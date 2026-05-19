@@ -1,0 +1,12 @@
+[workspace]
+members = ["packages/*"]
+resolver = "3"
+
+[workspace.dependencies]
+serde = { version = "1.0", default-features = false } # standard workspace dep
+windows = { version = "0.62", default-features = false, features = [
+    "Win32_Foundation",
+    "Win32_System_Threading",
+] }
+libc = { version = "0.2", default-features = false }
+nix = { version = "0.30", default-features = false }

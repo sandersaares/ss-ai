@@ -1,0 +1,14 @@
+[package]
+name = "non-virtual-root"
+version = "0.1.0"
+edition = "2024"
+
+[workspace]
+members = ["crates/gamma"]
+
+[workspace.dependencies]
+gamma = { version = "0.3.0", path = "crates/gamma", default-features = false }
+serde = { version = "1.0", default-features = false }
+
+[dependencies]
+serde = { workspace = true }

@@ -1,0 +1,25 @@
+[package]
+name = "edge-pkg"
+version = "0.1.0"
+edition = "2024"
+
+# Sub-table form for serde, mixing version and features lines.
+[dependencies.serde]
+version = "1.0"
+features = ["derive"]
+default-features = false
+
+# Dotted-key entries for the same dep on consecutive lines should merge.
+[dev-dependencies]
+windows.workspace = true
+windows.features = ["Win32_System_JobObjects"]
+
+[target.'cfg(windows)'.dependencies]
+windows = { workspace = true, features = ["Win32_Foundation"] }
+
+[target.'cfg(unix)'.dependencies]
+libc = { workspace = true } # trailing comment after value
+nix = { workspace = true, features = [
+    "process",
+    "signal",
+] }

@@ -1,0 +1,7 @@
+[workspace]
+members = ["packages/host"]
+resolver = "3"
+
+[workspace.dependencies]
+inside = { version = "0.1.0", path = "packages/host", default-features = false }
+outside = { version = "0.2.0", path = "external/elsewhere", default-features = false }
