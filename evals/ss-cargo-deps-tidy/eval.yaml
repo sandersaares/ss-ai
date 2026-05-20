@@ -1,10 +1,14 @@
 name: ss-cargo-deps-tidy-eval
-description: Evaluation suite for ss-cargo-deps-tidy.
+description: >
+  Evaluation suite for the ss-cargo-deps-tidy skill. Iteration 1 covers
+  trigger precision (positive and negative prompts) and a real-world
+  manifest-only fixture extracted from folo-rs/folo at commit
+  3e1f241ddfb6de7ab0ecca1a54ca923807135d83.
 skill: ss-cargo-deps-tidy
 version: "1.0"
 config:
   trials_per_task: 1
-  timeout_seconds: 300
+  timeout_seconds: 1800
   parallel: false
   executor: copilot-sdk
   model: claude-opus-4.6
@@ -12,17 +16,7 @@ metrics:
   - name: task_completion
     weight: 1.0
     threshold: 0.8
-    description: Did the skill complete the assigned task?
-graders:
-  - type: code
-    name: has_output
-    config:
-      assertions:
-        - "len(output) > 0"
-  - type: text
-    name: relevant_content
-    config:
-      regex_match:
-        - "(?i)(explain|describe|analyze|implement)"
+    description: Aggregate score across all task-level graders.
 tasks:
-  - "tasks/*.yaml"
+  - "tasks/trigger/*.yaml"
+  - "tasks/folo/*.yaml"

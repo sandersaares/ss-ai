@@ -1,0 +1,36 @@
+[package]
+name = "infinity_pool"
+description = "Offers object pooling capabilities both thread-safe and single threaded, both lifetime-managed and manual, both typed and untyped"
+publish = true
+version = "0.8.11"
+
+authors.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[package.metadata.docs.rs]
+all-features = true
+
+[features]
+default = []
+
+[dependencies]
+new_zealand = { workspace = true }
+num-integer = { workspace = true }
+pastey = { workspace = true }
+
+[dev-dependencies]
+alloc_tracker = { path = "../alloc_tracker" }
+criterion = { workspace = true }
+mutants = { workspace = true }
+rand = { workspace = true, features = ["small_rng"] }
+static_assertions = { workspace = true }
+
+[[bench]]
+name = "ip_vs_std"
+harness = false
+
+[lints]
+workspace = true

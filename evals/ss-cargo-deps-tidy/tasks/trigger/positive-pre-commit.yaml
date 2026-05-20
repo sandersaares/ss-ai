@@ -1,0 +1,21 @@
+id: trigger-positive-pre-commit
+name: Trigger - Pre-commit cleanup of dependency changes
+description: >
+  The user signals they are about to commit dependency-related changes. The
+  skill's description recommends batching dependency tidy at pre-commit
+  time, so this should trigger the skill.
+tags:
+  - trigger
+  - positive
+inputs:
+  prompt: >
+    I am about to commit a batch of dependency changes I made to several
+    Cargo.toml files in this Rust workspace. Before I commit, please make
+    sure everything is tidy.
+graders:
+  - type: trigger
+    name: trigger-positive
+    config:
+      skill_path: skills/ss-cargo-deps-tidy/SKILL.md
+      mode: positive
+      threshold: 0.6

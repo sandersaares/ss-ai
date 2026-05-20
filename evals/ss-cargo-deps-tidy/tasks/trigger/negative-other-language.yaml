@@ -1,0 +1,18 @@
+id: trigger-negative-other-language
+name: Trigger - Dependency edit in non-Rust project
+description: >
+  A dependency edit in a different ecosystem (Node.js / package.json).
+  The skill is Cargo-specific and must not be invoked.
+tags:
+  - trigger
+  - negative
+inputs:
+  prompt: >
+    Add lodash@^4.17.21 to dependencies in package.json and run npm install.
+graders:
+  - type: trigger
+    name: trigger-negative
+    config:
+      skill_path: skills/ss-cargo-deps-tidy/SKILL.md
+      mode: negative
+      threshold: 0.6

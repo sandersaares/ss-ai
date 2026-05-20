@@ -1,0 +1,72 @@
+[package]
+name = "many_cpus"
+description = "Efficiently schedule work and inspect the hardware environment on many-processor systems"
+publish = true
+version = "2.4.0"
+
+authors.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[package.metadata.docs.rs]
+all-features = true
+
+[features]
+default = []
+# Enables test utilities including the fake platform for simulating hardware configurations.
+test-util = []
+
+[dependencies]
+cpulist = { workspace = true }
+derive_more = { workspace = true, features = ["as_ref", "display"] }
+foldhash = { workspace = true }
+itertools = { workspace = true }
+new_zealand = { workspace = true }
+nonempty = { workspace = true }
+rand = { workspace = true, features = ["thread_rng"] }
+
+[target.'cfg(unix)'.dependencies]
+libc = { workspace = true }
+
+[target.'cfg(windows)'.dependencies]
+folo_ffi = { workspace = true }
+heapless = { workspace = true }
+smallvec = { workspace = true }
+windows = { workspace = true, features = [
+    "Win32_System_JobObjects",
+    "Win32_System_Kernel",
+    "Win32_System_SystemInformation",
+    "Win32_System_Threading",
+] }
+
+[dev-dependencies]
+criterion = { workspace = true }
+mockall = { workspace = true }
+mutants = { workspace = true }
+par_bench = { path = "../par_bench", features = ["criterion"] }
+static_assertions = { workspace = true }
+testing = { path = "../testing" }
+
+[target.'cfg(windows)'.dev-dependencies]
+windows = { workspace = true, features = ["Win32_Security"] }
+
+[[bench]]
+name = "hardware_info"
+harness = false
+
+[[bench]]
+name = "hardware_tracker"
+harness = false
+
+[[bench]]
+name = "pal_windows"
+harness = false
+
+[[bench]]
+name = "processor_set_builder"
+harness = false
+
+[lints]
+workspace = true

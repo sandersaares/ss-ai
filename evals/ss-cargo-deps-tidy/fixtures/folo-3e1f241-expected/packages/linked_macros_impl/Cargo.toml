@@ -1,0 +1,27 @@
+[package]
+name = "linked_macros_impl"
+description = "Internal dependency of the 'linked_macros' package - do not reference directly"
+publish = true
+version = "1.0.9"
+
+authors.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[package.metadata.docs.rs]
+all-features = true
+
+[lib]
+doc = false
+
+[dependencies]
+proc-macro2 = { workspace = true }
+quote = { workspace = true }
+syn = { workspace = true, features = ["full", "parsing", "printing"] }
+
+[dev-dependencies]
+
+[lints]
+workspace = true

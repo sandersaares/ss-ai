@@ -1,0 +1,46 @@
+[package]
+name = "benchmarks"
+description = "Random pile of benchmarks to explore relevant scenarios and guide Folo development"
+publish = false
+version = "0.0.1-never"
+
+authors.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[package.metadata.docs.rs]
+all-features = true
+
+[lib]
+doc = false
+
+[dev-dependencies]
+
+criterion = { workspace = true }
+fake_headers = { workspace = true }
+frozen-collections = { workspace = true }
+http = { workspace = true }
+many_cpus = { path = "../many_cpus" }
+many_cpus_benchmarking = { path = "../many_cpus_benchmarking" }
+scc = { workspace = true }
+
+[target.'cfg(windows)'.dev-dependencies]
+linked = { path = "../linked" }
+windows = { workspace = true, features = ["Win32_System_Memory"] }
+
+[[bench]]
+name = "variable_access"
+harness = false
+
+[[bench]]
+name = "effects_of_memory"
+harness = false
+
+[[bench]]
+name = "effects_of_memory_windows"
+harness = false
+
+[lints]
+workspace = true

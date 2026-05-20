@@ -1,0 +1,28 @@
+[package]
+# Cargo has its own logic for naming and expects dashes. Okay.
+name = "cargo-detect-package"
+description = "A Cargo tool to detect the package that a file belongs to, passing the package name to a subcommand"
+publish = true
+version = "1.0.16"
+
+authors.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[package.metadata.docs.rs]
+all-features = true
+
+[dependencies]
+argh = { workspace = true }
+toml = { workspace = true, features = ["parse", "serde"] }
+
+[dev-dependencies]
+mockall = { workspace = true }
+mutants = { workspace = true }
+serial_test = { workspace = true }
+tempfile = { workspace = true }
+
+[lints]
+workspace = true

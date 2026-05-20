@@ -1,0 +1,55 @@
+[package]
+name = "events"
+description = "Async manual-reset and auto-reset event primitives"
+publish = true
+version = "0.7.0"
+
+authors.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[package.metadata.docs.rs]
+all-features = true
+
+[package.metadata.cargo-udeps.ignore]
+development = [
+    "alloc_tracker",
+    "criterion",
+    "event-listener",
+    "futures",
+    "many_cpus",
+    "new_zealand",
+    "par_bench",
+    "rsevents",
+    "tokio",
+]
+
+[dependencies]
+awaiter_set = { workspace = true }
+
+[dev-dependencies]
+alloc_tracker = { path = "../alloc_tracker" }
+criterion = { workspace = true }
+event-listener = { workspace = true }
+futures = { workspace = true, features = ["executor"] }
+many_cpus = { path = "../many_cpus" }
+mutants = { workspace = true }
+new_zealand = { workspace = true }
+par_bench = { path = "../par_bench", features = ["criterion"] }
+rsevents = { workspace = true }
+static_assertions = { workspace = true }
+testing = { path = "../testing" }
+tokio = { workspace = true, features = ["macros", "rt", "rt-multi-thread"] }
+
+[[bench]]
+name = "events_bench"
+harness = false
+
+[[bench]]
+name = "contended_bench"
+harness = false
+
+[lints]
+workspace = true

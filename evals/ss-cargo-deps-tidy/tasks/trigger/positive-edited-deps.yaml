@@ -1,0 +1,22 @@
+id: trigger-positive-edited-deps
+name: Trigger - Edited workspace dependencies
+description: >
+  A request that explicitly mentions editing dependency declarations in a
+  Cargo workspace. The skill's trigger statement ("Invoke this skill
+  automatically after modifying dependency declarations in Cargo.toml
+  files") should fire.
+tags:
+  - trigger
+  - positive
+inputs:
+  prompt: >
+    I just added tokio and reqwest to the [workspace.dependencies] table in
+    Cargo.toml and referenced them from a couple of packages. Please clean
+    up the dependency declarations across the workspace.
+graders:
+  - type: trigger
+    name: trigger-positive
+    config:
+      skill_path: skills/ss-cargo-deps-tidy/SKILL.md
+      mode: positive
+      threshold: 0.6

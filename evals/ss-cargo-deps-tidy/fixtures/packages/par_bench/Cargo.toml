@@ -1,0 +1,58 @@
+[package]
+name = "par_bench"
+description = "Mechanisms for multithreaded benchmarking, designed for integration with Criterion or a similar benchmark framework"
+publish = true
+version = "0.2.34"
+
+authors.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[package.metadata.docs.rs]
+all-features = true
+
+[features]
+default = []
+all_the_time = ["dep:all_the_time"]
+alloc_tracker = ["dep:alloc_tracker"]
+criterion = ["dep:criterion"]
+
+[dependencies]
+all_the_time = { workspace = true, optional = true }
+alloc_tracker = { workspace = true, optional = true }
+criterion = { workspace = true, optional = true }
+derive_more = { workspace = true, features = ["debug"] }
+many_cpus = { workspace = true }
+new_zealand = { workspace = true }
+num-integer = { workspace = true }
+oneshot = { workspace = true }
+
+[dev-dependencies]
+all_the_time = { path = "../all_the_time" }
+alloc_tracker = { path = "../alloc_tracker" }
+criterion = { workspace = true }
+mutants = { workspace = true }
+static_assertions = { workspace = true }
+
+[[bench]]
+name = "par_bench_overhead"
+harness = false
+required-features = ["criterion"]
+
+[[bench]]
+name = "par_bench_basic"
+harness = false
+required-features = ["criterion"]
+
+[[bench]]
+name = "par_bench_manual"
+harness = false
+
+[[example]]
+name = "resource_usage_ext_example"
+required-features = ["alloc_tracker"]
+
+[lints]
+workspace = true

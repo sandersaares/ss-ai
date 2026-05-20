@@ -1,0 +1,45 @@
+[package]
+name = "events_once"
+description = "Efficient oneshot events (channels) with support for single-threaded events, object embedding, event pools and event lakes"
+publish = true
+version = "0.5.20"
+
+authors.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[package.metadata.docs.rs]
+all-features = true
+
+[features]
+default = []
+
+[dependencies]
+hash_hasher = { workspace = true }
+infinity_pool = { workspace = true }
+
+[dev-dependencies]
+criterion = { workspace = true }
+futures = { workspace = true, features = ["executor"] }
+oneshot = { workspace = true }
+pin-project = { workspace = true }
+static_assertions = { workspace = true }
+testing = { path = "../testing" }
+tokio = { workspace = true, features = ["macros", "rt", "rt-multi-thread", "time"] }
+
+[lints]
+workspace = true
+
+[[bench]]
+name = "ev_once_local"
+harness = false
+
+[[bench]]
+name = "ev_once_sync"
+harness = false
+
+[[bench]]
+name = "ev_once_vs_3p"
+harness = false

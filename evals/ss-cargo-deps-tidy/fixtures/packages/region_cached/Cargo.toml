@@ -1,0 +1,44 @@
+[package]
+name = "region_cached"
+description = "Adds a logical layer of caching between processor L3 cache and main memory"
+publish = true
+version = "1.0.14"
+
+authors.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[package.metadata.docs.rs]
+all-features = true
+
+[features]
+default = []
+
+[dependencies]
+arc-swap = { workspace = true }
+derive_more = { workspace = true, features = ["debug"] }
+linked = { workspace = true }
+many_cpus = { workspace = true }
+new_zealand = { workspace = true }
+rsevents = { workspace = true }
+scopeguard = { workspace = true }
+simple-mermaid = { workspace = true }
+
+[dev-dependencies]
+axum = { workspace = true, features = ["http1", "tokio"] }
+criterion = { workspace = true }
+many_cpus = { path = "../many_cpus", features = ["test-util"] }
+mutants = { workspace = true }
+par_bench = { path = "../par_bench", features = ["criterion"] }
+static_assertions = { workspace = true }
+testing = { path = "../testing" }
+tokio = { workspace = true, features = ["net", "rt-multi-thread"] }
+
+[[bench]]
+name = "region_cached"
+harness = false
+
+[lints]
+workspace = true

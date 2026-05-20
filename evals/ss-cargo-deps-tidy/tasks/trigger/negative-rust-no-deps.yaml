@@ -1,0 +1,19 @@
+id: trigger-negative-rust-no-deps
+name: Trigger - Rust code edit without dependency changes
+description: >
+  A Rust-related request that does not touch any Cargo.toml or dependency
+  declarations. The skill must not be invoked.
+tags:
+  - trigger
+  - negative
+inputs:
+  prompt: >
+    Refactor the `match` expression inside `parse_packet` in src/parser.rs
+    so it returns a Result instead of panicking on unknown variants.
+graders:
+  - type: trigger
+    name: trigger-negative
+    config:
+      skill_path: skills/ss-cargo-deps-tidy/SKILL.md
+      mode: negative
+      threshold: 0.6

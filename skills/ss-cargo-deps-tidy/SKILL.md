@@ -1,14 +1,18 @@
 ---
 name: ss-cargo-deps-tidy
 description: >
-  Tidies dependency declarations in Cargo.toml files to ensure uniform style, centralize version management and verify that minimum dependency version guarantees are upheld for published library crates. Invoke this skill automatically after modifying dependency declarations in Cargo.toml files. Batch changes or defer execution to pre-commit stage when possible to minimize the number of times this skill needs to be invoked.
+  Tidies Rust dependency declarations in Cargo.toml files to ensure uniform style, centralize version management and verify that minimum dependency version guarantees are upheld for published library crates. Invoke this skill automatically after modifying Rust dependency declarations in Cargo.toml files. Batch changes or defer execution to pre-commit stage when possible to minimize the number of times this skill needs to be invoked.
 ---
 
 # ss-cargo-deps-tidy
 
-Tidies dependency declarations in Cargo.toml files to ensure uniform style, centralize version management and verify that minimum dependency version guarantees are upheld for published library crates.
+Tidies Rust dependency declarations in Cargo.toml files to ensure uniform style, centralize version management and verify that minimum dependency version guarantees are upheld for published library crates.
 
-Invoke this skill automatically after modifying dependency declarations in Cargo.toml files. Batch changes or defer execution to pre-commit stage when possible to minimize the number of times this skill needs to be invoked.
+Invoke this skill automatically after modifying Rust dependency declarations in Cargo.toml files. Batch changes or defer execution to pre-commit stage when possible to minimize the number of times this skill needs to be invoked.
+
+# Prerequisites
+
+This skill is ONLY for Rust/Cargo workspaces. It does not do anything for projects that do not use Rust and Cargo.
 
 # Mission
 

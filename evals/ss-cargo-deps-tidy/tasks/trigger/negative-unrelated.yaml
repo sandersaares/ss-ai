@@ -1,0 +1,16 @@
+id: trigger-negative-unrelated
+name: Trigger - Unrelated chitchat
+description: >
+  An unrelated everyday prompt. The skill must not be invoked.
+tags:
+  - trigger
+  - negative
+inputs:
+  prompt: What is the weather today?
+graders:
+  - type: trigger
+    name: trigger-negative
+    config:
+      skill_path: skills/ss-cargo-deps-tidy/SKILL.md
+      mode: negative
+      threshold: 0.6

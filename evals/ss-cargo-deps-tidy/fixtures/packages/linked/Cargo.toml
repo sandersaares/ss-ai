@@ -1,0 +1,55 @@
+[package]
+name = "linked"
+description = "Create families of linked objects that can collaborate across threads while being internally single-threaded"
+publish = true
+version = "1.0.9"
+
+authors.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[package.metadata.docs.rs]
+all-features = true
+
+[features]
+default = []
+
+[dependencies]
+hash_hasher = { workspace = true }
+linked_macros = { workspace = true }
+pastey = { workspace = true }
+simple-mermaid = { workspace = true }
+
+[dev-dependencies]
+criterion = { workspace = true }
+many_cpus = { path = "../many_cpus" }
+mutants = { workspace = true }
+new_zealand = { path = "../new_zealand" }
+par_bench = { path = "../par_bench", features = ["criterion"] }
+seq-macro = { workspace = true }
+static_assertions = { workspace = true }
+
+[[bench]]
+name = "instances"
+harness = false
+
+[[bench]]
+name = "instance_per_thread"
+harness = false
+
+[[bench]]
+name = "instance_per_thread_sync"
+harness = false
+
+[[bench]]
+name = "static_thread_local_arc"
+harness = false
+
+[[bench]]
+name = "static_thread_local_rc"
+harness = false
+
+[lints]
+workspace = true
