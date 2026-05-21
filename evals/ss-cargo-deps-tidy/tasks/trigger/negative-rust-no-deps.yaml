@@ -10,9 +10,8 @@ inputs:
     Refactor the `match` expression inside `parse_packet` in src/parser.rs
     so it returns a Result instead of panicking on unknown variants.
 graders:
-  - type: trigger
-    name: trigger-negative
+  - type: behavior
+    name: skill-not-invoked
     config:
-      skill_path: skills/ss-cargo-deps-tidy/SKILL.md
-      mode: negative
-      threshold: 0.6
+      forbidden_tools:
+        - skill

@@ -11,9 +11,8 @@ inputs:
     moved a couple of crate-level dependency entries up to the workspace
     level. Can you review the Cargo.toml files?
 graders:
-  - type: trigger
-    name: trigger-positive
+  - type: behavior
+    name: skill-invoked
     config:
-      skill_path: skills/ss-cargo-deps-tidy/SKILL.md
-      mode: positive
-      threshold: 0.6
+      required_tools:
+        - skill

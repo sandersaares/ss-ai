@@ -13,9 +13,8 @@ inputs:
     Cargo.toml and referenced them from a couple of packages. Please clean
     up the dependency declarations across the workspace.
 graders:
-  - type: trigger
-    name: trigger-positive
+  - type: behavior
+    name: skill-invoked
     config:
-      skill_path: skills/ss-cargo-deps-tidy/SKILL.md
-      mode: positive
-      threshold: 0.6
+      required_tools:
+        - skill

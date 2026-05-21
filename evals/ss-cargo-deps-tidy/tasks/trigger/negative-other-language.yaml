@@ -9,9 +9,8 @@ inputs:
   prompt: >
     Add lodash@^4.17.21 to dependencies in package.json and run npm install.
 graders:
-  - type: trigger
-    name: trigger-negative
+  - type: behavior
+    name: skill-not-invoked
     config:
-      skill_path: skills/ss-cargo-deps-tidy/SKILL.md
-      mode: negative
-      threshold: 0.6
+      forbidden_tools:
+        - skill

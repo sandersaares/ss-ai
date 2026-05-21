@@ -7,9 +7,8 @@ tags:
 inputs:
   prompt: What is the weather today?
 graders:
-  - type: trigger
-    name: trigger-negative
+  - type: behavior
+    name: skill-not-invoked
     config:
-      skill_path: skills/ss-cargo-deps-tidy/SKILL.md
-      mode: negative
-      threshold: 0.6
+      forbidden_tools:
+        - skill

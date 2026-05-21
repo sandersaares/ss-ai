@@ -72,23 +72,45 @@ waza run evals/<skill>/<lane>.eval.yaml --tags <tag> --output-dir .\eval-results
   spec) is unreliable in practice (silently misresolves to CWD when
   filtering with `--tags`/`--task`). Always set this inline, e.g.
   `context_dir: evals/<skill>/fixtures`.
-- **`skill_invocation` grader DOES NOT WORK with waza's skill
-  injection model.** Waza injects SKILL.md content directly into the
-  agent's system prompt and never fires Copilot SDK `SkillInvoked`
-  events. The grader always scores 0 in single-skill scenarios.
-  Use `diff` (workspace file matching) or `trigger` (prompt
-  heuristic) graders to verify skill effectiveness instead.
+- **Verifying skill invocation.** Waza's bundled copilot-sdk *does*
+  emit `skill.invoked` events when the agent invokes a skill, and they
+  surface in three places in the results JSON:
+  - In each task's `runs[].transcript` as events with `type:
+    "skill.invoked"` (the `content` field carries the full SKILL.md
+    text).
+  - Aggregated into `runs[].skill_invocations` (omitted entirely if no
+    skill was invoked in that run).
+  - As a `skill` entry in `runs[].session_digest.tools_used` /
+    `tool_calls`.
+
+  The simplest grader to verify invocation is the `behavior` grader
+  with `required_tools: [skill]` (positive) or `forbidden_tools:
+  [skill]` (negative). The `skill_invocation` grader also works but
+  requires at least one `required_skills` entry, so it can't directly
+  express "no skill invocation" for negative tasks.
+
+  **Use this signal only for trigger-style evals.** In trigger evals
+  the whole point is "did the agent decide to invoke the skill", so
+  `skill` tool presence/absence is the metric. In workflow-style
+  evals, even when the prompt names the skill explicitly ("apply the
+  `ss-cargo-deps-tidy` skill"), the agent sometimes reads the skill
+  body from its system-prompt context and proceeds directly with
+  `view` / `str_replace` / `create` calls *without* invoking the
+  `skill` tool. Observed empirically: the `folo-3e1f241-cargo-only`
+  run at `eval-results/folo-debug/...20260520-083815.json` completed
+  79 tool calls with zero `skill.invoked` events. For workflow evals,
+  measure the *outcome* (`diff` graders against expected Cargo.toml
+  files) rather than tool-call shape.
 - **Grader config nesting** — `type:` and `name:` go at the top of the
   grader entry; type-specific keys go under `config:`. Example:
 
   ```yaml
   graders:
-    - type: trigger
-      name: trigger-positive
+    - type: behavior
+      name: skill-invoked
       config:
-        skill_path: skills/ss-cargo-deps-tidy/SKILL.md
-        mode: positive
-        threshold: 0.6
+        required_tools:
+          - skill
   ```
 
 ### Re-grading without re-executing the agent
@@ -108,14 +130,13 @@ The agent's per-task workspace must still exist (run the original
 with `--keep-workspace` to preserve it). `--workspace` is required
 because `waza grade` does not auto-derive it from the results JSON.
 
-### Trigger graders execute the agent too
+### Avoid the `trigger` grader
 
-The `trigger` grader scores the *prompt* heuristically against the skill's
-keyword set; it doesn't need the agent to run. Waza, however, still
-executes the agent for every task before grading. For trigger tasks this
-means each run consumes premium-request credit even though only the prompt
-is being scored. Keep trigger prompts short and consider seeding a minimal
-fixture so the agent doesn't escape its sandbox while hunting for context.
+The `trigger` grader scores the *prompt* heuristically against the
+skill's keyword set (no stop-word filtering, no session inspection),
+so false positives on negative cases are easy and the agent's actual
+behavior is invisible to it. Prefer `behavior` / `skill_invocation`
+/ `diff` graders that observe what the agent actually did.
 
 ### Caveats observed in practice
 
