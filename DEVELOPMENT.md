@@ -2,18 +2,42 @@
 
 This document covers how to develop and test the skills in this repo. For end-user usage, see [README.md](README.md). For agent-facing conventions (skill layout, Waza usage, repo idioms), see [AGENTS.md](AGENTS.md).
 
+## Development prerequisites
+
+Required regardless of which area you work in:
+
+- PowerShell 7+ (`pwsh`).
+- Git.
+
+Required for skill-helper unit tests:
+
+- [Pester](https://pester.dev/) 5.5.0 or newer:
+
+  ```powershell
+  Install-Module Pester -Scope CurrentUser -MinimumVersion 5.5.0 -Force
+  ```
+
+Required for eval tooling that reads/writes YAML (e.g. the
+`Generate-FoloFullTask.ps1` task generator):
+
+- [`powershell-yaml`](https://github.com/cloudbase/powershell-yaml) 0.4.12 or newer:
+
+  ```powershell
+  Install-Module powershell-yaml -Scope CurrentUser -MinimumVersion 0.4.12 -Force
+  ```
+
+  This is a *development-only* dependency; end users of the skills do
+  not need it. Skill helper scripts (`skills/**/*.ps1`) intentionally
+  avoid taking any module dependencies so they can run on a clean
+  PowerShell 7 install.
+
 # Testing
 
 Some skills ship with executable helper scripts that have their own unit tests. Tests live under `tests/<skill-name>/` (parallel to `skills/`) and use [Pester](https://pester.dev/) 5.x.
 
 ## Prerequisites
 
-- PowerShell 7+
-- Pester 5.5.0 or newer:
-
-  ```powershell
-  Install-Module Pester -Scope CurrentUser -MinimumVersion 5.5.0 -Force
-  ```
+See "Development prerequisites" above for Pester setup.
 
 ## Running tests
 

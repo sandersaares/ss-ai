@@ -286,15 +286,23 @@ Describe 'ConvertTo-WorkspacePath' {
 }
 
 Describe 'Get-PathKey' {
-    It 'produces a case-insensitive key' {
-        $a = Get-PathKey -Path 'C:\Foo\Bar'
-        $b = Get-PathKey -Path 'c:\foo\bar'
-        $a | Should -Be $b
+    BeforeAll {
+        $script:PkRoot = Join-Path $TestDrive 'PathKey'
+        New-Item -ItemType Directory -Path (Join-Path $script:PkRoot 'Foo\Bar') -Force | Out-Null
     }
     It 'strips trailing separators' {
-        $a = Get-PathKey -Path 'C:\Foo\Bar\'
-        $b = Get-PathKey -Path 'C:\Foo\Bar'
+        $a = Get-PathKey -Path (Join-Path $script:PkRoot 'Foo\Bar\')
+        $b = Get-PathKey -Path (Join-Path $script:PkRoot 'Foo\Bar')
         $a | Should -Be $b
+    }
+    It 'folds case on Windows and macOS, preserves case on Linux' {
+        $upper = Get-PathKey -Path (Join-Path $script:PkRoot 'Foo\Bar')
+        $lower = Get-PathKey -Path (Join-Path $script:PkRoot 'foo\bar')
+        if ($IsWindows -or $IsMacOS) {
+            $upper | Should -Be $lower
+        } else {
+            $upper | Should -Not -Be $lower
+        }
     }
 }
 
@@ -430,6 +438,36 @@ default-features = false
         $d.Attrs['version'] | Should -Be '1.0.209'
         $d.Attrs['features'] | Should -HaveCount 1
         $d.Attrs['default-features'] | Should -BeFalse
+    }
+
+    It 'preserves the full key=value text in raw for sub-table entries' {
+        Set-Content -LiteralPath $script:ManifestPath -Value @"
+[dependencies.serde]
+version = "1.0.209"
+features = ["derive"]
+default-features = false
+"@
+        $r = Read-CargoManifest -ManifestPath $script:ManifestPath -WorkspaceRoot $script:WorkspaceRoot
+        $d = $r.Dependencies[0]
+        $d.Raw | Should -Match 'version\s*=\s*"1\.0\.209"'
+        $d.Raw | Should -Match 'features\s*=\s*\["derive"\]'
+        $d.Raw | Should -Match 'default-features\s*=\s*false'
+    }
+
+    It 'preserves multi-line values in raw for sub-table entries' {
+        Set-Content -LiteralPath $script:ManifestPath -Value @"
+[dependencies.serde]
+version = "1.0.209"
+features = [
+    "derive",
+    "rc",
+]
+"@
+        $r = Read-CargoManifest -ManifestPath $script:ManifestPath -WorkspaceRoot $script:WorkspaceRoot
+        $d = $r.Dependencies[0]
+        $d.Raw | Should -Match 'features\s*=\s*\['
+        $d.Raw | Should -Match '"derive"'
+        $d.Raw | Should -Match '"rc"'
     }
 
     It 'tags target-conditional dependencies with the target cfg' {

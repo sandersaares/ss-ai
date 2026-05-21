@@ -83,8 +83,15 @@ function ConvertTo-WorkspacePath {
 }
 
 function Get-PathKey {
+    # Case-folding is filesystem-dependent. Windows and macOS default volumes
+    # are case-insensitive; Linux is case-sensitive. Lowercasing on a
+    # case-sensitive FS would collapse genuinely distinct directories.
     param([Parameter(Mandatory)] [string]$Path)
-    return ([System.IO.Path]::GetFullPath($Path)).TrimEnd('\', '/').ToLowerInvariant()
+    $normalized = ([System.IO.Path]::GetFullPath($Path)).TrimEnd('\', '/')
+    if ($IsWindows -or $IsMacOS) {
+        return $normalized.ToLowerInvariant()
+    }
+    return $normalized
 }
 
 # ============================================================================
@@ -379,6 +386,13 @@ function New-DepRecord {
     }
 }
 
+function Save-PendingDepRecord {
+    param($Pending, $Target)
+    if ($null -ne $Pending) {
+        [void]$Target.Add($Pending)
+    }
+}
+
 function Read-CargoManifest {
     param(
         [Parameter(Mandatory)] [string]$ManifestPath,
@@ -403,13 +417,6 @@ function Read-CargoManifest {
     $section = @{ Kind = 'other' }
     $pendingEntry = $null   # Used for dotted-key merging and sub-table accumulation.
 
-    function Save-Pending {
-        param($Pending, $Target)
-        if ($null -ne $Pending) {
-            [void]$Target.Add($Pending)
-        }
-    }
-
     $i = 0
     while ($i -lt $cleanLines.Count) {
         $line = $cleanLines[$i]
@@ -423,7 +430,7 @@ function Read-CargoManifest {
 
         # Section header? Treat [[array.of.tables]] as a section break we ignore.
         if ($trim.StartsWith('[')) {
-            Save-Pending -Pending $pendingEntry -Target $result.Dependencies
+            Save-PendingDepRecord -Pending $pendingEntry -Target $result.Dependencies
             $pendingEntry = $null
 
             if ($trim.StartsWith('[[')) {
@@ -498,8 +505,10 @@ function Read-CargoManifest {
                         $span = Read-ValueSpan -CleanLines $cleanLines -StartIndex $i -StartCol ($eqIdx + 1)
                         $val = ConvertFrom-TomlValue -Text $span.Text
                         $pendingEntry.Attrs[$key] = $val
-                        # Extend raw to cover all lines in the sub-table.
-                        $pendingEntry.Raw = "$($pendingEntry.Raw)`n$($span.Text)"
+                        # Extend raw to cover the full source span (key + value),
+                        # including any continuation lines for multi-line values.
+                        $spanLines = for ($r = $i; $r -le $span.EndIndex; $r++) { $cleanLines[$r] }
+                        $pendingEntry.Raw = "$($pendingEntry.Raw)`n$(($spanLines -join [Environment]::NewLine).TrimEnd())"
                         $i = $span.EndIndex + 1
                     }
                     else {
@@ -530,7 +539,7 @@ function Read-CargoManifest {
                                 $pendingEntry.Raw = "$($pendingEntry.Raw)`n$($line.Trim())"
                             }
                             else {
-                                Save-Pending -Pending $pendingEntry -Target $result.Dependencies
+                                Save-PendingDepRecord -Pending $pendingEntry -Target $result.Dependencies
                                 $pendingEntry = New-DepRecord `
                                     -ManifestPath $ManifestPath `
                                     -Name $depName `
@@ -543,7 +552,7 @@ function Read-CargoManifest {
                             }
                         }
                         elseif ($valueText.StartsWith('{')) {
-                            Save-Pending -Pending $pendingEntry -Target $result.Dependencies
+                            Save-PendingDepRecord -Pending $pendingEntry -Target $result.Dependencies
                             $pendingEntry = $null
                             $attrs = ConvertFrom-InlineTable -Text $valueText
                             $rec = New-DepRecord `
@@ -558,7 +567,7 @@ function Read-CargoManifest {
                             [void]$result.Dependencies.Add($rec)
                         }
                         else {
-                            Save-Pending -Pending $pendingEntry -Target $result.Dependencies
+                            Save-PendingDepRecord -Pending $pendingEntry -Target $result.Dependencies
                             $pendingEntry = $null
                             $version = ConvertFrom-TomlValue -Text $valueText
                             $rec = New-DepRecord `
@@ -586,7 +595,7 @@ function Read-CargoManifest {
         }
     }
 
-    Save-Pending -Pending $pendingEntry -Target $result.Dependencies
+    Save-PendingDepRecord -Pending $pendingEntry -Target $result.Dependencies
     $pendingEntry = $null
 
     return $result
