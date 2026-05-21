@@ -8,6 +8,10 @@ Required regardless of which area you work in:
 
 - PowerShell 7+ (`pwsh`).
 - Git.
+- Rust (latest stable toolchain via [rustup](https://rustup.rs/)). Some
+  skills (e.g. `ss-cargo-deps-tidy`) shell out to `cargo` during
+  evaluation, and a clean rustup install is the expected way to provide
+  it.
 
 Required for skill-helper unit tests:
 
