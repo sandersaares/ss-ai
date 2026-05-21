@@ -288,20 +288,22 @@ Describe 'ConvertTo-WorkspacePath' {
 Describe 'Get-PathKey' {
     BeforeAll {
         $script:PkRoot = Join-Path $TestDrive 'PathKey'
-        New-Item -ItemType Directory -Path (Join-Path $script:PkRoot 'Foo\Bar') -Force | Out-Null
+        $script:PkLeaf = Join-Path $script:PkRoot 'FooBar'
+        New-Item -ItemType Directory -Path $script:PkLeaf -Force | Out-Null
     }
     It 'strips trailing separators' {
-        $a = Get-PathKey -Path (Join-Path $script:PkRoot 'Foo\Bar\')
-        $b = Get-PathKey -Path (Join-Path $script:PkRoot 'Foo\Bar')
+        $sep = [System.IO.Path]::DirectorySeparatorChar
+        $a = Get-PathKey -Path ($script:PkLeaf + $sep)
+        $b = Get-PathKey -Path $script:PkLeaf
         $a | Should -Be $b
     }
     It 'folds case on Windows and macOS, preserves case on Linux' {
-        $upper = Get-PathKey -Path (Join-Path $script:PkRoot 'Foo\Bar')
-        $lower = Get-PathKey -Path (Join-Path $script:PkRoot 'foo\bar')
+        $upper = Get-PathKey -Path (Join-Path $script:PkRoot 'FooBar')
+        $lower = Get-PathKey -Path (Join-Path $script:PkRoot 'foobar')
         if ($IsWindows -or $IsMacOS) {
-            $upper | Should -Be $lower
+            $upper | Should -BeExactly $lower
         } else {
-            $upper | Should -Not -Be $lower
+            $upper | Should -Not -BeExactly $lower
         }
     }
 }
