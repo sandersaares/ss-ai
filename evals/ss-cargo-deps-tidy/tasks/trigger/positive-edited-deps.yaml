@@ -7,7 +7,6 @@ description: >
   files") should fire.
 tags:
   - trigger
-  - positive
 inputs:
   prompt: >
     I just added tokio and reqwest to the [workspace.dependencies] table in

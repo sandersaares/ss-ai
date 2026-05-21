@@ -5,7 +5,6 @@ description: >
   The skill should still recognize the situation via its activation hint.
 tags:
   - trigger
-  - positive
 inputs:
   prompt: >
     I bumped the minimum supported version of serde in the workspace and

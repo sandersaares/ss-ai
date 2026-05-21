@@ -1,6 +1,11 @@
 name: Run Skill Evaluations
 
 on:
+  push:
+    branches: [main]
+    paths:
+      - 'evals/**'
+      - 'skills/**'
   pull_request:
     branches: [main]
     paths:
@@ -13,18 +18,42 @@ permissions:
 jobs:
   eval:
     name: Run Evaluations
+    # Skip PRs from forks: secrets.COPILOT_PAT is not exposed to fork-PR runs,
+    # so the job would fail at the auth step. Same-repo PRs and pushes to main
+    # run normally.
+    if: github.event_name == 'push' || github.event.pull_request.head.repo.full_name == github.repository
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
+
       - name: Install Azure Developer CLI
         uses: Azure/setup-azd@v2
+
       - name: Install waza extension
         run: |
           azd config set alpha.extensions on
           azd ext source add -n waza -t url -l https://raw.githubusercontent.com/microsoft/waza/main/registry.json
           azd ext install microsoft.azd.waza
-      - name: Run evaluations
-        run: azd waza run --output-dir ./results
+
+      - name: Run trigger evaluations
+        # Run only the cheap `trigger` tag - these score skill activation
+        # heuristics on the prompt. Note: per AGENTS.md, waza still executes
+        # the agent for every task even with the trigger grader, so each task
+        # consumes one premium request. Heavier tags (e.g. `folo`) burn many
+        # more and should be run on demand via workflow_dispatch or a
+        # scheduled job, not per PR.
+        env:
+          GH_TOKEN: ${{ secrets.COPILOT_PAT }}
+          GITHUB_TOKEN: ${{ secrets.COPILOT_PAT }}
+        run: |
+          set -euo pipefail
+          for spec in evals/*/eval.yaml; do
+            echo "::group::$spec"
+            azd waza run "$spec" --tags trigger --output-dir ./results
+            echo "::endgroup::"
+          done
+
       - name: Upload results
         if: always()
         uses: actions/upload-artifact@v4

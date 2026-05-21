@@ -91,6 +91,30 @@ Run a single task by id:
 waza run evals/ss-cargo-deps-tidy/eval.yaml --task trigger-negative-unrelated --output-dir .\eval-results
 ```
 
+## Tag reference
+
+Eval task tags are kept deliberately small and orthogonal so CI and ad
+hoc runs can target the right cost tier without ambiguity. Every task
+that is run end-to-end **must** carry exactly one of `trigger` or
+`workflow`; `heavy` is added on top when applicable.
+
+| Tag | Meaning | When to apply |
+| --- | --- | --- |
+| `trigger` | The task scores skill activation/non-activation against a prompt. Inexpensive — exercises the heuristic, not the full workflow. | All tasks under `tasks/trigger/`. |
+| `workflow` | The task actually exercises the skill workflow against a fixture (file mutations, validators, etc.). | Any task that asserts on outputs the skill produces. |
+| `heavy` | The task is expensive (large fixtures, long timeouts, or high premium-request burn) and should not run on every PR. | Add alongside `workflow` when the cost warrants gating. |
+
+Avoid inventing additional tags. Per-skill or per-fixture distinctions
+(e.g. "folo", "cargo-only") belong in the task `id` and `name`, not in
+tags — tags are a CI/cost selector, not a categorisation system.
+
+CI mapping (see [.github/workflows](.github/workflows)):
+
+- `eval.yml` (push to `main`, same-repo PRs) — runs `--tags trigger`.
+- `eval-full.yml` (`workflow_dispatch`) — runs everything by default;
+  the operator can pass `tags: workflow` to skip the heavy bucket or
+  `tags: heavy` to run only the expensive scenarios.
+
 ## Authoring eval specs
 
 See [AGENTS.md](AGENTS.md) for the verified-against-Waza-0.31.0

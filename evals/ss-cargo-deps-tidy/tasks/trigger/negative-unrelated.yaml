@@ -4,7 +4,6 @@ description: >
   An unrelated everyday prompt. The skill must not be invoked.
 tags:
   - trigger
-  - negative
 inputs:
   prompt: What is the weather today?
 graders:

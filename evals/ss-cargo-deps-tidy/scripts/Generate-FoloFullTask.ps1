@@ -122,7 +122,7 @@ AGENTS.md, justfile) and is expected to apply ss-cargo-deps-tidy with
 ``cargo`` verification enabled. Only Cargo.toml files and Cargo.lock may be
 modified; source files must be byte-identical to upstream.
 "@
-    tags = @('folo', 'real-world', 'full-workspace', 'devenv')
+    tags = @('workflow', 'heavy')
     timeout_seconds = 3600
     context_dir = $cacheDir
     inputs = [ordered]@{

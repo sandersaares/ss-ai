@@ -1,0 +1,75 @@
+name: Run Skill Evaluations (full)
+
+on:
+  workflow_dispatch:
+    inputs:
+      spec:
+        description: 'Eval spec to run (leave blank to run every evals/*/eval.yaml)'
+        required: false
+        type: string
+        default: ''
+      tags:
+        description: 'Comma-separated tag filter (leave blank to run all tasks). Heavy tags burn many premium requests.'
+        required: false
+        type: string
+        default: ''
+      task:
+        description: 'Single task id to run (overrides --tags when set; only meaningful with a single spec)'
+        required: false
+        type: string
+        default: ''
+
+permissions:
+  contents: read
+
+jobs:
+  eval:
+    name: Run Full Evaluations
+    runs-on: ubuntu-latest
+    timeout-minutes: 360
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Azure Developer CLI
+        uses: Azure/setup-azd@v2
+
+      - name: Install waza extension
+        run: |
+          azd config set alpha.extensions on
+          azd ext source add -n waza -t url -l https://raw.githubusercontent.com/microsoft/waza/main/registry.json
+          azd ext install microsoft.azd.waza
+
+      - name: Run evaluations
+        env:
+          GH_TOKEN: ${{ secrets.COPILOT_PAT }}
+          GITHUB_TOKEN: ${{ secrets.COPILOT_PAT }}
+          SPEC: ${{ inputs.spec }}
+          TAGS: ${{ inputs.tags }}
+          TASK: ${{ inputs.task }}
+        run: |
+          set -euo pipefail
+          if [ -n "$SPEC" ]; then
+            specs=("$SPEC")
+          else
+            mapfile -t specs < <(ls evals/*/eval.yaml)
+          fi
+          for spec in "${specs[@]}"; do
+            echo "::group::$spec"
+            args=("$spec" --output-dir ./results --keep-workspace --session-log --session-dir ./results --transcript-dir ./results)
+            if [ -n "$TASK" ]; then
+              args+=(--task "$TASK")
+            elif [ -n "$TAGS" ]; then
+              args+=(--tags "$TAGS")
+            fi
+            echo "azd waza run ${args[*]}"
+            azd waza run "${args[@]}"
+            echo "::endgroup::"
+          done
+
+      - name: Upload results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: eval-results-full
+          path: ./results
+          retention-days: 30

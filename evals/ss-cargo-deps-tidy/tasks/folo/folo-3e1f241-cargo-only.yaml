@@ -10,9 +10,7 @@ description: >
   covered via regex spot-checks against patch components that folo
   required to satisfy minimum version compatibility.
 tags:
-  - folo
-  - real-world
-  - cargo-only
+  - workflow
 timeout_seconds: 1800
 inputs:
   prompt: |-

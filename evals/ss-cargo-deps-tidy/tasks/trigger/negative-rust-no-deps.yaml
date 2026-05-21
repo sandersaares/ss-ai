@@ -5,7 +5,6 @@ description: >
   declarations. The skill must not be invoked.
 tags:
   - trigger
-  - negative
 inputs:
   prompt: >
     Refactor the `match` expression inside `parse_packet` in src/parser.rs

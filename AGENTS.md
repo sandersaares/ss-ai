@@ -10,8 +10,10 @@ conventions an automated agent needs to be productive here.
   helper scripts and reference docs live alongside it.
 - `evals/<skill-name>/` — Waza evaluation suite for that skill.
   - `eval.yaml` — top-level eval spec
-  - `tasks/**/*.yaml` — individual tasks (organize by tag, e.g.
-    `tasks/trigger/`, `tasks/folo/`)
+  - `tasks/**/*.yaml` — individual tasks (organize by directory, e.g.
+    `tasks/trigger/`, `tasks/folo/`). Task **tags** are a separate,
+    deliberately small vocabulary used by CI to select cost tiers; see
+    the [Tag reference in DEVELOPMENT.md](DEVELOPMENT.md#tag-reference).
   - `fixtures/` — files that get copied into the per-task workspace
     (resolved relative to the eval YAML, default `./fixtures`)
 - `tests/<skill-name>/` — Pester tests for skill helper scripts (see

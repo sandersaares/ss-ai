@@ -6,7 +6,6 @@ description: >
   time, so this should trigger the skill.
 tags:
   - trigger
-  - positive
 inputs:
   prompt: >
     I am about to commit a batch of dependency changes I made to several
