@@ -10,6 +10,9 @@ inputs:
   prompt: >
     Refactor the `match` expression inside `parse_packet` in src/parser.rs
     so it returns a Result instead of panicking on unknown variants.
+
+    Note: there is no Rust toolchain available in this environment. Do not
+    run any cargo commands, just perform text edits without Cargo verification.
   files:
     - path: Cargo.toml
     - path: src/lib.rs

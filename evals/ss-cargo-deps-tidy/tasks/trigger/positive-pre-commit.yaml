@@ -14,8 +14,7 @@ inputs:
     sure everything is tidy.
 
     Note: there is no Rust toolchain available in this environment. Do not
-    run any cargo commands; treat the minimum-version verification stage as
-    out of scope.
+    run any cargo commands, just perform text edits without Cargo verification.
   files:
     - path: Cargo.toml
     - path: crates/foo/Cargo.toml

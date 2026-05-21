@@ -154,6 +154,27 @@ so false positives on negative cases are easy and the agent's actual
 behavior is invisible to it. Prefer `behavior` / `skill_invocation`
 / `diff` graders that observe what the agent actually did.
 
+### Omit top-level `skill:` from trigger eval specs
+
+Setting `skill: <name>` at the top of an eval spec causes Waza to
+**pre-inject the full SKILL.md body** into the agent's system prompt
+as a `<skill_context>` block (see `buildSkillSystemMessage` in
+`waza/internal/execution/copilot.go`). For workflow evals this is
+desirable — it saves a `skill` tool round-trip. For trigger evals it
+silently destroys the measurement: the agent already has the skill
+content and can "execute the workflow" without ever invoking the
+`skill` tool, so a `behavior` grader with `required_tools: [skill]`
+will fail (false negative) even when the agent correctly recognized
+the trigger. Worse, the agent may proceed to do skill work without
+firing any trigger-visible signal at all.
+
+When `skill:` is omitted, Waza still discovers the skill (it walks
+one level of subdirectories under its CWD, finding
+`skills/<name>/SKILL.md`) and exposes it via a compact
+`<available_skills>` summary containing only name + description. The
+agent must invoke the `skill` tool to read the body — which is
+exactly the signal a trigger eval needs to observe.
+
 ### Caveats observed in practice
 
 - The agent will sometimes look outside the per-task temp workspace if it

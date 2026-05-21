@@ -4,7 +4,13 @@ description: >
   prompts that should activate the skill and negative prompts that
   should not. Inexpensive — no fixture preparation, no source-tree
   workflow exercise.
-skill: ss-cargo-deps-tidy
+# Deliberately no top-level `skill:` field. Setting it makes Waza inject
+# the full SKILL.md body into the agent's system prompt (see
+# buildSkillSystemMessage in waza/internal/execution/copilot.go), which
+# defeats trigger measurement — the agent then "knows" the skill
+# without ever invoking the `skill` tool. With `skill:` omitted, the
+# agent only sees the compact <available_skills> summary (name +
+# description) and must invoke the tool to read the body.
 version: "1.0"
 config:
   trials_per_task: 1
