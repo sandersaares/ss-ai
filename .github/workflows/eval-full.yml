@@ -4,7 +4,7 @@ on:
   workflow_dispatch:
     inputs:
       spec:
-        description: 'Eval spec to run (leave blank to run every evals/*/eval.yaml)'
+        description: 'Eval spec to run (leave blank to run every evals/*/*.eval.yaml)'
         required: false
         type: string
         default: ''
@@ -39,6 +39,11 @@ jobs:
           azd ext source add -n waza -t url -l https://raw.githubusercontent.com/microsoft/waza/main/registry.json
           azd ext install microsoft.azd.waza
 
+      - name: Install PowerShell modules used by eval hooks
+        shell: pwsh
+        run: |
+          Install-Module powershell-yaml -Scope CurrentUser -MinimumVersion 0.4.12 -Force -SkipPublisherCheck
+
       - name: Run evaluations
         env:
           GH_TOKEN: ${{ secrets.COPILOT_PAT }}
@@ -51,11 +56,11 @@ jobs:
           if [ -n "$SPEC" ]; then
             specs=("$SPEC")
           else
-            mapfile -t specs < <(ls evals/*/eval.yaml)
+            mapfile -t specs < <(ls evals/*/*.eval.yaml)
           fi
           for spec in "${specs[@]}"; do
             echo "::group::$spec"
-            args=("$spec" --output-dir ./results --keep-workspace --session-log --session-dir ./results --transcript-dir ./results)
+            args=("$spec" --output-dir ./results --keep-workspace --session-log --session-dir ./results --transcript-dir ./results -v)
             if [ -n "$TASK" ]; then
               args+=(--task "$TASK")
             elif [ -n "$TAGS" ]; then

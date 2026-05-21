@@ -9,7 +9,10 @@ conventions an automated agent needs to be productive here.
 - `skills/<skill-name>/` — Skill definition. `SKILL.md` is the entrypoint;
   helper scripts and reference docs live alongside it.
 - `evals/<skill-name>/` — Waza evaluation suite for that skill.
-  - `eval.yaml` — top-level eval spec
+  - `<lane>.eval.yaml` — top-level eval spec, one per cost lane (e.g.
+    `trigger.eval.yaml`, `workflow.eval.yaml`). Lanes exist so cheap
+    runs don't pay for expensive `before_run` hooks tied to heavier
+    lanes.
   - `tasks/**/*.yaml` — individual tasks (organize by directory, e.g.
     `tasks/trigger/`, `tasks/folo/`). Task **tags** are a separate,
     deliberately small vocabulary used by CI to select cost tiers; see
@@ -45,7 +48,7 @@ Always invoke Waza from `c:\Source\ss-ai`:
 
 ```powershell
 cd c:\Source\ss-ai
-waza run evals/<skill>/eval.yaml --tags <tag> --output-dir .\eval-results
+waza run evals/<skill>/<lane>.eval.yaml --tags <tag> --output-dir .\eval-results
 ```
 
 ### Stable conventions (verified against Waza 0.31.0)
@@ -95,7 +98,7 @@ without invoking the model. Useful when iterating on grader config
 after a successful (but mis-graded) agent run:
 
 ```powershell
-waza grade evals/<skill>/eval.yaml `
+waza grade evals/<skill>/<lane>.eval.yaml `
     --results .\eval-results\<timestamp>\claude-opus-4.6.json `
     --workspace 'C:\Users\Sander\AppData\Local\Temp\waza-<random>' `
     --task <task-id> -o regrade.json -v
@@ -160,7 +163,7 @@ use the **global** `--debug` flag and redirect to a file you can tail:
 cd c:\Source\ss-ai
 $dbg = ".\eval-results\folo-debug"
 New-Item -ItemType Directory -Force $dbg | Out-Null
-waza --debug run evals/<skill>/eval.yaml --tags <tag> `
+waza --debug run evals/<skill>/<lane>.eval.yaml --tags <tag> `
     --output-dir .\eval-results --keep-workspace -v `
     --session-log --session-dir $dbg --transcript-dir $dbg `
     *>&1 > "$dbg\stdout.log"

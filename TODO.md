@@ -30,6 +30,6 @@ Improvement ideas to revisit when the repo matures.
   once Waza ships with copilot-cli >= 1.0.49. Currently sourced from
   [`evals/ss-cargo-deps-tidy/prompts/upstream-bug-workaround.md`](evals/ss-cargo-deps-tidy/prompts/upstream-bug-workaround.md).
 - **Bring eval `model` field in line with the README.** Waza 0.31.0's
-  hard-coded model list does not include `claude-opus-4.7`, so
-  [`evals/ss-cargo-deps-tidy/eval.yaml`](evals/ss-cargo-deps-tidy/eval.yaml)
-  pins `claude-opus-4.6`. Revisit when Waza updates the list.
+  hard-coded model list does not include `claude-opus-4.7`, so the
+  `evals/<skill>/<lane>.eval.yaml` files pin `claude-opus-4.6`.
+  Revisit when Waza updates the list.

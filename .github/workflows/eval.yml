@@ -36,6 +36,11 @@ jobs:
           azd ext source add -n waza -t url -l https://raw.githubusercontent.com/microsoft/waza/main/registry.json
           azd ext install microsoft.azd.waza
 
+      - name: Install PowerShell modules used by eval hooks
+        shell: pwsh
+        run: |
+          Install-Module powershell-yaml -Scope CurrentUser -MinimumVersion 0.4.12 -Force -SkipPublisherCheck
+
       - name: Run trigger evaluations
         # Run only the cheap `trigger` tag - these score skill activation
         # heuristics on the prompt. Note: per AGENTS.md, waza still executes
@@ -48,9 +53,10 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.COPILOT_PAT }}
         run: |
           set -euo pipefail
-          for spec in evals/*/eval.yaml; do
+          # Per-PR/per-push lane: only the cheap trigger-precision specs.
+          for spec in evals/*/trigger.eval.yaml; do
             echo "::group::$spec"
-            azd waza run "$spec" --tags trigger --output-dir ./results
+            azd waza run "$spec" --output-dir ./results -v
             echo "::endgroup::"
           done
 

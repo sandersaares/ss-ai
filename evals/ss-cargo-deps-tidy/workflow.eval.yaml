@@ -1,9 +1,10 @@
-name: ss-cargo-deps-tidy-eval
+name: ss-cargo-deps-tidy-workflow
 description: >
-  Evaluation suite for the ss-cargo-deps-tidy skill. Iteration 1 covers
-  trigger precision (positive and negative prompts) and a real-world
-  manifest-only fixture extracted from folo-rs/folo at commit
-  3e1f241ddfb6de7ab0ecca1a54ca923807135d83.
+  End-to-end workflow tasks for the ss-cargo-deps-tidy skill. Includes
+  a real-world fixture extracted from folo-rs/folo at commit
+  3e1f241ddfb6de7ab0ecca1a54ca923807135d83 (manifest-only and full
+  source-tree variants). Loads a `before_run` hook that clones folo
+  and generates the full-source task YAML.
 skill: ss-cargo-deps-tidy
 version: "1.0"
 config:
@@ -21,13 +22,12 @@ metrics:
     threshold: 0.8
     description: Aggregate score across all task-level graders.
 hooks:
-  # Iteration 3 (folo-3e1f241-full): clones folo at the pinned commit
-  # into fixtures/.eval-cache/ and regenerates tasks/folo/folo-3e1f241-full.yaml
-  # with one inputs.files entry per source file. before_run fires before
-  # task discovery, so the generated YAML is picked up in the same run.
+  # Clones folo at the pinned commit into fixtures/.eval-cache/ and
+  # regenerates tasks/folo/folo-3e1f241-full.yaml with one inputs.files
+  # entry per source file. before_run fires before task discovery, so
+  # the generated YAML is picked up in the same run.
   before_run:
     - command: pwsh -NoProfile -File evals/ss-cargo-deps-tidy/scripts/Generate-FoloFullTask.ps1
       error_on_fail: true
 tasks:
-  - "tasks/trigger/*.yaml"
   - "tasks/folo/*.yaml"

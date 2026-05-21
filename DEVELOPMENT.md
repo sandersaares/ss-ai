@@ -62,7 +62,9 @@ Invoke-Pester ./tests/ -FullNameFilter '*Get-SectionInfo*'
 # Evaluations
 
 Skills are evaluated end-to-end with [Waza](https://microsoft.github.io/waza/).
-Eval specs live under `evals/<skill-name>/eval.yaml` with task files
+Eval specs live under `evals/<skill-name>/<lane>.eval.yaml` (one file per
+cost lane, e.g. `trigger.eval.yaml`, `workflow.eval.yaml`) with task
+files
 under `evals/<skill-name>/tasks/**/*.yaml`.
 
 ## Prerequisites
@@ -73,22 +75,36 @@ under `evals/<skill-name>/tasks/**/*.yaml`.
 
 ## Running an eval
 
-Run every task in a skill's suite, writing results into `eval-results/`:
+Eval specs are split per cost tier so the cheap lane doesn't pay for
+expensive `before_run` hooks. A skill exposes one spec file per lane
+under `evals/<skill-name>/<lane>.eval.yaml` (e.g. `trigger.eval.yaml`,
+`workflow.eval.yaml`).
+
+Run every task across every skill and every lane:
 
 ```powershell
-waza run evals/ss-cargo-deps-tidy/eval.yaml --output-dir .\eval-results
+Get-ChildItem evals/*/*.eval.yaml | ForEach-Object {
+    waza run $_.FullName --output-dir .\eval-results
+}
 ```
 
-Filter by tag (e.g. trigger-precision tests only):
+Run a single lane for a single skill:
 
 ```powershell
-waza run evals/ss-cargo-deps-tidy/eval.yaml --tags trigger --output-dir .\eval-results
+waza run evals/ss-cargo-deps-tidy/trigger.eval.yaml --output-dir .\eval-results
+waza run evals/ss-cargo-deps-tidy/workflow.eval.yaml --output-dir .\eval-results
+```
+
+Filter by tag within a lane (e.g. skip `heavy` tasks in the workflow lane):
+
+```powershell
+waza run evals/ss-cargo-deps-tidy/workflow.eval.yaml --tags workflow --output-dir .\eval-results
 ```
 
 Run a single task by id:
 
 ```powershell
-waza run evals/ss-cargo-deps-tidy/eval.yaml --task trigger-negative-unrelated --output-dir .\eval-results
+waza run evals/ss-cargo-deps-tidy/trigger.eval.yaml --task trigger-negative-unrelated --output-dir .\eval-results
 ```
 
 ## Tag reference
@@ -110,10 +126,12 @@ tags — tags are a CI/cost selector, not a categorisation system.
 
 CI mapping (see [.github/workflows](.github/workflows)):
 
-- `eval.yml` (push to `main`, same-repo PRs) — runs `--tags trigger`.
-- `eval-full.yml` (`workflow_dispatch`) — runs everything by default;
-  the operator can pass `tags: workflow` to skip the heavy bucket or
-  `tags: heavy` to run only the expensive scenarios.
+- `eval.yml` (push to `main`, same-repo PRs) — runs every
+  `evals/*/trigger.eval.yaml`.
+- `eval-full.yml` (`workflow_dispatch`) — runs every
+  `evals/*/*.eval.yaml` by default; the operator can pass
+  `tags: workflow` to skip the heavy bucket or `tags: heavy` to run
+  only the expensive scenarios.
 
 ## Authoring eval specs
 
