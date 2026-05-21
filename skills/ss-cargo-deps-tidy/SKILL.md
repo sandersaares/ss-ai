@@ -85,6 +85,8 @@ Record the printed path. Each subsequent stage may run in its own PowerShell ses
 $inv = Get-Content -LiteralPath '<inventory-path-from-stage-1>' -Raw | ConvertFrom-Json
 ```
 
+Tip: when no edits are needed (i.e. you are only running filter queries, not iterating with edits in between), you can batch multiple stages into a single PowerShell session — load `$inv` once at the top of the script and run each stage's filter query against it. This avoids paying the PowerShell startup cost per stage.
+
 ## Inventory schema
 
 `$inv` is a `PSCustomObject` with:

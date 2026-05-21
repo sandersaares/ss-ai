@@ -11,6 +11,10 @@ inputs:
     I bumped the minimum supported version of serde in the workspace and
     moved a couple of crate-level dependency entries up to the workspace
     level. Can you review the Cargo.toml files?
+
+    Note: there is no Rust toolchain available in this environment. Do not
+    run any cargo commands; treat the minimum-version verification stage as
+    out of scope.
   files:
     - path: Cargo.toml
     - path: crates/core/Cargo.toml

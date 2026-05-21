@@ -13,6 +13,10 @@ inputs:
     I just added tokio and reqwest to the [workspace.dependencies] table in
     Cargo.toml and referenced them from a couple of packages. Please clean
     up the dependency declarations across the workspace.
+
+    Note: there is no Rust toolchain available in this environment. Do not
+    run any cargo commands; treat the minimum-version verification stage as
+    out of scope.
   files:
     - path: Cargo.toml
     - path: packages/api/Cargo.toml
