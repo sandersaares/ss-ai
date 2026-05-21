@@ -35,10 +35,6 @@ Required for eval tooling that reads/writes YAML (e.g. the
 
 Some skills ship with executable helper scripts that have their own unit tests. Tests live under `tests/<skill-name>/` (parallel to `skills/`) and use [Pester](https://pester.dev/) 5.x.
 
-## Prerequisites
-
-See "Development prerequisites" above for Pester setup.
-
 ## Running tests
 
 Run every test in the repo:
