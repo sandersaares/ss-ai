@@ -10,6 +10,44 @@ inputs:
     I bumped the minimum supported version of serde in the workspace and
     moved a couple of crate-level dependency entries up to the workspace
     level. Can you review the Cargo.toml files?
+  files:
+    - path: Cargo.toml
+      content: |
+        [workspace]
+        members = ["crates/core", "crates/api"]
+        resolver = "2"
+
+        [workspace.dependencies]
+        serde = "1.0.220"
+        anyhow = "1"
+    - path: crates/core/Cargo.toml
+      content: |
+        [package]
+        name = "core"
+        version = "0.1.0"
+        edition = "2024"
+
+        [dependencies]
+        serde = { workspace = true, features = ["derive"] }
+        anyhow = { workspace = true }
+        thiserror = "1.0"
+    - path: crates/core/src/lib.rs
+      content: |
+        pub fn placeholder() {}
+    - path: crates/api/Cargo.toml
+      content: |
+        [package]
+        name = "api"
+        version = "0.1.0"
+        edition = "2024"
+
+        [dependencies]
+        serde = { workspace = true, features = ["derive"] }
+        anyhow = { workspace = true }
+        thiserror = "1.0"
+    - path: crates/api/src/lib.rs
+      content: |
+        pub fn placeholder() {}
 graders:
   - type: behavior
     name: skill-invoked

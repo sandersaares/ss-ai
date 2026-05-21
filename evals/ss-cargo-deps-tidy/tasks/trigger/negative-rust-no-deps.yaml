@@ -9,6 +9,34 @@ inputs:
   prompt: >
     Refactor the `match` expression inside `parse_packet` in src/parser.rs
     so it returns a Result instead of panicking on unknown variants.
+  files:
+    - path: Cargo.toml
+      content: |
+        [package]
+        name = "demo"
+        version = "0.1.0"
+        edition = "2024"
+
+        [dependencies]
+    - path: src/lib.rs
+      content: |
+        pub mod parser;
+    - path: src/parser.rs
+      content: |
+        pub enum Packet {
+            Hello,
+            Ping,
+            Goodbye,
+        }
+
+        pub fn parse_packet(byte: u8) -> Packet {
+            match byte {
+                0x01 => Packet::Hello,
+                0x02 => Packet::Ping,
+                0x03 => Packet::Goodbye,
+                other => panic!("unknown packet variant: {other:#x}"),
+            }
+        }
 graders:
   - type: behavior
     name: skill-not-invoked

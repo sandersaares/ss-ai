@@ -11,6 +11,39 @@ inputs:
     I am about to commit a batch of dependency changes I made to several
     Cargo.toml files in this Rust workspace. Before I commit, please make
     sure everything is tidy.
+  files:
+    - path: Cargo.toml
+      content: |
+        [workspace]
+        members = ["crates/foo", "crates/bar"]
+        resolver = "2"
+
+        [workspace.dependencies]
+        clap = { version = "4", features = ["derive"] }
+    - path: crates/foo/Cargo.toml
+      content: |
+        [package]
+        name = "foo"
+        version = "0.1.0"
+        edition = "2024"
+
+        [dependencies]
+        clap = { workspace = true }
+    - path: crates/foo/src/lib.rs
+      content: |
+        pub fn placeholder() {}
+    - path: crates/bar/Cargo.toml
+      content: |
+        [package]
+        name = "bar"
+        version = "0.1.0"
+        edition = "2024"
+
+        [dependencies]
+        clap = { version = "4.5", features = ["derive"] }
+    - path: crates/bar/src/lib.rs
+      content: |
+        pub fn placeholder() {}
 graders:
   - type: behavior
     name: skill-invoked

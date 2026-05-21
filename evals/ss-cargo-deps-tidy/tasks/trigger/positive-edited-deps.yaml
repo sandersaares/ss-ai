@@ -12,6 +12,41 @@ inputs:
     I just added tokio and reqwest to the [workspace.dependencies] table in
     Cargo.toml and referenced them from a couple of packages. Please clean
     up the dependency declarations across the workspace.
+  files:
+    - path: Cargo.toml
+      content: |
+        [workspace]
+        members = ["packages/api", "packages/worker"]
+        resolver = "2"
+
+        [workspace.dependencies]
+        tokio = "1.40"
+        reqwest = "0.12"
+    - path: packages/api/Cargo.toml
+      content: |
+        [package]
+        name = "api"
+        version = "0.1.0"
+        edition = "2024"
+
+        [dependencies]
+        tokio = { version = "1.40", features = ["full"] }
+        reqwest = "0.12"
+    - path: packages/api/src/lib.rs
+      content: |
+        pub fn placeholder() {}
+    - path: packages/worker/Cargo.toml
+      content: |
+        [package]
+        name = "worker"
+        version = "0.1.0"
+        edition = "2024"
+
+        [dependencies]
+        tokio = { workspace = true, features = ["macros", "rt"] }
+    - path: packages/worker/src/lib.rs
+      content: |
+        pub fn placeholder() {}
 graders:
   - type: behavior
     name: skill-invoked
