@@ -280,6 +280,9 @@ For the explicitly allowed flags (both the always-allowed and per-package), add 
 to ensure that they are consistently enabled for all packages that depend on the relevant dependencies. Exception: do not add them if
 repo-specific agent guidelines say they are not desired.
 
+If you added some explicitly allowed flags, remove any pre-existing feature flags that they already contain (e.g. `clap/default` already
+enables the `help` feature, so there is no need to declare `help` separately).
+
 # Stage 7: Verify that minimum dependency version guarantees are upheld
 
 Cargo dependency declarations typically do not specify a fixed version. The commonly used version requirement syntax "1.2.3" means

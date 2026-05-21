@@ -3,3 +3,4 @@ results/
 coverage.txt
 *.exe
 eval-results/
+evals/**/.eval-cache/
