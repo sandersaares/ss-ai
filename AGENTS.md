@@ -57,10 +57,26 @@ waza run evals/<skill>/<lane>.eval.yaml --tags <tag> --output-dir .\eval-results
   `skills/ss-cargo-deps-tidy/SKILL.md`. Do **not** try to traverse with
   `../..` from the task YAML; the path is not resolved against the task
   file's directory.
-- **`inputs.files[].path`** — both source (under fixtures dir) AND
-  destination (under per-task workspace dir). To seed a Cargo workspace
-  manifest at the workspace root, the fixture file must live directly
-  under the fixtures dir (not under a sub-folder like `before/`).
+- **`inputs.files[].path`** — both source (under the active fixtures
+  dir) AND destination (under the per-task workspace dir). To seed a
+  Cargo workspace manifest at the workspace root, the fixture file
+  must live directly under the active fixtures dir (not under a
+  sub-folder like `before/`). When two tasks both need to seed the
+  same workspace-relative path (e.g. each wants its own root
+  `Cargo.toml`), use a per-task `context_dir` to give each task its
+  own private fixture root — see below.
+- **Per-task `context_dir`** — task YAML files accept a top-level
+  `context_dir:` that overrides the eval-level fixtures dir for that
+  one task ([waza/internal/models/testcase.go](https://github.com/microsoft/waza/blob/main/internal/models/testcase.go),
+  field `TestCase.ContextRoot`). Used directly with `filepath.Join`
+  by the runner, so it is resolved relative to the **CWD of
+  `waza run`** (not the task YAML or eval spec). Always express it
+  as a repo-root-relative path, e.g.
+  `context_dir: evals/<skill>/fixtures/trigger/<task-id>`.
+- **`inputs.files[].content`** — alternative to `path`, supplies the
+  file body inline. Use `path` + a per-task `context_dir` for real
+  fixture files; reserve inline `content` for one-off cases where
+  carving out a fixture directory adds more clutter than it removes.
 - **`diff` grader `snapshot`** — path relative to the grader's
   `context_dir`. Store expected files under a clearly named subdir
   (e.g. `fixtures/<scenario>-expected/...`) so they don't collide

@@ -7,6 +7,7 @@ description: >
   files") should fire.
 tags:
   - trigger
+context_dir: evals/ss-cargo-deps-tidy/fixtures/trigger/trigger-positive-edited-deps
 inputs:
   prompt: >
     I just added tokio and reqwest to the [workspace.dependencies] table in
@@ -14,39 +15,10 @@ inputs:
     up the dependency declarations across the workspace.
   files:
     - path: Cargo.toml
-      content: |
-        [workspace]
-        members = ["packages/api", "packages/worker"]
-        resolver = "2"
-
-        [workspace.dependencies]
-        tokio = "1.40"
-        reqwest = "0.12"
     - path: packages/api/Cargo.toml
-      content: |
-        [package]
-        name = "api"
-        version = "0.1.0"
-        edition = "2024"
-
-        [dependencies]
-        tokio = { version = "1.40", features = ["full"] }
-        reqwest = "0.12"
     - path: packages/api/src/lib.rs
-      content: |
-        pub fn placeholder() {}
     - path: packages/worker/Cargo.toml
-      content: |
-        [package]
-        name = "worker"
-        version = "0.1.0"
-        edition = "2024"
-
-        [dependencies]
-        tokio = { workspace = true, features = ["macros", "rt"] }
     - path: packages/worker/src/lib.rs
-      content: |
-        pub fn placeholder() {}
 graders:
   - type: behavior
     name: skill-invoked

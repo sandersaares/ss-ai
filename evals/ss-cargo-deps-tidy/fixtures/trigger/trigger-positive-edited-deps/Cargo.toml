@@ -1,0 +1,7 @@
+[workspace]
+members = ["packages/api", "packages/worker"]
+resolver = "2"
+
+[workspace.dependencies]
+tokio = "1.40"
+reqwest = "0.12"

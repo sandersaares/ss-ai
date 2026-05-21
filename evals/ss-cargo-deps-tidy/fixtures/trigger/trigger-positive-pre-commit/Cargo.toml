@@ -1,0 +1,6 @@
+[workspace]
+members = ["crates/foo", "crates/bar"]
+resolver = "2"
+
+[workspace.dependencies]
+clap = { version = "4", features = ["derive"] }
