@@ -276,7 +276,25 @@ $inv.dependencies |
     Select-Object manifest, line, name, features, raw
 ```
 
-For each row in the result set, move the non-allowlisted feature flags into the `Cargo.toml` files of individual packages that require these features.
+For each row in the result set, move the non-allowlisted feature flags into the `Cargo.toml` files of **only those member packages whose source actually exercises the API surface gated by that feature**.
+Do NOT propagate the feature to every package that depends on the crate — most packages use only the always-enabled API surface, and adding unused features bloats compile time, binary size, and the public feature exposure of downstream re-exports.
+
+Determine recipients by grepping the workspace source for symbols gated by the feature. For example, when removing `futures = { features = ["executor"] }` from the workspace, find the packages that actually use `futures::executor`:
+
+```powershell
+Get-ChildItem packages -Recurse -File -Include '*.rs' |
+    Select-String -SimpleMatch -Pattern 'futures::executor' |
+    Select-Object -Unique Path |
+    ForEach-Object {
+        $parts = (Resolve-Path -Relative $_.Path) -split '[\\/]'
+        if ($parts[0] -eq 'packages') { $parts[1] }
+    } | Sort-Object -Unique
+```
+
+Add `features = ["executor"]` only to the package-level `futures` declaration in the packages reported by the grep. If a feature's gated API surface is not obvious from its name,
+consult the dependency's `Cargo.toml` `[features]` table (under `~/.cargo/registry/src/...`) to learn which modules or items it enables before searching.
+
+If the grep returns zero member packages, the feature was unused at the workspace level — drop it entirely instead of moving it.
 
 For the explicitly allowed flags (both the always-allowed and per-package), add them if missing to the workspace-level declarations
 to ensure that they are consistently enabled for all packages that depend on the relevant dependencies. Exception: do not add them if
