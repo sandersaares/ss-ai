@@ -77,11 +77,34 @@ JSON:
 - As a `skill` entry in `runs[].session_digest.tools_used` /
   `tool_calls`.
 
-The simplest grader to verify invocation is the `behavior` grader
-with `required_tools: [skill]` (positive) or
-`forbidden_tools: [skill]` (negative). The `skill_invocation` grader
-also works but requires at least one `required_skills` entry, so it
-can't directly express "no skill invocation" for negative tasks.
+For **positive trigger tasks**, prefer the `skill_invocation`
+grader — it inspects `runs[].skill_invocations` and matches against
+a `required_skills` list, so it verifies *which* skill was invoked,
+not just that the `skill` tool fired:
+
+```yaml
+graders:
+  - type: skill_invocation
+    name: ss-cargo-deps-tidy-invoked
+    config:
+      required_skills:
+        - ss-cargo-deps-tidy
+      mode: any_order
+      allow_extra: true
+```
+
+The `behavior` grader with `required_tools: [skill]` is a looser
+alternative — it only checks tool *names*, not arguments, so any
+`skill` invocation (regardless of which skill) satisfies it. That's
+fine when only one skill is discoverable in the eval's CWD (Waza
+finds it at `skills/<name>/SKILL.md`), but it breaks silently as
+soon as a second skill enters the picture. Use `skill_invocation`
+for new positive tasks.
+
+For **negative trigger tasks**, the `behavior` grader with
+`forbidden_tools: [skill]` is the right tool: `skill_invocation`
+requires at least one `required_skills` entry and so cannot express
+"no skill was invoked".
 
 **Use this signal only for trigger-style evals.** In trigger evals
 the whole point is "did the agent decide to invoke the skill", so
@@ -115,11 +138,11 @@ as a `<skill_context>` block (see `buildSkillSystemMessage` in
   round-trip.
 - For **trigger evals** it silently destroys the measurement: the
   agent already has the skill content and can "execute the workflow"
-  without ever invoking the `skill` tool, so a `behavior` grader
-  with `required_tools: [skill]` will fail (false negative) even
-  when the agent correctly recognized the trigger. Worse, the agent
-  may proceed to do skill work without firing any trigger-visible
-  signal at all.
+  without ever invoking the `skill` tool, so a `skill_invocation` /
+  `behavior` grader expecting an invocation will fail (false
+  negative) even when the agent correctly recognized the trigger.
+  Worse, the agent may proceed to do skill work without firing any
+  trigger-visible signal at all.
 
 When `skill:` is omitted, Waza still discovers the skill (walks one
 level of subdirectories under its CWD, finding

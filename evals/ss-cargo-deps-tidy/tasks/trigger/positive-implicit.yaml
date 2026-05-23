@@ -21,8 +21,10 @@ inputs:
     - path: crates/api/Cargo.toml
     - path: crates/api/src/lib.rs
 graders:
-  - type: behavior
-    name: skill-invoked
+  - type: skill_invocation
+    name: ss-cargo-deps-tidy-invoked
     config:
-      required_tools:
-        - skill
+      required_skills:
+        - ss-cargo-deps-tidy
+      mode: any_order
+      allow_extra: true
