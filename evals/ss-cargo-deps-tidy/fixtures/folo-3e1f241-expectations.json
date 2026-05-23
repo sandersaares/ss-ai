@@ -1,0 +1,27 @@
+{
+    "_comment": "Fixture-specific facts for the folo @ 3e1f241 task. Used by Test-CargoTidied.ps1 to verify the skill correctly applied the changes that this real-world workspace requires. The Stage 2/4/5/6 universal rules are checked unconditionally and do not need entries here.",
+    "centralized_deps": [
+        { "name": "cpu-time" }
+    ],
+    "removed_features": [
+        { "name": "futures", "feature": "executor" }
+    ],
+    "replaced_features": [
+        { "name": "argh", "must_have": "default", "must_not_have": "help" }
+    ],
+    "bumped_deps": [
+        { "name": "fake_headers", "original_version": "0.0" },
+        { "name": "futures", "original_version": "0.3" },
+        { "name": "futures-core", "original_version": "0.3" },
+        { "name": "heapless", "original_version": "0.9" },
+        { "name": "libc", "original_version": "0.2" },
+        { "name": "oneshot", "original_version": "0.1" },
+        { "name": "proc-macro2", "original_version": "1.0" },
+        { "name": "quote", "original_version": "1.0" },
+        { "name": "rand", "original_version": "0.9" },
+        { "name": "scc", "original_version": "3.0" },
+        { "name": "syn", "original_version": "2.0" },
+        { "name": "tokio", "original_version": "1.43" },
+        { "name": "tracing", "original_version": "0.1" }
+    ]
+}

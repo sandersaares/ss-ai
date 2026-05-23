@@ -79,54 +79,43 @@ expected:
   outcomes:
     - type: task_completed
 graders:
-  - name: cargo-manifests-match-expected
-    type: diff
-    config:
-      context_dir: evals/ss-cargo-deps-tidy/fixtures
-      expected_files:
-        - { path: Cargo.toml, snapshot: folo-3e1f241-expected/Cargo.toml }
-        - { path: packages/alloc_tracker/Cargo.toml, snapshot: folo-3e1f241-expected/packages/alloc_tracker/Cargo.toml }
-        - { path: packages/all_the_time/Cargo.toml, snapshot: folo-3e1f241-expected/packages/all_the_time/Cargo.toml }
-        - { path: packages/awaiter_set/Cargo.toml, snapshot: folo-3e1f241-expected/packages/awaiter_set/Cargo.toml }
-        - { path: packages/benchmarks/Cargo.toml, snapshot: folo-3e1f241-expected/packages/benchmarks/Cargo.toml }
-        - { path: packages/cargo-detect-package/Cargo.toml, snapshot: folo-3e1f241-expected/packages/cargo-detect-package/Cargo.toml }
-        - { path: packages/cpulist/Cargo.toml, snapshot: folo-3e1f241-expected/packages/cpulist/Cargo.toml }
-        - { path: packages/events/Cargo.toml, snapshot: folo-3e1f241-expected/packages/events/Cargo.toml }
-        - { path: packages/events_once/Cargo.toml, snapshot: folo-3e1f241-expected/packages/events_once/Cargo.toml }
-        - { path: packages/fast_time/Cargo.toml, snapshot: folo-3e1f241-expected/packages/fast_time/Cargo.toml }
-        - { path: packages/folo_ffi/Cargo.toml, snapshot: folo-3e1f241-expected/packages/folo_ffi/Cargo.toml }
-        - { path: packages/folo_utils/Cargo.toml, snapshot: folo-3e1f241-expected/packages/folo_utils/Cargo.toml }
-        - { path: packages/future_deque/Cargo.toml, snapshot: folo-3e1f241-expected/packages/future_deque/Cargo.toml }
-        - { path: packages/infinity_pool/Cargo.toml, snapshot: folo-3e1f241-expected/packages/infinity_pool/Cargo.toml }
-        - { path: packages/linked/Cargo.toml, snapshot: folo-3e1f241-expected/packages/linked/Cargo.toml }
-        - { path: packages/linked_macros/Cargo.toml, snapshot: folo-3e1f241-expected/packages/linked_macros/Cargo.toml }
-        - { path: packages/linked_macros_impl/Cargo.toml, snapshot: folo-3e1f241-expected/packages/linked_macros_impl/Cargo.toml }
-        - { path: packages/many_cpus/Cargo.toml, snapshot: folo-3e1f241-expected/packages/many_cpus/Cargo.toml }
-        - { path: packages/many_cpus_benchmarking/Cargo.toml, snapshot: folo-3e1f241-expected/packages/many_cpus_benchmarking/Cargo.toml }
-        - { path: packages/new_zealand/Cargo.toml, snapshot: folo-3e1f241-expected/packages/new_zealand/Cargo.toml }
-        - { path: packages/nm/Cargo.toml, snapshot: folo-3e1f241-expected/packages/nm/Cargo.toml }
-        - { path: packages/nm_otel/Cargo.toml, snapshot: folo-3e1f241-expected/packages/nm_otel/Cargo.toml }
-        - { path: packages/par_bench/Cargo.toml, snapshot: folo-3e1f241-expected/packages/par_bench/Cargo.toml }
-        - { path: packages/region_cached/Cargo.toml, snapshot: folo-3e1f241-expected/packages/region_cached/Cargo.toml }
-        - { path: packages/region_local/Cargo.toml, snapshot: folo-3e1f241-expected/packages/region_local/Cargo.toml }
-        - { path: packages/testing/Cargo.toml, snapshot: folo-3e1f241-expected/packages/testing/Cargo.toml }
-        - { path: packages/ui_tests/Cargo.toml, snapshot: folo-3e1f241-expected/packages/ui_tests/Cargo.toml }
-        - { path: packages/vicinal/Cargo.toml, snapshot: folo-3e1f241-expected/packages/vicinal/Cargo.toml }
-  - name: stage-7-inline-table-form
+  - name: cargo-tidy-sentinels
     type: file
     config:
-      # Manifest-only fixture: stage 7 cannot raise actual minimum
-      # versions without source/lockfile context, so the patch
-      # component is allowed to be 0. This grader instead verifies
-      # the inline-table form is preserved with a 3-component
-      # version range. A future devenv-empowered eval should add a
-      # separate `stage-7-min-version-bumps` grader with
-      # `[1-9]\d*` patterns to require real bumps.
+      # Quick regex spot-checks of a few concrete deltas. These overlap with
+      # the program grader on purpose so each can catch the other's blind
+      # spots; failures here are immediately legible from the JSON results.
       content_patterns:
         - path: Cargo.toml
           must_match:
-            - 'libc\s*=\s*\{\s*version\s*=\s*"0\.2\.\d+"'
-            - 'proc-macro2\s*=\s*\{\s*version\s*=\s*"1\.0\.\d+"'
-            - 'tracing\s*=\s*\{\s*version\s*=\s*"0\.1\.\d+"'
-            - 'syn\s*=\s*\{\s*version\s*=\s*"2\.0\.\d+"'
-            - 'fake_headers\s*=\s*\{\s*version\s*=\s*"0\.0\.\d+"'
+            # Stage 4 centralization: cpu-time was hoisted from
+            # packages/all_the_time to the workspace root.
+            - 'cpu-time\s*='
+            # Stage 2 padding: arc-swap version went from "1.7" to 3 components.
+            - 'arc-swap\s*=\s*\{[^}]*version\s*=\s*"1\.7\.\d+"'
+            # Stage 6 feature placement: argh now declares "default" at workspace level.
+            - 'argh\s*=\s*\{[^}]*"default"'
+          must_not_match:
+            # Stage 6: argh's pre-tidy "help" feature must be gone.
+            - 'argh\s*=\s*\{[^}]*"help"'
+            # Stage 6: futures' pre-tidy "executor" feature must be gone.
+            - 'futures\s*=\s*\{[^}]*"executor"'
+  - name: cargo-tidiness-checks
+    type: program
+    config:
+      # Semantic validation via Generate-Inventory: enforces Stage 2/4/5/6
+      # universally across every workspace dep, plus the fixture-specific
+      # centralizations and feature edits encoded in the expectations JSON.
+      # Stage 7 bumps are intentionally NOT required here — the cargo-only
+      # task's prompt excludes the cargo verification step that would
+      # justify them.
+      command: pwsh
+      args:
+        - -NoProfile
+        - -File
+        - evals/ss-cargo-deps-tidy/scripts/Test-CargoTidied.ps1
+        - -ExpectationsPath
+        - evals/ss-cargo-deps-tidy/fixtures/folo-3e1f241-expectations.json
+        - -InventoryScript
+        - skills/ss-cargo-deps-tidy/Generate-Inventory.ps1
+      timeout: 60

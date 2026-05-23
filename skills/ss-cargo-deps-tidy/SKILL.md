@@ -65,6 +65,10 @@ Execute all stages in sequence to complete the workflow.
 
 # Stage 1: Create inventory of dependency declarations
 
+**This stage is your FIRST action in the workflow.** Before opening, viewing, reading or listing any `Cargo.toml` file in the workspace, run the inventory script described below. The inventory is the single source of truth for every later stage; reading manifests by hand is wasted work and burns through your turn budget before you have made any edits.
+
+**Anti-pattern (do not do this):** opening the workspace, listing `packages/`, and then issuing one `view` call per `Cargo.toml`. The inventory captures every declaration in every manifest — name, section, version, features, default-features, path, style, line number, raw text — so you never need to read manifests up front. You only open a specific manifest later when a filter query has identified a concrete edit that needs to be made in it.
+
 Generate the inventory once at the start of the workflow and write it to a temporary file. All subsequent stages run filter queries against the loaded object — they never load the raw file contents into the conversation.
 
 **Critical:** Always invoke the script with `-OutputPath`. The JSON body can easily exceed 100 KB on real workspaces and is not suitable for direct inclusion in the agent context window. Do not `Get-Content` the inventory file without an immediate `| ConvertFrom-Json` and a follow-up filter; do not paste, summarize, or quote its raw contents.

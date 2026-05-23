@@ -81,16 +81,6 @@ Write-Host "[prepare-folo] enumerated $($files.Count) files"
 #    grader config onto the manifest-only iteration-1 task.
 Import-Module powershell-yaml -ErrorAction Stop
 
-$expectedRel = 'fixtures/folo-3e1f241-expected'
-$snapshots = Get-ChildItem -Path (Join-Path $evalDir $expectedRel) -Recurse -File -Filter 'Cargo.toml' `
-    | ForEach-Object {
-        $rel = $_.FullName.Substring((Resolve-Path (Join-Path $evalDir $expectedRel)).Path.Length + 1) -replace '\\', '/'
-        # Snapshot is resolved against the diff grader's context_dir (set
-        # to "$evalDir/fixtures" below), so prefix with the expected-tree
-        # name only — NOT with `fixtures/`, which would double up.
-        [ordered]@{ path = $rel; snapshot = "folo-3e1f241-expected/$rel" }
-    }
-
 $workaroundPath = "$evalDir/prompts/upstream-bug-workaround.md"
 $workaroundRaw = (Get-Content -LiteralPath $workaroundPath -Raw).TrimEnd()
 # Indent continuation lines so the workaround reads as a single bullet
@@ -134,11 +124,41 @@ modified; source files must be byte-identical to upstream.
     }
     graders = @(
         [ordered]@{
-            name = 'cargo-manifests-match-expected'
-            type = 'diff'
+            name = 'cargo-tidy-sentinels'
+            type = 'file'
             config = [ordered]@{
-                context_dir = "$evalDir/fixtures"
-                expected_files = @($snapshots)
+                content_patterns = @(
+                    [ordered]@{
+                        path = 'Cargo.toml'
+                        must_match = @(
+                            'cpu-time\s*=',
+                            'arc-swap\s*=\s*\{[^}]*version\s*=\s*"1\.7\.\d+"',
+                            'argh\s*=\s*\{[^}]*"default"'
+                        )
+                        must_not_match = @(
+                            'argh\s*=\s*\{[^}]*"help"',
+                            'futures\s*=\s*\{[^}]*"executor"',
+                            'tokio\s*=\s*\{[^}]*version\s*=\s*"1\.43(\.0)?"',
+                            'tracing\s*=\s*\{[^}]*version\s*=\s*"0\.1(\.0)?"',
+                            'syn\s*=\s*\{[^}]*version\s*=\s*"2\.0(\.0)?"'
+                        )
+                    }
+                )
+            }
+        },
+        [ordered]@{
+            name = 'cargo-tidiness-checks'
+            type = 'program'
+            config = [ordered]@{
+                command = 'pwsh'
+                args = @(
+                    '-NoProfile', '-File',
+                    "$evalDir/scripts/Test-CargoTidied.ps1",
+                    '-ExpectationsPath', "$evalDir/fixtures/folo-3e1f241-expectations.json",
+                    '-InventoryScript', 'skills/ss-cargo-deps-tidy/Generate-Inventory.ps1',
+                    '-RequireBumps'
+                )
+                timeout = 60
             }
         },
         [ordered]@{
@@ -158,24 +178,6 @@ modified; source files must be byte-identical to upstream.
                 args = @('-NoProfile', '-File', "$evalDir/scripts/Test-LockfileModified.ps1", '-CacheDir', $cacheDir)
                 timeout = 30
             }
-        },
-        [ordered]@{
-            name = 'stage-7-min-version-bumps'
-            type = 'file'
-            config = [ordered]@{
-                content_patterns = @(
-                    [ordered]@{
-                        path = 'Cargo.toml'
-                        must_match = @(
-                            'libc\s*=\s*\{\s*version\s*=\s*"0\.2\.[1-9]\d*"',
-                            'proc-macro2\s*=\s*\{\s*version\s*=\s*"1\.0\.[1-9]\d*"',
-                            'tracing\s*=\s*\{\s*version\s*=\s*"0\.1\.[1-9]\d*"',
-                            'syn\s*=\s*\{\s*version\s*=\s*"2\.0\.[1-9]\d*"',
-                            'fake_headers\s*=\s*\{\s*version\s*=\s*"0\.0\.[1-9]\d*"'
-                        )
-                    }
-                )
-            }
         }
     )
 }
@@ -190,5 +192,5 @@ $yaml = ConvertTo-Yaml -Data $task
 
 New-Item -ItemType Directory -Force -Path (Split-Path $taskFile -Parent) | Out-Null
 Set-Content -Path $taskFile -Value ($header + $yaml) -Encoding utf8 -NoNewline
-Write-Host "[prepare-folo] wrote $taskFile ($($files.Count) files, $(@($snapshots).Count) snapshots)"
+Write-Host "[prepare-folo] wrote $taskFile ($($files.Count) files)"
 
