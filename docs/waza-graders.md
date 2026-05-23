@@ -101,10 +101,34 @@ finds it at `skills/<name>/SKILL.md`), but it breaks silently as
 soon as a second skill enters the picture. Use `skill_invocation`
 for new positive tasks.
 
-For **negative trigger tasks**, the `behavior` grader with
-`forbidden_tools: [skill]` is the right tool: `skill_invocation`
-requires at least one `required_skills` entry and so cannot express
-"no skill was invoked".
+For **negative trigger tasks**, use the `behavior` grader with
+`forbidden_tools: [skill]`:
+
+```yaml
+graders:
+  - type: behavior
+    name: no-skill-invoked
+    config:
+      forbidden_tools:
+        - skill
+```
+
+This is **stricter than the question we actually want to ask.** The
+accurate question for a negative-trigger task is "skill `S` was not
+invoked" — invoking an unrelated skill would be acceptable. But:
+
+- `behavior` filters on tool *name*, not arguments, so
+  `forbidden_tools: [skill]` rejects *every* skill invocation
+  regardless of which skill.
+- `skill_invocation` would be the precise fit, but it requires a
+  non-empty `required_skills` list and has no `forbidden_skills`
+  field, so it cannot express "no specific skill is required, but X
+  must not fire" (tracked upstream as a Waza feature request).
+
+The over-strict phrasing is harmless today because exactly one skill
+is discoverable from the eval CWD, making "any skill" and "this
+skill" equivalent. Revisit if the repo (or `config.skill_directories`)
+grows additional discoverable skills.
 
 **Use this signal only for trigger-style evals.** In trigger evals
 the whole point is "did the agent decide to invoke the skill", so
