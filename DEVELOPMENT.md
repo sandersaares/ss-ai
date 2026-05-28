@@ -12,6 +12,14 @@ Required regardless of which area you work in:
   skills (e.g. `ss-cargo-deps-tidy`) shell out to `cargo` during
   evaluation, and a clean rustup install is the expected way to provide
   it.
+- [`just`](https://github.com/casey/just) command runner. The repo's
+  `justfile` is the canonical entry point for running tests and evals;
+  every workflow in the rest of this document is a `just` recipe.
+  Installs via `cargo` once the Rust toolchain above is in place:
+
+  ```powershell
+  cargo install just --locked
+  ```
 
 Required for skill-helper unit tests:
 
@@ -41,22 +49,28 @@ Some skills ship with executable helper scripts that have their own unit tests. 
 
 ## Running tests
 
+All test commands are `just` recipes that run from the repo root. Use
+`just --list` to enumerate everything available. Any extra arguments
+you pass after the recipe name are forwarded verbatim to
+`Invoke-Pester`.
+
 Run every test in the repo:
 
 ```powershell
-Invoke-Pester ./tests/
+just test
 ```
 
 Run tests for a single skill:
 
 ```powershell
-Invoke-Pester ./tests/ss-cargo-deps-tidy/
+just test-skill ss-cargo-deps-tidy
 ```
 
 Filter by `Describe` or `It` name:
 
 ```powershell
-Invoke-Pester ./tests/ -FullNameFilter '*Get-SectionInfo*'
+just test -FullNameFilter '*Get-SectionInfo*'
+just test-skill ss-cargo-deps-tidy -FullNameFilter '*Get-SectionInfo*'
 ```
 
 # Evaluations
@@ -80,31 +94,43 @@ expensive `before_run` hooks. A skill exposes one spec file per lane
 under `evals/<skill-name>/<lane>.eval.yaml` (e.g. `trigger.eval.yaml`,
 `workflow.eval.yaml`).
 
+All eval commands are `just` recipes that wrap `waza run` and write
+results to `./eval-results`. Any extra arguments you pass after the
+recipe name are forwarded verbatim to `waza run`, so every `waza run`
+flag (`--model`, `--tags`, `--task`, etc.) works without editing the
+`justfile`. Run `just --list` to enumerate recipes.
+
 Run every task across every skill and every lane:
 
 ```powershell
-Get-ChildItem evals/*/*.eval.yaml | ForEach-Object {
-    waza run $_.FullName --output-dir .\eval-results
-}
+just eval-all
 ```
 
-Run a single lane for a single skill:
+Run a single lane across every skill:
 
 ```powershell
-waza run evals/ss-cargo-deps-tidy/trigger.eval.yaml --output-dir .\eval-results
-waza run evals/ss-cargo-deps-tidy/workflow.eval.yaml --output-dir .\eval-results
+just eval-triggers
+just eval-workflows
 ```
 
 Filter by tag within a lane (e.g. skip `heavy` tasks in the workflow lane):
 
 ```powershell
-waza run evals/ss-cargo-deps-tidy/workflow.eval.yaml --tags workflow --output-dir .\eval-results
+just eval-workflows --tags workflow
 ```
 
-Run a single task by id:
+Override the model used by the agent:
 
 ```powershell
-waza run evals/ss-cargo-deps-tidy/trigger.eval.yaml --task trigger-negative-unrelated --output-dir .\eval-results
+just eval-triggers --model claude-opus-4.6
+```
+
+Run a single spec file (the escape hatch when you want one skill + one
+lane, or to target a single task id):
+
+```powershell
+just eval evals/ss-cargo-deps-tidy/trigger.eval.yaml
+just eval evals/ss-cargo-deps-tidy/trigger.eval.yaml --task trigger-negative-unrelated
 ```
 
 ## Tag reference
