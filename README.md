@@ -63,10 +63,6 @@ directories with the same name are left alone (with a warning). On
 Windows the script uses NTFS junctions for the directory links, so it
 works in an ordinary non-elevated shell without Developer Mode.
 
-> Each skill's `SKILL.md` lists prerequisites specific to that skill.
-> `ss-cargo-deps-tidy`, for example, requires a Rust/Cargo workspace
-> and is a no-op otherwise.
-
 ## Development
 
 See [DEVELOPMENT.md](DEVELOPMENT.md) for the full development setup,
