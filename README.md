@@ -46,15 +46,16 @@ copilot
 ### GitHub Copilot in VS Code (and other skills-compatible agents)
 
 Use [`Install-CopilotSkills.ps1`](Install-CopilotSkills.ps1) to
-symlink every skill into the location your agent reads from. With
-`-Scope User` (the default), skills land in `$HOME/.copilot/skills/`
-and are available to all repos. With `-Scope Workspace`, they land in
-`.github/copilot/skills/` under the current directory and are scoped
-to that repo.
+symlink every skill into the location your agent reads from. With no
+arguments, skills land in `$HOME/.copilot/skills/` and are available
+to all repos. Pass `-Path <dir>` to install into
+`<dir>/.github/copilot/skills/` instead — typically a repo root so the
+skills get scoped to that repo.
 
 ```powershell
-pwsh path/to/ss-ai/Install-CopilotSkills.ps1                  # user scope
-pwsh path/to/ss-ai/Install-CopilotSkills.ps1 -Scope Workspace # current repo
+pwsh path/to/ss-ai/Install-CopilotSkills.ps1                # user-wide
+pwsh path/to/ss-ai/Install-CopilotSkills.ps1 -Path .         # cwd
+pwsh path/to/ss-ai/Install-CopilotSkills.ps1 -Path path/to/repo
 ```
 
 Existing links with the same name are replaced; existing plain

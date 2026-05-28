@@ -48,7 +48,7 @@ BeforeAll {
 
     function Invoke-Installer {
         param([Parameter(Mandatory)] [string]$WorkspacePath)
-        & $script:ScriptPath -Scope Workspace -WorkspacePath $WorkspacePath *>&1
+        & $script:ScriptPath -Path $WorkspacePath *>&1
     }
 
     function Get-SkillsTargetDir {

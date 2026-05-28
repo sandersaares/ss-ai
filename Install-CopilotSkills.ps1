@@ -14,34 +14,28 @@
     require Developer Mode or an elevated shell. On Linux and macOS the
     script uses symbolic links.
 
-.PARAMETER Scope
-    User (default): link into $HOME/.copilot/skills, making the skills
-    available to all repos via Copilot CLI and any other client that reads
-    that location.
+.PARAMETER Path
+    When omitted (default), the script links into $HOME/.copilot/skills,
+    making the skills available to all repos via Copilot CLI and any other
+    client that reads that location.
 
-    Workspace: link into .github/copilot/skills under -WorkspacePath
-    (current working directory by default), scoping the skills to that repo
-    (e.g. for GitHub Copilot in VS Code).
-
-.PARAMETER WorkspacePath
-    When -Scope is Workspace, the repo root to install the skills into.
-    Defaults to the current working directory.
+    When supplied, the script links into .github/copilot/skills under the
+    given directory (no repo detection is performed). Typically pass a
+    repo root to scope the skills to that repo (e.g. for GitHub Copilot
+    in VS Code).
 
 .EXAMPLE
     pwsh ./Install-CopilotSkills.ps1
     Links all skills into $HOME/.copilot/skills.
 
 .EXAMPLE
-    pwsh ./Install-CopilotSkills.ps1 -Scope Workspace
+    pwsh ./Install-CopilotSkills.ps1 -Path .
     Links all skills into ./.github/copilot/skills under the current dir.
 #>
 
 [CmdletBinding()]
 param(
-    [ValidateSet('User', 'Workspace')]
-    [string]$Scope = 'User',
-
-    [string]$WorkspacePath = (Get-Location).Path
+    [string]$Path
 )
 
 Set-StrictMode -Version Latest
@@ -52,9 +46,10 @@ if (-not (Test-Path -LiteralPath $skillsSource -PathType Container)) {
     throw "Skills source directory not found: $skillsSource"
 }
 
-switch ($Scope) {
-    'User'      { $targetRoot = Join-Path $HOME '.copilot/skills' }
-    'Workspace' { $targetRoot = Join-Path $WorkspacePath '.github/copilot/skills' }
+$targetRoot = if ($PSBoundParameters.ContainsKey('Path')) {
+    Join-Path $Path '.github/copilot/skills'
+} else {
+    Join-Path $HOME '.copilot/skills'
 }
 
 if (-not (Test-Path -LiteralPath $targetRoot)) {
