@@ -1,8 +1,9 @@
 # AI skills by Sander Saares
 
-Reusable [Copilot skills](https://docs.github.com/en/copilot/) and
-companion evaluations that the author finds useful. Feel free to do
-what you like with them; see [LICENSE](LICENSE) for terms.
+Reusable [agent skills](https://agentskills.io/home) — an open format
+for packaging procedural knowledge that AI agents load on demand —
+plus companion evaluations that the author finds useful. Feel free to
+do what you like with them; see [LICENSE](LICENSE) for terms.
 
 ## Skills in this repo
 
@@ -15,7 +16,10 @@ entrypoint. Helper scripts (when present) sit alongside the SKILL file.
 
 ## Requirements
 
-- A coding agent that supports the [Copilot skill format](https://docs.github.com/en/copilot/) — tested with GitHub Copilot and Claude Opus 4.7.
+- An agent that supports the [agent skills](https://agentskills.io/home)
+  format — tested with GitHub Copilot (CLI and VS Code) and Claude
+  Opus 4.7. See [the client showcase](https://agentskills.io/clients)
+  for the broader list of compatible agents.
 - PowerShell 7+ on the machine running the agent. Skills that ship
   helper scripts use `pwsh`; no other modules need to be installed for
   end-user use.
@@ -30,33 +34,33 @@ git clone https://github.com/sandersaares/ss-ai.git
 
 ### Copilot CLI
 
+Add the repo's `skills/` directory once. Copilot CLI persists the
+directory in its config and discovers every skill under it
+automatically, in this and future sessions:
+
 ```sh
 copilot
 /skills add path/to/ss-ai/skills
 ```
 
-### GitHub Copilot in VS Code
+### GitHub Copilot in VS Code (and other skills-compatible agents)
 
-Symlink (or copy) the skill folder into your target repo:
+Use [`Install-CopilotSkills.ps1`](Install-CopilotSkills.ps1) to
+symlink every skill into the location your agent reads from. With
+`-Scope User` (the default), skills land in `$HOME/.copilot/skills/`
+and are available to all repos. With `-Scope Workspace`, they land in
+`.github/copilot/skills/` under the current directory and are scoped
+to that repo.
 
-```sh
-mkdir -p .github/copilot/skills
-ln -s path/to/ss-ai/skills/ss-cargo-deps-tidy .github/copilot/skills/ss-cargo-deps-tidy
+```powershell
+pwsh path/to/ss-ai/Install-CopilotSkills.ps1                  # user scope
+pwsh path/to/ss-ai/Install-CopilotSkills.ps1 -Scope Workspace # current repo
 ```
 
-Then start a Copilot Chat agent session in that workspace.
-
-### Claude
-
-Point Claude at `skills/<name>/SKILL.md` directly (system-prompt
-attachment or your harness's skill-loading mechanism). Helper scripts
-must be reachable from the agent's working directory.
-
-### Standalone
-
-`SKILL.md` is plain Markdown — read it and follow the workflow
-manually. Helper scripts (e.g. `Generate-Inventory.ps1`) run directly
-from a shell.
+Existing links with the same name are replaced; existing plain
+directories with the same name are left alone (with a warning). On
+Windows the script uses NTFS junctions for the directory links, so it
+works in an ordinary non-elevated shell without Developer Mode.
 
 > Each skill's `SKILL.md` lists prerequisites specific to that skill.
 > `ss-cargo-deps-tidy`, for example, requires a Rust/Cargo workspace
