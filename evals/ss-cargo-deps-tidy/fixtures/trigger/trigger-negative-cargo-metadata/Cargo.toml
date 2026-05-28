@@ -1,0 +1,10 @@
+[package]
+name = "foobar-parser"
+version = "0.2.1"
+edition = "2024"
+description = "A parser for the FooBar protocol."
+keywords = ["parser"]
+license = "MIT"
+
+[dependencies]
+bytes = { version = "1", default-features = false }

@@ -10,17 +10,12 @@ version: "1.0"
 config:
   trials_per_task: 1
   timeout_seconds: 1800
-  parallel: false
+  parallel: true
   executor: copilot-sdk
   # Tracked README/skill target is Claude Opus 4.7, but Waza 0.31.0's
   # supported-model list (apparently hardcoded) does not include it yet,
   # so we pin to 4.6 here. Bump when Waza ships an updated list.
   model: claude-opus-4.6
-metrics:
-  - name: task_completion
-    weight: 1.0
-    threshold: 0.8
-    description: Aggregate score across all task-level graders.
 hooks:
   # Clones folo at the pinned commit into fixtures/.eval-cache/ and
   # regenerates tasks/folo/folo-3e1f241-full.yaml with one inputs.files

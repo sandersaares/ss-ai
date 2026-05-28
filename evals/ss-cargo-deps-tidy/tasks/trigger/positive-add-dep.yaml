@@ -1,0 +1,30 @@
+id: trigger-positive-add-dep
+name: Trigger - Add a single dependency to a Rust project
+description: >
+  The user asks the agent to add a single Cargo dependency (`tokio`) to a
+  Rust project. This is a weaker trigger than `positive-edited-deps`
+  because the user requests an addition rather than asking for cleanup of
+  edits already made, but the skill should still fire after the dependency
+  has been added (per the skill's "invoke automatically after modifying
+  dependency declarations" guidance).
+tags:
+  - trigger
+context_dir: evals/ss-cargo-deps-tidy/fixtures/trigger/trigger-positive-add-dep
+inputs:
+  prompt: >
+    Add the `tokio` dependency to the Rust project in the current
+    directory so I can start writing async code.
+
+    Note: there is no Rust toolchain available in this environment. Do not
+    run any cargo commands, just perform text edits without Cargo verification.
+  files:
+    - path: Cargo.toml
+    - path: src/main.rs
+graders:
+  - type: skill_invocation
+    name: ss-cargo-deps-tidy-invoked
+    config:
+      required_skills:
+        - ss-cargo-deps-tidy
+      mode: any_order
+      allow_extra: true

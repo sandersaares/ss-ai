@@ -1,7 +1,16 @@
 ---
 name: ss-cargo-deps-tidy
 description: >
-  Tidies Rust dependency declarations in Cargo.toml files to ensure uniform style, centralize version management and verify that minimum dependency version guarantees are upheld for published library crates. Invoke this skill automatically after modifying Rust dependency declarations in Cargo.toml files. Batch changes or defer execution to pre-commit stage when possible to minimize the number of times this skill needs to be invoked.
+  Tidies Rust dependency declarations in Cargo.toml files to ensure uniform style, centralize version management and verify that minimum dependency version guarantees are upheld for published library crates.
+  
+  Invoke this skill automatically after modifying Rust dependency declarations or dependency feature flags in Cargo.toml files.
+
+  Do not automatically use this skill if only performing metadata edits in Cargo.toml (e.g. changing the name, description, keywords or similar).
+  
+  If asked to tidy Cargo.toml after dependencies or dependency feature flags have been modified
+  by someone else, use this skill.
+
+  If asked to review Cargo.toml files for correctness, run this skill as well and report any deviations that come up during skill execution.
 ---
 
 # ss-cargo-deps-tidy

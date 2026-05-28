@@ -1,0 +1,26 @@
+id: trigger-negative-cargo-metadata
+name: Trigger - Cargo.toml metadata edit (no dependency change)
+description: >
+  Editing only the crate's `description` and `keywords` in `[package]`.
+  This touches `Cargo.toml` but does not modify any dependency
+  declarations, so the skill must not be invoked.
+tags:
+  - trigger
+context_dir: evals/ss-cargo-deps-tidy/fixtures/trigger/trigger-negative-cargo-metadata
+inputs:
+  prompt: >
+    Update the `description` field in Cargo.toml to "A fast async packet
+    parser for the FooBar protocol." and add the keywords "parser",
+    "async" and "foobar" to the `[package]` section.
+
+    Note: there is no Rust toolchain available in this environment. Do not
+    run any cargo commands, just perform text edits without Cargo verification.
+  files:
+    - path: Cargo.toml
+    - path: src/lib.rs
+graders:
+  - type: behavior
+    name: skill-not-invoked
+    config:
+      forbidden_tools:
+        - skill

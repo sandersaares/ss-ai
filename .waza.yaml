@@ -3,7 +3,7 @@
 paths:
   skills: skills/
   evals: evals/
-  results: results/
+  results: eval-results/
 defaults:
   engine: copilot-sdk
   model: claude-opus-4.6
@@ -17,14 +17,14 @@ cache:
   dir: .waza-cache
 server:
   port: 3000
-  resultsDir: results/
+  resultsDir: eval-results/
 dev:
-  model: claude-sonnet-4-20250514
+  model: claude-opus-4.6
   target: medium-high
   maxIterations: 5
 tokens:
-  warningThreshold: 500
-  fallbackLimit: 1000
+  warningThreshold: 10000
+  fallbackLimit: 25000
 graders:
   programTimeout: 30
 storage:

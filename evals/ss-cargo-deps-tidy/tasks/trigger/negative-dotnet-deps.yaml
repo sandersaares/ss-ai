@@ -1,0 +1,21 @@
+id: trigger-negative-dotnet-deps
+name: Trigger - Add NuGet package to .NET console app
+description: >
+  Adding a NuGet dependency to a .NET project. The skill is Cargo-specific
+  and must not be invoked.
+tags:
+  - trigger
+context_dir: evals/ss-cargo-deps-tidy/fixtures/trigger/trigger-negative-dotnet-deps
+inputs:
+  prompt: >
+    Add the Newtonsoft.Json NuGet package to this empty .NET console app
+    project so I can start using it from Program.cs.
+  files:
+    - path: DemoApp.csproj
+    - path: Program.cs
+graders:
+  - type: behavior
+    name: skill-not-invoked
+    config:
+      forbidden_tools:
+        - skill
