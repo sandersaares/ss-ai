@@ -125,7 +125,7 @@ Each `$inv.dependencies` record:
 | `workspace` | `$true` if the declaration uses `workspace = true` inheritance, otherwise `$null`. |
 | `defaultFeatures` | `$true`, `$false`, or `$null` if not specified. |
 | `features` | Array of feature names, or `$null` if not specified. |
-| `sameWorkspace` | `$true` if the dependency resolves (via `path` or workspace inheritance) to a member of this workspace. |
+| `sameWorkspace` | `$true` if the dependency resolves to a member of this workspace, via any of: an explicit `path` attribute, a name match against a member's `[package] name`, or `workspace = true` inheriting from a workspace-level entry that itself resolves to a member. |
 | `resolvedManifest` | Workspace-relative path of the target member's `Cargo.toml` when `sameWorkspace` is `$true`, otherwise `$null`. |
 | `raw` | Raw declaration text from the manifest. |
 | `line` | 1-based source line number of the declaration. |

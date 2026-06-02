@@ -1,0 +1,10 @@
+[package]
+name = "alpha"
+version = "0.1.0"
+edition = "2024"
+
+# `beta` is a same-workspace dev-dependency, but it inherits via
+# `workspace = true`. The tidy skill must convert this to a path-only
+# reference (Stage 3).
+[dev-dependencies]
+beta = { workspace = true }

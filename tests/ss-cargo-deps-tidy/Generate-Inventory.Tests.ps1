@@ -681,6 +681,47 @@ Describe 'End-to-end script' {
             $devOutside | Should -HaveCount 1
             $devOutside.sameWorkspace | Should -BeFalse
         }
+        It 'flags a workspace=true dep that inherits a workspace-level path to a member as sameWorkspace=true' {
+            # `inside` in host's [dependencies] uses workspace = true; the
+            # workspace.dependencies entry for `inside` has path =
+            # "packages/host". Inheritance must propagate the
+            # same-workspace classification.
+            $insideInHost = $script:Inv.dependencies | Where-Object {
+                $_.name -eq 'inside' -and $_.section -eq 'dependencies' -and $_.manifest -eq 'packages/host/Cargo.toml'
+            }
+            $insideInHost | Should -HaveCount 1
+            $insideInHost.sameWorkspace | Should -BeTrue
+            $insideInHost.resolvedManifest | Should -Be 'packages/host/Cargo.toml'
+        }
+    }
+
+    Context 'name-only-deps fixture' {
+        BeforeAll {
+            $script:Inv = Invoke-InventoryScript -WorkspaceManifest (Join-Path $script:FixturesRoot 'name-only-deps\Cargo.toml')
+        }
+        It 'flags a workspace.dependencies entry that matches a member by name (no path) as sameWorkspace=true' {
+            # `gamma` is declared with just version + default-features
+            # in the workspace; the resolver still treats it as the
+            # workspace member named `gamma`.
+            $gamma = $script:Inv.dependencies | Where-Object { $_.name -eq 'gamma' -and $_.section -eq 'workspace.dependencies' }
+            $gamma | Should -HaveCount 1
+            $gamma.sameWorkspace | Should -BeTrue
+            $gamma.resolvedManifest | Should -Be 'packages/gamma/Cargo.toml'
+        }
+        It 'does not flag an external workspace.dependencies entry whose name does not match any member' {
+            $serde = $script:Inv.dependencies | Where-Object { $_.name -eq 'serde' -and $_.section -eq 'workspace.dependencies' }
+            $serde | Should -HaveCount 1
+            $serde.sameWorkspace | Should -BeFalse
+            $serde.resolvedManifest | Should -BeNullOrEmpty
+        }
+        It 'flags a workspace=true dev-dep whose inherited entry resolves by member name as sameWorkspace=true' {
+            $gammaInDelta = $script:Inv.dependencies | Where-Object {
+                $_.name -eq 'gamma' -and $_.section -eq 'dev-dependencies' -and $_.manifest -eq 'packages/delta/Cargo.toml'
+            }
+            $gammaInDelta | Should -HaveCount 1
+            $gammaInDelta.sameWorkspace | Should -BeTrue
+            $gammaInDelta.resolvedManifest | Should -Be 'packages/gamma/Cargo.toml'
+        }
     }
 
     Context 'output mechanics' {

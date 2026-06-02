@@ -1,0 +1,11 @@
+[workspace]
+members = ["packages/*"]
+resolver = "3"
+
+[workspace.dependencies]
+alpha = { version = "0.1.0", path = "packages/alpha", default-features = false }
+# `beta` is a workspace member, but its workspace-level entry only carries
+# a version (no path). The tidy skill must add the missing path attribute
+# (Stage 2) and convert the inheriting dev-dep to a path-only reference
+# (Stage 3).
+beta = { version = "0.2.0", default-features = false }

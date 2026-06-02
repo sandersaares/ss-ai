@@ -1,0 +1,9 @@
+[workspace]
+members = ["packages/*"]
+resolver = "3"
+
+[workspace.dependencies]
+# Same-workspace member referenced by name + version only (no path).
+gamma = { version = "0.3.0", default-features = false }
+# External crate that happens to NOT match any member name.
+serde = { version = "1.0", default-features = false }

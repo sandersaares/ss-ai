@@ -1,0 +1,9 @@
+[package]
+name = "delta"
+version = "0.4.0"
+edition = "2024"
+
+[dev-dependencies]
+# Inherits the workspace.dependencies entry for `gamma`, which has no
+# explicit path but references a workspace member by name.
+gamma = { workspace = true }

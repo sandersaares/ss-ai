@@ -7,11 +7,26 @@
 
 Set-StrictMode -Version Latest
 
+BeforeDiscovery {
+    $script:RepoRoot = (Resolve-Path (Join-Path $PSScriptRoot '..\..')).ProviderPath
+    $script:EvalDir = Join-Path $script:RepoRoot 'evals\ss-cargo-deps-tidy'
+    $script:WorkaroundPath = Join-Path $script:EvalDir 'prompts\upstream-bug-workaround.md'
+    # Tracked, hand-authored workflow tasks that must mirror the canonical
+    # workaround text. Excludes the generated folo full-tree task
+    # (`folo-3e1f241-full.yaml`) because it is rewritten on every run by
+    # `scripts/Generate-FoloFullTask.ps1`; the generator handles its own
+    # workaround insertion.
+    $script:TasksWithWorkaround = @(
+        Join-Path $script:EvalDir 'tasks\folo\folo-3e1f241-cargo-only.yaml'
+        Join-Path $script:EvalDir 'tasks\inherited-dev-deps\inherited-with-path.yaml'
+        Join-Path $script:EvalDir 'tasks\inherited-dev-deps\inherited-name-only.yaml'
+    )
+}
+
 BeforeAll {
     $script:RepoRoot = (Resolve-Path (Join-Path $PSScriptRoot '..\..')).ProviderPath
     $script:EvalDir = Join-Path $script:RepoRoot 'evals\ss-cargo-deps-tidy'
     $script:WorkaroundPath = Join-Path $script:EvalDir 'prompts\upstream-bug-workaround.md'
-    $script:CargoOnlyTask = Join-Path $script:EvalDir 'tasks\folo\folo-3e1f241-cargo-only.yaml'
 }
 
 Describe 'Upstream-bug-workaround prompt is the single source of truth' {
@@ -19,9 +34,11 @@ Describe 'Upstream-bug-workaround prompt is the single source of truth' {
         Test-Path -LiteralPath $script:WorkaroundPath | Should -BeTrue
     }
 
-    It 'is mirrored verbatim in folo-3e1f241-cargo-only.yaml (line-by-line, indentation- and bullet-insensitive)' {
+    It 'is mirrored verbatim in <_> (line-by-line, indentation- and bullet-insensitive)' -ForEach $script:TasksWithWorkaround {
+        $taskPath = $_
+        Test-Path -LiteralPath $taskPath | Should -BeTrue -Because "task file $taskPath must exist"
         $canonical = (Get-Content -LiteralPath $script:WorkaroundPath -Raw).Trim() -split "`r?`n"
-        $task = Get-Content -LiteralPath $script:CargoOnlyTask
+        $task = Get-Content -LiteralPath $taskPath
         # Strip leading whitespace and any list-bullet marker from each line
         # so a "- WORKAROUND ..." bullet in the task matches the bare
         # "WORKAROUND ..." in the canonical text.
@@ -31,7 +48,7 @@ Describe 'Upstream-bug-workaround prompt is the single source of truth' {
         foreach ($line in $canonical) {
             if ([string]::IsNullOrWhiteSpace($line)) { continue }
             $expected = & $stripPrefix $line
-            $taskNormalized | Should -Contain $expected -Because "canonical line '$line' must appear in cargo-only task prompt"
+            $taskNormalized | Should -Contain $expected -Because "canonical line '$line' must appear in $taskPath"
         }
     }
 }

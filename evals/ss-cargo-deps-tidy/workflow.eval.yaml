@@ -26,3 +26,4 @@ hooks:
       error_on_fail: true
 tasks:
   - "tasks/folo/*.yaml"
+  - "tasks/inherited-dev-deps/*.yaml"

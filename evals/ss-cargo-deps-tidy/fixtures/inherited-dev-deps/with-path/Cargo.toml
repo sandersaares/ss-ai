@@ -1,0 +1,7 @@
+[workspace]
+members = ["packages/*"]
+resolver = "3"
+
+[workspace.dependencies]
+alpha = { version = "0.1.0", path = "packages/alpha", default-features = false }
+beta = { version = "0.2.0", path = "packages/beta", default-features = false }

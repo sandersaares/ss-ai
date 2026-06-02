@@ -1,0 +1,69 @@
+id: inherited-dev-dep-name-only
+name: Inherited dev-dep - workspace entry has version only, no path
+description: >
+  Smallest reproduction of bug #2 in Generate-Inventory.ps1's same-workspace
+  resolution. A workspace.dependencies entry references a same-workspace
+  member purely by name + version with no `path` attribute; a sibling member
+  inherits it via `workspace = true` in dev-dependencies. The tidy skill
+  must (Stage 2) add the missing path to the workspace-level entry and
+  (Stage 3) rewrite the inheriting dev-dep to a path-only reference.
+tags:
+  - workflow
+timeout_seconds: 1200
+context_dir: evals/ss-cargo-deps-tidy/fixtures/inherited-dev-deps/name-only
+inputs:
+  prompt: |-
+    The Cargo.toml files of a small two-package Rust workspace have been
+    placed in your workspace directory. The root manifest is `Cargo.toml`;
+    member manifests live under `packages/alpha/Cargo.toml` and
+    `packages/beta/Cargo.toml`.
+
+    Apply the `ss-cargo-deps-tidy` skill to this workspace.
+
+    Important constraints for this run:
+
+    - This is a manifest-only fixture. There are no source files, no
+      Cargo.lock, no AGENTS.md, and no justfile. Do not attempt to run
+      any `cargo` commands; the skill's workspace build verification
+      (the `cargo check` step in stage 5 and the entire stage 7
+      `cargo generate-lockfile` / build pass) is out of scope here.
+
+    - All other stages (1 inventory, 2 style, 3 dev-deps path-only,
+      4 centralization, 5 default-features, 6 package-level features,
+      8 cleanup) apply as written.
+
+    - WORKAROUND for an upstream waza/copilot-cli bug (tracked at
+      microsoft/waza; see copilot-sdk#947): do not invoke the `task` tool to
+      spawn sub-agents in this run. Sub-agent tool calls currently hang
+      indefinitely because the bundled copilot-cli 1.0.2 in waza 0.31.0
+      predates the sub-agent permission fix (shipped in copilot-cli 1.0.49).
+      Read and edit files directly with `view` / `str_replace` / `create`.
+      Once waza ships a release with copilot-cli >= 1.0.49 this constraint
+      should be removed.
+  files:
+    - path: Cargo.toml
+    - path: packages/alpha/Cargo.toml
+    - path: packages/beta/Cargo.toml
+graders:
+  - name: alpha-dev-dep-is-path-only
+    type: file
+    config:
+      content_patterns:
+        - path: packages/alpha/Cargo.toml
+          must_match:
+            # Stage 3: the dev-dep on `beta` is now a path-only inline table.
+            - 'beta\s*=\s*\{[^}]*path\s*=\s*"\.\./beta"'
+          must_not_match:
+            # Stage 3: workspace inheritance is gone from the dev-dep line.
+            - 'beta\s*=\s*\{[^}]*workspace\s*=\s*true'
+            # Stage 3: no version pin on a same-workspace dev-dep.
+            - 'beta\s*=\s*\{[^}]*version\s*='
+  - name: workspace-beta-entry-gains-path
+    type: file
+    config:
+      content_patterns:
+        - path: Cargo.toml
+          must_match:
+            # Stage 2: the workspace.dependencies entry for `beta` now has
+            # a path attribute pointing at the member it represents.
+            - 'beta\s*=\s*\{[^}]*path\s*=\s*"packages/beta"'

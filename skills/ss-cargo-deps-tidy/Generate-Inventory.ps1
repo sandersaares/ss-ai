@@ -781,6 +781,17 @@ foreach ($entry in $memberSet.Values) {
     }
 }
 
+# Index member manifests by [package] name. Cargo resolves a dep whose name
+# matches a workspace member's package name to that member (the local source
+# wins over any same-named registry crate), so the inventory must mark such
+# deps as same-workspace even when no explicit path is given.
+$manifestByPackageName = @{}
+foreach ($entry in $memberSet.Values) {
+    if ($entry.Package) {
+        $manifestByPackageName[$entry.Package] = $entry.RelativePath
+    }
+}
+
 $outputDeps = New-Object System.Collections.Generic.List[object]
 foreach ($scan in $allScans) {
     $manifestRel = $scan.RelativePath
@@ -801,8 +812,9 @@ foreach ($scan in $allScans) {
         $defaultFeatures = if ($attrs.ContainsKey('default-features')) { $attrs['default-features'] } else { $null }
         $features        = if ($attrs.ContainsKey('features'))         { $attrs['features'] }         else { $null }
 
-        # Same-workspace resolution: resolve path against the declaring
-        # manifest's directory and see if it points at a known manifest.
+        # Pass 1 of same-workspace resolution: explicit path attribute.
+        # Two follow-up passes (name match, workspace inheritance) run after
+        # all records have been collected.
         $sameWorkspace = $false
         $resolvedManifest = $null
         if ($pathAttr) {
@@ -836,6 +848,41 @@ foreach ($scan in $allScans) {
             raw              = $d.Raw
             line             = $d.Line
         })
+    }
+}
+
+# Pass 2: name-match fallback. A dep whose name matches a workspace member's
+# package name is same-workspace regardless of whether a path was given —
+# Cargo's resolver picks the local member over any registry crate of the
+# same name in path/inheritance contexts.
+foreach ($rec in $outputDeps) {
+    if ($rec.sameWorkspace) { continue }
+    if ($manifestByPackageName.ContainsKey($rec.name)) {
+        $rec.sameWorkspace = $true
+        $rec.resolvedManifest = $manifestByPackageName[$rec.name]
+    }
+}
+
+# Pass 3: workspace = true inheritance. A member-level dep with workspace=true
+# inherits its resolution from the matching workspace.dependencies entry,
+# which by now has been resolved via path or name match. Without this, a
+# member that aliases a same-workspace dep through workspace inheritance
+# (e.g. workspace.dependencies inside = { path = "packages/host" }, member
+# dep inside = { workspace = true }) would be reported as out-of-workspace.
+$workspaceDepsByName = @{}
+foreach ($rec in $outputDeps) {
+    if ($rec.section -eq 'workspace.dependencies') {
+        $workspaceDepsByName[$rec.name] = $rec
+    }
+}
+foreach ($rec in $outputDeps) {
+    if ($rec.sameWorkspace) { continue }
+    if ($rec.workspace -eq $true -and $workspaceDepsByName.ContainsKey($rec.name)) {
+        $wsEntry = $workspaceDepsByName[$rec.name]
+        if ($wsEntry.sameWorkspace) {
+            $rec.sameWorkspace = $true
+            $rec.resolvedManifest = $wsEntry.resolvedManifest
+        }
     }
 }
 
