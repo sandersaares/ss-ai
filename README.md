@@ -1,7 +1,7 @@
 # AI skills by Sander Saares
 
-Reusable [agent skills](https://agentskills.io/home) — an open format
-for packaging procedural knowledge that AI agents load on demand —
+Reusable [agent skills](https://agentskills.io/home) - an open format
+for packaging procedural knowledge that AI agents load on demand -
 plus companion evaluations that the author finds useful. Feel free to
 do what you like with them; see [LICENSE](LICENSE) for terms.
 
@@ -17,8 +17,8 @@ entrypoint. Helper scripts (when present) sit alongside the SKILL file.
 ## Requirements
 
 - An agent that supports the [agent skills](https://agentskills.io/home)
-  format — tested with GitHub Copilot (CLI and VS Code) and Claude
-  Opus 4.7. See [the client showcase](https://agentskills.io/clients)
+  format - tested with GitHub Copilot (CLI and VS Code) and Claude
+  Opus 4.8. See [the client showcase](https://agentskills.io/clients)
   for the broader list of compatible agents.
 - PowerShell 7+ on the machine running the agent. Skills that ship
   helper scripts use `pwsh`; no other modules need to be installed for
@@ -49,7 +49,7 @@ Use [`Install-CopilotSkills.ps1`](Install-CopilotSkills.ps1) to
 symlink every skill into the location your agent reads from. With no
 arguments, skills land in `$HOME/.copilot/skills/` and are available
 to all repos. Pass `-Path <dir>` to install into
-`<dir>/.github/copilot/skills/` instead — typically a repo root so the
+`<dir>/.github/copilot/skills/` instead - typically a repo root so the
 skills get scoped to that repo.
 
 ```powershell

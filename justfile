@@ -25,7 +25,7 @@ eval SPEC *ARGS:
 
 # Run every skill's trigger-lane eval. Extra args are forwarded to `waza run`.
 #   just eval-triggers
-#   just eval-triggers --model claude-opus-4.6 --tags trigger
+#   just eval-triggers --model claude-opus-4.8 --tags trigger
 eval-triggers *ARGS:
     Get-ChildItem evals/*/trigger.eval.yaml | ForEach-Object { waza run $_.FullName --output-dir ./eval-results {{ARGS}} }
 

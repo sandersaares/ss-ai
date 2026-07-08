@@ -852,7 +852,7 @@ foreach ($scan in $allScans) {
 }
 
 # Pass 2: name-match fallback. A dep whose name matches a workspace member's
-# package name is same-workspace regardless of whether a path was given —
+# package name is same-workspace regardless of whether a path was given -
 # Cargo's resolver picks the local member over any registry crate of the
 # same name in path/inheritance contexts.
 foreach ($rec in $outputDeps) {

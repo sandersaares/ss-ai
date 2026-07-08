@@ -8,7 +8,7 @@
     Creates one directory link per skill under skills/ pointing into a target
     skill directory recognised by Copilot. Existing links with the same name
     are replaced. Existing plain directories with the same name are left in
-    place and reported as warnings — never deleted.
+    place and reported as warnings - never deleted.
 
     On Windows the script uses NTFS directory junctions, which do not
     require Developer Mode or an elevated shell. On Linux and macOS the

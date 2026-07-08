@@ -76,9 +76,9 @@ Execute all stages in sequence to complete the workflow.
 
 **This stage is your FIRST action in the workflow.** Before opening, viewing, reading or listing any `Cargo.toml` file in the workspace, run the inventory script described below. The inventory is the single source of truth for every later stage; reading manifests by hand is wasted work and burns through your turn budget before you have made any edits.
 
-**Anti-pattern (do not do this):** opening the workspace, listing `packages/`, and then issuing one `view` call per `Cargo.toml`. The inventory captures every declaration in every manifest — name, section, version, features, default-features, path, style, line number, raw text — so you never need to read manifests up front. You only open a specific manifest later when a filter query has identified a concrete edit that needs to be made in it.
+**Anti-pattern (do not do this):** opening the workspace, listing `packages/`, and then issuing one `view` call per `Cargo.toml`. The inventory captures every declaration in every manifest - name, section, version, features, default-features, path, style, line number, raw text - so you never need to read manifests up front. You only open a specific manifest later when a filter query has identified a concrete edit that needs to be made in it.
 
-Generate the inventory once at the start of the workflow and write it to a temporary file. All subsequent stages run filter queries against the loaded object — they never load the raw file contents into the conversation.
+Generate the inventory once at the start of the workflow and write it to a temporary file. All subsequent stages run filter queries against the loaded object - they never load the raw file contents into the conversation.
 
 **Critical:** Always invoke the script with `-OutputPath`. The JSON body can easily exceed 100 KB on real workspaces and is not suitable for direct inclusion in the agent context window. Do not `Get-Content` the inventory file without an immediate `| ConvertFrom-Json` and a follow-up filter; do not paste, summarize, or quote its raw contents.
 
@@ -98,17 +98,17 @@ Record the printed path. Each subsequent stage may run in its own PowerShell ses
 $inv = Get-Content -LiteralPath '<inventory-path-from-stage-1>' -Raw | ConvertFrom-Json
 ```
 
-Tip: when no edits are needed (i.e. you are only running filter queries, not iterating with edits in between), you can batch multiple stages into a single PowerShell session — load `$inv` once at the top of the script and run each stage's filter query against it. This avoids paying the PowerShell startup cost per stage.
+Tip: when no edits are needed (i.e. you are only running filter queries, not iterating with edits in between), you can batch multiple stages into a single PowerShell session - load `$inv` once at the top of the script and run each stage's filter query against it. This avoids paying the PowerShell startup cost per stage.
 
 ## Inventory schema
 
 `$inv` is a `PSCustomObject` with:
 
-- `workspaceRoot` — absolute path to the workspace root directory.
-- `workspaceManifest` — `{ path, package, isVirtualWorkspace }` describing the workspace-level `Cargo.toml`.
-- `memberManifests` — array of `{ path, package }` for every member `Cargo.toml`, with workspace-relative paths.
-- `scannedAt` — ISO timestamp of when the scan ran.
-- `dependencies` — array of declaration records (see below). One record per declared dependency.
+- `workspaceRoot` - absolute path to the workspace root directory.
+- `workspaceManifest` - `{ path, package, isVirtualWorkspace }` describing the workspace-level `Cargo.toml`.
+- `memberManifests` - array of `{ path, package }` for every member `Cargo.toml`, with workspace-relative paths.
+- `scannedAt` - ISO timestamp of when the scan ran.
+- `dependencies` - array of declaration records (see below). One record per declared dependency.
 
 Each `$inv.dependencies` record:
 
@@ -290,7 +290,7 @@ $inv.dependencies |
 ```
 
 For each row in the result set, move the non-allowlisted feature flags into the `Cargo.toml` files of **only those member packages whose source actually exercises the API surface gated by that feature**.
-Do NOT propagate the feature to every package that depends on the crate — most packages use only the always-enabled API surface, and adding unused features bloats compile time, binary size, and the public feature exposure of downstream re-exports.
+Do NOT propagate the feature to every package that depends on the crate - most packages use only the always-enabled API surface, and adding unused features bloats compile time, binary size, and the public feature exposure of downstream re-exports.
 
 Determine recipients by grepping the workspace source for symbols gated by the feature. For example, when removing `futures = { features = ["executor"] }` from the workspace, find the packages that actually use `futures::executor`:
 
@@ -307,7 +307,7 @@ Get-ChildItem packages -Recurse -File -Include '*.rs' |
 Add `features = ["executor"]` only to the package-level `futures` declaration in the packages reported by the grep. If a feature's gated API surface is not obvious from its name,
 consult the dependency's `Cargo.toml` `[features]` table (under `~/.cargo/registry/src/...`) to learn which modules or items it enables before searching.
 
-If the grep returns zero member packages, the feature was unused at the workspace level — drop it entirely instead of moving it.
+If the grep returns zero member packages, the feature was unused at the workspace level - drop it entirely instead of moving it.
 
 For the explicitly allowed flags (both the always-allowed and per-package), add them if missing to the workspace-level declarations
 to ensure that they are consistently enabled for all packages that depend on the relevant dependencies. Exception: do not add them if

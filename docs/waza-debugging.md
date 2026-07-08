@@ -8,7 +8,7 @@ after a successful (but mis-graded) agent run:
 
 ```powershell
 waza grade evals/<skill>/<lane>.eval.yaml `
-    --results .\eval-results\<timestamp>\claude-opus-4.6.json `
+    --results .\eval-results\<timestamp>\claude-opus-4.8.json `
     --workspace 'C:\Users\Sander\AppData\Local\Temp\waza-<random>' `
     --task <task-id> -o regrade.json -v
 ```

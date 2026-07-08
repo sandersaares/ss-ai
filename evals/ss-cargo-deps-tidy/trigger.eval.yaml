@@ -2,12 +2,12 @@ name: ss-cargo-deps-tidy-trigger
 description: >
   Trigger-precision tasks for the ss-cargo-deps-tidy skill: positive
   prompts that should activate the skill and negative prompts that
-  should not. Inexpensive — no fixture preparation, no source-tree
+  should not. Inexpensive - no fixture preparation, no source-tree
   workflow exercise.
 # Deliberately no top-level `skill:` field. Setting it makes Waza inject
 # the full SKILL.md body into the agent's system prompt (see
 # buildSkillSystemMessage in waza/internal/execution/copilot.go), which
-# defeats trigger measurement — the agent then "knows" the skill
+# defeats trigger measurement - the agent then "knows" the skill
 # without ever invoking the `skill` tool. With `skill:` omitted, the
 # agent only sees the compact <available_skills> summary (name +
 # description) and must invoke the tool to read the body.
@@ -17,9 +17,6 @@ config:
   timeout_seconds: 300
   parallel: true
   executor: copilot-sdk
-  # Tracked README/skill target is Claude Opus 4.7, but Waza 0.31.0's
-  # supported-model list (apparently hardcoded) does not include it yet,
-  # so we pin to 4.6 here. Bump when Waza ships an updated list.
-  model: claude-opus-4.6
+  model: claude-opus-4.8
 tasks:
   - "tasks/trigger/*.yaml"

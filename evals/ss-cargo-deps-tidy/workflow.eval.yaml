@@ -12,10 +12,7 @@ config:
   timeout_seconds: 1800
   parallel: true
   executor: copilot-sdk
-  # Tracked README/skill target is Claude Opus 4.7, but Waza 0.31.0's
-  # supported-model list (apparently hardcoded) does not include it yet,
-  # so we pin to 4.6 here. Bump when Waza ships an updated list.
-  model: claude-opus-4.6
+  model: claude-opus-4.8
 hooks:
   # Clones folo at the pinned commit into fixtures/.eval-cache/ and
   # regenerates tasks/folo/folo-3e1f241-full.yaml with one inputs.files

@@ -2,7 +2,7 @@
 <#
 .SYNOPSIS
     Program-grader script. Verifies the agent did not modify any source
-    files in the per-task workspace — only Cargo.toml / Cargo.lock are
+    files in the per-task workspace - only Cargo.toml / Cargo.lock are
     allowed to differ from the upstream cache.
 
 .DESCRIPTION

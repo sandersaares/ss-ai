@@ -6,7 +6,7 @@ paths:
   results: eval-results/
 defaults:
   engine: copilot-sdk
-  model: claude-opus-4.6
+  model: claude-opus-4.8
   timeout: 300
   parallel: false
   workers: 4
@@ -19,7 +19,7 @@ server:
   port: 3000
   resultsDir: eval-results/
 dev:
-  model: claude-opus-4.6
+  model: claude-opus-4.8
   target: medium-high
   maxIterations: 5
 tokens:

@@ -1,6 +1,6 @@
 # Waza grader & task YAML conventions
 
-Verified against Waza 0.31.0. See also the upstream
+See the upstream
 [grader reference](https://microsoft.github.io/waza/guides/graders/) and
 [YAML schema](https://microsoft.github.io/waza/reference/schema/).
 
@@ -16,39 +16,39 @@ directory**. Always invoke Waza from `c:\Source\ss-ai`.
 
 ## Grader and task YAML fields
 
-- **Grader `skill_path`** — relative to the repo root, e.g.
+- **Grader `skill_path`** - relative to the repo root, e.g.
   `skills/ss-cargo-deps-tidy/SKILL.md`. Do **not** try to traverse
   with `../..` from the task YAML; the path is not resolved against
   the task file's directory.
-- **`inputs.files[].path`** — both source (under the active fixtures
+- **`inputs.files[].path`** - both source (under the active fixtures
   dir) AND destination (under the per-task workspace dir). To seed
   the workspace root, the fixture file must live directly under the
   active fixtures dir (not under a sub-folder like `before/`). When
   two tasks both need to seed the same workspace-relative path (e.g.
   each wants its own root `Cargo.toml`), give each task its own
   private fixture root via per-task `context_dir`.
-- **Per-task `context_dir`** — task YAML files accept a top-level
+- **Per-task `context_dir`** - task YAML files accept a top-level
   `context_dir:` that overrides the eval-level fixtures dir for that
   one task ([waza/internal/models/testcase.go][testcase-go], field
   `TestCase.ContextRoot`). Used directly with `filepath.Join` by the
   runner, so it is resolved relative to the **CWD of `waza run`**
   (not the task YAML or eval spec). Express it as a repo-root-relative
   path, e.g. `context_dir: evals/<skill>/fixtures/trigger/<task-id>`.
-- **`inputs.files[].content`** — alternative to `path`, supplies the
+- **`inputs.files[].content`** - alternative to `path`, supplies the
   file body inline. Prefer `path` + per-task `context_dir` for real
   fixture files; reserve inline `content` for one-off cases where
   carving out a fixture directory adds more clutter than it removes.
-- **`diff` grader `snapshot`** — path relative to the grader's
+- **`diff` grader `snapshot`** - path relative to the grader's
   `context_dir`. Store expected files under a clearly named subdir
   (e.g. `fixtures/<scenario>-expected/...`) so they don't collide
   with workspace-seeding fixtures.
-- **`diff` grader `context_dir`** — IS a real field (per
+- **`diff` grader `context_dir`** - IS a real field (per
   [docs/graders/diff.md][diff-docs]). Resolved relative to the CWD of
   `waza run`. The CLI default (`--context-dir ./fixtures` relative to
-  spec) is unreliable in practice — it silently misresolves to CWD
+  spec) is unreliable in practice - it silently misresolves to CWD
   when filtering with `--tags` / `--task`. Always set it inline:
   `context_dir: evals/<skill>/fixtures`.
-- **Grader config nesting** — `type:` and `name:` go at the top of
+- **Grader config nesting** - `type:` and `name:` go at the top of
   the grader entry; type-specific keys go under `config:`. Example:
 
   ```yaml
@@ -78,7 +78,7 @@ JSON:
   `tool_calls`.
 
 For **positive trigger tasks**, prefer the `skill_invocation`
-grader — it inspects `runs[].skill_invocations` and matches against
+grader - it inspects `runs[].skill_invocations` and matches against
 a `required_skills` list, so it verifies *which* skill was invoked,
 not just that the `skill` tool fired:
 
@@ -94,7 +94,7 @@ graders:
 ```
 
 The `behavior` grader with `required_tools: [skill]` is a looser
-alternative — it only checks tool *names*, not arguments, so any
+alternative - it only checks tool *names*, not arguments, so any
 `skill` invocation (regardless of which skill) satisfies it. That's
 fine when only one skill is discoverable in the eval's CWD (Waza
 finds it at `skills/<name>/SKILL.md`), but it breaks silently as
@@ -115,7 +115,7 @@ graders:
 
 This is **stricter than the question we actually want to ask.** The
 accurate question for a negative-trigger task is "skill `S` was not
-invoked" — invoking an unrelated skill would be acceptable. But:
+invoked" - invoking an unrelated skill would be acceptable. But:
 
 - `behavior` filters on tool *name*, not arguments, so
   `forbidden_tools: [skill]` rejects *every* skill invocation
@@ -158,7 +158,7 @@ Setting `skill: <name>` at the top of an eval spec causes Waza to
 as a `<skill_context>` block (see `buildSkillSystemMessage` in
 `waza/internal/execution/copilot.go`).
 
-- For **workflow evals** this is desirable — it saves a `skill` tool
+- For **workflow evals** this is desirable - it saves a `skill` tool
   round-trip.
 - For **trigger evals** it silently destroys the measurement: the
   agent already has the skill content and can "execute the workflow"
@@ -172,5 +172,5 @@ When `skill:` is omitted, Waza still discovers the skill (walks one
 level of subdirectories under its CWD, finding
 `skills/<name>/SKILL.md`) and exposes it via a compact
 `<available_skills>` summary containing only name + description. The
-agent must invoke the `skill` tool to read the body — which is
+agent must invoke the `skill` tool to read the body - which is
 exactly the signal a trigger eval needs to observe.

@@ -83,7 +83,7 @@ under `evals/<skill-name>/tasks/**/*.yaml`.
 
 ## Prerequisites
 
-- Waza CLI (`waza --version` should report 0.31.0 or newer).
+- Waza CLI (use the latest release).
 - Always invoke `waza run` from the repo root so relative paths in eval
   specs resolve correctly.
 
@@ -122,7 +122,7 @@ just eval-workflows --tags workflow
 Override the model used by the agent:
 
 ```powershell
-just eval-triggers --model claude-opus-4.6
+just eval-triggers --model claude-opus-4.8
 ```
 
 Run a single spec file (the escape hatch when you want one skill + one
@@ -142,26 +142,26 @@ that is run end-to-end **must** carry exactly one of `trigger` or
 
 | Tag | Meaning | When to apply |
 | --- | --- | --- |
-| `trigger` | The task scores skill activation/non-activation against a prompt. Inexpensive — exercises the heuristic, not the full workflow. | All tasks under `tasks/trigger/`. |
+| `trigger` | The task scores skill activation/non-activation against a prompt. Inexpensive - exercises the heuristic, not the full workflow. | All tasks under `tasks/trigger/`. |
 | `workflow` | The task actually exercises the skill workflow against a fixture (file mutations, validators, etc.). | Any task that asserts on outputs the skill produces. |
 | `heavy` | The task is expensive (large fixtures, long timeouts, or high premium-request burn) and should not run on every PR. | Add alongside `workflow` when the cost warrants gating. |
 
 Avoid inventing additional tags. Per-skill or per-fixture distinctions
 (e.g. "folo", "cargo-only") belong in the task `id` and `name`, not in
-tags — tags are a CI/cost selector, not a categorisation system.
+tags - tags are a CI/cost selector, not a categorisation system.
 
 CI mapping (see [.github/workflows](.github/workflows)):
 
-- `eval.yml` (push to `main`, same-repo PRs) — runs every
+- `eval.yml` (push to `main`, same-repo PRs) - runs every
   `evals/*/trigger.eval.yaml`.
-- `eval-full.yml` (`workflow_dispatch`) — runs every
+- `eval-full.yml` (`workflow_dispatch`) - runs every
   `evals/*/*.eval.yaml` by default; the operator can pass
   `tags: workflow` to skip the heavy bucket or `tags: heavy` to run
   only the expensive scenarios.
 
 ## Authoring eval specs
 
-See [AGENTS.md](AGENTS.md) for the verified-against-Waza-0.31.0
+See [AGENTS.md](AGENTS.md) for the Waza grader and task YAML
 conventions (path resolution, fixture layout, grader nesting). The
 upstream guides are also required reading:
 

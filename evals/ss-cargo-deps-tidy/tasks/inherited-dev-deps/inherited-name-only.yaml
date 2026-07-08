@@ -31,15 +31,6 @@ inputs:
     - All other stages (1 inventory, 2 style, 3 dev-deps path-only,
       4 centralization, 5 default-features, 6 package-level features,
       8 cleanup) apply as written.
-
-    - WORKAROUND for an upstream waza/copilot-cli bug (tracked at
-      microsoft/waza; see copilot-sdk#947): do not invoke the `task` tool to
-      spawn sub-agents in this run. Sub-agent tool calls currently hang
-      indefinitely because the bundled copilot-cli 1.0.2 in waza 0.31.0
-      predates the sub-agent permission fix (shipped in copilot-cli 1.0.49).
-      Read and edit files directly with `view` / `str_replace` / `create`.
-      Once waza ships a release with copilot-cli >= 1.0.49 this constraint
-      should be removed.
   files:
     - path: Cargo.toml
     - path: packages/alpha/Cargo.toml
