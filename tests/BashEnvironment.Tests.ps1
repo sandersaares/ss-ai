@@ -174,7 +174,7 @@ printf '%s\n' "${PATH-}" "$COPILOT_CUSTOM_INSTRUCTIONS_DIRS"
         $output -split "`n" | Should -Be @('', '/checkout/agents')
     }
 
-    It 'exports existing shell-local lists unchanged to child processes' -Skip:(-not $IsLinux) {
+    It 'exports shell-local instructions without changing the PATH export state' -Skip:(-not $IsLinux) {
         Set-BashUserEnvironment @script:SetupParameters 6>$null
         $command = @'
 set -eu
@@ -182,14 +182,16 @@ PATH='/usr/bin:/checkout/scripts:/bin'
 COPILOT_CUSTOM_INSTRUCTIONS_DIRS='existing-one,/checkout/agents,existing-two'
 export -n PATH COPILOT_CUSTOM_INSTRUCTIONS_DIRS
 . "$HOME/.config/ss-ai/environment.sh"
-/bin/bash --noprofile --norc -c 'printf "%s\n" "${PATH-}" "${COPILOT_CUSTOM_INSTRUCTIONS_DIRS-}"'
+printf '%s\n' "$PATH"
+/usr/bin/env
 '@
         $output = Invoke-PcTestProcess -Executable '/bin/bash' -HomeDirectory $script:HomeDirectory -Arguments @('--noprofile', '--norc', '-c', $command.Replace("`r`n", "`n"))
 
-        $output -split "`n" | Should -Be @(
-            '/usr/bin:/checkout/scripts:/bin'
-            'existing-one,/checkout/agents,existing-two'
-        )
+        $lines = $output -split "`n"
+        $lines[0] | Should -BeExactly '/usr/bin:/checkout/scripts:/bin'
+        $lines | Should -Contain 'COPILOT_CUSTOM_INSTRUCTIONS_DIRS=existing-one,/checkout/agents,existing-two'
+        # PATH belongs to machine setup, so AI setup must leave even its export state alone.
+        @($lines | Where-Object { $_.StartsWith('PATH=') }) | Should -BeNullOrEmpty
     }
 
     It 'loads the environment automatically in a fresh <Mode> Bash session' -Skip:(-not $IsLinux) -ForEach @(
