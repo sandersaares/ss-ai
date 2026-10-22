@@ -31,7 +31,7 @@ Metadata describes applicability, not an additional guideline to categorize sepa
 Remove any existing `instruction-set-source/` directory under session state, then recreate it as an empty directory before fetching or expanding any external reference. Materialize every direct instruction source there using stable relative paths and verbatim contents:
 
 * Copy the skill's `focus-areas.md` to `instruction-set-source/skill/focus-areas.md`.
-* Copy the `dev-env` repository's entire `agents/.github/instructions/` directory to the same relative path under `instruction-set-source/dev-env/`. Every file in that directory is an instruction source, so take all of them rather than judging which ones apply here.
+* Resolve the skill directory's filesystem link to its canonical checkout location. Copy the entire sibling `instructions/` directory from that `ss-ai` checkout to `instruction-set-source/ss-ai/instructions/`. Every file in that directory is an instruction source, so take all of them rather than judging which ones apply here. Do not use another checkout or infer sources from instructions already injected into context. If the canonical instruction directory is unavailable, stop and report the incomplete installation.
 * ONLY IF EXPLICITLY AUTHORIZED (default no) Copy each repository instruction file (e.g. `AGENTS.md`) that governs the reviewed content to its repository-relative path under `instruction-set-source/review-repository/`.
 
 Materialize these sources using filesystem copy tools. Do not read a source into context and write its contents back out: the cache key covers the exact bytes of every source, so incidental rewriting turns a reusable entry into a miss.

@@ -9,6 +9,19 @@ Improvement ideas to revisit when the repo matures.
   `tests/**/*.ps1`. Cheap insurance for a repo whose product is
   PowerShell scripts.
 - **Add an `.editorconfig`.** Lock indentation and EOL conventions.
+- **Schema-rejection diagnostics on PowerShell 7.6.7.** Align diagnostics
+  with `SsReviewFindingDecisions.Tests.ps1`, `SsReviewPublicationPlan.Tests.ps1`,
+  and `SsReviewWorkflowData.Tests.ps1` while preserving invalid-input
+  rejection and prevention of remote publication.
+- **Generated nvm fixture on Ubuntu.** Correct the generated `nvm.sh`
+  syntax exercised by `SsReviewReportTools.Tests.ps1`, including its real
+  POSIX-shell activation guard.
+- **Linux audit file URIs.** Use explicit file URI construction in
+  `skills/ss-review/scripts/ConvertTo-FindingMarkdown.ps1` and cover it in
+  `SsReviewFindingMarkdown.Tests.ps1`.
+- **Evaluation cache/task publication.** Assess shared access to
+  `dev/ss-cargo-deps-tidy/evals/Generate-FoloFullTask.ps1` and add transaction
+  protection where needed; use disposable checkouts for standalone preparation.
 
 ## Skill design
 
@@ -20,3 +33,8 @@ Improvement ideas to revisit when the repo matures.
   emitted by `Generate-Inventory.ps1`) would avoid drift, but
   representing both the data and the rationale concisely is non-trivial.
   Needs more design thought.
+- **Cargo inventory/expectation records.** Formalize producer/consumer
+  schemas and maintained reading commands for
+  `skills/ss-cargo-deps-tidy/scripts/Generate-Inventory.ps1` and its graders.
+- **Cargo inventory path identity.** Replace OS-based case-folding in
+  `Generate-Inventory.ps1` with filesystem-aware behavior and focused tests.

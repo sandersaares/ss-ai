@@ -1,6 +1,6 @@
 BeforeAll {
     $script:RepoRoot = Split-Path -Parent $PSScriptRoot
-    $script:LibraryRoot = Join-Path $script:RepoRoot 'agents\.github\skills\ss-review\scripts\lib'
+    $script:LibraryRoot = Join-Path $script:RepoRoot 'skills\ss-review\scripts\lib'
 
     # Libraries never dot-source one another, so every dependency is loaded here in the order the
     # composition root uses.

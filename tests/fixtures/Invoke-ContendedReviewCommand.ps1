@@ -23,4 +23,4 @@ function Start-Sleep {
 }
 
 $parameters = ConvertFrom-Json -InputObject $ParametersJson -AsHashtable
-& (Join-Path $PSScriptRoot "..\..\agents\.github\skills\ss-review\scripts\$CommandName") @parameters
+& (Join-Path $PSScriptRoot "..\..\skills\ss-review\scripts\$CommandName") @parameters

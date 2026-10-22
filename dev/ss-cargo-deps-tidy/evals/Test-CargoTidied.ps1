@@ -1,4 +1,4 @@
-#requires -Version 7.0
+#Requires -Version 7.6
 <#
 .SYNOPSIS
     Program-grader script. Verifies a Rust workspace has been correctly
@@ -34,7 +34,7 @@
     exit 1 if any fail, exit 2 on setup/configuration errors.
 #>
 
-[CmdletBinding()]
+[CmdletBinding(PositionalBinding = $false)]
 param(
     [Parameter(Mandatory)]
     [string]$ExpectationsPath,

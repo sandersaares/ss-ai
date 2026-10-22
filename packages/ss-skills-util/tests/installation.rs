@@ -65,9 +65,8 @@ fn cargo_installs_and_rebuilds_changed_source_at_the_same_version() {
     );
     let scripts = source.join("scripts");
     fs::create_dir_all(scripts.join("lib")).unwrap();
-    for name in ["Configure-Pc.ps1", "lib/BashEnvironment.ps1"] {
-        fs::copy(checkout.join("scripts").join(name), scripts.join(name)).unwrap();
-    }
+    fs::copy(checkout.join("Install.ps1"), source.join("Install.ps1")).unwrap();
+    copy_directory(&checkout.join("scripts").join("lib"), &scripts.join("lib"));
     let mut paths = vec![installed.join("bin")];
     paths.extend(std::env::split_paths(&std::env::var_os("PATH").unwrap()));
     let path = std::env::join_paths(paths).unwrap();
@@ -102,8 +101,8 @@ fn cargo_installs_and_rebuilds_changed_source_at_the_same_version() {
             .args(["-NoProfile", "-NonInteractive", "-Command"])
             .arg(format!(
                 "try {{ . '{}'; Install-SkillsUtility }} catch {{ [Console]::Error.WriteLine($_.Exception.Message); exit 1 }}",
-                scripts
-                    .join("Configure-Pc.ps1")
+                source
+                    .join("Install.ps1")
                     .to_str()
                     .unwrap()
                     .replace('\'', "''")
@@ -141,7 +140,7 @@ fn cargo_installs_and_rebuilds_changed_source_at_the_same_version() {
     let command_path = package.join("src").join("command.rs");
     let original = fs::read_to_string(&command_path).unwrap();
     let changed = original.replace(
-        "Shared native operations for dev-env skills",
+        "Shared native operations for ss-ai skills",
         "Test-owned replacement from changed local source",
     );
     assert_ne!(changed, original);

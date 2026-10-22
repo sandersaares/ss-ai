@@ -1,0 +1,62 @@
+name: Tests
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: tests-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  pester:
+    name: Pester (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: windows-latest
+            tests: ./tests
+          # Preserve Ubuntu setup/native coverage without promising the entire report stack there.
+          - os: ubuntu-latest
+            tests: ./tests/Install.Tests.ps1,./tests/AgentInstallation.Tests.ps1,./tests/NativeInstallation.Tests.ps1,./tests/BashEnvironment.Tests.ps1,./tests/LibraryLayout.Tests.ps1,./tests/InvokeTests.Tests.ps1,./tests/SsReviewGitDiff.Tests.ps1,./tests/SsReviewPullRequestAnchor.Tests.ps1,./tests/ss-cargo-deps-tidy
+          # macOS supports the PowerShell-only Cargo helper and directory linking, not native setup.
+          - os: macos-latest
+            tests: ./tests/Install.Tests.ps1,./tests/ss-cargo-deps-tidy
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Pester 5
+        # Keep runner selection independent of the separately installed newer major release.
+        shell: pwsh
+        run: Install-Module -Name Pester -RequiredVersion 5.7.1 -Scope CurrentUser -Force -SkipPublisherCheck
+      - name: Select repository toolchain
+        if: matrix.os != 'macos-latest'
+        shell: pwsh
+        run: rustup show active-toolchain
+      - name: Run tests
+        shell: pwsh
+        run: ./scripts/Invoke-Tests.ps1 -Path ('${{ matrix.tests }}' -split ',')
+
+  rust:
+    name: Rust (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-latest, ubuntu-latest]
+    env:
+      RUST_BACKTRACE: 1
+    steps:
+      - uses: actions/checkout@v4
+      # Hosted runners supply native compiler/linker prerequisites for mimalloc.
+      - name: Select repository toolchain
+        shell: pwsh
+        run: rustup show active-toolchain
+      - name: Native validation and isolated installation
+        shell: pwsh
+        run: ./scripts/Invoke-Tests.ps1 -Suite Rust

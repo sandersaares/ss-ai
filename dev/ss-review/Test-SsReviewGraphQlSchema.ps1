@@ -36,7 +36,7 @@ $PSNativeCommandUseErrorActionPreference = $false
 
 if (-not $AdapterPath) {
     $repoRoot = Split-Path -Parent (Split-Path -Parent $PSScriptRoot)
-    $adapterRoot = Join-Path $repoRoot 'agents\.github\skills\ss-review\scripts\lib'
+    $adapterRoot = Join-Path $repoRoot 'skills\ss-review\scripts\lib'
     $AdapterPath = @(
         (Join-Path $adapterRoot 'GitHubPullRequestApi.ps1'),
         (Join-Path $adapterRoot 'GitHubIssueApi.ps1'),

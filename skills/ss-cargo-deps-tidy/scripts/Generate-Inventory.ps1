@@ -1,4 +1,4 @@
-#Requires -Version 7
+#Requires -Version 7.6
 <#
 .SYNOPSIS
     Catalogs Cargo dependency declarations across a Cargo workspace.
@@ -19,9 +19,9 @@
     Optional path to write the JSON output to. If omitted, JSON is written to
     the success stream.
 #>
-[CmdletBinding()]
+[CmdletBinding(PositionalBinding = $false)]
 param(
-    [Parameter(Position = 0)]
+    [Parameter()]
     [string]$WorkspaceManifest = './Cargo.toml',
 
     [Parameter()]

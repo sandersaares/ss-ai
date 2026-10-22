@@ -1,6 +1,6 @@
 [package]
 name = "ss-skills-util"
-description = "Shared native operations for the dev-env skills"
+description = "Shared native operations for the ss-ai skills"
 version = "0.1.0"
 publish = false
 authors.workspace = true

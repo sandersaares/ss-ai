@@ -1,7 +1,7 @@
 BeforeAll {
     $repository = Split-Path -Parent (Split-Path -Parent $PSScriptRoot)
-    $script:Grader = Join-Path $repository 'evals\ss-cargo-deps-tidy\scripts\Test-CargoTidied.ps1'
-    $script:Inventory = Join-Path $repository 'skills\ss-cargo-deps-tidy\Generate-Inventory.ps1'
+    $script:Grader = Join-Path $repository 'dev\ss-cargo-deps-tidy\evals\Test-CargoTidied.ps1'
+    $script:Inventory = Join-Path $repository 'skills\ss-cargo-deps-tidy\scripts\Generate-Inventory.ps1'
 }
 
 Describe 'Cargo tidiness grader' {

@@ -1,4 +1,4 @@
-#Requires -Version 7
+#Requires -Version 7.6
 #Requires -Modules @{ ModuleName = 'Pester'; ModuleVersion = '5.5.0' }
 
 Set-StrictMode -Version Latest
@@ -22,7 +22,8 @@ BeforeDiscovery {
 }
 
 BeforeAll {
-    $script:ScriptPath       = (Resolve-Path (Join-Path $PSScriptRoot '..\Install-CopilotSkills.ps1')).ProviderPath
+    $script:ScriptPath       = (Resolve-Path (Join-Path $PSScriptRoot '..\Install.ps1')).ProviderPath
+    . $script:ScriptPath
     $script:SkillsDir        = (Resolve-Path (Join-Path $PSScriptRoot '..\skills')).ProviderPath
     $script:ExpectedSkills   = @(Get-ChildItem -LiteralPath $script:SkillsDir -Directory | Select-Object -ExpandProperty Name)
     $script:ExpectedLinkType = if ($IsWindows) { 'Junction' } else { 'SymbolicLink' }
@@ -48,16 +49,16 @@ BeforeAll {
 
     function Invoke-Installer {
         param([Parameter(Mandatory)] [string]$WorkspacePath)
-        & $script:ScriptPath -Path $WorkspacePath *>&1
+        Install-CopilotSkills -TargetRoot (Get-SkillsTargetDir -WorkspacePath $WorkspacePath) *>&1
     }
 
     function Get-SkillsTargetDir {
         param([Parameter(Mandatory)] [string]$WorkspacePath)
-        Join-Path $WorkspacePath '.github/copilot/skills'
+        Join-Path $WorkspacePath '.copilot\skills'
     }
 }
 
-Describe 'Install-CopilotSkills.ps1' {
+Describe 'Installed skill links' {
     BeforeEach {
         $script:Workspace = New-TempWorkspace
     }
@@ -73,7 +74,7 @@ Describe 'Install-CopilotSkills.ps1' {
             $names | Sort-Object | Should -Be ($script:ExpectedSkills | Sort-Object)
         }
 
-        It 'creates the .github/copilot/skills target dir if missing' {
+        It 'creates the user skills target directory if missing' {
             $target = Get-SkillsTargetDir -WorkspacePath $script:Workspace
             Test-Path -LiteralPath $target | Should -BeFalse
             Invoke-Installer -WorkspacePath $script:Workspace | Out-Null
@@ -148,7 +149,7 @@ Describe 'Install-CopilotSkills.ps1' {
     }
 
     Context 'safety for non-link contents' {
-        It 'warns and skips a pre-existing plain directory and preserves its contents' {
+        It 'reports a pre-existing plain directory and preserves its contents' {
             $target = Get-SkillsTargetDir -WorkspacePath $script:Workspace
             New-Item -ItemType Directory -Path $target -Force | Out-Null
             $skill    = $script:ExpectedSkills[0]
@@ -157,39 +158,37 @@ Describe 'Install-CopilotSkills.ps1' {
             $sentinel = Join-Path $plain 'keep.txt'
             'do not delete' | Out-File -LiteralPath $sentinel
 
-            $output = Invoke-Installer -WorkspacePath $script:Workspace
+            { Invoke-Installer -WorkspacePath $script:Workspace } | Should -Throw '*collision*'
 
             $entry = Get-Item -Force -LiteralPath $plain
             $entry.Attributes.HasFlag([System.IO.FileAttributes]::ReparsePoint) | Should -BeFalse
             (Get-Content -LiteralPath $sentinel) | Should -Be 'do not delete'
-            ($output | Out-String) | Should -Match 'Skipping'
         }
 
-        It 'warns and skips a pre-existing plain file and preserves its contents' {
+        It 'reports a pre-existing plain file and preserves its contents' {
             $target = Get-SkillsTargetDir -WorkspacePath $script:Workspace
             New-Item -ItemType Directory -Path $target -Force | Out-Null
             $skill    = $script:ExpectedSkills[0]
             $filePath = Join-Path $target $skill
             'do not delete' | Out-File -LiteralPath $filePath
 
-            $output = Invoke-Installer -WorkspacePath $script:Workspace
+            { Invoke-Installer -WorkspacePath $script:Workspace } | Should -Throw '*collision*'
 
             (Get-Item -LiteralPath $filePath).Attributes.HasFlag([System.IO.FileAttributes]::ReparsePoint) | Should -BeFalse
             (Get-Content -LiteralPath $filePath) | Should -Be 'do not delete'
-            ($output | Out-String) | Should -Match 'Skipping'
         }
 
-        It 'still links other skills when one is blocked by a plain directory' -Skip:($ExpectedSkillCount -lt 2) {
+        It 'does not report complete installation when a skill collides' -Skip:($ExpectedSkillCount -lt 2) {
             $target = Get-SkillsTargetDir -WorkspacePath $script:Workspace
             New-Item -ItemType Directory -Path $target -Force | Out-Null
             $blocked = $script:ExpectedSkills[0]
             $other   = $script:ExpectedSkills[1]
             New-Item -ItemType Directory -Path (Join-Path $target $blocked) | Out-Null
 
-            Invoke-Installer -WorkspacePath $script:Workspace | Out-Null
+            { Invoke-Installer -WorkspacePath $script:Workspace } | Should -Throw '*collision*'
 
             (Get-Item -Force -LiteralPath (Join-Path $target $blocked)).Attributes.HasFlag([System.IO.FileAttributes]::ReparsePoint) | Should -BeFalse
-            (Get-Item -Force -LiteralPath (Join-Path $target $other  )).LinkType | Should -Be $script:ExpectedLinkType
+            # Other entries may precede the collision; no unrelated content is removed.
         }
     }
 }

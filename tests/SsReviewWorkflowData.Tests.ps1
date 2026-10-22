@@ -1,5 +1,5 @@
 BeforeAll {
-    $script:Scripts = Join-Path (Split-Path -Parent $PSScriptRoot) 'agents\.github\skills\ss-review\scripts'
+    $script:Scripts = Join-Path (Split-Path -Parent $PSScriptRoot) 'skills\ss-review\scripts'
     . "$script:Scripts\lib\JsonValue.ps1"
     . "$script:Scripts\lib\PullRequestModel.ps1"
     . "$script:Scripts\lib\WorkflowData.ps1"

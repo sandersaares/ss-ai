@@ -153,7 +153,7 @@ Windows and Linux use the same commands and records, with native paths and
 UTF-8 content. Windows and WSL have separate native installations and
 authentication. The binary uses mimalloc on both platforms.
 
-`Configure-Pc.ps1` installs from the local package with Cargo and `--locked`,
+`Install.ps1` installs from the local package with Cargo and `--locked`,
 using the repository toolchain. It verifies invocation through `PATH` before
 updating skill links. Cargo owns the installation root and conflict detection.
 Re-running setup upgrades unchanged package versions from local source.

@@ -25,7 +25,7 @@ Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 
 # Marks every body this skill publishes as written by an agent rather than by the operator whose
-# account posts it (agents/.github/instructions/global.instructions.md, "Communication policy").
+# account posts it (instructions/global.instructions.md, "Communication policy").
 # It is applied by the renderer rather than by each publication path, so no path can omit it.
 $script:FindingMarkdownAuthorshipPrefix = '[Copilot speaking]'
 

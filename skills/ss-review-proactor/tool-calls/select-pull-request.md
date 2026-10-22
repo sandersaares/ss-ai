@@ -29,5 +29,5 @@ requires human input; never reinterpret it as `noCandidate` or automatically
 repeat a possibly successful write.
 
 Invoke the installed executable directly on `PATH`. If it is unavailable,
-ask the user to run the repository's `scripts\Configure-Pc.ps1`; do not install
+ask the user to run the `ss-ai` checkout's `Install.ps1`; do not install
 or upgrade tools during a skill run.

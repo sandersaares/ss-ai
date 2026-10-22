@@ -79,6 +79,13 @@ unresolved boundary.
 
 ## Guidance scope
 
+The `ss-ai` installation supplies reusable instructions from its canonical
+`instructions/` bundle. Review preparation preserves the files and their
+applicability metadata verbatim, independently of instructions injected into
+the session. Repository-specific guidance enters review criteria only when
+the user explicitly authorizes it. Installed skill links do not change
+instruction ownership or review approval authority.
+
 Workers receive explicit authorization for their bounded task, not for invoking
 the orchestration workflow. Shared reading instructions include resolved paths,
 document sizes, and a complete bounded reading route from the first call.

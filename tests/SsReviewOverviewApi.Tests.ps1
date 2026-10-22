@@ -1,5 +1,5 @@
 BeforeAll {
-    $lib = Join-Path (Split-Path -Parent $PSScriptRoot) 'agents\.github\skills\ss-review\scripts\lib'
+    $lib = Join-Path (Split-Path -Parent $PSScriptRoot) 'skills\ss-review\scripts\lib'
     . (Join-Path $lib 'JsonValue.ps1')
     . (Join-Path $lib 'PublicationFailure.ps1')
     . (Join-Path $lib 'PullRequestTarget.ps1')

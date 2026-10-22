@@ -61,9 +61,9 @@ pwsh -NoProfile -NonInteractive -File '{{PROGRAM_PATH}}'
 
 Check the exit status before using the output and follow Stage 2 for errors and saved-query reads. Delete the private script after its command succeeds; retain it for diagnosis on failure.
 
-This file boundary applies to typed arrays and composed PowerShell operations without translating their syntax or changing their binding. Never copy `pwsh -Command { ... }` directly into Bash or interpolate its body into a Bash command string: Bash interprets `$`, backticks, and `&` before PowerShell receives them. Do not replace typed arrays with shell arguments or ad hoc JSON. Forward this shared recipe, including this calling-shell contract, to bounded workers.
+This file boundary applies to typed arrays and composed PowerShell operations without translating their syntax or changing their binding. Never copy a PowerShell script block directly into Bash or interpolate its body into a Bash command string: Bash interprets `$`, backticks, and `&` before PowerShell receives them. Do not replace typed arrays with shell arguments or ad hoc JSON. Forward this shared recipe, including this calling-shell contract, to bounded workers.
 
-Ordinary scalar `pwsh -File` calls may run directly without a private script. Use the calling shell's path quoting and line continuations; PowerShell backticks do not continue Bash lines.
+Ordinary scalar `pwsh -NonInteractive -File` calls may run directly without a private script. Use the calling shell's path quoting and line continuations; PowerShell backticks do not continue Bash lines.
 
 ## Metadata and description
 
@@ -101,7 +101,7 @@ if (-not $?) { exit 1 }
 
 For a Bash-backed tool, run this same example through the private script described in **Calling shell**; do not maintain a second query program.
 
-Replace the illustrative repository-relative paths with the assigned files and any known prior names from the diff. The program binds a typed array inside PowerShell; do not pass an array expression as a native argument to `pwsh -File`, which accepts native command-line arguments rather than array expressions. Saving the program to a script preserves that binding. For one path, `-File` with `-Files 'src\a.rs'` is sufficient. Split large discovery sets into bounded, explicit requests rather than inventing JSON serialization.
+Replace the illustrative repository-relative paths with the assigned files and any known prior names from the diff. The program binds a typed array inside PowerShell; do not pass an array expression as a native argument to `pwsh -NonInteractive -File`, which accepts native command-line arguments rather than array expressions. Saving the program to a script preserves that binding. For one path, `-File` with `-Files 'src\a.rs'` is sufficient. Split large discovery sets into bounded, explicit requests rather than inventing JSON serialization.
 
 The descriptors carry identifiers, including `openingCommentId`, URLs, kind, resolution, `isOutdated`, anchor, decision, an opening-comment excerpt, and comment count. They do not contain full comment bodies. Retain the relevant thread IDs, then read their conversations with the comments variant below.
 

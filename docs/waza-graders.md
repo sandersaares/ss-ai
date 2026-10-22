@@ -7,7 +7,7 @@ See the upstream
 ## Paths are resolved against CWD, not the YAML file
 
 Waza resolves several paths relative to the **current working
-directory**. Always invoke Waza from `c:\Source\ss-ai`.
+directory**. Invoke Waza from the active checkout root, including a worktree.
 
 - The `trigger` grader's `skill_path` is resolved against the CWD.
 - `--context-dir` defaults to `./fixtures` relative to the eval spec,
@@ -125,10 +125,9 @@ invoked" - invoking an unrelated skill would be acceptable. But:
   field, so it cannot express "no specific skill is required, but X
   must not fire" (tracked upstream as a Waza feature request).
 
-The over-strict phrasing is harmless today because exactly one skill
-is discoverable from the eval CWD, making "any skill" and "this
-skill" equivalent. Revisit if the repo (or `config.skill_directories`)
-grows additional discoverable skills.
+The trigger lane disables the repository's unrelated skills through
+`config.disabled_skills`, so this assertion measures only the Cargo skill.
+Keep that list aligned with the installed skill collection.
 
 **Use this signal only for trigger-style evals.** In trigger evals
 the whole point is "did the agent decide to invoke the skill", so
@@ -151,26 +150,11 @@ so false positives on negative cases are easy and the agent's actual
 behavior is invisible to it. Prefer `behavior` / `skill_invocation`
 / `diff` graders that observe what the agent actually did.
 
-## Omit top-level `skill:` from trigger eval specs
+## Disable body injection in trigger eval specs
 
-Setting `skill: <name>` at the top of an eval spec causes Waza to
-**pre-inject the full SKILL.md body** into the agent's system prompt
-as a `<skill_context>` block (see `buildSkillSystemMessage` in
-`waza/internal/execution/copilot.go`).
-
-- For **workflow evals** this is desirable - it saves a `skill` tool
-  round-trip.
-- For **trigger evals** it silently destroys the measurement: the
-  agent already has the skill content and can "execute the workflow"
-  without ever invoking the `skill` tool, so a `skill_invocation` /
-  `behavior` grader expecting an invocation will fail (false
-  negative) even when the agent correctly recognized the trigger.
-  Worse, the agent may proceed to do skill work without firing any
-  trigger-visible signal at all.
-
-When `skill:` is omitted, Waza still discovers the skill (walks one
-level of subdirectories under its CWD, finding
-`skills/<name>/SKILL.md`) and exposes it via a compact
-`<available_skills>` summary containing only name + description. The
-agent must invoke the `skill` tool to read the body - which is
-exactly the signal a trigger eval needs to observe.
+Current Waza requires a target `skill` and `metrics` for a legacy skill
+suite. Set `skill: ss-cargo-deps-tidy` and
+`config.inject_skill_body: false` in the trigger lane. This preserves
+skill discovery without providing the full skill body before invocation.
+Workflow evaluations may inject the body because their assertions measure
+the resulting files rather than activation.

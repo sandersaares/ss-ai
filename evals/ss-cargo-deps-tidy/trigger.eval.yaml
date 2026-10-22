@@ -4,13 +4,9 @@ description: >
   prompts that should activate the skill and negative prompts that
   should not. Inexpensive - no fixture preparation, no source-tree
   workflow exercise.
-# Deliberately no top-level `skill:` field. Setting it makes Waza inject
-# the full SKILL.md body into the agent's system prompt (see
-# buildSkillSystemMessage in waza/internal/execution/copilot.go), which
-# defeats trigger measurement - the agent then "knows" the skill
-# without ever invoking the `skill` tool. With `skill:` omitted, the
-# agent only sees the compact <available_skills> summary (name +
-# description) and must invoke the tool to read the body.
+# Name the target for current Waza validation, but prevent body injection so
+# activation still requires the agent to invoke the skill.
+skill: ss-cargo-deps-tidy
 version: "1.0"
 config:
   trials_per_task: 1
@@ -18,5 +14,18 @@ config:
   parallel: true
   executor: copilot-sdk
   model: claude-opus-4.8
+  inject_skill_body: false
+  # Negative tasks forbid any skill invocation; isolate the target measurement
+  # from unrelated skills installed by the combined repository.
+  disabled_skills:
+    - ss-review
+    - ss-review-proactor
+    - ss-review-deep
+    - ss-autoreapprove
+metrics:
+  # Every trigger assertion contributes equally and is required to pass.
+  - name: pass_rate
+    weight: 1
+    threshold: 1
 tasks:
   - "tasks/trigger/*.yaml"

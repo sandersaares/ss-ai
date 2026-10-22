@@ -1,10 +1,10 @@
-#Requires -Version 7
+#Requires -Version 7.6
 #Requires -Modules @{ ModuleName = 'Pester'; ModuleVersion = '5.5.0' }
 
 Set-StrictMode -Version Latest
 
 BeforeAll {
-    $script:ScriptPath = (Resolve-Path (Join-Path $PSScriptRoot '..\..\skills\ss-cargo-deps-tidy\Generate-Inventory.ps1')).ProviderPath
+    $script:ScriptPath = (Resolve-Path (Join-Path $PSScriptRoot '..\..\skills\ss-cargo-deps-tidy\scripts\Generate-Inventory.ps1')).ProviderPath
     $script:FixturesRoot = Join-Path $PSScriptRoot 'fixtures'
     . $script:ScriptPath
 }

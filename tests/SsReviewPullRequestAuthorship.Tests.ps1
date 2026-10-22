@@ -1,6 +1,6 @@
 BeforeAll {
     $script:RepoRoot = Split-Path -Parent $PSScriptRoot
-    $script:ScriptRoot = Join-Path $script:RepoRoot 'agents\.github\skills\ss-review\scripts'
+    $script:ScriptRoot = Join-Path $script:RepoRoot 'skills\ss-review\scripts'
     $script:LibraryRoot = Join-Path $script:ScriptRoot 'lib'
     $script:AuthorshipScript = Join-Path $script:ScriptRoot 'Set-CommentAuthorship.ps1'
 

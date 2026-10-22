@@ -21,7 +21,7 @@ Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 $PSNativeCommandUseErrorActionPreference = $true
 $repoRoot = Split-Path -Parent (Split-Path -Parent $PSScriptRoot)
-$skillScripts = Join-Path $repoRoot 'agents\.github\skills\ss-review\scripts'
+$skillScripts = Join-Path $repoRoot 'skills\ss-review\scripts'
 . "$skillScripts\lib\JsonValue.ps1"
 . "$skillScripts\lib\PullRequestModel.ps1"
 . "$skillScripts\lib\WorkflowData.ps1"

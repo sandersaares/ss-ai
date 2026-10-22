@@ -84,11 +84,18 @@ Generate the inventory once at the start of the workflow and write it to a tempo
 
 ```powershell
 $inventoryPath = Join-Path $env:TEMP "cargo-deps-inventory-$([guid]::NewGuid()).json"
-& <path-to-skill>/Generate-Inventory.ps1 `
-    -WorkspaceManifest <path-to-workspace-Cargo.toml> `
+& '{{SKILL_ROOT}}/scripts/Generate-Inventory.ps1' `
+    -WorkspaceManifest '{{WORKSPACE_MANIFEST}}' `
     -OutputPath $inventoryPath
 Write-Host "Inventory written to: $inventoryPath"
 ```
+
+| Placeholder | Description |
+| --- | --- |
+| `SKILL_ROOT` | Absolute directory containing this skill's `SKILL.md`. |
+| `WORKSPACE_MANIFEST` | Absolute path to the workspace-level `Cargo.toml`. |
+
+If the command fails, stop and report its diagnostic; do not proceed with a partial inventory. On success, use the printed output path for the following queries.
 
 The script discovers all member packages automatically by expanding the workspace `members` / `exclude` declarations, so the workspace-level `Cargo.toml` is the only path you need to provide.
 

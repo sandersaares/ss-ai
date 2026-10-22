@@ -13,13 +13,18 @@ config:
   parallel: true
   executor: copilot-sdk
   model: claude-opus-4.8
+metrics:
+  # All retained fixture assertions are required; no partial-credit cutover.
+  - name: pass_rate
+    weight: 1
+    threshold: 1
 hooks:
   # Clones folo at the pinned commit into fixtures/.eval-cache/ and
   # regenerates tasks/folo/folo-3e1f241-full.yaml with one inputs.files
   # entry per source file. before_run fires before task discovery, so
   # the generated YAML is picked up in the same run.
   before_run:
-    - command: pwsh -NoProfile -File evals/ss-cargo-deps-tidy/scripts/Generate-FoloFullTask.ps1
+    - command: pwsh -NoProfile -File dev/ss-cargo-deps-tidy/evals/Generate-FoloFullTask.ps1
       error_on_fail: true
 tasks:
   - "tasks/folo/*.yaml"

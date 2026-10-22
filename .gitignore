@@ -4,3 +4,6 @@ coverage.txt
 *.exe
 eval-results/
 evals/**/.eval-cache/
+/target/
+# Provider fixture writers retain transaction locks between invocations.
+/packages/ss-skills-util/tests/fixtures/*.json.lock

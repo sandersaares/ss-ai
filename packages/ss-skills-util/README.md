@@ -2,7 +2,7 @@
 
 Shared native operations for this repository's skills on Windows and Linux.
 Install or upgrade the executable and source-linked skills together by running
-`scripts\Configure-Pc.ps1` from this repository.
+`Install.ps1` from this repository.
 
 ## Prerequisites
 

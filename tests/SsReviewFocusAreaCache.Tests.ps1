@@ -1,7 +1,7 @@
 BeforeAll {
     $script:RepoRoot = Split-Path -Parent $PSScriptRoot
-    $script:CacheLibrary = Join-Path $script:RepoRoot 'agents\.github\skills\ss-review\scripts\lib\FocusAreaCache.ps1'
-    $script:CacheCliDirectory = Join-Path $script:RepoRoot 'agents\.github\skills\ss-review\scripts'
+    $script:CacheLibrary = Join-Path $script:RepoRoot 'skills\ss-review\scripts\lib\FocusAreaCache.ps1'
+    $script:CacheCliDirectory = Join-Path $script:RepoRoot 'skills\ss-review\scripts'
     $script:MoveItemCommand = Get-Command Move-Item -CommandType Cmdlet
     . (Join-Path $script:CacheCliDirectory 'lib\PullRequestModel.ps1')
     . $script:CacheLibrary
@@ -16,7 +16,7 @@ BeforeAll {
 
         New-Item -ItemType Directory -Path $Path -Force | Out-Null
         Set-Content -LiteralPath (Join-Path $Path 'current-context.md') -Value '# Current context'
-        $nested = Join-Path $Path 'dev-env'
+        $nested = Join-Path $Path 'ss-ai'
         New-Item -ItemType Directory -Path $nested | Out-Null
         Set-Content -LiteralPath (Join-Path $nested 'rust.instructions.md') -Value '# Rust'
     }
@@ -984,7 +984,7 @@ Keep names clear.
         # A missing mandatory parameter prompts rather than failing when stdin is an open pipe,
         # which an agent shell provides, so a documented command without -NonInteractive stalls the
         # review indefinitely instead of reporting the mistake.
-        $skillRoot = Join-Path $script:RepoRoot 'agents\.github\skills\ss-review'
+        $skillRoot = Join-Path $script:RepoRoot 'skills\ss-review'
 
         # Match the executable rather than the start of the line so that an invocation prefixed by
         # the call operator, spelled pwsh.exe, or written inline in prose is still held to the rule.

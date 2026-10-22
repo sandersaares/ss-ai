@@ -17,9 +17,9 @@ function Invoke-SkillsGit {
         [string] $StandardInput = ''
     )
 
-    $program = Get-Command ss-skills-util -CommandType Application -ErrorAction SilentlyContinue
+    $program = Get-Command ss-skills-util -CommandType Application -ErrorAction SilentlyContinue | Select-Object -First 1
     if (-not $program) {
-        throw 'ss-skills-util is required on PATH. Run scripts\Configure-Pc.ps1 from dev-env before reviewing.'
+        throw 'ss-skills-util is required on PATH. Run Install.ps1 from ss-ai before reviewing.'
     }
 
     $start = [Diagnostics.ProcessStartInfo]::new($program.Source)

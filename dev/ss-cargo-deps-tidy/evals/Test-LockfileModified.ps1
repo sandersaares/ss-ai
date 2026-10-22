@@ -1,4 +1,4 @@
-#requires -Version 7.0
+#Requires -Version 7.6
 <#
 .SYNOPSIS
     Program-grader script. Verifies the agent ran cargo (or otherwise
@@ -18,7 +18,7 @@
     cache exactly (suggesting the agent never ran cargo).
 #>
 
-[CmdletBinding()]
+[CmdletBinding(PositionalBinding = $false)]
 param(
     [Parameter(Mandatory)]
     [string]$CacheDir

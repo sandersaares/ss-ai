@@ -34,7 +34,7 @@ use crate::{Clock, Http, Process};
 #[command(
     name = "ss-skills-util",
     version,
-    about = "Shared native operations for dev-env skills",
+    about = "Shared native operations for ss-ai skills",
     long_about = None
 )]
 struct Cli {

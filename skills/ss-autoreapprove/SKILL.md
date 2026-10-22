@@ -12,7 +12,7 @@ writes remotely. Do not create schedules, merge, change policies, resolve
 discussion, or automatically invoke `ss-review`.
 
 Run the native `ss-skills-util` on PATH. Missing tooling requires the user's
-normal `scripts\Configure-Pc.ps1` setup, not an installation during this skill.
+normal `Install.ps1` setup in `ss-ai`, not an installation during this skill.
 Use GitHub CLI authentication or Azure CLI OAuth, never a personal access
 token. Keep credentials out of prompts and records.
 

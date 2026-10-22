@@ -1,4 +1,4 @@
-#requires -Version 7.0
+#Requires -Version 7.6
 <#
 .SYNOPSIS
     Program-grader script. Verifies the agent did not modify any source
@@ -15,7 +15,7 @@
     Mismatches are printed to stderr (waza captures it in grader notes).
 #>
 
-[CmdletBinding()]
+[CmdletBinding(PositionalBinding = $false)]
 param(
     [Parameter(Mandatory)]
     [string]$CacheDir

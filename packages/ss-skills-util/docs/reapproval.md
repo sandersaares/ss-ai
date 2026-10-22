@@ -4,7 +4,7 @@
 
 Reapproval preserves the authenticated user's approval across later source
 changes without conducting an initial review. The installed
-[significance policy](../../../agents/.github/skills/ss-autoreapprove/significance.md)
+[significance policy](../../../skills/ss-autoreapprove/significance.md)
 permits renewal unless there are significant design changes, likely performance
 regressions, or likely correctness regressions. Insufficient evidence is uncertain,
 not permission. Native operations validate evidence and publication; the agent

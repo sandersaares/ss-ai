@@ -1,7 +1,7 @@
 BeforeAll {
     Set-StrictMode -Version Latest
     $ErrorActionPreference = 'Stop'
-    $script:SkillRoot = Join-Path (Split-Path -Parent $PSScriptRoot) 'agents\.github\skills\ss-review-proactor'
+    $script:SkillRoot = Join-Path (Split-Path -Parent $PSScriptRoot) 'skills\ss-review-proactor'
     $script:ProactorPrompt = Get-Content -LiteralPath (Join-Path $script:SkillRoot 'SKILL.md') -Raw
     $script:ReviewPrompt = Get-Content -LiteralPath (Join-Path $script:SkillRoot '..\ss-review\SKILL.md') -Raw
     $script:RunControl = [regex]::Match($script:ProactorPrompt, '(?s)# Run control(.*?)# Stage 1:').Groups[1].Value

@@ -68,6 +68,14 @@ where context is available and keeps safety properties in executable code.
 
 ## Worker input boundary
 
+The installed skill resolves its filesystem link to the canonical checkout.
+Preparation copies the sibling `instructions/` tree under
+`instruction-set-source/ss-ai/instructions/`. The generation recipe and exact
+source bytes participate in the cache key, so incompatible instruction
+provenance produces a miss rather than requiring a legacy cache reader.
+Runtime scripts, report templates, and pinned npm manifests stay together in
+the skill tree so installed links and checkout-relative use share assets.
+
 `New-ReviewWorkerAssignment.ps1` is the common builder for bounded preparation
 and focus-area reviewer tasks. It renders phase instructions, states the
 delegation authorization without granting orchestration or user authority, and
@@ -667,7 +675,7 @@ Reviewer registration runs through the shared `ss-skills-util` executable on
 `PATH`, independently of these review-only PowerShell libraries. Its native
 transport and identity operations also serve proactor selection and confirmation.
 The remaining capture, analysis, and publication operations stay within this
-skill. See the utility's [implementation guide](../../../../../packages/ss-skills-util/docs/implementation.md)
+skill. See the utility's [implementation guide](../../../packages/ss-skills-util/docs/implementation.md)
 for its transaction and provider boundaries.
 
 ## Target resolution
@@ -782,7 +790,7 @@ Literal search text may come from a UTF-8 file;
 typed file arrays bind inside a noninteractive PowerShell program rather than
 JSON inside a shell string. The query recipe distinguishes PowerShell callers
 from Bash callers. Bash-backed tools save the canonical PowerShell example to a
-private script with a file-writing tool and invoke it through `pwsh -File`.
+private script with a file-writing tool and invoke it through `pwsh -NonInteractive -File`.
 This keeps query instructions in one program and prevents Bash from interpreting
 PowerShell syntax. Scalar `-File` invocations can run directly.
 Creation validates the selected query against its

@@ -1,6 +1,6 @@
 BeforeAll {
     $script:RepoRoot = Split-Path -Parent $PSScriptRoot
-    $script:LibraryRoot = Join-Path $script:RepoRoot 'agents\.github\skills\ss-review\scripts\lib'
+    $script:LibraryRoot = Join-Path $script:RepoRoot 'skills\ss-review\scripts\lib'
 
     . (Join-Path $script:LibraryRoot 'GitDiff.ps1')
 
@@ -226,6 +226,19 @@ index bbbbbbb..ccccccc 100644
 -before
 +after
 '@
+}
+
+Describe 'ss-review native executable discovery' {
+    It 'uses the first PATH application when another installation is also discoverable' {
+        $script:FirstNative = Get-Command ss-skills-util -CommandType Application | Select-Object -First 1
+        Mock Get-Command {
+            $script:FirstNative
+            [pscustomobject]@{ Source = 'not-the-first-PATH-application' }
+        } -ParameterFilter { ($Name -join ',') -eq 'ss-skills-util' }
+
+        $result = Invoke-SkillsGit -ArgumentList @('path', '--value', 'src/example.rs')
+        $result['path'] | Should -Be 'src/example.rs'
+    }
 }
 
 Describe 'ss-review Git diff parsing' {

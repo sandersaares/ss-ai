@@ -8,7 +8,7 @@ BeforeAll {
 
 Describe 'Automatic reapproval repository scope instructions' {
     BeforeAll {
-        $skill = Join-Path (Split-Path -Parent $PSScriptRoot) 'agents\.github\skills\ss-autoreapprove'
+        $skill = Join-Path (Split-Path -Parent $PSScriptRoot) 'skills\ss-autoreapprove'
         $script:Prompt = Get-Content -LiteralPath (Join-Path $skill 'SKILL.md') -Raw
         $script:Recipes = Get-Content -LiteralPath (Join-Path $skill 'commands.md') -Raw
     }
@@ -53,7 +53,7 @@ Describe 'Automatic reapproval provider fixtures' {
 
     It 'installs one canonical policy and native-only lifecycle recipes' {
         $root = Split-Path -Parent $PSScriptRoot
-        $skill = Join-Path $root 'agents\.github\skills\ss-autoreapprove'
+        $skill = Join-Path $root 'skills\ss-autoreapprove'
         Test-Path -LiteralPath (Join-Path $skill 'SKILL.md') | Should -BeTrue
         Test-Path -LiteralPath (Join-Path $skill 'significance.md') | Should -BeTrue
         Test-Path -LiteralPath (Join-Path $root 'dev\ss-autoreapprove\significance.md') | Should -BeFalse

@@ -302,7 +302,7 @@ fn prepare(root: &Path, provider: &Provider, dry_run: bool) -> (String, Value) {
     fs::create_dir_all(root).unwrap();
     fs::write(
         root.join("policy.md"),
-        include_str!("../../../agents/.github/skills/ss-autoreapprove/significance.md"),
+        include_str!("../../../skills/ss-autoreapprove/significance.md"),
     )
     .unwrap();
     let mut args = vec![
