@@ -67,7 +67,8 @@ if (-not (Test-Path $workspaceManifest)) {
     [Console]::Error.WriteLine("workspace Cargo.toml not found at $workspaceManifest"); exit 2
 }
 
-$inventoryPath = Join-Path $env:TEMP "ss-cargo-deps-tidy-grader-$([guid]::NewGuid()).json"
+# Unix shells need not define TEMP; use the platform's temporary directory.
+$inventoryPath = Join-Path ([IO.Path]::GetTempPath()) "ss-cargo-deps-tidy-grader-$([guid]::NewGuid()).json"
 try {
     $global:LASTEXITCODE = 0
     & $InventoryScript -WorkspaceManifest $workspaceManifest -OutputPath $inventoryPath

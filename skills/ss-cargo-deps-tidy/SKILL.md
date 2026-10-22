@@ -83,7 +83,7 @@ Generate the inventory once at the start of the workflow and write it to a tempo
 **Critical:** Always invoke the script with `-OutputPath`. The JSON body can easily exceed 100 KB on real workspaces and is not suitable for direct inclusion in the agent context window. Do not `Get-Content` the inventory file without an immediate `| ConvertFrom-Json` and a follow-up filter; do not paste, summarize, or quote its raw contents.
 
 ```powershell
-$inventoryPath = Join-Path $env:TEMP "cargo-deps-inventory-$([guid]::NewGuid()).json"
+$inventoryPath = Join-Path ([IO.Path]::GetTempPath()) "cargo-deps-inventory-$([guid]::NewGuid()).json"
 & '{{SKILL_ROOT}}/scripts/Generate-Inventory.ps1' `
     -WorkspaceManifest '{{WORKSPACE_MANIFEST}}' `
     -OutputPath $inventoryPath

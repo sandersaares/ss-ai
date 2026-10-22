@@ -5,7 +5,7 @@ BeforeAll {
 }
 
 Describe 'Cargo tidiness grader' {
-    It 'accepts absent optional expectation properties and rejects untidied dependencies' {
+    It 'accepts absent optional expectation properties and rejects untidied dependencies without TEMP' {
         $workspace = Join-Path $TestDrive 'workspace'
         New-Item -ItemType Directory -Path $workspace | Out-Null
         $expectations = Join-Path $TestDrive 'expectations.json'
@@ -13,8 +13,10 @@ Describe 'Cargo tidiness grader' {
         $manifest = Join-Path $workspace 'Cargo.toml'
         [IO.File]::WriteAllText($manifest, "[workspace]`nmembers = []`n")
         $previous = $env:WAZA_WORKSPACE_DIR
+        $previousTemp = $env:TEMP
         try {
             $env:WAZA_WORKSPACE_DIR = $workspace
+            $env:TEMP = $null
             & pwsh -NoProfile -File $script:Grader -ExpectationsPath $expectations -InventoryScript $script:Inventory
             $LASTEXITCODE | Should -Be 0
 
@@ -24,6 +26,7 @@ Describe 'Cargo tidiness grader' {
             $LASTEXITCODE | Should -Be 1
         } finally {
             $env:WAZA_WORKSPACE_DIR = $previous
+            $env:TEMP = $previousTemp
         }
     }
 }
