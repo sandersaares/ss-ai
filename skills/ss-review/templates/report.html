@@ -1,0 +1,46 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; img-src data:; style-src 'unsafe-inline'; base-uri 'none'; form-action 'none'">
+<title>$pagetitle$</title>
+<style>
+:root { color-scheme: light dark; --paper: #fff; --ink: #20252b; --muted: #59636e; --border: #d0d7de; --panel: #f4f6f8; --link: #0969da; }
+@media (prefers-color-scheme: dark) { :root { --paper: #10151b; --ink: #e6edf3; --muted: #a4afbb; --border: #39444f; --panel: #1b232d; --link: #79b8ff; } }
+/* Wide report layout: docs/design.md, "Report presentation". */
+body { margin: 0 auto; padding: 2rem; max-width: 120rem; font: 17px/1.65 system-ui, sans-serif; background: var(--paper); color: var(--ink); overflow-wrap: anywhere; }
+header { border-bottom: 1px solid var(--border); margin-bottom: 2rem; }
+main { max-width: 114ch; margin: auto; }
+a { color: var(--link); }
+h1, h2, h3, h4 { line-height: 1.25; scroll-margin-top: 1rem; }
+h2 { margin-top: 2.2rem; border-bottom: 1px solid var(--border); padding-bottom: .4rem; }
+nav { background: var(--panel); border: 1px solid var(--border); border-radius: .6rem; padding: 1rem 1.5rem; margin-bottom: 2rem; }
+nav ul { padding-left: 1.4rem; }
+pre { overflow-x: auto; white-space: pre; padding: 1rem; background: var(--panel); border: 1px solid var(--border); border-radius: .4rem; }
+code { font: .88em/1.5 ui-monospace, Consolas, monospace; }
+table { display: block; max-width: 100%; overflow-x: auto; border-collapse: collapse; margin: 1.5rem 0; }
+th, td { padding: .6rem .8rem; border: 1px solid var(--border); text-align: left; vertical-align: top; }
+th { background: var(--panel); }
+blockquote { border-left: .25rem solid var(--border); padding-left: 1rem; color: var(--muted); }
+figure.diagram { margin: 1.5rem 0; }
+.diagram-scroll { overflow-x: auto; padding: 1rem; border: 1px solid var(--border); border-radius: .4rem; background: #fff; color-scheme: light; }
+.diagram img { display: block; max-width: none; margin: auto; }
+summary { cursor: pointer; color: var(--muted); padding-top: .5rem; }
+hr { border: 0; border-top: 1px solid var(--border); margin: 2rem 0; }
+@media print { body { max-width: none; padding: 0; font-size: 11pt; background: #fff; color: #000; } nav, details { display: none; } pre { white-space: pre-wrap; } .diagram img { max-width: 100%; } table { display: table; } }
+$if(highlighting-css)$
+$highlighting-css$
+$endif$
+</style>
+</head>
+<body>
+<header><h1>$title$</h1></header>
+<main>
+$if(toc)$
+<nav aria-label="Contents">$table-of-contents$</nav>
+$endif$
+$body$
+</main>
+</body>
+</html>

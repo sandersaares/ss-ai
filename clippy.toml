@@ -1,0 +1,13 @@
+# Folo is the canonical lint configuration; do not customize this copy.
+# When upgrading tooling versions, copy-paste the full lint section and
+# clippy.toml from folo-rs/folo again and update the source revision below.
+# Comments inside the copied configuration refer to Folo's tooling.
+# Source: https://github.com/folo-rs/folo/blob/5b7761ff275b865bdb9f8ac5a3b610cc50f88b6d/clippy.toml
+# This file contains fine-tuning settings that cannot be specified in cargo.toml (which only supports "error level").
+
+# Absolute paths of length 3 can be useful to emphasize where a particular symbol is coming from,
+# e.g. by using "std::sync::mutex" versus "tokio::sync::mutex".  Anything beyond 3 segments seems
+# excessively verbose, so we limit it to 3 - import or alias to shorten longer symbol paths.
+absolute-paths-max-segments = 3
+
+doc-valid-idents = ["GBps", ".."]

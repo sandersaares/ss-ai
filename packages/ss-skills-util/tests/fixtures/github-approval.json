@@ -1,0 +1,86 @@
+{
+  "schemaVersion": 1,
+  "provenance": {
+    "kind": "service-contract-projection",
+    "source": "https://github.com/github/docs/pull/46209",
+    "contract": "https://docs.github.com/en/graphql/reference/objects#reviewdismissedevent",
+    "description": "Read-only REST and GraphQL observations establish the review states, ordering, review-ID join, and distinct approved and staleness-causing commits. Identifiers, repository metadata, refs, timestamps, and prose are synthetic. This is not a complete capture of the source PR.",
+    "limitations": "The source establishes commit-caused dismissal, not a manual-dismissal experiment or a historical target tip. Null-cause and other counterexamples are explicit test mutations."
+  },
+  "accountId": "42",
+  "repositoryId": "123",
+  "observedAt": "2026-01-10T00:00:00Z",
+  "evidence": {
+    "scope": "history",
+    "pullRequest": {
+      "number": 1,
+      "state": "open",
+      "draft": false,
+      "user": { "id": 8 },
+      "head": {
+        "sha": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        "ref": "fixture-source",
+        "repo": { "id": 123 }
+      },
+      "base": {
+        "sha": "cccccccccccccccccccccccccccccccccccccccc",
+        "ref": "fixture-target",
+        "repo": { "id": 123 }
+      },
+      "body": "Synthetic pull request description."
+    },
+    "reviews": [
+      {
+        "id": 1,
+        "node_id": "review-1",
+        "user": { "id": 99, "node_id": "user-99" },
+        "state": "COMMENTED",
+        "submitted_at": "2026-01-01T18:43:18Z",
+        "commit_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "body": "Synthetic comment-only review."
+      },
+      {
+        "id": 2,
+        "node_id": "review-2",
+        "user": { "id": 42, "node_id": "user-42" },
+        "state": "DISMISSED",
+        "submitted_at": "2026-01-07T10:08:17Z",
+        "commit_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "body": "Synthetic approving review."
+      },
+      {
+        "id": 3,
+        "node_id": "review-3",
+        "user": { "id": 99, "node_id": "user-99" },
+        "state": "COMMENTED",
+        "submitted_at": "2026-01-08T20:33:32Z",
+        "commit_id": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        "body": "Synthetic later comment-only review."
+      }
+    ],
+    "timeline": [
+      { "__typename": "PullRequestReview", "id": "review-1", "state": "COMMENTED" },
+      { "__typename": "PullRequestReview", "id": "review-2", "state": "DISMISSED" },
+      {
+        "__typename": "ReviewDismissedEvent",
+        "id": "dismissal-1",
+        "createdAt": "2026-01-07T10:08:57Z",
+        "previousReviewState": "APPROVED",
+        "review": { "id": "review-2" },
+        "pullRequestCommit": {
+          "commit": { "oid": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb" }
+        }
+      },
+      { "__typename": "PullRequestReview", "id": "review-3", "state": "COMMENTED" }
+    ],
+    "comments": [
+      {
+        "id": 1,
+        "body": "Synthetic discussion.",
+        "created_at": "2026-01-08T21:00:00Z",
+        "updated_at": "2026-01-08T22:00:00Z"
+      }
+    ],
+    "reviewComments": []
+  }
+}

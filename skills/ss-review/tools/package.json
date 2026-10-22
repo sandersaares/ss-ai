@@ -1,0 +1,8 @@
+{
+  "name": "ss-review-report-tools",
+  "private": true,
+  "description": "Pinned Mermaid renderer for offline, self-contained review reports.",
+  "dependencies": {
+    "@mermaid-js/mermaid-cli": "11.17.0"
+  }
+}

@@ -1,0 +1,8 @@
+query($owner:String!,$repo:String!,$num:Int!,$cur:String,$size:Int!){
+  repository(owner:$owner,name:$repo){pullRequest(number:$num){
+    commits(first:$size,after:$cur){
+      nodes{commit{committedDate}}
+      pageInfo{hasNextPage endCursor}
+    }
+  }}
+}

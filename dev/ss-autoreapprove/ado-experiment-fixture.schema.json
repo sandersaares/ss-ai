@@ -1,0 +1,67 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Sanitized ADO experiment fixture",
+  "description": "A projection of verified provider observations, not runtime authorization. Provider payload subsets preserve external field names and absent optional fields; their consumer validates the applicable service contract.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schemaVersion", "scenario", "accountId", "provenance", "stages"],
+  "properties": {
+    "schemaVersion": { "const": 1 },
+    "scenario": { "const": "ado-no-approval-policy" },
+    "accountId": { "type": "string", "format": "uuid" },
+    "provenance": {
+      "type": "object", "additionalProperties": false,
+      "required": ["source", "actions", "sanitization", "limitation"],
+      "properties": {
+        "source": { "$ref": "#/$defs/text" },
+        "actions": { "type": "array", "minItems": 1, "items": { "$ref": "#/$defs/text" } },
+        "sanitization": { "$ref": "#/$defs/text" },
+        "limitation": { "$ref": "#/$defs/text" }
+      }
+    },
+    "stages": {
+      "type": "array", "minItems": 5, "maxItems": 5,
+      "items": {
+        "type": "object", "additionalProperties": false,
+        "required": ["label", "observedAt", "pullRequest", "sourceCommit", "targetCommit", "autoComplete", "reviewers", "iterations", "threads", "policies", "evaluations"],
+        "properties": {
+          "label": { "enum": ["baseline", "approved", "source-updated", "source-cleaned", "reviewer-removed"] },
+          "observedAt": { "type": "string", "format": "date-time" },
+          "pullRequest": {
+            "type": "object", "additionalProperties": false,
+            "required": ["pullRequestId", "status", "isDraft", "sourceRefName", "targetRefName", "repository"],
+            "properties": {
+              "pullRequestId": { "type": "integer", "minimum": 1 },
+              "status": { "const": "active" }, "isDraft": { "const": false },
+              "sourceRefName": { "type": "string", "pattern": "^refs/heads/.+" },
+              "targetRefName": { "type": "string", "pattern": "^refs/heads/.+" },
+              "repository": {
+                "type": "object", "additionalProperties": false, "required": ["id", "project"],
+                "properties": {
+                  "id": { "type": "string", "format": "uuid" },
+                  "project": {
+                    "type": "object", "additionalProperties": false, "required": ["id"],
+                    "properties": { "id": { "type": "string", "format": "uuid" } }
+                  }
+                }
+              }
+            }
+          },
+          "sourceCommit": { "$ref": "#/$defs/commit" },
+          "targetCommit": { "$ref": "#/$defs/commit" },
+          "autoComplete": { "const": false },
+          "reviewers": { "$ref": "#/$defs/objects" },
+          "iterations": { "$ref": "#/$defs/objects", "minItems": 1 },
+          "threads": { "$ref": "#/$defs/objects" },
+          "policies": { "$ref": "#/$defs/objects" },
+          "evaluations": { "type": "array", "maxItems": 0 }
+        }
+      }
+    }
+  },
+  "$defs": {
+    "text": { "type": "string", "minLength": 1 },
+    "commit": { "type": "string", "pattern": "^[0-9a-f]{40}$" },
+    "objects": { "type": "array", "items": { "type": "object" } }
+  }
+}

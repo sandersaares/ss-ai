@@ -1,0 +1,1557 @@
+{
+  "schemaVersion": 1,
+  "scenario": "ado-no-approval-policy",
+  "accountId": "10000000-0000-4000-8000-000000000001",
+  "provenance": {
+    "limitation": "No approval policy or policy evaluations applied. Both pushes retained vote 10 without a new vote event. This does not demonstrate a reset or a required fresh-iteration renewal.",
+    "sanitization": "Projected service fields only; identities, refs, commits, and thread IDs replaced consistently; timestamps shifted by one constant interval; names, URLs, prose, and private code omitted.",
+    "source": "Authorized ADO Services experiment captured by dev/ss-autoreapprove/Invoke-AdoExperiment.ps1.",
+    "actions": [
+      "Create the authenticated reviewer with vote 10",
+      "Add one unique text file in a source commit",
+      "Delete that file in a source commit",
+      "Delete only the experiment-created reviewer"
+    ]
+  },
+  "stages": [
+    {
+      "policies": [
+        {
+          "id": 1,
+          "settings": {
+            "maxPathLength": 248,
+            "scope": [
+              {
+                "repositoryId": null
+              }
+            ]
+          },
+          "isEnabled": false,
+          "type": {
+            "id": "001a79cf-fda1-4c4e-9e7c-bac40ee5ead8"
+          },
+          "isBlocking": true,
+          "revision": 2
+        },
+        {
+          "id": 2,
+          "settings": {
+            "scope": [
+              {
+                "repositoryId": null
+              }
+            ]
+          },
+          "isEnabled": false,
+          "type": {
+            "id": "db2b9b4c-180d-4529-9701-01541d19f36b"
+          },
+          "isBlocking": true,
+          "revision": 2
+        },
+        {
+          "id": 3,
+          "settings": {
+            "authorEmailPatterns": null,
+            "scope": [
+              {
+                "repositoryId": null
+              }
+            ]
+          },
+          "isEnabled": false,
+          "type": {
+            "id": "77ed4bd3-b063-4689-934a-175e4d0a78d7"
+          },
+          "isBlocking": true,
+          "revision": 2
+        },
+        {
+          "id": 4,
+          "settings": {
+            "suppressionFile": null,
+            "avoidThrowingErrors": null,
+            "scope": [
+              {
+                "repositoryId": "20000000-0000-4000-8000-000000000001"
+              }
+            ]
+          },
+          "isEnabled": true,
+          "type": {
+            "id": "e67ae10f-cf9a-40bc-8e66-6b3a8216956e"
+          },
+          "isBlocking": true,
+          "revision": 1
+        },
+        {
+          "id": 5,
+          "settings": {
+            "suppressionFile": null,
+            "avoidThrowingErrors": null,
+            "scope": [
+              {
+                "repositoryId": null
+              }
+            ]
+          },
+          "isEnabled": true,
+          "type": {
+            "id": "e67ae10f-cf9a-40bc-8e66-6b3a8216956e"
+          },
+          "isBlocking": true,
+          "revision": 1
+        },
+        {
+          "id": 6,
+          "settings": {
+            "scope": [
+              {
+                "repositoryId": "20000000-0000-4000-8000-000000000001"
+              }
+            ],
+            "enforceConsistentCase": null,
+            "rejectDotGit": null,
+            "optimizedByDefault": null,
+            "breadcrumbDays": null,
+            "allowedForkTargets": null,
+            "gvfsOnly": null,
+            "gvfsExemptUsers": null,
+            "gvfsAllowedVersionRanges": null,
+            "detectRenameFalsePositivesByDefault": null,
+            "strictVoteMode": null,
+            "inheritPullRequestCreationMode": null,
+            "repoPullRequestAsDraftByDefault": null,
+            "repoPullRequestAutoCompleteByDefault": null,
+            "revertEnabled": null,
+            "copilotReviewerEnabled": true,
+            "copilotReviewEffortLevel": null,
+            "copilotReviewMcpEnabled": null
+          },
+          "isEnabled": true,
+          "type": {
+            "id": "7ed39669-655c-494e-b4a0-a08b4da0fcce"
+          },
+          "isBlocking": true,
+          "revision": 1
+        }
+      ],
+      "pullRequest": {
+        "targetRefName": "refs/heads/fixture-target",
+        "repository": {
+          "id": "20000000-0000-4000-8000-000000000001",
+          "project": {
+            "id": "30000000-0000-4000-8000-000000000001"
+          }
+        },
+        "isDraft": false,
+        "pullRequestId": 1,
+        "sourceRefName": "refs/heads/fixture-source",
+        "status": "active"
+      },
+      "reviewers": [],
+      "label": "baseline",
+      "autoComplete": false,
+      "sourceCommit": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "observedAt": "2026-01-01T00:27:04.6783986Z",
+      "evaluations": [],
+      "iterations": [
+        {
+          "sourceRefCommit": {
+            "commitId": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+          },
+          "author": {
+            "id": "10000000-0000-4000-8000-000000000001"
+          },
+          "targetRefCommit": {
+            "commitId": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+          },
+          "createdDate": "2026-01-01T00:00:00.0000000Z",
+          "updatedDate": "2026-01-01T00:00:00.0000000Z",
+          "reason": "push",
+          "id": 1,
+          "commonRefCommit": {
+            "commitId": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+          }
+        }
+      ],
+      "targetCommit": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+      "threads": []
+    },
+    {
+      "policies": [
+        {
+          "id": 1,
+          "settings": {
+            "maxPathLength": 248,
+            "scope": [
+              {
+                "repositoryId": null
+              }
+            ]
+          },
+          "isEnabled": false,
+          "type": {
+            "id": "001a79cf-fda1-4c4e-9e7c-bac40ee5ead8"
+          },
+          "isBlocking": true,
+          "revision": 2
+        },
+        {
+          "id": 2,
+          "settings": {
+            "scope": [
+              {
+                "repositoryId": null
+              }
+            ]
+          },
+          "isEnabled": false,
+          "type": {
+            "id": "db2b9b4c-180d-4529-9701-01541d19f36b"
+          },
+          "isBlocking": true,
+          "revision": 2
+        },
+        {
+          "id": 3,
+          "settings": {
+            "authorEmailPatterns": null,
+            "scope": [
+              {
+                "repositoryId": null
+              }
+            ]
+          },
+          "isEnabled": false,
+          "type": {
+            "id": "77ed4bd3-b063-4689-934a-175e4d0a78d7"
+          },
+          "isBlocking": true,
+          "revision": 2
+        },
+        {
+          "id": 4,
+          "settings": {
+            "suppressionFile": null,
+            "avoidThrowingErrors": null,
+            "scope": [
+              {
+                "repositoryId": "20000000-0000-4000-8000-000000000001"
+              }
+            ]
+          },
+          "isEnabled": true,
+          "type": {
+            "id": "e67ae10f-cf9a-40bc-8e66-6b3a8216956e"
+          },
+          "isBlocking": true,
+          "revision": 1
+        },
+        {
+          "id": 5,
+          "settings": {
+            "suppressionFile": null,
+            "avoidThrowingErrors": null,
+            "scope": [
+              {
+                "repositoryId": null
+              }
+            ]
+          },
+          "isEnabled": true,
+          "type": {
+            "id": "e67ae10f-cf9a-40bc-8e66-6b3a8216956e"
+          },
+          "isBlocking": true,
+          "revision": 1
+        },
+        {
+          "id": 6,
+          "settings": {
+            "scope": [
+              {
+                "repositoryId": "20000000-0000-4000-8000-000000000001"
+              }
+            ],
+            "enforceConsistentCase": null,
+            "rejectDotGit": null,
+            "optimizedByDefault": null,
+            "breadcrumbDays": null,
+            "allowedForkTargets": null,
+            "gvfsOnly": null,
+            "gvfsExemptUsers": null,
+            "gvfsAllowedVersionRanges": null,
+            "detectRenameFalsePositivesByDefault": null,
+            "strictVoteMode": null,
+            "inheritPullRequestCreationMode": null,
+            "repoPullRequestAsDraftByDefault": null,
+            "repoPullRequestAutoCompleteByDefault": null,
+            "revertEnabled": null,
+            "copilotReviewerEnabled": true,
+            "copilotReviewEffortLevel": null,
+            "copilotReviewMcpEnabled": null
+          },
+          "isEnabled": true,
+          "type": {
+            "id": "7ed39669-655c-494e-b4a0-a08b4da0fcce"
+          },
+          "isBlocking": true,
+          "revision": 1
+        }
+      ],
+      "pullRequest": {
+        "targetRefName": "refs/heads/fixture-target",
+        "repository": {
+          "id": "20000000-0000-4000-8000-000000000001",
+          "project": {
+            "id": "30000000-0000-4000-8000-000000000001"
+          }
+        },
+        "isDraft": false,
+        "pullRequestId": 1,
+        "sourceRefName": "refs/heads/fixture-source",
+        "status": "active"
+      },
+      "reviewers": [
+        {
+          "id": "10000000-0000-4000-8000-000000000001",
+          "vote": 10,
+          "isFlagged": false,
+          "hasDeclined": false
+        }
+      ],
+      "label": "approved",
+      "autoComplete": false,
+      "sourceCommit": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "observedAt": "2026-01-01T00:27:39.5126797Z",
+      "evaluations": [],
+      "iterations": [
+        {
+          "sourceRefCommit": {
+            "commitId": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+          },
+          "author": {
+            "id": "10000000-0000-4000-8000-000000000001"
+          },
+          "targetRefCommit": {
+            "commitId": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+          },
+          "createdDate": "2026-01-01T00:00:00.0000000Z",
+          "updatedDate": "2026-01-01T00:00:00.0000000Z",
+          "reason": "push",
+          "id": 1,
+          "commonRefCommit": {
+            "commitId": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+          }
+        }
+      ],
+      "targetCommit": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+      "threads": [
+        {
+          "id": 1,
+          "lastUpdatedDate": "2026-01-01T00:27:34.5055580Z",
+          "identities": {
+            "1": {
+              "id": "10000000-0000-4000-8000-000000000001"
+            }
+          },
+          "comments": [
+            {
+              "publishedDate": "2026-01-01T00:27:34.5055580Z",
+              "lastUpdatedDate": "2026-01-01T00:27:34.5055580Z",
+              "commentType": "system",
+              "id": 1
+            }
+          ],
+          "properties": {
+            "CodeReviewThreadType": {
+              "$type": "System.String",
+              "$value": "ReviewersUpdate"
+            },
+            "CodeReviewReviewersUpdatedNumAdded": {
+              "$type": "System.Int32",
+              "$value": 1
+            },
+            "CodeReviewReviewersUpdatedNumRemoved": {
+              "$type": "System.Int32",
+              "$value": 0
+            },
+            "CodeReviewReviewersUpdatedNumChanged": {
+              "$type": "System.Int32",
+              "$value": 0
+            },
+            "CodeReviewReviewersUpdatedNumDeclined": {
+              "$type": "System.Int32",
+              "$value": 0
+            },
+            "CodeReviewReviewersUpdatedAddedIdentity": {
+              "$type": "System.String",
+              "$value": "1"
+            },
+            "CodeReviewReviewersUpdatedByIdentity": {
+              "$type": "System.String",
+              "$value": "1"
+            }
+          },
+          "publishedDate": "2026-01-01T00:27:34.5055580Z"
+        },
+        {
+          "id": 2,
+          "lastUpdatedDate": "2026-01-01T00:27:34.5255580Z",
+          "identities": {
+            "1": {
+              "id": "10000000-0000-4000-8000-000000000001"
+            }
+          },
+          "comments": [
+            {
+              "publishedDate": "2026-01-01T00:27:34.5255580Z",
+              "lastUpdatedDate": "2026-01-01T00:27:34.5255580Z",
+              "commentType": "system",
+              "id": 1
+            }
+          ],
+          "properties": {
+            "CodeReviewThreadType": {
+              "$type": "System.String",
+              "$value": "VoteUpdate"
+            },
+            "CodeReviewVoteResult": {
+              "$type": "System.String",
+              "$value": "10"
+            },
+            "CodeReviewVotedByIdentity": {
+              "$type": "System.String",
+              "$value": "1"
+            },
+            "CodeReviewVotedByInitiatorIdentity": {
+              "$type": "System.String",
+              "$value": "1"
+            }
+          },
+          "publishedDate": "2026-01-01T00:27:34.5255580Z"
+        }
+      ]
+    },
+    {
+      "policies": [
+        {
+          "id": 1,
+          "settings": {
+            "maxPathLength": 248,
+            "scope": [
+              {
+                "repositoryId": null
+              }
+            ]
+          },
+          "isEnabled": false,
+          "type": {
+            "id": "001a79cf-fda1-4c4e-9e7c-bac40ee5ead8"
+          },
+          "isBlocking": true,
+          "revision": 2
+        },
+        {
+          "id": 2,
+          "settings": {
+            "scope": [
+              {
+                "repositoryId": null
+              }
+            ]
+          },
+          "isEnabled": false,
+          "type": {
+            "id": "db2b9b4c-180d-4529-9701-01541d19f36b"
+          },
+          "isBlocking": true,
+          "revision": 2
+        },
+        {
+          "id": 3,
+          "settings": {
+            "authorEmailPatterns": null,
+            "scope": [
+              {
+                "repositoryId": null
+              }
+            ]
+          },
+          "isEnabled": false,
+          "type": {
+            "id": "77ed4bd3-b063-4689-934a-175e4d0a78d7"
+          },
+          "isBlocking": true,
+          "revision": 2
+        },
+        {
+          "id": 4,
+          "settings": {
+            "suppressionFile": null,
+            "avoidThrowingErrors": null,
+            "scope": [
+              {
+                "repositoryId": "20000000-0000-4000-8000-000000000001"
+              }
+            ]
+          },
+          "isEnabled": true,
+          "type": {
+            "id": "e67ae10f-cf9a-40bc-8e66-6b3a8216956e"
+          },
+          "isBlocking": true,
+          "revision": 1
+        },
+        {
+          "id": 5,
+          "settings": {
+            "suppressionFile": null,
+            "avoidThrowingErrors": null,
+            "scope": [
+              {
+                "repositoryId": null
+              }
+            ]
+          },
+          "isEnabled": true,
+          "type": {
+            "id": "e67ae10f-cf9a-40bc-8e66-6b3a8216956e"
+          },
+          "isBlocking": true,
+          "revision": 1
+        },
+        {
+          "id": 6,
+          "settings": {
+            "scope": [
+              {
+                "repositoryId": "20000000-0000-4000-8000-000000000001"
+              }
+            ],
+            "enforceConsistentCase": null,
+            "rejectDotGit": null,
+            "optimizedByDefault": null,
+            "breadcrumbDays": null,
+            "allowedForkTargets": null,
+            "gvfsOnly": null,
+            "gvfsExemptUsers": null,
+            "gvfsAllowedVersionRanges": null,
+            "detectRenameFalsePositivesByDefault": null,
+            "strictVoteMode": null,
+            "inheritPullRequestCreationMode": null,
+            "repoPullRequestAsDraftByDefault": null,
+            "repoPullRequestAutoCompleteByDefault": null,
+            "revertEnabled": null,
+            "copilotReviewerEnabled": true,
+            "copilotReviewEffortLevel": null,
+            "copilotReviewMcpEnabled": null
+          },
+          "isEnabled": true,
+          "type": {
+            "id": "7ed39669-655c-494e-b4a0-a08b4da0fcce"
+          },
+          "isBlocking": true,
+          "revision": 1
+        }
+      ],
+      "pullRequest": {
+        "targetRefName": "refs/heads/fixture-target",
+        "repository": {
+          "id": "20000000-0000-4000-8000-000000000001",
+          "project": {
+            "id": "30000000-0000-4000-8000-000000000001"
+          }
+        },
+        "isDraft": false,
+        "pullRequestId": 1,
+        "sourceRefName": "refs/heads/fixture-source",
+        "status": "active"
+      },
+      "reviewers": [
+        {
+          "id": "10000000-0000-4000-8000-000000000001",
+          "vote": 10,
+          "isFlagged": false,
+          "hasDeclined": false
+        }
+      ],
+      "label": "source-updated",
+      "autoComplete": false,
+      "sourceCommit": "cccccccccccccccccccccccccccccccccccccccc",
+      "observedAt": "2026-01-01T00:28:54.2722451Z",
+      "evaluations": [],
+      "iterations": [
+        {
+          "sourceRefCommit": {
+            "commitId": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+          },
+          "author": {
+            "id": "10000000-0000-4000-8000-000000000001"
+          },
+          "targetRefCommit": {
+            "commitId": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+          },
+          "createdDate": "2026-01-01T00:00:00.0000000Z",
+          "updatedDate": "2026-01-01T00:00:00.0000000Z",
+          "reason": "push",
+          "id": 1,
+          "commonRefCommit": {
+            "commitId": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+          }
+        },
+        {
+          "sourceRefCommit": {
+            "commitId": "cccccccccccccccccccccccccccccccccccccccc"
+          },
+          "author": {
+            "id": "10000000-0000-4000-8000-000000000001"
+          },
+          "targetRefCommit": {
+            "commitId": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+          },
+          "createdDate": "2026-01-01T00:28:47.2835343Z",
+          "updatedDate": "2026-01-01T00:28:47.2835343Z",
+          "reason": "push",
+          "id": 2,
+          "commonRefCommit": {
+            "commitId": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+          }
+        }
+      ],
+      "targetCommit": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+      "threads": [
+        {
+          "id": 1,
+          "lastUpdatedDate": "2026-01-01T00:27:34.5055580Z",
+          "identities": {
+            "1": {
+              "id": "10000000-0000-4000-8000-000000000001"
+            }
+          },
+          "comments": [
+            {
+              "publishedDate": "2026-01-01T00:27:34.5055580Z",
+              "lastUpdatedDate": "2026-01-01T00:27:34.5055580Z",
+              "commentType": "system",
+              "id": 1
+            }
+          ],
+          "properties": {
+            "CodeReviewThreadType": {
+              "$type": "System.String",
+              "$value": "ReviewersUpdate"
+            },
+            "CodeReviewReviewersUpdatedNumAdded": {
+              "$type": "System.Int32",
+              "$value": 1
+            },
+            "CodeReviewReviewersUpdatedNumRemoved": {
+              "$type": "System.Int32",
+              "$value": 0
+            },
+            "CodeReviewReviewersUpdatedNumChanged": {
+              "$type": "System.Int32",
+              "$value": 0
+            },
+            "CodeReviewReviewersUpdatedNumDeclined": {
+              "$type": "System.Int32",
+              "$value": 0
+            },
+            "CodeReviewReviewersUpdatedAddedIdentity": {
+              "$type": "System.String",
+              "$value": "1"
+            },
+            "CodeReviewReviewersUpdatedByIdentity": {
+              "$type": "System.String",
+              "$value": "1"
+            }
+          },
+          "publishedDate": "2026-01-01T00:27:34.5055580Z"
+        },
+        {
+          "id": 2,
+          "lastUpdatedDate": "2026-01-01T00:27:34.5255580Z",
+          "identities": {
+            "1": {
+              "id": "10000000-0000-4000-8000-000000000001"
+            }
+          },
+          "comments": [
+            {
+              "publishedDate": "2026-01-01T00:27:34.5255580Z",
+              "lastUpdatedDate": "2026-01-01T00:27:34.5255580Z",
+              "commentType": "system",
+              "id": 1
+            }
+          ],
+          "properties": {
+            "CodeReviewThreadType": {
+              "$type": "System.String",
+              "$value": "VoteUpdate"
+            },
+            "CodeReviewVoteResult": {
+              "$type": "System.String",
+              "$value": "10"
+            },
+            "CodeReviewVotedByIdentity": {
+              "$type": "System.String",
+              "$value": "1"
+            },
+            "CodeReviewVotedByInitiatorIdentity": {
+              "$type": "System.String",
+              "$value": "1"
+            }
+          },
+          "publishedDate": "2026-01-01T00:27:34.5255580Z"
+        },
+        {
+          "id": 3,
+          "lastUpdatedDate": "2026-01-01T00:28:47.3715580Z",
+          "identities": {
+            "1": {
+              "id": "10000000-0000-4000-8000-000000000001"
+            }
+          },
+          "comments": [
+            {
+              "publishedDate": "2026-01-01T00:28:47.3715580Z",
+              "lastUpdatedDate": "2026-01-01T00:28:47.3715580Z",
+              "commentType": "system",
+              "id": 1
+            }
+          ],
+          "properties": {
+            "CodeReviewThreadType": {
+              "$type": "System.String",
+              "$value": "RefUpdate"
+            },
+            "CodeReviewRefName": {
+              "$type": "System.String",
+              "$value": "refs/heads/fixture-source"
+            },
+            "CodeReviewRefNewCommits": {
+              "$type": "System.String",
+              "$value": "cccccccccccccccccccccccccccccccccccccccc"
+            },
+            "CodeReviewRefNewCommitsCount": {
+              "$type": "System.Int32",
+              "$value": 1
+            },
+            "CodeReviewRefNewHeadCommit": {
+              "$type": "System.String",
+              "$value": "cccccccccccccccccccccccccccccccccccccccc"
+            },
+            "CodeReviewRefUpdatedByIdentity": {
+              "$type": "System.String",
+              "$value": "1"
+            }
+          },
+          "publishedDate": "2026-01-01T00:28:47.3715580Z"
+        }
+      ]
+    },
+    {
+      "policies": [
+        {
+          "id": 1,
+          "settings": {
+            "maxPathLength": 248,
+            "scope": [
+              {
+                "repositoryId": null
+              }
+            ]
+          },
+          "isEnabled": false,
+          "type": {
+            "id": "001a79cf-fda1-4c4e-9e7c-bac40ee5ead8"
+          },
+          "isBlocking": true,
+          "revision": 2
+        },
+        {
+          "id": 2,
+          "settings": {
+            "scope": [
+              {
+                "repositoryId": null
+              }
+            ]
+          },
+          "isEnabled": false,
+          "type": {
+            "id": "db2b9b4c-180d-4529-9701-01541d19f36b"
+          },
+          "isBlocking": true,
+          "revision": 2
+        },
+        {
+          "id": 3,
+          "settings": {
+            "authorEmailPatterns": null,
+            "scope": [
+              {
+                "repositoryId": null
+              }
+            ]
+          },
+          "isEnabled": false,
+          "type": {
+            "id": "77ed4bd3-b063-4689-934a-175e4d0a78d7"
+          },
+          "isBlocking": true,
+          "revision": 2
+        },
+        {
+          "id": 4,
+          "settings": {
+            "suppressionFile": null,
+            "avoidThrowingErrors": null,
+            "scope": [
+              {
+                "repositoryId": "20000000-0000-4000-8000-000000000001"
+              }
+            ]
+          },
+          "isEnabled": true,
+          "type": {
+            "id": "e67ae10f-cf9a-40bc-8e66-6b3a8216956e"
+          },
+          "isBlocking": true,
+          "revision": 1
+        },
+        {
+          "id": 5,
+          "settings": {
+            "suppressionFile": null,
+            "avoidThrowingErrors": null,
+            "scope": [
+              {
+                "repositoryId": null
+              }
+            ]
+          },
+          "isEnabled": true,
+          "type": {
+            "id": "e67ae10f-cf9a-40bc-8e66-6b3a8216956e"
+          },
+          "isBlocking": true,
+          "revision": 1
+        },
+        {
+          "id": 6,
+          "settings": {
+            "scope": [
+              {
+                "repositoryId": "20000000-0000-4000-8000-000000000001"
+              }
+            ],
+            "enforceConsistentCase": null,
+            "rejectDotGit": null,
+            "optimizedByDefault": null,
+            "breadcrumbDays": null,
+            "allowedForkTargets": null,
+            "gvfsOnly": null,
+            "gvfsExemptUsers": null,
+            "gvfsAllowedVersionRanges": null,
+            "detectRenameFalsePositivesByDefault": null,
+            "strictVoteMode": null,
+            "inheritPullRequestCreationMode": null,
+            "repoPullRequestAsDraftByDefault": null,
+            "repoPullRequestAutoCompleteByDefault": null,
+            "revertEnabled": null,
+            "copilotReviewerEnabled": true,
+            "copilotReviewEffortLevel": null,
+            "copilotReviewMcpEnabled": null
+          },
+          "isEnabled": true,
+          "type": {
+            "id": "7ed39669-655c-494e-b4a0-a08b4da0fcce"
+          },
+          "isBlocking": true,
+          "revision": 1
+        }
+      ],
+      "pullRequest": {
+        "targetRefName": "refs/heads/fixture-target",
+        "repository": {
+          "id": "20000000-0000-4000-8000-000000000001",
+          "project": {
+            "id": "30000000-0000-4000-8000-000000000001"
+          }
+        },
+        "isDraft": false,
+        "pullRequestId": 1,
+        "sourceRefName": "refs/heads/fixture-source",
+        "status": "active"
+      },
+      "reviewers": [
+        {
+          "id": "10000000-0000-4000-8000-000000000001",
+          "vote": 10,
+          "isFlagged": false,
+          "hasDeclined": false
+        }
+      ],
+      "label": "source-cleaned",
+      "autoComplete": false,
+      "sourceCommit": "dddddddddddddddddddddddddddddddddddddddd",
+      "observedAt": "2026-01-01T00:29:46.4925715Z",
+      "evaluations": [],
+      "iterations": [
+        {
+          "sourceRefCommit": {
+            "commitId": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+          },
+          "author": {
+            "id": "10000000-0000-4000-8000-000000000001"
+          },
+          "targetRefCommit": {
+            "commitId": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+          },
+          "createdDate": "2026-01-01T00:00:00.0000000Z",
+          "updatedDate": "2026-01-01T00:00:00.0000000Z",
+          "reason": "push",
+          "id": 1,
+          "commonRefCommit": {
+            "commitId": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+          }
+        },
+        {
+          "sourceRefCommit": {
+            "commitId": "cccccccccccccccccccccccccccccccccccccccc"
+          },
+          "author": {
+            "id": "10000000-0000-4000-8000-000000000001"
+          },
+          "targetRefCommit": {
+            "commitId": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+          },
+          "createdDate": "2026-01-01T00:28:47.2835343Z",
+          "updatedDate": "2026-01-01T00:28:47.2835343Z",
+          "reason": "push",
+          "id": 2,
+          "commonRefCommit": {
+            "commitId": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+          }
+        },
+        {
+          "sourceRefCommit": {
+            "commitId": "dddddddddddddddddddddddddddddddddddddddd"
+          },
+          "author": {
+            "id": "10000000-0000-4000-8000-000000000001"
+          },
+          "targetRefCommit": {
+            "commitId": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+          },
+          "createdDate": "2026-01-01T00:29:38.8843566Z",
+          "updatedDate": "2026-01-01T00:29:38.8843566Z",
+          "reason": "push",
+          "id": 3,
+          "commonRefCommit": {
+            "commitId": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+          }
+        }
+      ],
+      "targetCommit": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+      "threads": [
+        {
+          "id": 1,
+          "lastUpdatedDate": "2026-01-01T00:27:34.5055580Z",
+          "identities": {
+            "1": {
+              "id": "10000000-0000-4000-8000-000000000001"
+            }
+          },
+          "comments": [
+            {
+              "publishedDate": "2026-01-01T00:27:34.5055580Z",
+              "lastUpdatedDate": "2026-01-01T00:27:34.5055580Z",
+              "commentType": "system",
+              "id": 1
+            }
+          ],
+          "properties": {
+            "CodeReviewThreadType": {
+              "$type": "System.String",
+              "$value": "ReviewersUpdate"
+            },
+            "CodeReviewReviewersUpdatedNumAdded": {
+              "$type": "System.Int32",
+              "$value": 1
+            },
+            "CodeReviewReviewersUpdatedNumRemoved": {
+              "$type": "System.Int32",
+              "$value": 0
+            },
+            "CodeReviewReviewersUpdatedNumChanged": {
+              "$type": "System.Int32",
+              "$value": 0
+            },
+            "CodeReviewReviewersUpdatedNumDeclined": {
+              "$type": "System.Int32",
+              "$value": 0
+            },
+            "CodeReviewReviewersUpdatedAddedIdentity": {
+              "$type": "System.String",
+              "$value": "1"
+            },
+            "CodeReviewReviewersUpdatedByIdentity": {
+              "$type": "System.String",
+              "$value": "1"
+            }
+          },
+          "publishedDate": "2026-01-01T00:27:34.5055580Z"
+        },
+        {
+          "id": 2,
+          "lastUpdatedDate": "2026-01-01T00:27:34.5255580Z",
+          "identities": {
+            "1": {
+              "id": "10000000-0000-4000-8000-000000000001"
+            }
+          },
+          "comments": [
+            {
+              "publishedDate": "2026-01-01T00:27:34.5255580Z",
+              "lastUpdatedDate": "2026-01-01T00:27:34.5255580Z",
+              "commentType": "system",
+              "id": 1
+            }
+          ],
+          "properties": {
+            "CodeReviewThreadType": {
+              "$type": "System.String",
+              "$value": "VoteUpdate"
+            },
+            "CodeReviewVoteResult": {
+              "$type": "System.String",
+              "$value": "10"
+            },
+            "CodeReviewVotedByIdentity": {
+              "$type": "System.String",
+              "$value": "1"
+            },
+            "CodeReviewVotedByInitiatorIdentity": {
+              "$type": "System.String",
+              "$value": "1"
+            }
+          },
+          "publishedDate": "2026-01-01T00:27:34.5255580Z"
+        },
+        {
+          "id": 3,
+          "lastUpdatedDate": "2026-01-01T00:28:47.3715580Z",
+          "identities": {
+            "1": {
+              "id": "10000000-0000-4000-8000-000000000001"
+            }
+          },
+          "comments": [
+            {
+              "publishedDate": "2026-01-01T00:28:47.3715580Z",
+              "lastUpdatedDate": "2026-01-01T00:28:47.3715580Z",
+              "commentType": "system",
+              "id": 1
+            }
+          ],
+          "properties": {
+            "CodeReviewThreadType": {
+              "$type": "System.String",
+              "$value": "RefUpdate"
+            },
+            "CodeReviewRefName": {
+              "$type": "System.String",
+              "$value": "refs/heads/fixture-source"
+            },
+            "CodeReviewRefNewCommits": {
+              "$type": "System.String",
+              "$value": "cccccccccccccccccccccccccccccccccccccccc"
+            },
+            "CodeReviewRefNewCommitsCount": {
+              "$type": "System.Int32",
+              "$value": 1
+            },
+            "CodeReviewRefNewHeadCommit": {
+              "$type": "System.String",
+              "$value": "cccccccccccccccccccccccccccccccccccccccc"
+            },
+            "CodeReviewRefUpdatedByIdentity": {
+              "$type": "System.String",
+              "$value": "1"
+            }
+          },
+          "publishedDate": "2026-01-01T00:28:47.3715580Z"
+        },
+        {
+          "id": 4,
+          "lastUpdatedDate": "2026-01-01T00:29:39.0685580Z",
+          "identities": {
+            "1": {
+              "id": "10000000-0000-4000-8000-000000000001"
+            }
+          },
+          "comments": [
+            {
+              "publishedDate": "2026-01-01T00:29:39.0685580Z",
+              "lastUpdatedDate": "2026-01-01T00:29:39.0685580Z",
+              "commentType": "system",
+              "id": 1
+            }
+          ],
+          "properties": {
+            "CodeReviewThreadType": {
+              "$type": "System.String",
+              "$value": "RefUpdate"
+            },
+            "CodeReviewRefName": {
+              "$type": "System.String",
+              "$value": "refs/heads/fixture-source"
+            },
+            "CodeReviewRefNewCommits": {
+              "$type": "System.String",
+              "$value": "dddddddddddddddddddddddddddddddddddddddd"
+            },
+            "CodeReviewRefNewCommitsCount": {
+              "$type": "System.Int32",
+              "$value": 1
+            },
+            "CodeReviewRefNewHeadCommit": {
+              "$type": "System.String",
+              "$value": "dddddddddddddddddddddddddddddddddddddddd"
+            },
+            "CodeReviewRefUpdatedByIdentity": {
+              "$type": "System.String",
+              "$value": "1"
+            }
+          },
+          "publishedDate": "2026-01-01T00:29:39.0685580Z"
+        }
+      ]
+    },
+    {
+      "policies": [
+        {
+          "id": 1,
+          "settings": {
+            "maxPathLength": 248,
+            "scope": [
+              {
+                "repositoryId": null
+              }
+            ]
+          },
+          "isEnabled": false,
+          "type": {
+            "id": "001a79cf-fda1-4c4e-9e7c-bac40ee5ead8"
+          },
+          "isBlocking": true,
+          "revision": 2
+        },
+        {
+          "id": 2,
+          "settings": {
+            "scope": [
+              {
+                "repositoryId": null
+              }
+            ]
+          },
+          "isEnabled": false,
+          "type": {
+            "id": "db2b9b4c-180d-4529-9701-01541d19f36b"
+          },
+          "isBlocking": true,
+          "revision": 2
+        },
+        {
+          "id": 3,
+          "settings": {
+            "authorEmailPatterns": null,
+            "scope": [
+              {
+                "repositoryId": null
+              }
+            ]
+          },
+          "isEnabled": false,
+          "type": {
+            "id": "77ed4bd3-b063-4689-934a-175e4d0a78d7"
+          },
+          "isBlocking": true,
+          "revision": 2
+        },
+        {
+          "id": 4,
+          "settings": {
+            "suppressionFile": null,
+            "avoidThrowingErrors": null,
+            "scope": [
+              {
+                "repositoryId": "20000000-0000-4000-8000-000000000001"
+              }
+            ]
+          },
+          "isEnabled": true,
+          "type": {
+            "id": "e67ae10f-cf9a-40bc-8e66-6b3a8216956e"
+          },
+          "isBlocking": true,
+          "revision": 1
+        },
+        {
+          "id": 5,
+          "settings": {
+            "suppressionFile": null,
+            "avoidThrowingErrors": null,
+            "scope": [
+              {
+                "repositoryId": null
+              }
+            ]
+          },
+          "isEnabled": true,
+          "type": {
+            "id": "e67ae10f-cf9a-40bc-8e66-6b3a8216956e"
+          },
+          "isBlocking": true,
+          "revision": 1
+        },
+        {
+          "id": 6,
+          "settings": {
+            "scope": [
+              {
+                "repositoryId": "20000000-0000-4000-8000-000000000001"
+              }
+            ],
+            "enforceConsistentCase": null,
+            "rejectDotGit": null,
+            "optimizedByDefault": null,
+            "breadcrumbDays": null,
+            "allowedForkTargets": null,
+            "gvfsOnly": null,
+            "gvfsExemptUsers": null,
+            "gvfsAllowedVersionRanges": null,
+            "detectRenameFalsePositivesByDefault": null,
+            "strictVoteMode": null,
+            "inheritPullRequestCreationMode": null,
+            "repoPullRequestAsDraftByDefault": null,
+            "repoPullRequestAutoCompleteByDefault": null,
+            "revertEnabled": null,
+            "copilotReviewerEnabled": true,
+            "copilotReviewEffortLevel": null,
+            "copilotReviewMcpEnabled": null
+          },
+          "isEnabled": true,
+          "type": {
+            "id": "7ed39669-655c-494e-b4a0-a08b4da0fcce"
+          },
+          "isBlocking": true,
+          "revision": 1
+        }
+      ],
+      "pullRequest": {
+        "targetRefName": "refs/heads/fixture-target",
+        "repository": {
+          "id": "20000000-0000-4000-8000-000000000001",
+          "project": {
+            "id": "30000000-0000-4000-8000-000000000001"
+          }
+        },
+        "isDraft": false,
+        "pullRequestId": 1,
+        "sourceRefName": "refs/heads/fixture-source",
+        "status": "active"
+      },
+      "reviewers": [],
+      "label": "reviewer-removed",
+      "autoComplete": false,
+      "sourceCommit": "dddddddddddddddddddddddddddddddddddddddd",
+      "observedAt": "2026-01-01T00:30:13.4644153Z",
+      "evaluations": [],
+      "iterations": [
+        {
+          "sourceRefCommit": {
+            "commitId": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+          },
+          "author": {
+            "id": "10000000-0000-4000-8000-000000000001"
+          },
+          "targetRefCommit": {
+            "commitId": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+          },
+          "createdDate": "2026-01-01T00:00:00.0000000Z",
+          "updatedDate": "2026-01-01T00:00:00.0000000Z",
+          "reason": "push",
+          "id": 1,
+          "commonRefCommit": {
+            "commitId": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+          }
+        },
+        {
+          "sourceRefCommit": {
+            "commitId": "cccccccccccccccccccccccccccccccccccccccc"
+          },
+          "author": {
+            "id": "10000000-0000-4000-8000-000000000001"
+          },
+          "targetRefCommit": {
+            "commitId": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+          },
+          "createdDate": "2026-01-01T00:28:47.2835343Z",
+          "updatedDate": "2026-01-01T00:28:47.2835343Z",
+          "reason": "push",
+          "id": 2,
+          "commonRefCommit": {
+            "commitId": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+          }
+        },
+        {
+          "sourceRefCommit": {
+            "commitId": "dddddddddddddddddddddddddddddddddddddddd"
+          },
+          "author": {
+            "id": "10000000-0000-4000-8000-000000000001"
+          },
+          "targetRefCommit": {
+            "commitId": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+          },
+          "createdDate": "2026-01-01T00:29:38.8843566Z",
+          "updatedDate": "2026-01-01T00:29:38.8843566Z",
+          "reason": "push",
+          "id": 3,
+          "commonRefCommit": {
+            "commitId": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+          }
+        }
+      ],
+      "targetCommit": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+      "threads": [
+        {
+          "id": 1,
+          "lastUpdatedDate": "2026-01-01T00:27:34.5055580Z",
+          "identities": {
+            "1": {
+              "id": "10000000-0000-4000-8000-000000000001"
+            }
+          },
+          "comments": [
+            {
+              "publishedDate": "2026-01-01T00:27:34.5055580Z",
+              "lastUpdatedDate": "2026-01-01T00:27:34.5055580Z",
+              "commentType": "system",
+              "id": 1
+            }
+          ],
+          "properties": {
+            "CodeReviewThreadType": {
+              "$type": "System.String",
+              "$value": "ReviewersUpdate"
+            },
+            "CodeReviewReviewersUpdatedNumAdded": {
+              "$type": "System.Int32",
+              "$value": 1
+            },
+            "CodeReviewReviewersUpdatedNumRemoved": {
+              "$type": "System.Int32",
+              "$value": 0
+            },
+            "CodeReviewReviewersUpdatedNumChanged": {
+              "$type": "System.Int32",
+              "$value": 0
+            },
+            "CodeReviewReviewersUpdatedNumDeclined": {
+              "$type": "System.Int32",
+              "$value": 0
+            },
+            "CodeReviewReviewersUpdatedAddedIdentity": {
+              "$type": "System.String",
+              "$value": "1"
+            },
+            "CodeReviewReviewersUpdatedByIdentity": {
+              "$type": "System.String",
+              "$value": "1"
+            }
+          },
+          "publishedDate": "2026-01-01T00:27:34.5055580Z"
+        },
+        {
+          "id": 2,
+          "lastUpdatedDate": "2026-01-01T00:27:34.5255580Z",
+          "identities": {
+            "1": {
+              "id": "10000000-0000-4000-8000-000000000001"
+            }
+          },
+          "comments": [
+            {
+              "publishedDate": "2026-01-01T00:27:34.5255580Z",
+              "lastUpdatedDate": "2026-01-01T00:27:34.5255580Z",
+              "commentType": "system",
+              "id": 1
+            }
+          ],
+          "properties": {
+            "CodeReviewThreadType": {
+              "$type": "System.String",
+              "$value": "VoteUpdate"
+            },
+            "CodeReviewVoteResult": {
+              "$type": "System.String",
+              "$value": "10"
+            },
+            "CodeReviewVotedByIdentity": {
+              "$type": "System.String",
+              "$value": "1"
+            },
+            "CodeReviewVotedByInitiatorIdentity": {
+              "$type": "System.String",
+              "$value": "1"
+            }
+          },
+          "publishedDate": "2026-01-01T00:27:34.5255580Z"
+        },
+        {
+          "id": 3,
+          "lastUpdatedDate": "2026-01-01T00:28:47.3715580Z",
+          "identities": {
+            "1": {
+              "id": "10000000-0000-4000-8000-000000000001"
+            }
+          },
+          "comments": [
+            {
+              "publishedDate": "2026-01-01T00:28:47.3715580Z",
+              "lastUpdatedDate": "2026-01-01T00:28:47.3715580Z",
+              "commentType": "system",
+              "id": 1
+            }
+          ],
+          "properties": {
+            "CodeReviewThreadType": {
+              "$type": "System.String",
+              "$value": "RefUpdate"
+            },
+            "CodeReviewRefName": {
+              "$type": "System.String",
+              "$value": "refs/heads/fixture-source"
+            },
+            "CodeReviewRefNewCommits": {
+              "$type": "System.String",
+              "$value": "cccccccccccccccccccccccccccccccccccccccc"
+            },
+            "CodeReviewRefNewCommitsCount": {
+              "$type": "System.Int32",
+              "$value": 1
+            },
+            "CodeReviewRefNewHeadCommit": {
+              "$type": "System.String",
+              "$value": "cccccccccccccccccccccccccccccccccccccccc"
+            },
+            "CodeReviewRefUpdatedByIdentity": {
+              "$type": "System.String",
+              "$value": "1"
+            }
+          },
+          "publishedDate": "2026-01-01T00:28:47.3715580Z"
+        },
+        {
+          "id": 4,
+          "lastUpdatedDate": "2026-01-01T00:29:39.0685580Z",
+          "identities": {
+            "1": {
+              "id": "10000000-0000-4000-8000-000000000001"
+            }
+          },
+          "comments": [
+            {
+              "publishedDate": "2026-01-01T00:29:39.0685580Z",
+              "lastUpdatedDate": "2026-01-01T00:29:39.0685580Z",
+              "commentType": "system",
+              "id": 1
+            }
+          ],
+          "properties": {
+            "CodeReviewThreadType": {
+              "$type": "System.String",
+              "$value": "RefUpdate"
+            },
+            "CodeReviewRefName": {
+              "$type": "System.String",
+              "$value": "refs/heads/fixture-source"
+            },
+            "CodeReviewRefNewCommits": {
+              "$type": "System.String",
+              "$value": "dddddddddddddddddddddddddddddddddddddddd"
+            },
+            "CodeReviewRefNewCommitsCount": {
+              "$type": "System.Int32",
+              "$value": 1
+            },
+            "CodeReviewRefNewHeadCommit": {
+              "$type": "System.String",
+              "$value": "dddddddddddddddddddddddddddddddddddddddd"
+            },
+            "CodeReviewRefUpdatedByIdentity": {
+              "$type": "System.String",
+              "$value": "1"
+            }
+          },
+          "publishedDate": "2026-01-01T00:29:39.0685580Z"
+        },
+        {
+          "id": 5,
+          "lastUpdatedDate": "2026-01-01T00:30:07.0985580Z",
+          "identities": {
+            "1": {
+              "id": "10000000-0000-4000-8000-000000000001"
+            }
+          },
+          "comments": [
+            {
+              "publishedDate": "2026-01-01T00:30:07.0985580Z",
+              "lastUpdatedDate": "2026-01-01T00:30:07.0985580Z",
+              "commentType": "system",
+              "id": 1
+            }
+          ],
+          "properties": {
+            "CodeReviewThreadType": {
+              "$type": "System.String",
+              "$value": "ReviewersUpdate"
+            },
+            "CodeReviewReviewersUpdatedNumAdded": {
+              "$type": "System.Int32",
+              "$value": 0
+            },
+            "CodeReviewReviewersUpdatedNumRemoved": {
+              "$type": "System.Int32",
+              "$value": 1
+            },
+            "CodeReviewReviewersUpdatedNumChanged": {
+              "$type": "System.Int32",
+              "$value": 0
+            },
+            "CodeReviewReviewersUpdatedNumDeclined": {
+              "$type": "System.Int32",
+              "$value": 0
+            },
+            "CodeReviewReviewersUpdatedByIdentity": {
+              "$type": "System.String",
+              "$value": "1"
+            },
+            "CodeReviewReviewersUpdatedRemovedIdentity": {
+              "$type": "System.String",
+              "$value": "1"
+            }
+          },
+          "publishedDate": "2026-01-01T00:30:07.0985580Z"
+        }
+      ]
+    }
+  ]
+}
