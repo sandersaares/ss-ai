@@ -9,13 +9,13 @@ _default:
 #   just test
 #   just test -FullNameFilter '*Get-SectionInfo*'
 test *ARGS:
-    Invoke-Pester ./tests/ {{ARGS}}
+    Invoke-Pester -Path ./tests/ -EnableExit {{ARGS}}
 
 # Run Pester tests for one skill. Extra args are forwarded to Invoke-Pester.
 #   just test-skill ss-cargo-deps-tidy
 #   just test-skill ss-cargo-deps-tidy -FullNameFilter '*Get-SectionInfo*'
 test-skill SKILL *ARGS:
-    Invoke-Pester ./tests/{{SKILL}}/ {{ARGS}}
+    Invoke-Pester -Path ./tests/{{SKILL}}/ -EnableExit {{ARGS}}
 
 # Run a single eval spec. Extra args are forwarded to `waza run`.
 #   just eval evals/ss-cargo-deps-tidy/trigger.eval.yaml

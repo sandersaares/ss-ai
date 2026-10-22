@@ -167,7 +167,7 @@ foreach ($dep in @($inv.dependencies | Where-Object {
 function Has-Prop {
     param($Obj, [string]$Name)
     if ($null -eq $Obj) { return $false }
-    return [bool]($Obj.PSObject.Properties.Match($Name))
+    return $Obj.PSObject.Properties.Match($Name).Count -gt 0
 }
 
 if ((Has-Prop $expectations 'centralized_deps') -and $expectations.centralized_deps) {
