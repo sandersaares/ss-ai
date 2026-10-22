@@ -77,6 +77,8 @@ service events and complete source iterations. An individual's `votedFor`
 entries describe contributions to groups; they do not turn the individual's
 own vote into an unsupported group vote. Routine policy, auto-complete, and
 draft activity does not change approval authority.
+System notifications with null or omitted property bags do not supply vote,
+reset, or reviewer authority. Inspection does not interpret their prose.
 
 Minimum-reviewer evaluations identify applicable policy configurations. Their
 settings must agree with the captured configurations. Inspection combines
@@ -132,6 +134,13 @@ provider inspection. `github_approval.rs` joins complete REST reviews to the
 cursor-paged GraphQL history; filtered timeline totals are not pagination limits.
 `ado_approval.rs` validates structured actors, source iterations, and policy
 pages. Both fence repeated complete observations before deriving authority.
+ADO system comments without a property bag may remain untyped notifications
+only when they have no nonempty identity mappings. Present property bags require
+a typed `CodeReviewThreadType`; retained identity evidence without that discriminator
+is incomplete structured history. Required event properties remain strict, and
+diagnostics identify the thread and missing typed evidence. Notifications remain
+in the captured observations, and neither excuse current-vote/history mismatches
+nor bypass system-event timestamp validation.
 
 REST `COMMENTED` reviews may lack a GraphQL timeline review node. They remain
 in the captured evidence and receive normal identity, submission-time, body,

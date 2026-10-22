@@ -52,6 +52,8 @@ Reviewer removal, withdrawals, and negative decisions prevent using old
 authority. Missing reset causality, unknown policy settings, and uninterpretable
 history are explicit tooling failures, never successful unresolved outcomes.
 Current reset settings and a later push alone do not prove why a vote is zero.
+Routine untyped system notifications do not change approval standing or supply
+vote-reset authority.
 
 Inspection does not create or renew approvals. It emits bounded terminal
 outcomes and leaves failed evidence explicit. A new run obtains

@@ -963,6 +963,62 @@ fn ado_inspection_preserves_verified_retention_and_removal_in_both_modes() {
 }
 
 #[test]
+fn ado_inspection_persists_untyped_notifications_without_losing_approval_authority() {
+    for properties in [Some(Value::Null), None] {
+        let root = fixture();
+        // A retained vote after a push exercises both typed votes and routine notices.
+        let mut provider = AzureApproval::new(2);
+        let mut notification = json!({
+            "id": "routine-notification",
+            "isDeleted": false,
+            "status": "closed",
+            "publishedDate": "2026-01-01T12:00:00Z",
+            "comments": [{"commentType": "system", "content": "No code change or vote reset."}]
+        });
+        if let Some(properties) = properties {
+            notification["properties"] = properties;
+        }
+        provider.fixture["stages"][2]["threads"]
+            .as_array_mut()
+            .unwrap()
+            .push(notification.clone());
+        discover_azure_approval(root.path(), &provider, true);
+        let output: Value = serde_json::from_str(
+            &run(
+                &inspect_arguments(root.path(), 1),
+                &AzureToken,
+                &provider,
+                &FixedClock,
+            )
+            .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(output["state"], "complete");
+        assert_eq!(output["items"][0]["status"], "alreadyValid");
+        assert_eq!(output["items"][0]["approvalEventId"], "2");
+        assert_eq!(output["counts"]["failed"], 0);
+        let saved = record(root.path());
+        let inspection = &saved["inventory"][0]["inspection"];
+        assert!(inspection["error"].is_null());
+        assert!(inspection["snapshotDigest"].is_string());
+        assert!(
+            inspection["evidence"]["observation"]["threads"]
+                .as_array()
+                .unwrap()
+                .contains(&notification)
+        );
+        // Result consumption revalidates the persisted observation and decision.
+        run(
+            &result_arguments(root.path()),
+            &NoProcess,
+            &NoHttp,
+            &FixedClock,
+        )
+        .unwrap();
+    }
+}
+
+#[test]
 fn ado_ordinary_policies_preserve_individual_votes_and_bind_assessment_anchors() {
     for (stage, expected) in [
         (0, "noPriorApproval"),

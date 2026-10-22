@@ -3,7 +3,7 @@ use std::collections::HashSet;
 use jiff::Timestamp;
 use ohno::AppError;
 use serde::{Deserialize, Serialize};
-use serde_json::{Value, json};
+use serde_json::{Map, Value, json};
 
 use crate::api::Api;
 use crate::approval::Decision;
@@ -583,20 +583,55 @@ fn ordered_events(threads: &[Value], now: Timestamp) -> Result<Vec<Event<'_>>, A
         if !system {
             continue;
         }
-        let kind = property(thread, "CodeReviewThreadType", "System.String")?;
         let at = timestamp(text(field(thread, "publishedDate")?)?)?;
         if at > now {
             return Err(fail("service", "Future ADO system event"));
         }
+        let Some(kind) = system_event_kind(thread)? else {
+            continue;
+        };
         events.push(Event {
             id: identifier(field(thread, "id")?)?,
             at,
             value: thread,
-            kind: text(kind)?,
+            kind,
         });
     }
     events.sort_by_key(|event| event.at);
     Ok(events)
+}
+
+/// Separates untyped notifications from incomplete structured authority evidence.
+fn system_event_kind(thread: &Value) -> Result<Option<&str>, AppError> {
+    let id = identifier(field(thread, "id")?)?;
+    if thread.get("properties").is_none_or(Value::is_null) {
+        // Untyped notifications carry no vote/reset authority. Retained identity
+        // mappings instead indicate incomplete structured evidence (docs/reapproval.md).
+        if thread.get("identities").is_some_and(|identities| {
+            !identities.is_null() && !identities.as_object().is_some_and(Map::is_empty)
+        }) {
+            return Err(fail(
+                "service",
+                format!(
+                    "ADO system thread {id} has identity evidence but lacks properties.CodeReviewThreadType; \
+                     cannot establish vote/reviewer authority"
+                ),
+            ));
+        }
+        return Ok(None);
+    }
+    text(property(thread, "CodeReviewThreadType", "System.String")?)
+        .map(Some)
+        .map_err(|error| {
+            Failure::caused_by(
+                "service",
+                format!(
+                    "ADO system thread {id} requires a string properties.CodeReviewThreadType to classify authority"
+                ),
+                error,
+            )
+            .into()
+        })
 }
 
 /// Latest explicit decisions and removals supersede every older positive event.
@@ -795,12 +830,26 @@ fn iteration_at(iterations: &[Value], at: Timestamp) -> Result<&Value, AppError>
     })
 }
 
+/// Keeps required typed evidence strict and identifies the incomplete event.
 fn property<'a>(event: &'a Value, name: &str, kind: &str) -> Result<&'a Value, AppError> {
-    let property = field(field(event, "properties")?, name)?;
-    if text(field(property, "$type")?)? != kind {
-        return Err(fail("service", "Unrecognized ADO property wrapper"));
-    }
-    field(property, "$value")
+    let read = || {
+        let property = field(field(event, "properties")?, name)?;
+        if text(field(property, "$type")?)? != kind {
+            return Err(fail("service", "Unrecognized ADO property wrapper"));
+        }
+        field(property, "$value")
+    };
+    read().map_err(|error| {
+        Failure::caused_by(
+            "service",
+            format!(
+                "ADO system thread {} requires properties.{name} with {kind} authority evidence",
+                event.get("id").unwrap_or(&Value::Null)
+            ),
+            error,
+        )
+        .into()
+    })
 }
 
 fn actor<'a>(event: &'a Value, name: &str) -> Result<&'a str, AppError> {
@@ -1067,6 +1116,172 @@ mod tests {
         value["reviewers"] = json!([]);
         value["threads"][1]["identities"]["1"]["id"] = json!("other-account");
         assert_eq!(decide(value).unwrap(), Decision::NoPriorApproval);
+    }
+
+    /// Synthetic notifications model absent metadata without copying service prose.
+    fn untyped_notification(properties: Option<Value>) -> Value {
+        let mut thread = json!({
+            "id": "routine-notification",
+            "publishedDate": "2026-01-01T12:00:00Z",
+            "isDeleted": false,
+            "status": "closed",
+            "comments": [{
+                "commentType": "system",
+                "content": "No source change or vote reset. VoteUpdate CodeReviewVoteResult 10."
+            }]
+        });
+        if let Some(properties) = properties {
+            thread["properties"] = properties;
+        }
+        thread
+    }
+
+    #[test]
+    fn null_and_omitted_notification_properties_preserve_exact_classification() {
+        let fixture = fixture();
+        for properties in [Some(Value::Null), None] {
+            for stage in fixture["stages"].as_array().unwrap() {
+                let mut value = evidence(stage);
+                let expected = decide(value.clone()).unwrap();
+                value["threads"]
+                    .as_array_mut()
+                    .unwrap()
+                    .push(untyped_notification(properties.clone()));
+                assert_eq!(decide(value).unwrap(), expected);
+            }
+            let mut value = evidence(&fixture["stages"][2]);
+            reviewer_policy(&mut value, json!({"requireVoteOnLastIteration": true}));
+            let expected = decide(value.clone()).unwrap();
+            assert_eq!(expected.status(), "assessmentRequired");
+            value["threads"]
+                .as_array_mut()
+                .unwrap()
+                .push(untyped_notification(properties));
+            assert_eq!(decide(value).unwrap(), expected);
+        }
+    }
+
+    #[test]
+    fn untyped_notifications_do_not_override_later_human_decisions() {
+        for properties in [Some(Value::Null), None] {
+            for (vote, reason) in [
+                (0, "approvalWithdrawn"),
+                (-5, "negativeDecision"),
+                (-10, "negativeDecision"),
+            ] {
+                let mut value = evidence(&fixture()["stages"][2]);
+                let mut decision = value["threads"][1].clone();
+                decision["id"] = json!("later-human-decision");
+                decision["publishedDate"] = json!("2026-01-01T18:00:00Z");
+                decision["properties"]["CodeReviewVoteResult"]["$value"] = json!(vote.to_string());
+                value["reviewers"][0]["vote"] = json!(vote);
+                let threads = value["threads"].as_array_mut().unwrap();
+                threads.push(decision);
+                // Input order must not replace chronological decision ordering.
+                threads.push(untyped_notification(properties.clone()));
+                assert_eq!(
+                    decide(value).unwrap(),
+                    Decision::Ineligible {
+                        reason: reason.to_owned()
+                    }
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn untyped_notifications_cannot_supply_missing_vote_or_reset_evidence() {
+        for properties in [Some(Value::Null), None] {
+            let mut value = evidence(&fixture()["stages"][2]);
+            reviewer_policy(&mut value, json!({"resetOnSourcePush": true}));
+            value["threads"]
+                .as_array_mut()
+                .unwrap()
+                .push(untyped_notification(properties));
+            value["reviewers"][0]["vote"] = json!(0);
+            assert!(
+                decide(value.clone())
+                    .unwrap_err()
+                    .to_string()
+                    .contains("missing authoritative vote-reset evidence")
+            );
+            value["reviewers"][0]["vote"] = json!(10);
+            value["threads"].as_array_mut().unwrap().remove(1);
+            assert!(
+                decide(value)
+                    .unwrap_err()
+                    .to_string()
+                    .contains("does not match history")
+            );
+        }
+    }
+
+    #[test]
+    fn incomplete_structured_events_identify_thread_and_required_authority() {
+        let original = evidence(&fixture()["stages"][2]);
+        for properties in [
+            Value::Null,
+            json!({}),
+            json!([]),
+            json!(false),
+            json!({"CodeReviewThreadType": null}),
+            json!({"CodeReviewThreadType": {"$type": "System.Int32", "$value": 10}}),
+            json!({"CodeReviewThreadType": {"$type": "System.String", "$value": 10}}),
+            json!({"CodeReviewVoteResult": {"$type": "System.String", "$value": "10"}}),
+        ] {
+            let mut value = original.clone();
+            value["threads"][1]["properties"] = properties;
+            let error = decide(value).unwrap_err().to_string();
+            assert!(error.contains("thread 2"), "{error}");
+            assert!(error.contains("CodeReviewThreadType"), "{error}");
+        }
+        let mut value = original.clone();
+        value["threads"][1]
+            .as_object_mut()
+            .unwrap()
+            .remove("properties");
+        let error = decide(value).unwrap_err().to_string();
+        assert!(error.contains("thread 2"), "{error}");
+        assert!(error.contains("CodeReviewThreadType"), "{error}");
+
+        for name in [
+            "CodeReviewVoteResult",
+            "CodeReviewVotedByIdentity",
+            "CodeReviewVotedByInitiatorIdentity",
+        ] {
+            let mut value = original.clone();
+            value["threads"][1]["properties"]
+                .as_object_mut()
+                .unwrap()
+                .remove(name);
+            let error = decide(value).unwrap_err().to_string();
+            assert!(error.contains("thread 2"), "{error}");
+            assert!(error.contains(name), "{error}");
+        }
+    }
+
+    #[test]
+    fn untyped_notifications_still_require_complete_nonfuture_nondeleted_history() {
+        for (key, replacement) in [
+            ("publishedDate", Value::Null),
+            ("publishedDate", json!("2027-01-01T00:00:00Z")),
+            ("isDeleted", json!(true)),
+            ("identities", json!({"1": {"id": "unresolved-actor"}})),
+            ("identities", json!([])),
+        ] {
+            let mut value = evidence(&fixture()["stages"][2]);
+            let mut notification = untyped_notification(Some(Value::Null));
+            notification[key] = replacement;
+            value["threads"].as_array_mut().unwrap().push(notification);
+            decide(value).unwrap_err();
+        }
+        for identities in [Value::Null, json!({})] {
+            let mut value = evidence(&fixture()["stages"][2]);
+            let mut notification = untyped_notification(Some(Value::Null));
+            notification["identities"] = identities;
+            value["threads"].as_array_mut().unwrap().push(notification);
+            assert_eq!(decide(value).unwrap().status(), "alreadyValid");
+        }
     }
 
     #[test]
