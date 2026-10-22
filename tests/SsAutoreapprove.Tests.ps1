@@ -66,4 +66,19 @@ Describe 'Automatic reapproval provider fixtures' {
         }
         $recipes | Should -Not -Match 'pwsh .* -File|gh api|az devops|ConvertTo-Json'
     }
+
+    It 'routes ADO publication and recovery through the guarded native transaction' {
+        $skill = Join-Path (Split-Path -Parent $PSScriptRoot) 'skills\ss-autoreapprove'
+        $prompt = Get-Content -LiteralPath (Join-Path $skill 'SKILL.md') -Raw
+        $recipes = Get-Content -LiteralPath (Join-Path $skill 'commands.md') -Raw
+        $prompt | Should -Not -Match 'ADO publication.*not supported|ADO inspection and assessment are read-only'
+        $recipes | Should -Not -Match 'ADO supports read-only|unsupported publication transaction'
+        $recipes | Should -Match '(?m)^ss-skills-util autoreapprove publish .*--tenant "\{\{TENANT\}\}"'
+        $recipes | Should -Match 'unique new structured vote on the assessed iteration'
+        $prompt | Should -Match 'never issue a direct reviewer vote'
+        $prompt | Should -Match 'never repeats an uncertain vote or audit'
+        $help = & ss-skills-util autoreapprove publish --help | Out-String
+        $LASTEXITCODE | Should -Be 0
+        $help | Should -Match '\-\-tenant'
+    }
 }

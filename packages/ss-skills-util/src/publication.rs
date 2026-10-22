@@ -9,6 +9,7 @@ use sha2::{Digest, Sha256};
 use uuid::Uuid;
 
 use crate::Clock;
+use crate::ado_publication;
 use crate::api::Api;
 use crate::approval::{Decision, Evidence};
 use crate::clock::timestamp;
@@ -24,6 +25,55 @@ pub(crate) struct Store<'a> {
     journal: FileJournal<'a>,
     path: PathBuf,
     record: Record,
+}
+
+/// Provider transactions share the host-before-run locking and receipt contract.
+pub(crate) enum ProviderStore<'a> {
+    GitHub(Store<'a>),
+    AzureDevOps(ado_publication::Store<'a>),
+}
+
+impl<'a> ProviderStore<'a> {
+    pub(crate) fn open(
+        platform: Platform,
+        directory: &Path,
+        scope: &Scope,
+        clock: &'a dyn Clock,
+    ) -> Result<Self, AppError> {
+        match platform {
+            Platform::GitHub => Store::open(directory, scope, clock).map(Self::GitHub),
+            Platform::AzureDevOps => {
+                ado_publication::Store::open(directory, scope, clock).map(Self::AzureDevOps)
+            }
+        }
+    }
+
+    pub(crate) fn has_effect(&self, run_id: &str) -> bool {
+        match self {
+            Self::GitHub(store) => store.has_effect(run_id),
+            Self::AzureDevOps(store) => store.has_effect(run_id),
+        }
+    }
+
+    pub(crate) fn may_write(&self, run_id: &str) -> bool {
+        match self {
+            Self::GitHub(store) => store.may_write(run_id),
+            Self::AzureDevOps(store) => store.may_write(run_id),
+        }
+    }
+
+    pub(crate) fn publish(
+        &mut self,
+        api: &mut Api<'_>,
+        target: &Target,
+        clock: &dyn Clock,
+        input: &Input<'_>,
+    ) -> Result<Receipt, AppError> {
+        match self {
+            Self::GitHub(store) => store.publish(api, target, clock, input),
+            Self::AzureDevOps(store) => store.publish(api, target, clock, input),
+        }
+    }
 }
 
 /// Stable scope is independent of repository URL spelling and session directories.
@@ -862,7 +912,7 @@ fn matching_review(review: &Value, operation: &Operation) -> Result<String, AppE
     Ok(text(field(review, "node_id")?)?.to_owned())
 }
 
-fn hash(value: &impl Serialize) -> Result<String, AppError> {
+pub(crate) fn hash(value: &impl Serialize) -> Result<String, AppError> {
     Ok(format!("{:x}", Sha256::digest(serde_json::to_vec(value)?)))
 }
 

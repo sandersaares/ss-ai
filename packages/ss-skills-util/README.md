@@ -250,12 +250,17 @@ Completed judgments are immutable.
 `error`. An uncertain evaluation returns `failed` with a diagnostic and makes the
 run partial; only a resolved insignificant result permits publication.
 
-`publish` also takes the run's `--repository-url` and nonempty `--attribution`.
+`publish` also takes the run's `--repository-url`, nonempty `--attribution`,
+and the same optional Azure `--tenant` used for discovery.
 Only a completed insignificant live assessment can publish. Source/account
 freshness, approval authority, pending reviews, and complete discussion are
 rechecked immediately before the explicit-commit GitHub approval and afterward.
-Target-tip movement alone does not change source evidence. ADO supports read-only
-inspection and assessment; `publish` requires GitHub.
+Target-tip movement alone does not change source evidence. ADO publishes a
+retained-strength positive vote and a separate source-bound audit. It requires
+a unique new account-owned vote event on the assessed iteration. Its vote API
+has no commit-SHA condition; preflight and postflight detect races, not prevent
+them atomically. Server-visible account pending threads, attention flags and
+declined reviews block publication.
 
 ### Assessment records
 
@@ -290,6 +295,10 @@ run lock, freshness reads, effect intent, write, and local result persistence.
 Schedules for the same scope must use one publishing host; this is not a
 distributed exactly-once guarantee.
 
+Provider-qualified scope hashes keep GitHub and ADO transactions separate.
+The table below describes the GitHub host journal; both providers use the same
+scope and receipt fields.
+
 | Record | Fields |
 | --- | --- |
 | Host journal | `schemaVersion: 1`, `scope`, unique `operations`. |
@@ -305,12 +314,33 @@ Operation states are `prepared`, `write-intent`, `write-acknowledged`,
 are `intent`, `acknowledged`, `verified`, `failed`, and `unknown`. Receipt
 outcomes are `reapproved`, `alreadyValid`, `ineligible`,
 `staleDuringExecution`, and `failed`. Acknowledgement and postflight verification
-are separate facts. The audit marker is embedded in the submitted review body;
+are separate facts. The GitHub audit marker is embedded in the submitted review body;
 `submitted` never claims postflight verification.
+
+ADO uses its own schema-1 host journal with the same `schemaVersion`, `scope`,
+and unique `operations` envelope. Its operation requires UUID `runId`; shared
+`audit`; nonempty `attribution`, `explanation`; UTC `capturedAt`; complete
+`snapshot`; positive approval `vote`; and independent `voteState`, `auditState`.
+Required nullable fields are `voteAcknowledgement`, `voteEventId`,
+`auditAcknowledgement`, `verification`, and `result`. Unknown fields are rejected.
+The effect states are `prepared`, `intent`, `acknowledged`, `verified`, `refused`,
+and `unknown`. Acknowledgements retain complete provider replies; `voteEventId`
+identifies the unique structured vote thread, not the mutable reviewer.
+Verification and result use the shared record fields above.
+
+The ADO audit marker is `<!-- ss-autoreapprove-ado {JSON} -->` with required
+`audit`, nonempty `voteEventId`, and positive source `iterationId`. It appears
+in a separate account-authored audit thread. Recognition joins its author,
+scope, original anchor, source iteration, and vote event; it does not treat the
+audit comment itself as approval authority.
 
 Recovery uses the original `publish` command and run. A unique owned remote
 effect can establish completion without another write. Missing or ambiguous
 effects remain unknown and block other runs on the host.
+ADO recovery may create an unattempted audit, or retry a definitively refused
+audit after fresh verification of the same vote. It never repeats an uncertain
+vote or audit. A vote without a verified audit blocks other host runs even if
+the reviewer currently has a positive vote.
 Policy changes block new effects, not read-only reconciliation under the
 original captured assessment. Explicit rate-limit
 refusals are not replayed inside publication. An accepted-but-stale approval

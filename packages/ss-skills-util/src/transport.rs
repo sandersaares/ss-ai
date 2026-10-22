@@ -200,6 +200,20 @@ impl<'a> Transport<'a> {
         self.github(path, "POST", Some(body), false, false)
     }
 
+    /// A renewal must recheck freshness rather than replay a refused ADO write.
+    pub(crate) fn ado_write_once(
+        &mut self,
+        path: &str,
+        method: &str,
+        body: &Value,
+    ) -> Result<Value, AppError> {
+        let page = self.ado_request(path, method, Some(body), &[], "7.1", false)?;
+        if page.continuation.is_some() {
+            return Err(fail("ambiguousWrite", "Unexpected ADO write continuation"));
+        }
+        Ok(page.payload)
+    }
+
     /// Reads GitHub slurped REST pages or a checked ADO list envelope.
     pub(crate) fn list(&mut self, path: &str) -> Result<Vec<Value>, AppError> {
         match self.platform {
@@ -447,6 +461,19 @@ impl<'a> Transport<'a> {
         query: &[(&str, String)],
         version: &str,
     ) -> Result<Page, AppError> {
+        self.ado_request(path, method, body, query, version, true)
+    }
+
+    /// Keeps ordinary transport recovery separate from freshness-bound publication.
+    fn ado_request(
+        &mut self,
+        path: &str,
+        method: &str,
+        body: Option<&Value>,
+        query: &[(&str, String)],
+        version: &str,
+        retry_refusals: bool,
+    ) -> Result<Page, AppError> {
         let collection = self
             .collection
             .as_deref()
@@ -492,6 +519,12 @@ impl<'a> Transport<'a> {
                 }
             };
             if response.status == 429 {
+                if !retry_refusals {
+                    return Err(fail(
+                        "rateLimited",
+                        "ADO publication was rate limited; write not replayed",
+                    ));
+                }
                 let delay = ado_delay(response.headers.get("retry-after"), rate_attempt, true);
                 rate_attempt = rate_attempt.saturating_add(1);
                 eprintln!(
@@ -545,7 +578,11 @@ impl<'a> Transport<'a> {
                 || text.trim_start().starts_with('<')
             {
                 return Err(fail(
-                    "authentication",
+                    if read {
+                        "authentication"
+                    } else {
+                        "ambiguousWrite"
+                    },
                     "Azure DevOps returned a sign-in document; authenticate with the collection's tenant",
                 ));
             }

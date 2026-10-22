@@ -9,6 +9,7 @@
 #![cfg_attr(docsrs, feature(doc_cfg))]
 
 mod ado_approval;
+mod ado_publication;
 mod api;
 mod approval;
 mod assessment;

@@ -18,7 +18,7 @@ use crate::github_approval::Evidence as GitHubEvidence;
 use crate::journal::{FileJournal, read_bytes};
 use crate::json::{boolean, field, identifier, required_optional, text};
 use crate::objects;
-use crate::publication::{self, Outcome, Receipt, Scope, Store};
+use crate::publication::{self, Outcome, Receipt, Scope};
 use crate::target::{Platform, Target};
 use crate::{Clock, Process};
 
@@ -977,6 +977,7 @@ pub(crate) struct PublishInput<'a> {
     pub(crate) repository: &'a Target,
     pub(crate) attribution: &'a str,
     pub(crate) directory: &'a Path,
+    pub(crate) tenant: Option<&'a str>,
 }
 
 /// Acquires the host transaction before the run transaction and never repeats uncertain effects.
@@ -985,11 +986,8 @@ pub(crate) fn publish(
     clock: &dyn Clock,
     input: &PublishInput<'_>,
 ) -> Result<Value, AppError> {
-    if input.attribution.trim().is_empty() || input.repository.platform != Platform::GitHub {
-        return Err(fail(
-            "invalidInput",
-            "Publication requires attribution and a supported GitHub renewal",
-        ));
+    if input.attribution.trim().is_empty() {
+        return Err(fail("invalidInput", "Publication requires attribution"));
     }
     let (scope, run_id) = {
         let journal = FileJournal::open(input.path, clock)?;
@@ -1003,13 +1001,19 @@ pub(crate) fn publish(
         }
         (run.publication_scope(input.number), run.run_id)
     };
-    let mut store = Store::open(input.directory, &scope, clock)?;
+    let mut store = publication::ProviderStore::open(
+        input.repository.platform,
+        input.directory,
+        &scope,
+        clock,
+    )?;
     let journal = FileJournal::open(input.path, clock)?;
     let mut run =
         DiscoveryRecord::load(&journal)?.ok_or_else(|| fail("invalidState", "Missing run"))?;
     if run.run_id != run_id
         || run.publication_scope(input.number) != scope
         || run.repository_url != input.repository.web_url
+        || run.tenant.as_deref() != input.tenant
         || run.dry_run
         || (run.state == RunState::Failed
             && (run

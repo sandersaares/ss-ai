@@ -12,10 +12,12 @@ supplies the semantic judgments.
 
 ## External approval and renewal recognition
 
-An **external approval** is an approval by the authenticated account whose review
-body does not contain the reserved `<!-- ss-autoreapprove` marker. It can come
-from the UI or another review tool and can predate installation. Its service
-review identity and approved source commit form the **anchor**.
+An **external approval** is an approval by the authenticated account that this
+skill did not issue. It can come from the UI or another review tool and can
+predate installation. Its service approval-event identity and approved source
+commit form the **anchor**. GitHub recognizes external approvals by the absence
+of the reserved `<!-- ss-autoreapprove` marker in the review body. ADO joins
+structured vote events to separate authenticated audit threads, as described below.
 
 A **renewal** is an approval with exactly one complete, valid schema-1
 `<!-- ss-autoreapprove {JSON} -->` audit marker. The marker carries the operation
@@ -62,8 +64,9 @@ absent sides represent additions or deletions, not missing evidence. Structural 
 behavioral edits are not automatically significant. Mixed significant or uncertain
 judgments prevent approval. See the package command contract for schemas and bounds.
 
-Publication refreshes identity, authority, source, and discussion, and submits the
-assessed source SHA explicitly. A retained same-host lock encloses intent,
+Publication refreshes identity, authority, source, and discussion. GitHub submits
+the assessed source SHA explicitly; ADO binds the source through its structured
+iteration history and separate audit. A retained same-host lock encloses intent,
 acknowledgement, verification, and atomic run updates. Recovery reconciles only a
 unique owned effect and never blindly repeats a write. Dry runs have no remote
 effects. Accepted-but-stale and unknown outcomes remain explicit, without rollback.
@@ -109,9 +112,61 @@ establishes retained approval and reviewer removal without approval policies.
 Synthetic regression cases cover policy combinations and iteration freshness
 without claiming a live reset experiment.
 
-ADO inspection and source assessment are read-only. TODO: enable ADO publication
-only with a provider-specific, source-bound vote/audit transaction and recovery
-contract that preserves the original external anchor across renewals.
+### ADO publication and recovery
+
+ADO renewals preserve the existing positive vote strength. The native transaction
+uses the documented [reviewer vote API](https://learn.microsoft.com/en-us/rest/api/azure/devops/git/pull-request-reviewers/create-pull-request-reviewer?view=azure-devops-rest-7.1)
+with `isReapprove: true`, so a retained vote can count on the assessed iteration.
+It never clears a vote first, changes reviewer requirements, or withdraws an
+approval as rollback. Attention flags, declined reviews and account-authored
+server-visible pending threads block publication. ADO does not expose unsent UI
+drafts through this evidence; the utility does not claim to inspect them.
+
+The reviewer API accepts neither a source SHA precondition nor an operation ID.
+The host journal therefore captures complete authority and source evidence before
+the single vote request. Readback must identify exactly one new positive
+`VoteUpdate` by the account and its own initiator. A retained reviewer value,
+an acknowledgement alone, or absence of an event cannot establish completion.
+Missing or competing events leave the write unknown and block later host runs.
+The service cannot distinguish an identical concurrent human vote by the same
+account; schedules for the same scope must use one publishing host, and the
+workflow does not promise distributed ownership or an atomic human-decision fence.
+
+After identifying the vote, the transaction creates a standalone closed
+[audit thread](https://learn.microsoft.com/en-us/rest/api/azure/devops/git/pull-request-threads/create?view=azure-devops-rest-7.1).
+It changes no existing discussion. Its `<!-- ss-autoreapprove-ado {JSON} -->`
+marker contains `audit` (the shared schema-1 scope, operation, policy, assessment,
+source and original anchor), `voteEventId`, and positive `iterationId`.
+The marker joins the service-authenticated comment author to the structured vote
+actor, initiator and source iteration. Duplicate, edited, deleted, mismatched,
+or malformed owned markers fail explicitly. Recognition processes the joined
+vote chronologically and preserves the existing external anchor; later human
+approvals establish new anchors, while withdrawals, negatives and removals
+still supersede automatic renewals.
+
+Each remote effect has its own persisted intent and readback. Recovery never
+repeats an uncertain vote or thread creation. It may finish an unattempted audit,
+or retry a definitively refused audit only after identifying the same vote in
+fresh complete evidence. A vote without a verified audit remains unresolved and
+blocks other host publications. An inspection during that interval is not a
+new publishing authority: later publication must acquire the host lock and pass
+fresh evidence checks.
+
+Postflight strips only the unique owned vote and audit, then compares all
+remaining evidence with the original snapshot. It also requires current valid
+approval standing on the assessed source. A source, policy, discussion or human
+decision race produces an explicit accepted-but-stale result, never a successful
+renewal. The audit retains the assessed source even for stale effects. ADO's
+mutable vote can affect a newer source or auto-merge before postflight; these
+checks detect that race rather than prevent it.
+
+Freshness comparisons ignore evaluation progress and context, which can change
+as the renewed vote satisfies aggregate policy. They retain complete captured
+evaluations and compare their configuration and reviewer-policy applicability.
+The complete reviewer endpoint owns reviewer evidence rather than the PR's
+duplicated reviewer summary; the request-only `isReapprove` flag does not
+represent standing authority. Source, discussion, attention and decision
+evidence remain fenced.
 
 The maintained tooling under `dev/ss-autoreapprove` captures authorized experiments
 and exports sanitized fixtures. Live writes require explicit authorization in
@@ -158,11 +213,17 @@ so missing data cannot become an empty successful result. Timestamps use the sha
 Jiff parser and injectable clock; the reapproval workflow has no independent
 clock or retry timer.
 
-`publication.rs` acquires the stable account/repository/PR lock before the run
-lock. `renewal.rs` defines the audit marker. The write transport never retries
+`publication.rs` dispatches the provider transaction and acquires the stable
+account/repository/PR lock before the run lock. `ado_publication.rs` owns ADO's
+separate vote and audit effects; `ado_approval.rs` joins their remote provenance.
+`renewal.rs` defines the shared audit data. The write transport never retries
 publication, including rate-limit refusals. Recovery matches account, source,
 body, and a unique review; verification removes only that owned effect before
 comparing the remaining evidence. Receipts retain the absolute host-journal path.
+ADO synthetic provider fixtures exercise publication, refusal, uncertainty,
+source and human-decision races, and cumulative anchor preservation without
+writing to live pull requests. They use the documented write contracts and
+sanitized service history shapes, not a claim of a live renewal experiment.
 Every attempt to write, including resumed preparation, checks for other runs'
 unresolved effects under the host lock. The host record is saved before the run
 record. If execution stops between those saves, recovery copies the validated

@@ -41,3 +41,9 @@ HTTP replies retain status, normalized headers, and raw bytes until transport
 classifies them. GitHub failures use captured CLI diagnostics and explicit
 rate-limit evidence. Neither path treats an uncertain write as permission to
 try again; journal reconciliation belongs to the calling workflow.
+
+Approval publication uses explicit single-attempt methods for both providers,
+including ADO's reviewer PUT and audit-thread POST. These methods do not wait
+and replay a rate-limit refusal: publication must refresh authority before any
+new effect. ADO sign-in documents or malformed successful write replies are
+ambiguous effects, not proof that the service made no change.

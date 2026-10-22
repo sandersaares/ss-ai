@@ -95,7 +95,8 @@ renewal unless changes introduce significant design changes, likely performance
 regressions, or likely correctness regressions; it does not restrict edit categories.
 
 A stable same-host scope lock encloses publication and its run update.
-Intent precedes the explicit-commit approval. Acknowledgement and postflight
+Intent precedes each provider effect. GitHub submits an explicit-commit approval;
+ADO fences a mutable vote and a separate source-bound audit. Acknowledgement and postflight
 verification remain distinct. Unknown writes are reconciled read-only, never
 blindly replayed; they block later runs. A concurrent push or human decision
 can make an accepted effect stale. The utility reports it without rollback

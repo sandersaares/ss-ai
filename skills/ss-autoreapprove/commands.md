@@ -73,17 +73,22 @@ partial; it is not a completed no-work result.
 # Stage 4: publication and recovery
 
 ```powershell
-ss-skills-util autoreapprove publish --repository-url "{{REPOSITORY}}" --state-path "{{RUN}}" --pull-request-id "{{PR}}" --snapshot-digest "{{SNAPSHOT}}" --attribution "{{ATTRIBUTION}}"
+ss-skills-util autoreapprove publish --repository-url "{{REPOSITORY}}" --state-path "{{RUN}}" --pull-request-id "{{PR}}" --snapshot-digest "{{SNAPSHOT}}" --attribution "{{ATTRIBUTION}}" --tenant "{{TENANT}}"
 ss-skills-util autoreapprove results --state-path "{{RUN}}"
 ```
 
-ADO supports read-only inspection and source assessment, not publication.
-Report the unsupported publication transaction rather than using a direct vote write.
 GitHub publication creates a source-bound submitted approval and audit body.
+ADO publication preserves the account's positive vote strength using
+`isReapprove`, verifies a unique new structured vote on the assessed iteration,
+then creates a separate authenticated audit carrying the original anchor.
+ADO has no atomic source-SHA vote precondition; changed evidence produces an
+explicit stale result rather than rollback. Never substitute a direct vote write.
 Read the outcome and any publication error, including accepted-but-stale
 effects. Do not interpret a `failed` run as no remote change.
 
 The same publication command reconciles an interrupted attempt using its
 original run and assessment. It never repeats an effect that might have
-succeeded. Unknown effects block later runs on the same publishing host.
+succeeded. Recovery may finish an unattempted ADO audit or retry an explicitly
+refused audit after fresh vote verification, but never repeats an uncertain effect.
+Unknown effects block later runs on the same publishing host.
 Do not alter journals, delete retained locks, or issue manual retry writes.

@@ -13,7 +13,7 @@ pub(crate) struct Anchor {
     pub(crate) source_commit: String,
 }
 
-/// A submitted review binds its audit data to the service's author and commit.
+/// A submitted approval binds audit data to its service account and assessed source.
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub(crate) struct Audit {
@@ -29,7 +29,7 @@ pub(crate) struct Audit {
     pub(crate) state: State,
 }
 
-/// GitHub creates the approval and body together; this does not claim postflight verification.
+/// Submission records an effect, not successful postflight verification.
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub(crate) enum State {

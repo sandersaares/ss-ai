@@ -83,6 +83,8 @@ enum Autoreapprove {
         repository_url: String,
         #[arg(long)]
         attribution: String,
+        #[arg(long)]
+        tenant: Option<String>,
     },
     /// Fetch exact source objects and initialize a bounded assessment assignment.
     Prepare(WorkInput),
@@ -398,12 +400,13 @@ fn execute(
                 input,
                 repository_url,
                 attribution,
+                tenant,
             } => {
                 let repository = Target::repository(&repository_url)?;
                 let directory = directory
                     .map_or_else(publication::data_directory, |path| Ok(path.to_owned()))?;
                 let mut api = Api {
-                    transport: Transport::new(&repository, None, process, http, clock),
+                    transport: Transport::new(&repository, tenant.as_deref(), process, http, clock),
                 };
                 discovery::publish(
                     &mut api,
@@ -415,6 +418,7 @@ fn execute(
                         repository: &repository,
                         attribution: &attribution,
                         directory: &directory,
+                        tenant: tenant.as_deref(),
                     },
                 )?
             }

@@ -128,12 +128,16 @@ decision and discussion assessment. Do not run builds or tests.
 
 Publish only `readyToReapprove`, passing attribution required by the user's
 communication policy. The utility refreshes authority and source evidence,
-holds a same-host account/repository/PR lock, submits an explicit source SHA,
-and verifies the result. It never touches an existing pending human review.
+holds a same-host account/repository/PR lock, and verifies the result.
+GitHub submits an explicit source SHA. ADO preserves the positive vote strength,
+requires a unique new account-owned vote event on the assessed source iteration,
+and publishes a source-bound audit. Its vote API cannot condition the write on
+a source SHA; preflight and postflight detect movement, not atomically prevent it.
+The utility preserves pending human reviews, including ADO's server-visible
+pending threads, attention flags, and declined reviews.
 
-Dry runs end at `wouldReapprove`. ADO inspection and assessment are read-only;
-ADO publication requires a provider-specific transaction and is not supported.
-Report that limitation rather than issuing provider writes manually.
+Dry runs end at `wouldReapprove`. Both providers publish only through the native
+transaction; never issue a direct reviewer vote or assemble an audit manually.
 Significant work ends at `needsReview`; uncertain evaluation fails explicitly.
 Report these outcomes without triggering another review workflow or a question
 for every PR.
@@ -144,7 +148,9 @@ An accepted write can race with a push, a human decision, or existing auto-merge
 Postflight detection is not atomic prevention. Never clear or dismiss a vote
 as rollback. An unknown write stops further publication. Preserve the run and
 host journal; native publication recovery can reconcile a unique owned effect
-without repeating it. Do not fabricate records or replay provider commands.
+without repeating it. ADO recovery can finish a not-yet-attempted audit after
+identifying the original vote; it never repeats an uncertain vote or audit.
+Do not fabricate records or replay provider commands.
 Overlapping schedules for one account and repository must use one publishing
 host; local locks do not promise distributed exactly-once behavior.
 
