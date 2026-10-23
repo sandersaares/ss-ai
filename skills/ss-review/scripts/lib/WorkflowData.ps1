@@ -7,6 +7,8 @@ Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 $PSNativeCommandUseErrorActionPreference = $true
 $script:WorkflowSchemaPath = Join-Path $PSScriptRoot '..\..\schemas\workflow-data.schema.json'
+# Load PowerShell's bundled schema engine without taking a module dependency.
+$null = Get-Command Test-Json -Module Microsoft.PowerShell.Utility
 
 # Selects a named schema without relying on external reference fetching.
 function Assert-WorkflowData {
@@ -14,8 +16,25 @@ function Assert-WorkflowData {
     $schema = ConvertFrom-JsonVerbatim -Text ((Read-PullRequestFileText -Path ($script:WorkflowSchemaPath)))
     if (-not $schema['$defs'].Contains($Kind)) { throw "Unknown workflow schema '$Kind'." }
     $schema['$ref'] = "#/`$defs/$Kind"
-    if (-not (Test-Json -Json (ConvertTo-JsonText -Value $Value) -Schema (ConvertTo-JsonText -Value $schema))) {
-        throw "Invalid '$Kind' workflow data."
+    try {
+        $validator = [Json.Schema.JsonSchema]::FromText((ConvertTo-JsonText -Value $schema))
+    } catch [System.Management.Automation.MethodInvocationException] {
+        throw "Invalid '$Kind' workflow schema: $($_.Exception.InnerException.Message)"
+    }
+    # Test-Json in PowerShell 7.6 reads only the first level of hierarchical errors.
+    # Flat output retains diagnostics below references without altering schema validation.
+    $options = [Json.Schema.EvaluationOptions]::new()
+    $options.OutputFormat = [Json.Schema.OutputFormat]::List
+    $result = $validator.Evaluate([System.Text.Json.Nodes.JsonNode]::Parse((ConvertTo-JsonText -Value $Value)), $options)
+    if (-not $result.IsValid) {
+        $diagnostics = @(foreach ($entry in @($result) + @($result.Details)) {
+            if ($entry.HasErrors) {
+                foreach ($errorMessage in $entry.Errors.Values) {
+                    "$errorMessage at '$($entry.InstanceLocation.ToString())'."
+                }
+            }
+        })
+        throw "Invalid '$Kind' workflow data: JSON is not valid with the schema. $($diagnostics -join ' ')"
     }
 }
 

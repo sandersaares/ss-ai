@@ -408,6 +408,11 @@ unknown fields and absent required arrays. Prepared commands own atomic writes
 and lock read-modify-write operations; workers submit typed item drafts.
 Prose remains Markdown where no mechanical consumer requires fields.
 
+Validation uses PowerShell's bundled JSON Schema engine with flat diagnostic
+output. This preserves invalid-field paths below schema references;
+`Test-Json` in PowerShell 7.6 does not traverse every level of its hierarchical
+error output. Schema parsing and evaluation failures remain terminating errors.
+
 Expansion records connect each target to every referring context by parent ID
 and immutable source spans. Resolving parent chains on demand incorporates late
 referrers into descendants without bespoke metadata merging. Cycles and shared

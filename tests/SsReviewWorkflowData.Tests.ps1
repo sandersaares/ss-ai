@@ -70,6 +70,29 @@ Describe 'Typed workflow plans' {
         $script:Path = Join-Path $script:Root 'plan.json'
     }
 
+    It 'reports the invalid field below schema references without emitting a result' {
+        $document = @{
+            schemaVersion = 1
+            decisions = @(
+                @{ findingId = 'a-1'; decision = 'approved' }
+                @{ findingId = 'b-1'; decision = 'maybe' }
+            )
+        }
+        $output = [System.Collections.Generic.List[object]]::new()
+        { Assert-WorkflowData -Kind decisions -Value $document | ForEach-Object { $output.Add($_) } } |
+            Should -Throw "*not valid with the schema*decisions/1/decision*"
+        $output.Count | Should -Be 0
+    }
+
+    It 'rejects a malformed schema rather than accepting the document' {
+        $schemaPath = Join-Path $script:Root 'malformed.schema.json'
+        # A numeric type keyword is invalid schema syntax, not an invalid workflow value.
+        [IO.File]::WriteAllText($schemaPath, '{"$defs":{"decisions":{"type":42}}}')
+        Mock Read-PullRequestFileText { [IO.File]::ReadAllText($schemaPath) } -ParameterFilter { $Path -eq $script:WorkflowSchemaPath }
+        { Assert-WorkflowData -Kind decisions -Value @{ schemaVersion = 1; decisions = @() } } |
+            Should -Throw "*Invalid 'decisions' workflow schema*Expected string*"
+    }
+
     It 'initializes explicit empty plans and rejects missing or misspelled envelopes' {
         New-WorkflowList -Kind mergePlan -Path $script:Path
         (Read-FindingMergePlan -Path $script:Path).Count | Should -Be 0

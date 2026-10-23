@@ -9,10 +9,6 @@ Improvement ideas to revisit when the repo matures.
   `tests/**/*.ps1`. Cheap insurance for a repo whose product is
   PowerShell scripts.
 - **Add an `.editorconfig`.** Lock indentation and EOL conventions.
-- **Schema-rejection diagnostics on PowerShell 7.6.7.** Align diagnostics
-  with `SsReviewFindingDecisions.Tests.ps1`, `SsReviewPublicationPlan.Tests.ps1`,
-  and `SsReviewWorkflowData.Tests.ps1` while preserving invalid-input
-  rejection and prevention of remote publication.
 - **Generated nvm fixture on Ubuntu.** Correct the generated `nvm.sh`
   syntax exercised by `SsReviewReportTools.Tests.ps1`, including its real
   POSIX-shell activation guard.
