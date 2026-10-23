@@ -98,7 +98,9 @@ no remote effects. Tooling failures before a completed assessment and missing ap
 semantic refusal markers.
 
 Recovery verifies the original operation's authenticated comment independently
-of current approval eligibility. It ignores unrelated expired notices but
+of current approval eligibility, including after closure or draft conversion.
+It captures PR identity and complete discussion without requiring source refs
+or approval history. It ignores unrelated expired notices but
 retains the intended comment's scope, timestamp, exact-body, and uniqueness
 checks. A run-wide publication failure records its originating PR; reconciling
 another PR cannot clear that failure.
@@ -233,7 +235,7 @@ counterexamples, not claims of a live manual-dismissal experiment.
 
 ## Implementation responsibilities
 
-`discovery.rs` owns the schema-6 run and applies shared recency before dispatching
+`discovery.rs` owns the persisted run and applies shared recency before dispatching
 provider inspection. `github_approval.rs` joins complete REST reviews to the
 cursor-paged GraphQL history; filtered timeline totals are not pagination limits.
 `ado_approval.rs` validates structured actors, source iterations, and policy

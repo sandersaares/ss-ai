@@ -190,27 +190,43 @@ fn notices(
     external: Option<Timestamp>,
     operation: Option<&str>,
 ) -> Result<Vec<(Marker, Notice, String)>, AppError> {
-    let comments: Vec<(&Value, bool)> = match evidence {
-        Evidence::GitHub(GitHubEvidence::History { comments, .. }) => {
-            comments.iter().map(|comment| (comment, false)).collect()
-        }
+    let (platform, collection) = match evidence {
+        Evidence::GitHub(GitHubEvidence::History { comments, .. }) => (Platform::GitHub, comments),
         Evidence::AzureDevOps(AdoEvidence::History { threads, .. }) => {
-            let mut comments = Vec::new();
-            for thread in threads {
-                // Deleted ADO threads may retain only a tombstone, without comments.
-                if thread.get("isDeleted") == Some(&Value::Bool(true)) {
-                    continue;
-                }
-                for comment in array(field(thread, "comments")?)? {
-                    comments.push((comment, true));
-                }
-            }
-            comments
+            (Platform::AzureDevOps, threads)
         }
         _ => return Ok(Vec::new()),
     };
+    parse_notices(collection, platform, scope, now, external, operation)
+}
+
+/// Inspection and operation-specific readback share the same provenance checks.
+fn parse_notices(
+    collection: &[Value],
+    platform: Platform,
+    scope: &Scope,
+    now: Timestamp,
+    external: Option<Timestamp>,
+    operation: Option<&str>,
+) -> Result<Vec<(Marker, Notice, String)>, AppError> {
+    let ado = platform == Platform::AzureDevOps;
+    let comments = if ado {
+        let mut comments = Vec::new();
+        for thread in collection {
+            // Deleted ADO threads may retain only a tombstone, without comments.
+            if thread.get("isDeleted") == Some(&Value::Bool(true)) {
+                continue;
+            }
+            for comment in array(field(thread, "comments")?)? {
+                comments.push(comment);
+            }
+        }
+        comments
+    } else {
+        collection.iter().collect()
+    };
     let mut found = Vec::new();
-    for (comment, ado) in comments {
+    for comment in comments {
         // Only surviving text comments supply provenance; removed payloads may be absent.
         if ado
             && (comment.get("isDeleted") == Some(&Value::Bool(true))
@@ -274,6 +290,60 @@ fn notices(
         ));
     }
     Ok(found)
+}
+
+/// Notice effects need fenced discussion, not source refs or current approval authority.
+fn capture_comments(
+    api: &mut Api<'_>,
+    target: &Target,
+    scope: &Scope,
+) -> Result<Vec<Value>, AppError> {
+    let first = observe_comments(api, target, scope)?;
+    let second = observe_comments(api, target, scope)?;
+    if first != second {
+        return Err(fail(
+            "staleEvidence",
+            "Needs-review discussion changed during capture",
+        ));
+    }
+    Ok(first)
+}
+
+/// Every observation validates service PR identity before reading its complete discussion.
+fn observe_comments(
+    api: &mut Api<'_>,
+    target: &Target,
+    scope: &Scope,
+) -> Result<Vec<Value>, AppError> {
+    let pull_request = api.transport.request(&target.pr_api(), "GET", None)?;
+    let (evidence, path) = match target.platform {
+        Platform::GitHub => (
+            Evidence::GitHub(GitHubEvidence::State { pull_request }),
+            format!(
+                "{}/issues/{}/comments",
+                target.repository_api(),
+                target.pull_request_id
+            ),
+        ),
+        Platform::AzureDevOps => (
+            Evidence::AzureDevOps(AdoEvidence::State { pull_request }),
+            format!("{}/threads", target.pr_api()),
+        ),
+    };
+    evidence.validate_scope(&scope.repository_id, scope.pull_request_id)?;
+    let mut comments = api.transport.list(&path)?;
+    let mut ids = HashSet::new();
+    for comment in &comments {
+        if !ids.insert(identifier(field(comment, "id")?)?) {
+            return Err(fail(
+                "service",
+                "Duplicate needs-review discussion identity",
+            ));
+        }
+    }
+    // Service list ordering does not change the captured discussion.
+    comments.sort_by_key(|comment| comment.get("id").map(Value::to_string));
+    Ok(comments)
 }
 
 /// A later external approval resets every older notice, but a renewal never does.
@@ -427,14 +497,6 @@ impl<'a> Store<'a> {
                 "Needs-review publication account changed",
             ));
         }
-        let fresh = Evidence::capture(api, target)?;
-        if api.identity()?.id.as_deref() != Some(&self.record.scope.account_id) {
-            return Err(fail(
-                "authentication",
-                "Needs-review publication account changed during capture",
-            ));
-        }
-        let now = clock.now();
         if let Some(index) = self
             .record
             .attempts
@@ -457,9 +519,17 @@ impl<'a> Store<'a> {
                     "Notice recovery requires the original immutable assessment",
                 ));
             }
-            return self.reconcile(index, &fresh, now);
+            return self.readback(api, target, clock, index);
         }
-        // Existing effects need authenticated readback, not renewed approval eligibility.
+        // New notices require full preflight evidence; readback cannot authorize a new effect.
+        let fresh = Evidence::capture(api, target)?;
+        if api.identity()?.id.as_deref() != Some(&self.record.scope.account_id) {
+            return Err(fail(
+                "authentication",
+                "Needs-review publication account changed during capture",
+            ));
+        }
+        let now = clock.now();
         let decision = fresh.decide(
             target.platform,
             &self.record.scope.account_id,
@@ -526,27 +596,35 @@ impl<'a> Store<'a> {
             return Err(error);
         }
         // A lost acknowledgement does not permit another POST, even if readback fails.
-        let fresh = Evidence::capture(api, target).map_err(|error| fail("ambiguousWrite", format!("Needs-review comment may exist; retain the original run for reconciliation: {error}")))?;
+        let index = self.record.attempts.len().saturating_sub(1);
+        self.readback(api, target, clock, index)
+    }
+
+    /// Accepted or uncertain writes share read-only recovery, including closed and draft PRs.
+    fn readback(
+        &mut self,
+        api: &mut Api<'_>,
+        target: &Target,
+        clock: &dyn Clock,
+        index: usize,
+    ) -> Result<Notice, AppError> {
+        let comments = capture_comments(api, target, &self.record.scope).map_err(|error| fail("ambiguousWrite", format!("Needs-review comment may exist; retain the original run for reconciliation: {error}")))?;
         if api.identity()?.id.as_deref() != Some(&self.record.scope.account_id) {
             return Err(fail(
                 "ambiguousWrite",
                 "Needs-review comment may exist but authenticated account changed",
             ));
         }
-        let index = self.record.attempts.len().saturating_sub(1);
-        self.reconcile(index, &fresh, clock.now())
+        self.reconcile(index, target.platform, &comments, clock.now())
     }
 
     fn reconcile(
         &mut self,
         index: usize,
-        evidence: &Evidence,
+        platform: Platform,
+        comments: &[Value],
         now: Timestamp,
     ) -> Result<Notice, AppError> {
-        evidence.validate_scope(
-            &self.record.scope.repository_id,
-            self.record.scope.pull_request_id,
-        )?;
         let attempt = self
             .record
             .attempts
@@ -558,8 +636,9 @@ impl<'a> Store<'a> {
                 "Needs-review comment was refused; start a fresh run",
             ));
         }
-        let found = notices(
-            evidence,
+        let found = parse_notices(
+            comments,
+            platform,
             &self.record.scope,
             now,
             None,

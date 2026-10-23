@@ -171,6 +171,29 @@ impl Provider {
         if fault == "preflightReadFailure" {
             return Some(Value::Null);
         }
+        if self.writes.get() > 0
+            && matches!(fault, "noticeClosed" | "noticeDraft" | "noticeAbandoned")
+        {
+            let mut evidence = self.evidence.borrow_mut();
+            if self.ado {
+                evidence["pullRequest"]["isDraft"] = json!(fault == "noticeDraft");
+                evidence["pullRequest"]["status"] = json!(match fault {
+                    "noticeClosed" => "completed",
+                    "noticeAbandoned" => "abandoned",
+                    _ => "active",
+                });
+                // A completed PR may have no source ref; recovery needs only its discussion.
+                evidence["sourceCommit"] = Value::Null;
+            } else {
+                evidence["pullRequest"]["draft"] = json!(fault == "noticeDraft");
+                evidence["pullRequest"]["state"] = json!(if fault == "noticeClosed" {
+                    "closed"
+                } else {
+                    "open"
+                });
+                evidence["pullRequest"]["head"]["repo"] = Value::Null;
+            }
+        }
         if !matches!(fault, "reportReadFailure" | "reportStandingChanged") {
             return None;
         }
@@ -1312,6 +1335,114 @@ fn ado_notice_recovery_does_not_require_current_approval_eligibility() {
     assert_eq!(provider.writes.get(), 1);
 }
 
+/// Accepted comments remain recoverable after state changes without weakening ownership checks.
+fn notice_readback_survives_closure_and_draft_conversion() {
+    let repository = TempDir::new().unwrap();
+    let (old, new) = sources(repository.path());
+    for ado in [false, true] {
+        for fault in ["noticeClosed", "noticeDraft", "noticeAbandoned"] {
+            if !ado && fault == "noticeAbandoned" {
+                continue;
+            }
+            for interrupted in [false, true] {
+                let scope = TempDir::new().unwrap();
+                let root = scope.path().join("run");
+                let provider = if ado {
+                    Provider::ado(repository.path(), &old, &new)
+                } else {
+                    Provider::new(repository.path(), &old, &new)
+                };
+                let (snapshot, prepared) = prepare(&root, &provider, false);
+                assess_as(&root, &provider, &snapshot, &prepared, "significant");
+                if interrupted {
+                    provider.fault.set("postReadFailure");
+                    assert_eq!(
+                        ss_skills_util::classification(
+                            &notify(&root, &provider, &snapshot).unwrap_err()
+                        ),
+                        "ambiguousWrite"
+                    );
+                    assert_eq!(
+                        invoke(&root, &provider, "results", &[]).unwrap()["state"],
+                        "failed"
+                    );
+                }
+                provider.fault.set(fault);
+                if interrupted {
+                    assert_notice_readback_ownership(&root, &provider, &snapshot, fault);
+                }
+                let recovered = notify(&root, &provider, &snapshot)
+                    .unwrap_or_else(|error| panic!("{ado}: {fault}: {interrupted}: {error}"));
+                assert_eq!(recovered["state"], "complete");
+                assert_eq!(recovered["items"][0]["status"], "needsReview");
+                assert!(recovered["items"][0]["reviewNotice"].is_object());
+                assert!(recovered["error"].is_null());
+                let record: Value =
+                    serde_json::from_slice(&fs::read(root.join("run.json")).unwrap()).unwrap();
+                assert!(record["errorPullRequestId"].is_null());
+                assert_eq!(provider.writes.get(), 1);
+            }
+        }
+    }
+}
+
+/// Recovery of an inactive PR still requires a unique, exact, account-owned effect.
+fn assert_notice_readback_ownership(
+    root: &Path,
+    provider: &Provider,
+    snapshot: &str,
+    fault: &'static str,
+) {
+    let ado = provider.ado;
+    let original = provider.evidence.borrow().clone();
+    // Replacement identities deliberately lie outside the fixture's original service scope.
+    for mutation in ["account", "scope", "author", "body", "duplicate"] {
+        let mut evidence = provider.evidence.borrow_mut();
+        match mutation {
+            "account" => provider.fault.set("auth"),
+            "scope" => {
+                evidence["pullRequest"][if ado { "pullRequestId" } else { "number" }] = json!(999);
+            }
+            _ => {
+                let collection = evidence[if ado { "threads" } else { "comments" }]
+                    .as_array_mut()
+                    .unwrap();
+                if mutation == "duplicate" {
+                    let mut duplicate = collection.last().unwrap().clone();
+                    duplicate["id"] = json!(999);
+                    collection.push(duplicate);
+                } else {
+                    let comment = collection.last_mut().unwrap();
+                    let comment = if ado {
+                        &mut comment["comments"][0]
+                    } else {
+                        comment
+                    };
+                    if mutation == "author" {
+                        comment[if ado { "author" } else { "user" }]["id"] =
+                            json!("another-account");
+                    } else {
+                        let key = if ado { "content" } else { "body" };
+                        comment[key] = json!(format!("{}\nEdited", comment[key].as_str().unwrap()));
+                    }
+                }
+            }
+        }
+        drop(evidence);
+        assert_eq!(
+            ss_skills_util::classification(&notify(root, provider, snapshot).unwrap_err()),
+            "ambiguousWrite",
+            "{ado}: {fault}: {mutation}"
+        );
+        let failed = invoke(root, provider, "results", &[]).unwrap();
+        assert_eq!(failed["state"], "failed");
+        assert_eq!(failed["error"]["kind"], "ambiguousWrite");
+        assert_eq!(provider.writes.get(), 1);
+        provider.evidence.replace(original.clone());
+        provider.fault.set(fault);
+    }
+}
+
 /// Superseded edited notices cannot obstruct a later operation's exact readback.
 fn expired_edited_notices_do_not_block_new_notice_readback() {
     let repository = TempDir::new().unwrap();
@@ -1527,6 +1658,7 @@ fn native_git_assessment_and_guarded_publication_have_exact_effect_boundaries() 
     uncertain_assessment_diagnostic_survives_notification_retry();
     notice_recovery_is_bound_to_the_failed_pull_request();
     ado_notice_recovery_does_not_require_current_approval_eligibility();
+    notice_readback_survives_closure_and_draft_conversion();
     expired_edited_notices_do_not_block_new_notice_readback();
 }
 

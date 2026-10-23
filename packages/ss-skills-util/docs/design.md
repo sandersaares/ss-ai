@@ -116,6 +116,7 @@ verification remain distinct. Unknown writes are reconciled read-only, never
 blindly replayed; they block later runs. A concurrent push or human decision
 can make an accepted effect stale. The utility reports it without rollback
 and does not claim that detection prevents existing auto-merge.
+Needs-review notice readback remains available after PR closure or draft conversion.
 
 ## Git comparisons
 
