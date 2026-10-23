@@ -144,6 +144,54 @@ impl Provider {
             );
         }
     }
+
+    /// Prevents atomic replacement without touching the active sibling lock.
+    fn fail_journal_save(&self) {
+        let path = host_journal(self.host_directory.borrow().as_ref().unwrap());
+        fs::rename(&path, path.with_extension("saved")).unwrap();
+        fs::create_dir_all(path).unwrap();
+    }
+
+    /// Reporting faults begin only after the provider's terminal receipt is durable.
+    fn observation_override(&self) -> Option<Value> {
+        let fault = self.fault.get();
+        if fault == "preflightReadFailure" {
+            return Some(Value::Null);
+        }
+        if !matches!(fault, "reportReadFailure" | "reportStandingChanged") {
+            return None;
+        }
+        let path = host_journal(self.host_directory.borrow().as_ref().unwrap());
+        let record: Value = serde_json::from_slice(&fs::read(path).unwrap()).unwrap();
+        if !record["operations"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|operation| operation["result"]["outcome"] == "alreadyValid")
+        {
+            return None;
+        }
+        if fault == "reportReadFailure" {
+            return Some(Value::Null);
+        }
+        self.fault.set("");
+        if self.ado {
+            self.ado_vote(0, 41, "2026-09-28T09:07:00Z");
+        } else {
+            let mut evidence = self.evidence.borrow_mut();
+            let source = evidence["pullRequest"]["head"]["sha"].clone();
+            evidence["reviews"].as_array_mut().unwrap().push(json!({
+                "id": 99, "node_id": "reporting-withdrawal", "user": {"id": 42, "node_id": "user-42"},
+                "state": "CHANGES_REQUESTED", "submitted_at": "2026-09-28T09:07:00Z",
+                "commit_id": source, "body": "Independent later decision."
+            }));
+            evidence["timeline"].as_array_mut().unwrap().push(json!({
+                "__typename": "PullRequestReview", "id": "reporting-withdrawal",
+                "state": "CHANGES_REQUESTED"
+            }));
+        }
+        None
+    }
 }
 
 impl Process for Provider {
@@ -167,7 +215,13 @@ impl Process for Provider {
         let method = arguments[3].as_str();
         if method == "POST" && path == "repos/example/widgets/issues/1/comments" {
             self.writes.set(self.writes.get() + 1);
-            if self.fault.get() == "noticeRefused" {
+            if matches!(
+                self.fault.get(),
+                "noticeRefused" | "noticeRefusalJournalFailure"
+            ) {
+                if self.fault.get() == "noticeRefusalJournalFailure" {
+                    self.fail_journal_save();
+                }
                 return Ok(ProcessOutput::new(
                     false,
                     b"HTTP/2.0 403 Forbidden\r\n\r\n{}".to_vec(),
@@ -184,6 +238,9 @@ impl Process for Provider {
                     .as_array_mut()
                     .unwrap()
                     .push(comment.clone());
+            }
+            if self.fault.get() == "noticeJournalFailure" {
+                self.fail_journal_save();
             }
             return Ok(
                 if matches!(self.fault.get(), "noticeUnknown" | "lostNoticeReply") {
@@ -243,9 +300,7 @@ impl Process for Provider {
             }
             if self.fault.get() == "journalFailure" {
                 // A directory at the journal name deterministically refuses atomic file replacement.
-                let path = host_journal(self.host_directory.borrow().as_ref().unwrap());
-                fs::rename(&path, path.with_extension("saved")).unwrap();
-                fs::create_dir_all(path).unwrap();
+                self.fail_journal_save();
             }
             return Ok(if matches!(self.fault.get(), "lostReply" | "unknown") {
                 ProcessOutput::new(false, Vec::new(), b"connection lost".to_vec())
@@ -261,6 +316,15 @@ impl Process for Provider {
             return Ok(ProcessOutput::new(
                 false,
                 b"HTTP/2.0 403 Forbidden\r\n\r\n{}".to_vec(),
+                Vec::new(),
+            ));
+        }
+        if path == "repos/example/widgets/pulls/1"
+            && let Some(value) = self.observation_override()
+        {
+            return Ok(ProcessOutput::new(
+                true,
+                serde_json::to_vec(&value).unwrap(),
                 Vec::new(),
             ));
         }
@@ -373,8 +437,15 @@ impl Http for Provider {
             assert!(vote || method == "POST");
             if self.fault.get() == "rateLimit"
                 || self.fault.get() == "permission"
-                || !vote && matches!(self.fault.get(), "auditRefused" | "noticeRefused")
+                || !vote
+                    && matches!(
+                        self.fault.get(),
+                        "auditRefused" | "noticeRefused" | "noticeRefusalJournalFailure"
+                    )
             {
+                if self.fault.get() == "noticeRefusalJournalFailure" {
+                    self.fail_journal_save();
+                }
                 return response(
                     if self.fault.get() == "rateLimit" {
                         429
@@ -442,6 +513,9 @@ impl Http for Provider {
                     .unwrap()
                     .push(thread.clone());
             }
+            if self.fault.get() == "noticeJournalFailure" {
+                self.fail_journal_save();
+            }
             if matches!(
                 self.fault.get(),
                 "lostAuditReply" | "auditUnknown" | "lostNoticeReply" | "noticeUnknown"
@@ -452,6 +526,11 @@ impl Http for Provider {
         }
         if self.fault.get() == "postReadFailure" && self.writes.get() > 0 {
             return response(403, json!({}));
+        }
+        if path.ends_with("/pullRequests/1")
+            && let Some(value) = self.observation_override()
+        {
+            return response(200, value);
         }
         let evidence = self.evidence.borrow();
         let values =
@@ -1004,6 +1083,132 @@ fn valid_automatic_approval_timestamps_survive_later_invocations() {
     }
 }
 
+/// A terminal provider receipt cannot leave reporting errors absent from results.
+fn publication_reporting_failures_are_persisted() {
+    let repository = TempDir::new().unwrap();
+    let (old, new) = sources(repository.path());
+    for ado in [false, true] {
+        for fault in ["reportReadFailure", "reportStandingChanged"] {
+            let scope = TempDir::new().unwrap();
+            let root = scope.path().join("first");
+            let provider = if ado {
+                Provider::ado(repository.path(), &old, &new)
+            } else {
+                Provider::new(repository.path(), &old, &new)
+            };
+            let (snapshot, prepared) = prepare(&root, &provider, false);
+            assess(&root, &provider, &snapshot, &prepared);
+            if ado {
+                provider.ado_vote(10, 40, "2026-09-28T09:06:00Z");
+            } else {
+                provider.later("APPROVED");
+            }
+            provider
+                .host_directory
+                .replace(Some(scope.path().join("host-store/publications")));
+            provider.fault.set(fault);
+            let error = publish(&root, &provider, &snapshot).unwrap_err();
+            let result = invoke(&root, &provider, "results", &[]).unwrap();
+            assert_eq!(result["state"], "partial");
+            assert_eq!(
+                result["items"][0]["status"],
+                if fault == "reportStandingChanged" {
+                    "staleDuringExecution"
+                } else {
+                    "failed"
+                }
+            );
+            assert_eq!(
+                result["items"][0]["error"]["kind"],
+                ss_skills_util::classification(&error)
+            );
+            assert!(result["items"][0]["publication"].is_null());
+            assert!(result["items"][0]["automaticApproval"].is_null());
+            assert_eq!(provider.writes.get(), 0);
+            provider.fault.set("");
+            publish(&root, &provider, &snapshot).unwrap_err();
+            assert_eq!(invoke(&root, &provider, "results", &[]).unwrap(), result);
+        }
+    }
+}
+
+/// Failed terminal saves must retain recoverable intent in both journals.
+fn notice_terminal_save_failures_preserve_original_recovery() {
+    let repository = TempDir::new().unwrap();
+    let (old, new) = sources(repository.path());
+    for ado in [false, true] {
+        for fault in ["noticeJournalFailure", "noticeRefusalJournalFailure"] {
+            let scope = TempDir::new().unwrap();
+            let root = scope.path().join("first");
+            let provider = if ado {
+                Provider::ado(repository.path(), &old, &new)
+            } else {
+                Provider::new(repository.path(), &old, &new)
+            };
+            let (snapshot, prepared) = prepare(&root, &provider, false);
+            assess_as(&root, &provider, &snapshot, &prepared, "significant");
+            let directory = scope.path().join("host-store/review-notices");
+            provider.host_directory.replace(Some(directory.clone()));
+            provider.fault.set(fault);
+            let error = notify(&root, &provider, &snapshot).unwrap_err();
+            assert_eq!(ss_skills_util::classification(&error), "ambiguousWrite");
+            let result = invoke(&root, &provider, "results", &[]).unwrap();
+            assert_eq!(result["state"], "failed");
+            assert_eq!(result["error"]["kind"], "ambiguousWrite");
+            assert!(result["items"][0]["error"].is_null());
+            let path = host_journal(&directory);
+            let intent: Value =
+                serde_json::from_slice(&fs::read(path.with_extension("saved")).unwrap()).unwrap();
+            assert_eq!(intent["attempts"][0]["state"], "intent");
+            fs::remove_dir(&path).unwrap();
+            fs::rename(path.with_extension("saved"), &path).unwrap();
+            provider.fault.set("");
+            let recovered = notify(&root, &provider, &snapshot);
+            if fault == "noticeJournalFailure" {
+                assert_eq!(recovered.unwrap()["items"][0]["status"], "needsReview");
+                let settled: Value = serde_json::from_slice(&fs::read(path).unwrap()).unwrap();
+                assert_eq!(settled["attempts"][0]["state"], "verified");
+            } else {
+                // The lost refusal is not durable evidence permitting another POST.
+                assert_eq!(
+                    ss_skills_util::classification(&recovered.unwrap_err()),
+                    "ambiguousWrite"
+                );
+            }
+            assert_eq!(provider.writes.get(), 1);
+        }
+    }
+}
+
+/// A resolved notification error cannot replace the assessment's uncertainty.
+fn uncertain_assessment_diagnostic_survives_notification_retry() {
+    let repository = TempDir::new().unwrap();
+    let (old, new) = sources(repository.path());
+    for ado in [false, true] {
+        let scope = TempDir::new().unwrap();
+        let root = scope.path().join("first");
+        let provider = if ado {
+            Provider::ado(repository.path(), &old, &new)
+        } else {
+            Provider::new(repository.path(), &old, &new)
+        };
+        let (snapshot, prepared) = prepare(&root, &provider, false);
+        assess_as(&root, &provider, &snapshot, &prepared, "uncertain");
+        let before = invoke(&root, &provider, "results", &[]).unwrap();
+        provider.fault.set("preflightReadFailure");
+        notify(&root, &provider, &snapshot).unwrap_err();
+        let failed = invoke(&root, &provider, "results", &[]).unwrap();
+        assert_eq!(failed["items"][0]["error"], before["items"][0]["error"]);
+        provider.fault.set("");
+        let recovered = notify(&root, &provider, &snapshot).unwrap();
+        assert_eq!(recovered["items"][0]["error"], before["items"][0]["error"]);
+        assert_eq!(recovered["items"][0]["status"], "failed");
+        assert_eq!(recovered["state"], "partial");
+        assert!(recovered["items"][0]["reviewNotice"].is_object());
+        assert_eq!(provider.writes.get(), 1);
+    }
+}
+
 fn publish(root: &Path, provider: &Provider, snapshot: &str) -> Result<Value, AppError> {
     work(
         root,
@@ -1127,6 +1332,9 @@ fn native_git_assessment_and_guarded_publication_have_exact_effect_boundaries() 
     needs_review_notices_short_circuit_and_expire_only_after_external_approval();
     notice_dry_runs_refusals_and_uncertain_effects_do_not_duplicate_writes();
     valid_automatic_approval_timestamps_survive_later_invocations();
+    publication_reporting_failures_are_persisted();
+    notice_terminal_save_failures_preserve_original_recovery();
+    uncertain_assessment_diagnostic_survives_notification_retry();
 }
 
 /// Exercises real command dispatch and records while ADO effects remain entirely in memory.

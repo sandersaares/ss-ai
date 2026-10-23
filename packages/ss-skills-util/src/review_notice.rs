@@ -1,6 +1,7 @@
 //! Persists account-owned review requirements without granting approval authority.
 
 use std::collections::HashSet;
+use std::mem::replace;
 use std::path::Path;
 
 use jiff::Timestamp;
@@ -158,10 +159,14 @@ fn approvals(
                                     == Some("APPROVED")
                         });
                 if approved {
+                    // Only interpretable audits supply reset metadata; the provider validates standing.
+                    let Ok(audit) = Audit::parse(text(field(review, "body")?)?) else {
+                        continue;
+                    };
                     events.push(ApprovalEvent {
                         id: id.to_owned(),
                         at: timestamp(text(field(review, "submitted_at")?)?)?,
-                        automatic: Audit::parse(text(field(review, "body")?)?)?.is_some(),
+                        automatic: audit.is_some(),
                     });
                 }
             }
@@ -498,7 +503,11 @@ impl<'a> Store<'a> {
             body: body.clone(),
             state: State::Intent,
         });
-        self.save()?;
+        if let Err(error) = self.save() {
+            // No effect starts before intent is durable, so a failed save leaves no owned attempt.
+            let _ = self.record.attempts.pop();
+            return Err(error);
+        }
         let response = match target.platform {
             Platform::GitHub => api.transport.github_write_once(&format!("{}/issues/{}/comments", target.repository_api(), target.pull_request_id), &json!({"body": body})),
             Platform::AzureDevOps => api.transport.ado_write_once(&format!("{}/threads", target.pr_api()), "POST", &json!({"status": 4, "comments": [{"parentCommentId": 0, "commentType": 1, "content": body}]})),
@@ -506,12 +515,7 @@ impl<'a> Store<'a> {
         if let Err(error) = response
             && classification(&error) != "ambiguousWrite"
         {
-            self.record
-                .attempts
-                .last_mut()
-                .ok_or_else(|| fail("invalidState", "Missing notice intent"))?
-                .state = State::Refused;
-            self.save()?;
+            self.save_state(self.record.attempts.len().saturating_sub(1), State::Refused)?;
             return Err(error);
         }
         // A lost acknowledgement does not permit another POST, even if readback fails.
@@ -557,13 +561,30 @@ impl<'a> Store<'a> {
             ));
         };
         let notice = notice.clone();
-        self.record
-            .attempts
-            .get_mut(index)
-            .ok_or_else(|| fail("invalidState", "Missing notice intent"))?
-            .state = State::Verified;
-        self.save()?;
+        self.save_state(index, State::Verified)?;
         Ok(notice)
+    }
+
+    /// Recovery checks retain the last durable state when a terminal save fails.
+    fn save_state(&mut self, index: usize, state: State) -> Result<(), AppError> {
+        let previous = replace(
+            &mut self
+                .record
+                .attempts
+                .get_mut(index)
+                .ok_or_else(|| fail("invalidState", "Missing notice intent"))?
+                .state,
+            state,
+        );
+        let result = self.save();
+        if result.is_err() {
+            self.record
+                .attempts
+                .get_mut(index)
+                .ok_or_else(|| fail("invalidState", "Missing notice intent"))?
+                .state = previous;
+        }
+        result
     }
 
     fn save(&self) -> Result<(), AppError> {
@@ -754,6 +775,24 @@ mod tests {
             .unwrap();
         comment["updated_at"] = json!("2026-01-09T02:00:00Z");
         assert_eq!(decide(&evidence).unwrap().status(), "alreadyValid");
+    }
+
+    /// Superseded invalid audits cannot block a later independent approval or expire notices.
+    #[test]
+    fn later_external_approval_supersedes_malformed_audit_without_granting_authority() {
+        let mut evidence = fixture();
+        evidence["reviews"][1]["body"] = json!("<!-- ss-autoreapprove malformed -->");
+        decide(&evidence).unwrap_err();
+        add_approval(&mut evidence, "2026-01-09T01:00:00Z", true, false);
+        assert_eq!(decide(&evidence).unwrap().status(), "alreadyValid");
+        add_notice(&mut evidence, "2026-01-09T00:00:00Z", 60);
+        assert_eq!(decide(&evidence).unwrap().status(), "alreadyValid");
+        evidence["reviews"]
+            .as_array_mut()
+            .unwrap()
+            .last_mut()
+            .unwrap()["body"] = json!("<!-- ss-autoreapprove malformed -->");
+        decide(&evidence).unwrap_err();
     }
 
     /// Deleted discussion must neither break scanning nor satisfy notice readback.

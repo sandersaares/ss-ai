@@ -1155,8 +1155,39 @@ pub(crate) fn publish(
             explanation: assessment.explanation()?,
         },
     );
+    // Reporting is part of publication completion, so its failures need the same durable diagnostic.
+    let result = result.and_then(|receipt| {
+        let mut automatic_approval =
+            if matches!(receipt.outcome, Outcome::Reapproved | Outcome::AlreadyValid) {
+                store.automatic_approval(&run.run_id)?
+            } else {
+                None
+            };
+        if receipt.outcome == Outcome::AlreadyValid && automatic_approval.is_none() {
+            // Another run may have renewed approval after this run's inspection.
+            // Capture its origin rather than misreporting absent metadata as an external review.
+            let fresh = Evidence::capture(api, &target)?;
+            if !matches!(
+                fresh.decide(
+                    run.platform,
+                    &run.account_id,
+                    &run.repository_id,
+                    input.number.get(),
+                    clock.now()
+                )?,
+                Decision::AlreadyValid { .. }
+            ) {
+                return Err(fail(
+                    "staleEvidence",
+                    "Approval standing changed before result reporting",
+                ));
+            }
+            automatic_approval = review_notice::automatic_approval(&fresh, &scope, clock.now())?;
+        }
+        Ok((receipt, automatic_approval))
+    });
     match result {
-        Ok(receipt) => {
+        Ok((receipt, automatic_approval)) => {
             let fatal = receipt
                 .error
                 .as_ref()
@@ -1170,34 +1201,7 @@ pub(crate) fn publish(
                     kind: error.kind.clone(),
                     message: error.message.clone(),
                 });
-            entry.automatic_approval =
-                if matches!(receipt.outcome, Outcome::Reapproved | Outcome::AlreadyValid) {
-                    store.automatic_approval(&run.run_id)?
-                } else {
-                    None
-                };
-            if receipt.outcome == Outcome::AlreadyValid && entry.automatic_approval.is_none() {
-                // Another run may have renewed approval after this run's inspection.
-                // Capture its origin rather than misreporting absent metadata as an external review.
-                let fresh = Evidence::capture(api, &target)?;
-                if !matches!(
-                    fresh.decide(
-                        run.platform,
-                        &run.account_id,
-                        &run.repository_id,
-                        input.number.get(),
-                        clock.now()
-                    )?,
-                    Decision::AlreadyValid { .. }
-                ) {
-                    return Err(fail(
-                        "staleEvidence",
-                        "Approval standing changed before result reporting",
-                    ));
-                }
-                entry.automatic_approval =
-                    review_notice::automatic_approval(&fresh, &scope, clock.now())?;
-            }
+            entry.automatic_approval = automatic_approval;
             entry.publication = Some(receipt);
             run.error = fatal;
             if run.error.is_some() {
@@ -1365,7 +1369,10 @@ pub(crate) fn notify(
                 run.error = Some(diagnostic);
                 run.state = RunState::Failed;
             } else {
-                entry.execution_error = Some(diagnostic);
+                // Notification errors cannot replace a completed assessment's uncertainty.
+                if !uncertain {
+                    entry.execution_error = Some(diagnostic);
+                }
                 finish_state(&mut run);
             }
             run.save(&journal)?;
