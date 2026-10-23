@@ -7,7 +7,7 @@ applyTo: "**/*.rs"
 Miri slows down tests but tests should still not take unreasonable amounts of time under Miri.
 
 If a test is longer than 10 seconds under Miri, fix the test so it runs faster. Most of the time, the problem is that too much data is
-covered by the test - shorten arrays (`cfg` grated to Miri specific settings, if necessary) and reduce the workload in the test to make
+covered by the test - shorten arrays (`cfg` gated to Miri specific settings, if necessary) and reduce the workload in the test to make
 it faster. As a last resort, if the test truly relies on a large data set, skip it under Miri.
 
 # Unit tests must be in-process
