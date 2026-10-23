@@ -120,8 +120,9 @@ with `isReapprove: true`, so a retained vote can count on the assessed iteration
 It never clears a vote first, changes reviewer requirements, or withdraws an
 approval as rollback. A request for the account's attention (`isFlagged: true`
 on its ADO reviewer record), a declined review, or an account-authored
-server-visible pending thread blocks publication. ADO does not expose unsent UI
-drafts through this evidence; the utility does not claim to inspect them.
+pending thread returned by the server blocks publication. The utility checks
+returned threads containing the account's comment; it does not claim comprehensive
+draft detection or establish whether unpublished server-saved drafts appear.
 
 The reviewer API accepts neither a source SHA precondition nor an operation ID.
 The host journal therefore captures complete authority and source evidence before
