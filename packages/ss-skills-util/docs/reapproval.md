@@ -118,8 +118,9 @@ ADO renewals preserve the existing positive vote strength. The native transactio
 uses the documented [reviewer vote API](https://learn.microsoft.com/en-us/rest/api/azure/devops/git/pull-request-reviewers/create-pull-request-reviewer?view=azure-devops-rest-7.1)
 with `isReapprove: true`, so a retained vote can count on the assessed iteration.
 It never clears a vote first, changes reviewer requirements, or withdraws an
-approval as rollback. Attention flags, declined reviews and account-authored
-server-visible pending threads block publication. ADO does not expose unsent UI
+approval as rollback. A request for the account's attention (`isFlagged: true`
+on its ADO reviewer record), a declined review, or an account-authored
+server-visible pending thread blocks publication. ADO does not expose unsent UI
 drafts through this evidence; the utility does not claim to inspect them.
 
 The reviewer API accepts neither a source SHA precondition nor an operation ID.

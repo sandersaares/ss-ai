@@ -133,8 +133,9 @@ GitHub submits an explicit source SHA. ADO preserves the positive vote strength,
 requires a unique new account-owned vote event on the assessed source iteration,
 and publishes a source-bound audit. Its vote API cannot condition the write on
 a source SHA; preflight and postflight detect movement, not atomically prevent it.
-The utility preserves pending human reviews, including ADO's server-visible
-pending threads, attention flags, and declined reviews.
+The utility preserves pending human reviews. On ADO, publication stops for
+account-authored server-visible pending threads, requests for the account's
+attention (`isFlagged: true` on its reviewer record), and declined reviews.
 
 Dry runs end at `wouldReapprove`. Both providers publish only through the native
 transaction; never issue a direct reviewer vote or assemble an audit manually.
