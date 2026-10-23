@@ -963,6 +963,78 @@ fn ado_inspection_preserves_verified_retention_and_removal_in_both_modes() {
 }
 
 #[test]
+fn ado_inspection_ignores_deleted_history_and_persists_deterministic_results() {
+    for dry_run in [true, false] {
+        for delete_approval in [false, true] {
+            let root = fixture();
+            let mut provider = AzureApproval::new(2);
+            let stage = &mut provider.fixture["stages"][2];
+            stage["threads"].as_array_mut().unwrap().push(json!({
+                "id": "deleted-discussion", "isDeleted": true
+            }));
+            if delete_approval {
+                stage["threads"][1] = json!({"id": 2, "isDeleted": true});
+            }
+            discover_azure_approval(root.path(), &provider, dry_run);
+            let output: Value = serde_json::from_str(
+                &run(
+                    &inspect_arguments(root.path(), 1),
+                    &AzureToken,
+                    &provider,
+                    &FixedClock,
+                )
+                .unwrap(),
+            )
+            .unwrap();
+            let expected = if delete_approval {
+                "noPriorApproval"
+            } else {
+                "alreadyValid"
+            };
+            assert_eq!(output["state"], "complete");
+            assert_eq!(output["counts"]["failed"], 0);
+            assert_eq!(output["counts"][expected], 1);
+            assert_eq!(output["items"][0]["status"], expected);
+            assert!(output["items"][0]["error"].is_null());
+            let captured = record(root.path());
+            let inspection = &captured["inventory"][0]["inspection"];
+            assert!(!inspection["snapshotDigest"].is_null());
+            let captured_threads = inspection["evidence"]["observation"]["threads"]
+                .as_array()
+                .unwrap();
+            let returned_threads = provider.fixture["stages"][2]["threads"].as_array().unwrap();
+            assert_eq!(captured_threads.len(), returned_threads.len());
+            assert!(
+                returned_threads
+                    .iter()
+                    .all(|thread| captured_threads.contains(thread))
+            );
+            let results: Value = serde_json::from_str(
+                &run(
+                    &result_arguments(root.path()),
+                    &NoProcess,
+                    &NoHttp,
+                    &FixedClock,
+                )
+                .unwrap(),
+            )
+            .unwrap();
+            assert_eq!(results["items"][0]["status"], expected);
+            provider.calls.borrow_mut().clear();
+            run(
+                &inspect_arguments(root.path(), 1),
+                &AzureToken,
+                &provider,
+                &FixedClock,
+            )
+            .unwrap();
+            assert_eq!(record(root.path()), captured);
+            assert_eq!(provider.calls.borrow().len(), 2);
+        }
+    }
+}
+
+#[test]
 fn ado_inspection_persists_untyped_notifications_without_losing_approval_authority() {
     for properties in [Some(Value::Null), None] {
         let root = fixture();
@@ -1177,6 +1249,12 @@ fn ado_inspection_reports_unknown_policy_and_persists_partial_or_scope_failures(
     ] {
         let root = fixture();
         let mut provider = AzureApproval::new(2);
+        provider.fixture["stages"][2]["threads"]
+            .as_array_mut()
+            .unwrap()
+            .push(json!({
+                "id": "deleted-discussion", "isDeleted": true
+            }));
         provider.move_source = fault == "movement";
         provider.repeat_policy = fault == "repeatedPage";
         provider.deny_threads = fault == "permission";

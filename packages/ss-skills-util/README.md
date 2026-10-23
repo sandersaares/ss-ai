@@ -191,6 +191,11 @@ without a latest timestamp or complete evidence.
 An inspection's digest covers its capture time and complete evidence.
 Consumers recompute its conclusion and validate its run identity.
 
+ADO inspections ignore deleted threads and comments as authority while retaining
+the returned records in their snapshots. They report `noPriorApproval` when no
+applicable approval survives, or `ineligible` with reason `approvalEvidenceDeleted`
+when deletion prevents establishing renewal authority.
+
 The run starts `enumerating`, then becomes `processing`. Discovery remains
 `processing` while recency work or approval assessments remain. `complete`
 requires no remaining candidates, pending checks, or failures. Per-PR failures
