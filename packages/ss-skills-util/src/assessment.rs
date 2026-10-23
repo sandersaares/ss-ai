@@ -54,6 +54,25 @@ pub(crate) enum Disposition {
 }
 
 impl Assessment {
+    /// Semantic refusal includes completed uncertainty, but not unfinished or failed preparation.
+    pub(crate) fn needs_review(&self) -> bool {
+        self.complete
+            && matches!(
+                self.disposition(),
+                Some(Disposition::Significant | Disposition::Uncertain)
+            )
+    }
+
+    /// Reports a significant member rather than letting a favorable aggregate hide its reason.
+    pub(crate) fn rationale(&self) -> Option<&str> {
+        let disposition = self.disposition()?;
+        self.decisions
+            .values()
+            .chain(self.cumulative.iter())
+            .find(|judgment| judgment.disposition == disposition)
+            .map(|judgment| judgment.rationale.as_str())
+    }
+
     pub(crate) fn explanation(&self) -> Result<&str, AppError> {
         self.cumulative
             .as_ref()

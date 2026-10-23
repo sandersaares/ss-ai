@@ -18,6 +18,7 @@ use crate::github_approval::Evidence as GitHubEvidence;
 use crate::journal::FileJournal;
 use crate::json::{field, identifier, required_optional, text};
 use crate::renewal::{Anchor, Audit, State as AuditState};
+use crate::review_notice::{self, AutomaticApproval};
 use crate::target::{Platform, Target};
 
 /// Host-level serialization encloses the run lock, preflight, effects, and verification.
@@ -34,6 +35,51 @@ pub(crate) enum ProviderStore<'a> {
 }
 
 impl<'a> ProviderStore<'a> {
+    /// Notice publication cannot overlap an approval whose remote effect is unknown.
+    pub(crate) fn ensure_resolved(&self) -> Result<(), AppError> {
+        let unresolved = match self {
+            Self::GitHub(store) => store.record.operations.iter().any(|operation| {
+                matches!(
+                    operation.state,
+                    State::WriteIntent | State::WriteAcknowledged | State::WriteUnknown
+                )
+            }),
+            Self::AzureDevOps(store) => store.unresolved(),
+        };
+        if unresolved {
+            return Err(fail(
+                "ambiguousWrite",
+                "An unresolved approval blocks needs-review publication",
+            ));
+        }
+        Ok(())
+    }
+
+    /// Reuses persisted postflight evidence, including after host-save/run-save interruption.
+    pub(crate) fn automatic_approval(
+        &self,
+        run: &str,
+    ) -> Result<Option<AutomaticApproval>, AppError> {
+        match self {
+            Self::GitHub(store) => {
+                let verification = store
+                    .record
+                    .operations
+                    .iter()
+                    .find(|operation| operation.run_id == run)
+                    .and_then(|operation| operation.verification.as_ref());
+                verification.map_or(Ok(None), |verification| {
+                    review_notice::automatic_approval(
+                        &verification.evidence,
+                        &store.record.scope,
+                        timestamp(&verification.observed_at)?,
+                    )
+                })
+            }
+            Self::AzureDevOps(store) => store.automatic_approval(run),
+        }
+    }
+
     pub(crate) fn open(
         platform: Platform,
         directory: &Path,

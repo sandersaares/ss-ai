@@ -67,6 +67,8 @@ the current digest from `assessment` and rejects conflicting updates.
 Missing work is not an empty successful assessment. Completion
 returns `needsReview`, `failed`, `wouldReapprove`, or `readyToReapprove`;
 only the last permits publication.
+Completed significant or uncertain assessments in a live run require the orchestrator's native `notify` command;
+workers stop after completion and never publish. Dry runs do not notify.
 An uncertain evaluation returns `failed` with a diagnostic and keeps the run
 partial; it is not a completed no-work result.
 
@@ -74,6 +76,7 @@ partial; it is not a completed no-work result.
 
 ```powershell
 ss-skills-util autoreapprove publish --repository-url "{{REPOSITORY}}" --state-path "{{RUN}}" --pull-request-id "{{PR}}" --snapshot-digest "{{SNAPSHOT}}" --attribution "{{ATTRIBUTION}}" --tenant "{{TENANT}}"
+ss-skills-util autoreapprove notify --repository-url "{{REPOSITORY}}" --state-path "{{RUN}}" --pull-request-id "{{PR}}" --snapshot-digest "{{SNAPSHOT}}" --attribution "{{ATTRIBUTION}}" --tenant "{{TENANT}}"
 ss-skills-util autoreapprove results --state-path "{{RUN}}"
 ```
 
@@ -92,3 +95,20 @@ succeeded. Recovery may finish an unattempted ADO audit or retry an explicitly
 refused audit after fresh vote verification, but never repeats an uncertain effect.
 Unknown effects block later runs on the same publishing host.
 Do not alter journals, delete retained locks, or issue manual retry writes.
+
+`notify` accepts only a completed significant or uncertain live assessment. It refreshes
+source and decision evidence under the publication lock, posts an attributed
+standalone needs-review comment with a hidden marker, and verifies the owned
+comment. Repeating the original command reconciles the same intent without
+posting again. An unknown comment effect blocks later approval writes on this
+host; preserve the original run for reconciliation. Never call `notify` for
+a dry run, an existing active marker, missing approval authority, or a tooling
+failure without a completed assessment. Uncertain assessments retain their
+failure diagnostic and partial run status after notification.
+
+Follow every final `results` page. Each in-range item supplies its title and
+URL for the linked summary, `assessmentReason` for a completed judgment,
+`reviewNotice` (`commentId`, `createdAt`, `rationale`) for a current or retained
+needs-review comment, and `automaticApproval` (`approvalEventId`, `approvedAt`)
+only for valid automatic approval standing. Null automatic metadata with
+`alreadyValid` means an external approval, not an automatic one.

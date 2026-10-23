@@ -165,6 +165,34 @@ impl Process for Provider {
         assert_eq!(program, "gh");
         let path = arguments[1].as_str();
         let method = arguments[3].as_str();
+        if method == "POST" && path == "repos/example/widgets/issues/1/comments" {
+            self.writes.set(self.writes.get() + 1);
+            if self.fault.get() == "noticeRefused" {
+                return Ok(ProcessOutput::new(
+                    false,
+                    b"HTTP/2.0 403 Forbidden\r\n\r\n{}".to_vec(),
+                    Vec::new(),
+                ));
+            }
+            let request: Value = serde_json::from_slice(input).unwrap();
+            let comment = json!({
+                "id": 50, "user": {"id": 42}, "body": request["body"],
+                "created_at": "2026-09-28T09:05:00Z", "updated_at": "2026-09-28T09:05:00Z"
+            });
+            if self.fault.get() != "noticeUnknown" {
+                self.evidence.borrow_mut()["comments"]
+                    .as_array_mut()
+                    .unwrap()
+                    .push(comment.clone());
+            }
+            return Ok(
+                if matches!(self.fault.get(), "noticeUnknown" | "lostNoticeReply") {
+                    ProcessOutput::new(false, Vec::new(), b"connection lost".to_vec())
+                } else {
+                    ProcessOutput::new(true, serde_json::to_vec(&comment).unwrap(), Vec::new())
+                },
+            );
+        }
         if method == "POST" && path.ends_with("/reviews") {
             self.writes.set(self.writes.get() + 1);
             if self.fault.get() == "rateLimit" {
@@ -345,7 +373,7 @@ impl Http for Provider {
             assert!(vote || method == "POST");
             if self.fault.get() == "rateLimit"
                 || self.fault.get() == "permission"
-                || !vote && self.fault.get() == "auditRefused"
+                || !vote && matches!(self.fault.get(), "auditRefused" | "noticeRefused")
             {
                 return response(
                     if self.fault.get() == "rateLimit" {
@@ -408,13 +436,16 @@ impl Http for Provider {
                     "author": {"id": "10000000-0000-4000-8000-000000000001"},
                     "content": request["comments"][0]["content"], "publishedDate": at,
                     "lastContentUpdatedDate": at, "lastUpdatedDate": at}], "isDeleted": false, "properties": {}});
-            if self.fault.get() != "auditUnknown" {
+            if !matches!(self.fault.get(), "auditUnknown" | "noticeUnknown") {
                 self.evidence.borrow_mut()["threads"]
                     .as_array_mut()
                     .unwrap()
                     .push(thread.clone());
             }
-            if matches!(self.fault.get(), "lostAuditReply" | "auditUnknown") {
+            if matches!(
+                self.fault.get(),
+                "lostAuditReply" | "auditUnknown" | "lostNoticeReply" | "noticeUnknown"
+            ) {
                 return Err(io::Error::other("Lost audit reply").into());
             }
             return response(200, thread);
@@ -539,7 +570,8 @@ fn invoke(
     )?)?)
 }
 
-fn prepare(root: &Path, provider: &Provider, dry_run: bool) -> (String, Value) {
+/// Starts a fresh run without requiring its inspection to need source assessment.
+fn discover_inspect(root: &Path, provider: &Provider, dry_run: bool) -> Value {
     fs::create_dir_all(root).unwrap();
     fs::write(
         root.join("policy.md"),
@@ -557,7 +589,7 @@ fn prepare(root: &Path, provider: &Provider, dry_run: bool) -> (String, Value) {
     }
     let discovered = invoke(root, provider, "discover", &args).unwrap();
     assert_eq!(discovered["counts"]["noRecentCommit"], 1);
-    let inspected = invoke(
+    invoke(
         root,
         provider,
         "inspect",
@@ -568,8 +600,15 @@ fn prepare(root: &Path, provider: &Provider, dry_run: bool) -> (String, Value) {
             "1".into(),
         ],
     )
-    .unwrap();
-    assert_eq!(inspected["items"][0]["status"], "assessmentRequired");
+    .unwrap()
+}
+
+fn prepare(root: &Path, provider: &Provider, dry_run: bool) -> (String, Value) {
+    let inspected = discover_inspect(root, provider, dry_run);
+    assert_eq!(
+        inspected["items"][0]["status"], "assessmentRequired",
+        "{inspected}"
+    );
     let snapshot = inspected["items"][0]["snapshotDigest"]
         .as_str()
         .unwrap()
@@ -608,6 +647,17 @@ fn work(
 }
 
 fn assess(root: &Path, provider: &Provider, snapshot: &str, prepared: &Value) {
+    assess_as(root, provider, snapshot, prepared, "insignificant");
+}
+
+/// Shares complete evidence coverage while varying the cumulative policy decision.
+fn assess_as(
+    root: &Path,
+    provider: &Provider,
+    snapshot: &str,
+    prepared: &Value,
+    disposition: &str,
+) {
     let mut references = vec!["policy".to_owned(), "discussion".to_owned()];
     for change in prepared["changes"].as_array().unwrap() {
         let id = change["id"].as_str().unwrap();
@@ -661,9 +711,13 @@ fn assess(root: &Path, provider: &Provider, snapshot: &str, prepared: &Value) {
         "--change-id".into(),
         "cumulative".into(),
         "--disposition".into(),
-        "insignificant".into(),
+        disposition.into(),
         "--rationale".into(),
-        "Combined fixture changes have no significant design change or likely performance/correctness regression; discussion has no new objection.".into(),
+        match disposition {
+            "significant" => "A significant design change requires a separate new review.",
+            "uncertain" => "Missing contract context prevents assessing correctness.",
+            _ => "Combined fixture changes have no significant design change or likely performance/correctness regression; discussion has no new objection.",
+        }.into(),
         "--evidence".into(),
         "policy".into(),
         "--evidence".into(),
@@ -676,6 +730,278 @@ fn assess(root: &Path, provider: &Provider, snapshot: &str, prepared: &Value) {
     }
     work(root, provider, "judge", snapshot, &cumulative).unwrap();
     work(root, provider, "complete", snapshot, &[]).unwrap();
+}
+
+/// Notice publication carries the same immutable snapshot and attribution as approval.
+fn notify(root: &Path, provider: &Provider, snapshot: &str) -> Result<Value, AppError> {
+    work(
+        root,
+        provider,
+        "notify",
+        snapshot,
+        &[
+            "--repository-url".into(),
+            provider.url().into(),
+            "--attribution".into(),
+            "[Copilot speaking]".into(),
+        ],
+    )
+}
+
+/// Exercises both providers' persistent refusal and independent-approval reset.
+fn needs_review_notices_short_circuit_and_expire_only_after_external_approval() {
+    let repository = TempDir::new().unwrap();
+    let (old, new) = sources(repository.path());
+    for ado in [false, true] {
+        let scope = TempDir::new().unwrap();
+        let root = scope.path().join("first");
+        let provider = if ado {
+            Provider::ado(repository.path(), &old, &new)
+        } else {
+            Provider::new(repository.path(), &old, &new)
+        };
+        let (snapshot, prepared) = prepare(&root, &provider, false);
+        assess_as(&root, &provider, &snapshot, &prepared, "significant");
+        let overlapping = scope.path().join("overlapping");
+        let (overlapping_snapshot, overlapping_prepared) = prepare(&overlapping, &provider, false);
+        assess_as(
+            &overlapping,
+            &provider,
+            &overlapping_snapshot,
+            &overlapping_prepared,
+            "significant",
+        );
+        publish(&root, &provider, &snapshot).unwrap_err();
+        let result = notify(&root, &provider, &snapshot).unwrap();
+        assert_eq!(result["state"], "complete");
+        assert_eq!(result["items"][0]["status"], "needsReview");
+        assert_eq!(
+            result["items"][0]["reviewNotice"]["createdAt"],
+            "2026-09-28T09:05:00Z"
+        );
+        assert_eq!(provider.writes.get(), 1);
+        notify(&root, &provider, &snapshot).unwrap();
+        let shared = notify(&overlapping, &provider, &overlapping_snapshot).unwrap();
+        assert_eq!(
+            shared["items"][0]["reviewNotice"],
+            result["items"][0]["reviewNotice"]
+        );
+        assert_eq!(provider.writes.get(), 1);
+        let body = if ado {
+            provider.evidence.borrow()["threads"]
+                .as_array()
+                .unwrap()
+                .last()
+                .unwrap()["comments"][0]["content"]
+                .as_str()
+                .unwrap()
+                .to_owned()
+        } else {
+            provider.evidence.borrow()["comments"]
+                .as_array()
+                .unwrap()
+                .last()
+                .unwrap()["body"]
+                .as_str()
+                .unwrap()
+                .to_owned()
+        };
+        assert!(body.starts_with("[Copilot speaking]"));
+        assert!(body.contains("<!-- ss-autoreapprove-needs-review "));
+        assert!(body.contains("separate new review"));
+        let fetches = provider.fetches.get();
+        let retained = discover_inspect(&scope.path().join("retained"), &provider, false);
+        assert_eq!(retained["items"][0]["status"], "needsReview");
+        assert_eq!(
+            retained["items"][0]["reviewNotice"],
+            result["items"][0]["reviewNotice"]
+        );
+        assert_eq!(
+            provider.fetches.get(),
+            fetches,
+            "Retained notices skip source work"
+        );
+        assert_eq!(provider.writes.get(), 1);
+        if ado {
+            // An external positive vote on the same source is a new approval event.
+            provider.ado_vote(10, 40, "2026-09-28T09:06:00Z");
+        } else {
+            provider.later("APPROVED");
+            provider.evidence.borrow_mut()["reviews"]
+                .as_array_mut()
+                .unwrap()
+                .last_mut()
+                .unwrap()["submitted_at"] = json!("2026-09-28T09:06:00Z");
+        }
+        let reset = discover_inspect(&scope.path().join("reset"), &provider, false);
+        assert_eq!(reset["items"][0]["status"], "alreadyValid");
+        assert!(reset["items"][0]["automaticApproval"].is_null());
+        if ado {
+            provider.ado_push();
+            provider.evidence.borrow_mut()["iterations"][2]["createdDate"] =
+                json!("2026-09-28T09:08:00Z");
+        } else {
+            let mut evidence = provider.evidence.borrow_mut();
+            evidence["reviews"]
+                .as_array_mut()
+                .unwrap()
+                .last_mut()
+                .unwrap()["state"] = json!("DISMISSED");
+            evidence["timeline"]
+                .as_array_mut()
+                .unwrap()
+                .last_mut()
+                .unwrap()["state"] = json!("DISMISSED");
+            evidence["timeline"].as_array_mut().unwrap().push(json!({
+                "__typename": "ReviewDismissedEvent", "id": "later-dismissal",
+                "review": {"id": "later-review"}, "previousReviewState": "APPROVED",
+                "createdAt": "2026-09-28T09:08:00Z",
+                "pullRequestCommit": {"commit": {"oid": new}}
+            }));
+        }
+        let resumed = discover_inspect(&scope.path().join("resumed"), &provider, true);
+        assert_eq!(resumed["items"][0]["status"], "assessmentRequired");
+        assert_eq!(provider.writes.get(), 1);
+    }
+}
+
+/// Verifies that dry runs and uncertain comment effects never issue another POST.
+fn notice_dry_runs_refusals_and_uncertain_effects_do_not_duplicate_writes() {
+    let repository = TempDir::new().unwrap();
+    let (old, new) = sources(repository.path());
+    for ado in [false, true] {
+        for fault in [
+            "dryRun",
+            "uncertain",
+            "noticeRefused",
+            "lostNoticeReply",
+            "noticeUnknown",
+            "postReadFailure",
+            "prePush",
+        ] {
+            let scope = TempDir::new().unwrap();
+            let root = scope.path().join("first");
+            let provider = if ado {
+                Provider::ado(repository.path(), &old, &new)
+            } else {
+                Provider::new(repository.path(), &old, &new)
+            };
+            let (snapshot, prepared) = prepare(&root, &provider, fault == "dryRun");
+            assess_as(
+                &root,
+                &provider,
+                &snapshot,
+                &prepared,
+                if fault == "uncertain" {
+                    "uncertain"
+                } else {
+                    "significant"
+                },
+            );
+            provider.fault.set(fault);
+            if fault == "prePush" {
+                if ado {
+                    provider.ado_push();
+                } else {
+                    provider.evidence.borrow_mut()["pullRequest"]["head"]["sha"] =
+                        json!("f".repeat(40));
+                }
+            }
+            let result = notify(&root, &provider, &snapshot);
+            if fault == "lostNoticeReply" {
+                assert_eq!(result.unwrap()["items"][0]["status"], "needsReview");
+                notify(&root, &provider, &snapshot).unwrap();
+            } else if fault == "uncertain" {
+                let result = result.unwrap();
+                assert_eq!(result["items"][0]["status"], "failed");
+                assert_eq!(result["items"][0]["error"]["kind"], "service");
+                assert_eq!(result["state"], "partial");
+                let later = discover_inspect(&scope.path().join("later"), &provider, false);
+                assert_eq!(later["items"][0]["status"], "needsReview");
+                notify(&root, &provider, &snapshot).unwrap();
+            } else if fault == "postReadFailure" {
+                assert_eq!(
+                    ss_skills_util::classification(&result.unwrap_err()),
+                    "ambiguousWrite"
+                );
+                provider.fault.set("");
+                assert_eq!(
+                    notify(&root, &provider, &snapshot).unwrap()["items"][0]["status"],
+                    "needsReview"
+                );
+            } else {
+                result.unwrap_err();
+                notify(&root, &provider, &snapshot).unwrap_err();
+            }
+            if fault == "noticeUnknown" {
+                provider.fault.set("");
+                let later = scope.path().join("later");
+                let (snapshot, prepared) = prepare(&later, &provider, false);
+                assess(&later, &provider, &snapshot, &prepared);
+                assert_eq!(
+                    ss_skills_util::classification(
+                        &publish(&later, &provider, &snapshot).unwrap_err()
+                    ),
+                    "ambiguousWrite"
+                );
+            }
+            assert_eq!(
+                provider.writes.get(),
+                usize::from(!matches!(fault, "dryRun" | "prePush")),
+                "{ado}: {fault}"
+            );
+        }
+    }
+}
+
+/// Keeps automatic timestamps distinct from external approvals across fresh runs.
+fn valid_automatic_approval_timestamps_survive_later_invocations() {
+    let repository = TempDir::new().unwrap();
+    let (old, new) = sources(repository.path());
+    for ado in [false, true] {
+        let scope = TempDir::new().unwrap();
+        let root = scope.path().join("first");
+        let provider = if ado {
+            Provider::ado(repository.path(), &old, &new)
+        } else {
+            Provider::new(repository.path(), &old, &new)
+        };
+        let (snapshot, prepared) = prepare(&root, &provider, false);
+        assess(&root, &provider, &snapshot, &prepared);
+        let overlapping = scope.path().join("overlapping");
+        let (overlapping_snapshot, overlapping_prepared) = prepare(&overlapping, &provider, false);
+        assess(
+            &overlapping,
+            &provider,
+            &overlapping_snapshot,
+            &overlapping_prepared,
+        );
+        let published = publish(&root, &provider, &snapshot).unwrap();
+        let automatic = &published["items"][0]["automaticApproval"];
+        assert_eq!(automatic["approvedAt"], "2026-09-28T09:00:00Z");
+        assert_eq!(published["items"][0]["status"], "reapproved");
+        let shared = publish(&overlapping, &provider, &overlapping_snapshot).unwrap();
+        assert_eq!(shared["items"][0]["status"], "alreadyValid");
+        assert_eq!(&shared["items"][0]["automaticApproval"], automatic);
+        let later = discover_inspect(&scope.path().join("later"), &provider, false);
+        assert_eq!(later["items"][0]["status"], "alreadyValid");
+        assert_eq!(&later["items"][0]["automaticApproval"], automatic);
+        assert_eq!(
+            later["items"][0]["title"],
+            if ado { "Recent" } else { "Recent source" }
+        );
+        assert!(
+            later["items"][0]["url"]
+                .as_str()
+                .unwrap()
+                .starts_with(provider.url())
+        );
+        assert_eq!(
+            later["items"].as_array().unwrap().len(),
+            1,
+            "Out-of-range PRs appear only in counts"
+        );
+    }
 }
 
 fn publish(root: &Path, provider: &Provider, snapshot: &str) -> Result<Value, AppError> {
@@ -796,6 +1122,11 @@ fn native_git_assessment_and_guarded_publication_have_exact_effect_boundaries() 
     risk_judgments_and_uncertainty_prevent_publication();
     prepared_run_cannot_bypass_another_runs_unknown_effect();
     ado_publication_preserves_authority_and_never_replays_unknown_effects();
+    // Keep subprocess scenarios in this binary's single test entry point:
+    // concurrent process creation can briefly inherit another thread's held file lock.
+    needs_review_notices_short_circuit_and_expire_only_after_external_approval();
+    notice_dry_runs_refusals_and_uncertain_effects_do_not_duplicate_writes();
+    valid_automatic_approval_timestamps_survive_later_invocations();
 }
 
 /// Exercises real command dispatch and records while ADO effects remain entirely in memory.

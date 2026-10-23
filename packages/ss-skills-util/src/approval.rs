@@ -7,6 +7,7 @@ use crate::api::Api;
 use crate::error::fail;
 use crate::github_approval;
 use crate::renewal::Anchor;
+use crate::review_notice::{self, Notice};
 use crate::target::{Platform, Target};
 
 /// Provider-tagged observations cannot be interpreted under another service's rules.
@@ -36,7 +37,7 @@ impl Evidence {
         number: u32,
         observed_at: Timestamp,
     ) -> Result<Decision, AppError> {
-        match (self, platform) {
+        let decision = match (self, platform) {
             (Self::AzureDevOps(evidence), Platform::AzureDevOps) => {
                 evidence.decide(account, repository, number, observed_at)
             }
@@ -47,7 +48,8 @@ impl Evidence {
                 "invalidState",
                 "Approval evidence has another platform",
             )),
-        }
+        }?;
+        review_notice::apply(self, decision, account, repository, number, observed_at)
     }
 }
 
@@ -65,6 +67,9 @@ pub(crate) enum Decision {
         approval_event_id: String,
     },
     NoPriorApproval,
+    NeedsReview {
+        notice: Notice,
+    },
     Ineligible {
         reason: String,
     },
@@ -76,6 +81,7 @@ impl Decision {
             Self::AssessmentRequired { .. } => "assessmentRequired",
             Self::AlreadyValid { .. } => "alreadyValid",
             Self::NoPriorApproval => "noPriorApproval",
+            Self::NeedsReview { .. } => "needsReview",
             Self::Ineligible { .. } => "ineligible",
         }
     }
@@ -83,6 +89,7 @@ impl Decision {
     pub(crate) fn reason(&self) -> Option<&str> {
         match self {
             Self::Ineligible { reason } => Some(reason),
+            Self::NeedsReview { notice } => Some(&notice.rationale),
             Self::AssessmentRequired { .. } | Self::AlreadyValid { .. } | Self::NoPriorApproval => {
                 None
             }

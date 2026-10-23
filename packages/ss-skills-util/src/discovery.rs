@@ -19,6 +19,7 @@ use crate::journal::{FileJournal, read_bytes};
 use crate::json::{boolean, field, identifier, required_optional, text};
 use crate::objects;
 use crate::publication::{self, Outcome, Receipt, Scope};
+use crate::review_notice::{self, AutomaticApproval, Notice};
 use crate::target::{Platform, Target};
 use crate::{Clock, Process};
 
@@ -70,6 +71,10 @@ struct Entry {
     execution_error: Option<Diagnostic>,
     #[serde(deserialize_with = "required_optional")]
     publication: Option<Receipt>,
+    #[serde(deserialize_with = "required_optional")]
+    review_notice: Option<Notice>,
+    #[serde(deserialize_with = "required_optional")]
+    automatic_approval: Option<AutomaticApproval>,
 }
 
 /// Inspection is either a complete immutable observation or an explicit failure.
@@ -140,7 +145,7 @@ impl DiscoveryRecord {
     }
 
     fn validate(&self) -> Result<(), AppError> {
-        if self.schema_version != 5
+        if self.schema_version != 6
             || Uuid::parse_str(&self.run_id).is_err()
             || self.repository_id.trim().is_empty()
             || self.account_id.trim().is_empty()
@@ -231,15 +236,65 @@ impl DiscoveryRecord {
                         ));
                     }
                 }
+                if let Some(notice) = &entry.review_notice {
+                    timestamp(&notice.created_at)?;
+                    if self.dry_run
+                        || notice.comment_id.trim().is_empty()
+                        || notice.rationale.trim().is_empty()
+                        || entry
+                            .assessment
+                            .as_ref()
+                            .is_none_or(|assessment| !assessment.needs_review())
+                    {
+                        return Err(fail(
+                            "invalidState",
+                            "Invalid published needs-review notice",
+                        ));
+                    }
+                }
+                if let Some(approval) = &entry.automatic_approval {
+                    timestamp(&approval.approved_at)?;
+                    if approval.approval_event_id.trim().is_empty()
+                        || entry.status(self.dry_run) != "alreadyValid"
+                            && entry.status(self.dry_run) != "reapproved"
+                    {
+                        return Err(fail(
+                            "invalidState",
+                            "Automatic approval metadata requires valid standing",
+                        ));
+                    }
+                }
                 inspection.validate(
                     self.platform,
                     &self.account_id,
                     &self.repository_id,
                     entry.pull_request_id.get(),
                 )?;
+                if entry.publication.is_none()
+                    && entry.automatic_approval
+                        != inspection
+                            .evidence
+                            .as_ref()
+                            .map(|evidence| {
+                                review_notice::automatic_approval(
+                                    evidence,
+                                    &self.publication_scope(entry.pull_request_id),
+                                    timestamp(&inspection.captured_at)?,
+                                )
+                            })
+                            .transpose()?
+                            .flatten()
+                {
+                    return Err(fail(
+                        "invalidState",
+                        "Automatic approval summary disagrees with inspection",
+                    ));
+                }
             } else if entry.assessment.is_some()
                 || entry.execution_error.is_some()
                 || entry.publication.is_some()
+                || entry.review_notice.is_some()
+                || entry.automatic_approval.is_some()
             {
                 return Err(fail(
                     "invalidState",
@@ -340,11 +395,17 @@ impl DiscoveryRecord {
                     "title": entry.title,
                     "status": entry.status(self.dry_run),
                     "reason": if entry.draft { Some("draft") } else { decision.and_then(Decision::reason) },
+                    "assessmentReason": entry.assessment.as_ref().and_then(Assessment::rationale),
                     "approvalEventId": decision.and_then(Decision::approval_event_id),
                     "capturedAt": entry.inspection.as_ref().map(|inspection| &inspection.captured_at),
                     "snapshotDigest": entry.inspection.as_ref().and_then(|inspection| inspection.snapshot_digest.as_ref()),
                     "assessmentDigest": entry.assessment.as_ref().and_then(|assessment| assessment.digest.as_ref()),
                     "publication": entry.publication,
+                    "reviewNotice": entry.review_notice.as_ref().or(match decision {
+                        Some(Decision::NeedsReview { notice }) => Some(notice),
+                        _ => None,
+                    }),
+                    "automaticApproval": entry.automatic_approval,
                     "error": entry.execution_error.as_ref().or_else(|| entry.inspection.as_ref()?.error.as_ref()).or(entry.recency.error.as_ref())
                 })
             })
@@ -395,7 +456,9 @@ impl Entry {
                         matches!(
                             assessment.status(dry_run),
                             "assessmentRequired" | "readyToReapprove"
-                        )
+                        ) || !dry_run
+                            && assessment.status(false) == "needsReview"
+                            && self.review_notice.is_none()
                     }))
     }
 
@@ -682,7 +745,7 @@ pub(crate) fn discover(
         run
     } else {
         DiscoveryRecord {
-            schema_version: 5,
+            schema_version: 6,
             run_id: Uuid::new_v4().to_string(),
             repository_url: input.repository.web_url.clone(),
             repository_id,
@@ -867,13 +930,24 @@ pub(crate) fn inspect(
         });
         let mut scope_error = None;
         let inspection = match observation {
-            Ok((evidence, decision, snapshot_digest)) => Inspection {
-                captured_at,
-                evidence: Some(evidence),
-                decision: Some(decision),
-                snapshot_digest: Some(snapshot_digest),
-                error: None,
-            },
+            Ok((evidence, decision, snapshot_digest)) => {
+                let automatic = review_notice::automatic_approval(
+                    &evidence,
+                    &run.publication_scope(number),
+                    timestamp(&captured_at)?,
+                )?;
+                run.inventory
+                    .get_mut(index)
+                    .ok_or_else(|| fail("invalidState", "Inventory changed"))?
+                    .automatic_approval = automatic;
+                Inspection {
+                    captured_at,
+                    evidence: Some(evidence),
+                    decision: Some(decision),
+                    snapshot_digest: Some(snapshot_digest),
+                    error: None,
+                }
+            }
             Err(error) => {
                 let diagnostic = Diagnostic::from_error(&error);
                 if matches!(
@@ -1007,6 +1081,9 @@ pub(crate) fn publish(
         &scope,
         clock,
     )?;
+    let notices =
+        review_notice::Store::open(input.repository.platform, input.directory, &scope, clock)?;
+    notices.ensure_resolved()?;
     let journal = FileJournal::open(input.path, clock)?;
     let mut run =
         DiscoveryRecord::load(&journal)?.ok_or_else(|| fail("invalidState", "Missing run"))?;
@@ -1093,6 +1170,34 @@ pub(crate) fn publish(
                     kind: error.kind.clone(),
                     message: error.message.clone(),
                 });
+            entry.automatic_approval =
+                if matches!(receipt.outcome, Outcome::Reapproved | Outcome::AlreadyValid) {
+                    store.automatic_approval(&run.run_id)?
+                } else {
+                    None
+                };
+            if receipt.outcome == Outcome::AlreadyValid && entry.automatic_approval.is_none() {
+                // Another run may have renewed approval after this run's inspection.
+                // Capture its origin rather than misreporting absent metadata as an external review.
+                let fresh = Evidence::capture(api, &target)?;
+                if !matches!(
+                    fresh.decide(
+                        run.platform,
+                        &run.account_id,
+                        &run.repository_id,
+                        input.number.get(),
+                        clock.now()
+                    )?,
+                    Decision::AlreadyValid { .. }
+                ) {
+                    return Err(fail(
+                        "staleEvidence",
+                        "Approval standing changed before result reporting",
+                    ));
+                }
+                entry.automatic_approval =
+                    review_notice::automatic_approval(&fresh, &scope, clock.now())?;
+            }
             entry.publication = Some(receipt);
             run.error = fatal;
             if run.error.is_some() {
@@ -1116,6 +1221,149 @@ pub(crate) fn publish(
             ) {
                 run.state = RunState::Failed;
                 run.error = Some(diagnostic);
+            } else {
+                entry.execution_error = Some(diagnostic);
+                finish_state(&mut run);
+            }
+            run.save(&journal)?;
+            return Err(error);
+        }
+    }
+    run.save(&journal)?;
+    Ok(run.summary(input.number.get().saturating_sub(1), NonZeroUsize::MIN))
+}
+
+/// Publishes a completed nonqualifying judgment under the host-before-run lock order.
+pub(crate) fn notify(
+    api: &mut Api<'_>,
+    clock: &dyn Clock,
+    input: &PublishInput<'_>,
+) -> Result<Value, AppError> {
+    if input.attribution.trim().is_empty() {
+        return Err(fail(
+            "invalidInput",
+            "Needs-review publication requires attribution",
+        ));
+    }
+    let (scope, run_id) = {
+        let journal = FileJournal::open(input.path, clock)?;
+        let run =
+            DiscoveryRecord::load(&journal)?.ok_or_else(|| fail("invalidState", "Missing run"))?;
+        if run.dry_run {
+            return Err(fail(
+                "invalidInput",
+                "Dry runs cannot publish needs-review comments",
+            ));
+        }
+        (run.publication_scope(input.number), run.run_id)
+    };
+    // Sharing this lock with approval publication prevents opposing writes from overlapping.
+    let publication = publication::ProviderStore::open(
+        input.repository.platform,
+        input.directory,
+        &scope,
+        clock,
+    )?;
+    publication.ensure_resolved()?;
+    let mut notices =
+        review_notice::Store::open(input.repository.platform, input.directory, &scope, clock)?;
+    let journal = FileJournal::open(input.path, clock)?;
+    let mut run =
+        DiscoveryRecord::load(&journal)?.ok_or_else(|| fail("invalidState", "Missing run"))?;
+    if run.run_id != run_id
+        || run.dry_run
+        || run.publication_scope(input.number) != scope
+        || run.repository_url != input.repository.web_url
+        || run.tenant.as_deref() != input.tenant
+        || run.state == RunState::Failed
+            && run.error.as_ref().is_none_or(|error| {
+                error.kind != "ambiguousWrite" || !notices.has_attempt(&run.run_id)
+            })
+    {
+        return Err(fail(
+            "invalidState",
+            "Needs-review publication scope changed",
+        ));
+    }
+    if !notices.has_attempt(&run.run_id) {
+        let policy = read_bytes(Path::new(&run.policy.source_path), clock)?
+            .ok_or_else(|| fail("invalidState", "Captured significance policy is missing"))?;
+        if digest(&policy) != run.policy.sha256 {
+            return Err(fail(
+                "invalidState",
+                "Policy changed; notice publication requires a new assessment",
+            ));
+        }
+    }
+    let entry = run
+        .inventory
+        .iter_mut()
+        .find(|entry| entry.pull_request_id == input.number)
+        .ok_or_else(|| fail("invalidInput", "Unknown needs-review PR"))?;
+    let (snapshot, evidence) = entry.assessment_inputs()?;
+    let assessment = entry
+        .assessment
+        .as_ref()
+        .ok_or_else(|| fail("invalidState", "Missing completed assessment"))?;
+    let uncertain = assessment.status(false) == "failed";
+    if snapshot != input.snapshot
+        || !assessment.needs_review()
+        || entry.execution_error.is_some() && !uncertain
+    {
+        return Err(fail(
+            "invalidState",
+            "Needs-review publication requires the completed nonqualifying assessment",
+        ));
+    }
+    let Some(Decision::AssessmentRequired { anchor, .. }) = entry.decision() else {
+        return Err(fail("invalidState", "Missing original approval authority"));
+    };
+    let result = notices.publish(
+        api,
+        &input.repository.candidate(input.number),
+        clock,
+        &publication::Input {
+            run_id: &run.run_id,
+            assessment_digest: assessment
+                .digest
+                .as_deref()
+                .ok_or_else(|| fail("invalidState", "Missing assessment digest"))?,
+            policy_digest: &run.policy.sha256,
+            evidence,
+            anchor,
+            source_commit: &assessment.inventory.new_commit,
+            attribution: input.attribution,
+            explanation: assessment
+                .rationale()
+                .ok_or_else(|| fail("invalidState", "Missing significance rationale"))?,
+        },
+    );
+    match result {
+        Ok(notice) => {
+            entry.review_notice = Some(notice);
+            if !uncertain {
+                entry.execution_error = None;
+            }
+            run.error = None;
+            finish_state(&mut run);
+        }
+        Err(error) => {
+            let error = if notices.has_unresolved(&run.run_id) {
+                Failure::caused_by(
+                    "ambiguousWrite",
+                    "Needs-review comment may exist; retain the original notify invocation for reconciliation".to_owned(),
+                    error.into_std_error(),
+                ).into()
+            } else {
+                error
+            };
+            let diagnostic = Diagnostic::from_error(&error);
+            if matches!(
+                diagnostic.kind.as_str(),
+                "ambiguousWrite" | "authentication" | "permissionDenied"
+            ) {
+                run.error = Some(diagnostic);
+                run.state = RunState::Failed;
             } else {
                 entry.execution_error = Some(diagnostic);
                 finish_state(&mut run);
@@ -1256,6 +1504,8 @@ fn metadata(api: &mut Api<'_>, repository: &Target) -> Result<Vec<Entry>, AppErr
             assessment: None,
             execution_error: None,
             publication: None,
+            review_notice: None,
+            automatic_approval: None,
         });
     }
     entries.sort_by_key(|entry| entry.pull_request_id);
