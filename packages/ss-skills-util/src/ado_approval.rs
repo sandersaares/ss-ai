@@ -11,6 +11,7 @@ use crate::clock::timestamp;
 use crate::error::{Failure, fail};
 use crate::json::{array, boolean, field, identifier, text};
 use crate::renewal::{Anchor, Audit};
+use crate::review_notice::ApprovalEvent;
 use crate::target::{Target, escape};
 use crate::transport::ado_items;
 
@@ -63,14 +64,52 @@ pub(crate) struct Renewal {
 }
 
 impl Evidence {
-    /// Binds stored evidence to the enclosing run and recomputes its conclusion.
-    pub(crate) fn decide(
+    /// Exposes authenticated positive event times for notice expiry and result reporting.
+    pub(crate) fn approval_events(
         &self,
         account: &str,
         repository: &str,
         number: u32,
-        observed_at: Timestamp,
-    ) -> Result<Decision, AppError> {
+        now: Timestamp,
+    ) -> Result<Vec<ApprovalEvent>, AppError> {
+        let Self::History {
+            threads,
+            iterations,
+            ..
+        } = self
+        else {
+            return Ok(Vec::new());
+        };
+        let events = ordered_events(threads, now)?;
+        let renewals = renewals(
+            threads, &events, iterations, account, repository, number, now,
+        )?;
+        let mut approvals = Vec::new();
+        for event in events {
+            if event.kind == "VoteUpdate"
+                && actor(event.value, "CodeReviewVotedByIdentity")? == account
+                && actor(event.value, "CodeReviewVotedByInitiatorIdentity")? == account
+                && matches!(
+                    text(property(
+                        event.value,
+                        "CodeReviewVoteResult",
+                        "System.String"
+                    )?)?,
+                    "5" | "10"
+                )
+            {
+                approvals.push(ApprovalEvent {
+                    automatic: renewals.contains_key(&event.id),
+                    id: event.id,
+                    at: event.at,
+                });
+            }
+        }
+        Ok(approvals)
+    }
+
+    /// Notice readback shares PR identity checks without requiring approval standing.
+    pub(crate) fn validate_scope(&self, repository: &str, number: u32) -> Result<(), AppError> {
         let pr = match self {
             Self::State { pull_request } | Self::History { pull_request, .. } => pull_request,
         };
@@ -82,6 +121,21 @@ impl Evidence {
                 "ADO approval evidence has another PR identity",
             ));
         }
+        Ok(())
+    }
+
+    /// Binds stored evidence to the enclosing run and recomputes its conclusion.
+    pub(crate) fn decide(
+        &self,
+        account: &str,
+        repository: &str,
+        number: u32,
+        observed_at: Timestamp,
+    ) -> Result<Decision, AppError> {
+        let pr = match self {
+            Self::State { pull_request } | Self::History { pull_request, .. } => pull_request,
+        };
+        self.validate_scope(repository, number)?;
         if let Some(decision) = excluded(pr)? {
             return Ok(decision);
         }
@@ -1147,6 +1201,10 @@ fn renewals(
             let Some((_, remainder)) = body.split_once("<!-- ss-autoreapprove") else {
                 continue;
             };
+            // Needs-review notices carry no vote authority and have their own strict parser.
+            if remainder.starts_with("-needs-review ") {
+                continue;
+            }
             let remainder = remainder
                 .strip_prefix("-ado ")
                 .ok_or_else(|| fail("service", "Unrecognized ADO renewal audit marker"))?;

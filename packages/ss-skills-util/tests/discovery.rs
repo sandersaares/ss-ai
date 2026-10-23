@@ -297,6 +297,10 @@ fn records_require_complete_consistent_fields_before_any_results_are_exposed() {
     for (pointer, replacement) in [
         ("/schemaVersion", json!(1)),
         ("/schemaVersion", json!(2)),
+        ("/schemaVersion", json!(6)),
+        ("/errorPullRequestId", json!(0)),
+        ("/errorPullRequestId", json!(1)),
+        ("/errorPullRequestId", json!(999)),
         ("/runId", json!("not-a-uuid")),
         ("/accountId", json!("")),
         ("/utilityVersion", json!("")),
@@ -337,7 +341,7 @@ fn records_require_complete_consistent_fields_before_any_results_are_exposed() {
         assert_eq!(ss_skills_util::classification(&error), "invalidState");
         assert_eq!(record(root.path()), malformed);
     }
-    for field in ["tenant", "error"] {
+    for field in ["tenant", "error", "errorPullRequestId"] {
         let mut malformed = original.clone();
         malformed.as_object_mut().unwrap().remove(field);
         fs::write(

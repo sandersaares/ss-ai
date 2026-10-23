@@ -42,6 +42,34 @@ Describe 'Automatic reapproval repository scope instructions' {
         $script:Prompt | Should -Match 'schedule running in a Git repository can simply invoke\s+`ss-autoreapprove`'
         $script:Prompt | Should -Match 'Report the resolved repository and whether it was explicit or defaulted from\s+the invocation checkout'
     }
+
+    It 'isolates each semantic assessment in the specified model and context' {
+        $script:Prompt | Should -Match 'one fresh subagent per eligible PR'
+        $script:Prompt | Should -Match 'model: "gpt-6\.1-sol"'
+        $script:Prompt | Should -Match 'reasoning_effort: "medium"'
+        $script:Prompt | Should -Match 'context_tier: "default"'
+        $script:Prompt | Should -Match 'Never assess source changes in the\s+orchestrator or silently substitute another model'
+        $script:Prompt | Should -Match 'verify its returned completion status and digest using\s+native `results`'
+        $assignment = Get-Content -LiteralPath (Join-Path $skill 'assessment.md') -Raw
+        $assignment | Should -Match 'Do not invoke the\s+skill, delegate, publish remotely'
+        $assignment | Should -Match 'Follow every inventory page'
+        $assignment | Should -Match 'Do not return source text, discussion transcripts'
+    }
+
+    It 'reports every in-range result with linked identity and service approval time' {
+        $script:Prompt | Should -Match 'one summary row for every in-range candidate from all final `results`'
+        $script:Prompt | Should -Match '\[PR number \+ title\]\(PR URL\)'
+        $script:Prompt | Should -Match 'retained from `reviewNotice.createdAt`'
+        $script:Prompt | Should -Match 'service `approvedAt` timestamp, even when issued in a previous invocation'
+        $script:Prompt | Should -Match 'External approval valid'
+    }
+
+    It 'retains refusal markers until a strictly later external approval' {
+        $script:Prompt | Should -Match 'Only\s+an external approval by the authenticated account strictly after'
+        $script:Prompt | Should -Match 'Never reassess an active marker'
+        $script:Prompt | Should -Match 'Dry runs report the decision without posting a marker'
+        $script:Recipes | Should -Match 'Repeating the original command reconciles the same intent without\s+posting again'
+    }
 }
 
 Describe 'Automatic reapproval provider fixtures' {
@@ -60,7 +88,7 @@ Describe 'Automatic reapproval provider fixtures' {
         $recipes = Get-Content -LiteralPath (Join-Path $skill 'commands.md') -Raw
         $help = & ss-skills-util autoreapprove --help | Out-String
         $LASTEXITCODE | Should -Be 0
-        foreach ($command in @('discover', 'results', 'inspect', 'prepare', 'assessment', 'read', 'judge', 'complete', 'publish')) {
+        foreach ($command in @('discover', 'results', 'inspect', 'prepare', 'assessment', 'read', 'judge', 'complete', 'publish', 'notify')) {
             $recipes | Should -Match "(?m)^ss-skills-util autoreapprove $command "
             $help | Should -Match "(?m)^\s+$command\s"
         }

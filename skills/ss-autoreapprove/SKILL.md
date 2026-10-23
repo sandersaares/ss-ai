@@ -85,6 +85,12 @@ entries need no content work. An unresolved inspection is a tooling failure,
 not an acceptable terminal result. Do not interpret failed or partial discovery
 as no work.
 
+An account-owned needs-review comment short-circuits source assessment and
+returns `needsReview`, including when a previous invocation posted it. Only
+an external approval by the authenticated account strictly after the comment's
+service timestamp invalidates that marker. Another account's approval or an
+automatic renewal does not reset it. Never reassess an active marker.
+
 The anchor is the latest applicable approval by the authenticated account
 not issued by this skill. Renewals retain that anchor. Later human withdrawals,
 negative decisions, removals, and pending reviews prevent automatic renewal.
@@ -108,25 +114,25 @@ authority or conduct additional service experiments.
 
 # Stage 3: assess exact source changes
 
-Prepare each eligible snapshot through the native command. It obtains isolated
-Git objects and the exact original-approved/current source-tree inventory.
-This retains removals after force-pushes and handles rebases without a
-three-dot shortcut. Never replace the anchor with the last automatic renewal.
+Dispatch one fresh subagent per eligible PR with explicit spawn arguments
+`model: "gpt-6.1-sol"`, `reasoning_effort: "medium"`, and
+`context_tier: "default"` (regular context), including replacements. This isolates
+the semantic evidence from the orchestrator and selects the assessment model
+independently of the orchestrator's model. Never assess source changes in the
+orchestrator or silently substitute another model. If this configuration is
+unavailable, report the assessment as blocked; do not approve.
 
-Use the native assignment's selected policy, assessment contract, discussion,
-and changed-source evidence. Read bounded pages to completion. Do not load
-full-review focus-area or audit guides. Follow all inventory pages, record a
-judgment for every change, then record the cumulative judgment.
+Give the worker the absolute installed skill root, absolute run path, PR ID,
+exact inspection snapshot digest, and [assessment assignment](assessment.md).
+The worker owns native preparation, evidence reads, judgments, and completion
+for that PR only. Do not pass another PR's evidence, conversation history, or
+an orchestrator-generated semantic conclusion. Do not reuse a worker for another
+PR, load source or discussion in the orchestrator, or dispatch a full review.
 
-Cite the returned evidence references and assess significant design changes,
-likely performance regressions, and likely correctness regressions. There is no
-category allowlist: behavioral and structural changes can qualify. Opaque or
-missing content is not empty content; insufficient evidence requires uncertainty.
-
-Complete the assessment through the utility. It enforces exact coverage,
-snapshot/policy bindings, and complete evidence reads
-for insignificant decisions. Empty inventories still require a cumulative
-decision and discussion assessment. Do not run builds or tests.
+Wait for the worker and verify its returned completion status and digest using
+native `results`. An interrupted worker leaves unfinished work, not permission;
+stop it before dispatching a replacement on the same snapshot. Workers cannot
+publish, ask human decision questions, or delegate further.
 
 # Stage 4: publish or retain the dry-run result
 
@@ -147,6 +153,17 @@ provide comprehensive draft detection.
 Dry runs end at `wouldReapprove`. Both providers publish only through the native
 transaction; never issue a direct reviewer vote or assemble an audit manually.
 Significant work ends at `needsReview`; uncertain evaluation fails explicitly.
+For each newly completed significant or uncertain assessment in a live run,
+execute native `notify` with the required attribution. Uncertainty retains its
+explicit failure diagnostic even after the notice is posted.
+The utility posts a standalone comment explaining that automatic reapproval is
+unavailable and a separate new review is required,
+with a hidden account/repository/PR-bound marker. The native transaction verifies
+readback and prevents duplicate comments. An existing active marker needs no
+new comment. Dry runs report the decision without posting a marker.
+Tooling failures before a completed assessment and missing approval authority
+are not semantic refusals and do not create needs-review markers.
+Never manually assemble or post a marker.
 Report these outcomes without triggering another review workflow or a question
 for every PR.
 Changed source or decision evidence ends this PR's attempt rather than chasing
@@ -169,4 +186,21 @@ the invocation checkout, PR links and outcomes, actionable significance/uncertai
 partial or failed scope, aggregate recency exclusions, and the absolute run
 path. Highlight any accepted-but-stale or unknown publication and its retained
 host journal. Include the policy digest and whether this was a dry run.
-Do not post follow-up discussion or file findings automatically.
+Emit one summary row for every in-range candidate from all final `results`
+pages, including retained decisions, already-valid approvals, and failures.
+Never reduce the summary to counts or only this invocation's writes.
+Use `[PR number + title](PR URL)` for each row (use `PR 123`, not `#123`,
+for Azure DevOps) and an explicit decision:
+
+| Decision | Required detail |
+| --- | --- |
+| Separate new review required | `needsReview`; say whether determined now or retained from `reviewNotice.createdAt`, and include the significance reason. |
+| Automatic approval valid | `reapproved` or `alreadyValid` with nonnull `automaticApproval`; include its service `approvedAt` timestamp, even when issued in a previous invocation. |
+| External approval valid | `alreadyValid` with null `automaticApproval`; do not describe it as an automatic approval. |
+| Would reapprove | Dry-run outcome; no approval or comment was posted. |
+| No prior approval / ineligible | State the missing authority or returned reason; do not imply assessment occurred. |
+| Failed / stale / incomplete | Include the diagnostic and any possible remote effect; a completed uncertain assessment also needs a separate new review. Do not imply success. |
+
+If any assessment, notification, or publication remains unfinished, say the run
+is incomplete. Do not post follow-up discussion beyond native needs-review
+notices or file findings automatically.
