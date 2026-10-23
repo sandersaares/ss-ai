@@ -58,7 +58,7 @@ Prefer compound terms that are already widely understood over introducing new ja
 
 # A reader should not need to reverse engineer
 
-Neither developer documentation nor public API documenation nor private API documentation should require the user to reverse engineer code to
+Neither developer documentation nor public API documentation nor private API documentation should require the user to reverse engineer code to
 understand what it is talking about. Description must be contextualized, terms must be defined or their definitions available in referenced context,
 jargon must be avoided, clear and understandable English must be used. Consider who the reader is and what they may or may not know already, do not
 assume a reader has all the knowledge that you already have.
