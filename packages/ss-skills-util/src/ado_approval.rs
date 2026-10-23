@@ -108,14 +108,8 @@ impl Evidence {
         Ok(approvals)
     }
 
-    /// Binds stored evidence to the enclosing run and recomputes its conclusion.
-    pub(crate) fn decide(
-        &self,
-        account: &str,
-        repository: &str,
-        number: u32,
-        observed_at: Timestamp,
-    ) -> Result<Decision, AppError> {
+    /// Notice readback shares PR identity checks without requiring approval standing.
+    pub(crate) fn validate_scope(&self, repository: &str, number: u32) -> Result<(), AppError> {
         let pr = match self {
             Self::State { pull_request } | Self::History { pull_request, .. } => pull_request,
         };
@@ -127,6 +121,21 @@ impl Evidence {
                 "ADO approval evidence has another PR identity",
             ));
         }
+        Ok(())
+    }
+
+    /// Binds stored evidence to the enclosing run and recomputes its conclusion.
+    pub(crate) fn decide(
+        &self,
+        account: &str,
+        repository: &str,
+        number: u32,
+        observed_at: Timestamp,
+    ) -> Result<Decision, AppError> {
+        let pr = match self {
+            Self::State { pull_request } | Self::History { pull_request, .. } => pull_request,
+        };
+        self.validate_scope(repository, number)?;
         if let Some(decision) = excluded(pr)? {
             return Ok(decision);
         }

@@ -97,6 +97,12 @@ publication, and unresolved approval effects block new notices. Dry runs have
 no remote effects. Tooling failures before a completed assessment and missing approval authority do not produce
 semantic refusal markers.
 
+Recovery verifies the original operation's authenticated comment independently
+of current approval eligibility. It ignores unrelated expired notices but
+retains the intended comment's scope, timestamp, exact-body, and uniqueness
+checks. A run-wide publication failure records its originating PR; reconciling
+another PR cannot clear that failure.
+
 The final summary lists each in-range candidate as a linked PR number and title.
 It identifies current and retained needs-review decisions and distinguishes
 valid automatic approval standing from external approvals. Automatic metadata

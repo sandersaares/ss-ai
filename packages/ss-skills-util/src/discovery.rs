@@ -43,6 +43,9 @@ struct DiscoveryRecord {
     inventory: Vec<Entry>,
     #[serde(deserialize_with = "required_optional")]
     error: Option<Diagnostic>,
+    /// Recovery must not clear a fatal diagnostic originating from another PR.
+    #[serde(deserialize_with = "required_optional")]
+    error_pull_request_id: Option<NonZeroU32>,
 }
 
 /// Keeps the trusted policy bytes and digest together across interrupted runs.
@@ -145,7 +148,7 @@ impl DiscoveryRecord {
     }
 
     fn validate(&self) -> Result<(), AppError> {
-        if self.schema_version != 6
+        if self.schema_version != 7
             || Uuid::parse_str(&self.run_id).is_err()
             || self.repository_id.trim().is_empty()
             || self.account_id.trim().is_empty()
@@ -343,6 +346,15 @@ impl DiscoveryRecord {
         }
         if let Some(error) = &self.error {
             error.validate()?;
+        }
+        if let Some(number) = self.error_pull_request_id
+            && (self.error.is_none()
+                || !self
+                    .inventory
+                    .iter()
+                    .any(|entry| entry.pull_request_id == number))
+        {
+            return Err(fail("invalidState", "Run failure has an invalid PR origin"));
         }
         Ok(())
     }
@@ -745,7 +757,7 @@ pub(crate) fn discover(
         run
     } else {
         DiscoveryRecord {
-            schema_version: 6,
+            schema_version: 7,
             run_id: Uuid::new_v4().to_string(),
             repository_url: input.repository.web_url.clone(),
             repository_id,
@@ -767,6 +779,7 @@ pub(crate) fn discover(
             state: RunState::Enumerating,
             inventory: Vec::new(),
             error: None,
+            error_pull_request_id: None,
         }
     };
     run.save(&journal)?;
@@ -1093,10 +1106,11 @@ pub(crate) fn publish(
         || run.tenant.as_deref() != input.tenant
         || run.dry_run
         || (run.state == RunState::Failed
-            && (run
-                .error
-                .as_ref()
-                .is_none_or(|error| error.kind != "ambiguousWrite")
+            && (run.error_pull_request_id != Some(input.number)
+                || run
+                    .error
+                    .as_ref()
+                    .is_none_or(|error| error.kind != "ambiguousWrite")
                 || !store.has_effect(&run.run_id)))
     {
         return Err(fail(
@@ -1204,6 +1218,7 @@ pub(crate) fn publish(
             entry.automatic_approval = automatic_approval;
             entry.publication = Some(receipt);
             run.error = fatal;
+            run.error_pull_request_id = run.error.as_ref().map(|_| input.number);
             if run.error.is_some() {
                 run.state = RunState::Failed;
             } else {
@@ -1225,6 +1240,7 @@ pub(crate) fn publish(
             ) {
                 run.state = RunState::Failed;
                 run.error = Some(diagnostic);
+                run.error_pull_request_id = Some(input.number);
             } else {
                 entry.execution_error = Some(diagnostic);
                 finish_state(&mut run);
@@ -1280,9 +1296,10 @@ pub(crate) fn notify(
         || run.repository_url != input.repository.web_url
         || run.tenant.as_deref() != input.tenant
         || run.state == RunState::Failed
-            && run.error.as_ref().is_none_or(|error| {
-                error.kind != "ambiguousWrite" || !notices.has_attempt(&run.run_id)
-            })
+            && (run.error_pull_request_id != Some(input.number)
+                || run.error.as_ref().is_none_or(|error| {
+                    error.kind != "ambiguousWrite" || !notices.has_attempt(&run.run_id)
+                }))
     {
         return Err(fail(
             "invalidState",
@@ -1349,10 +1366,11 @@ pub(crate) fn notify(
                 entry.execution_error = None;
             }
             run.error = None;
+            run.error_pull_request_id = None;
             finish_state(&mut run);
         }
         Err(error) => {
-            let error = if notices.has_unresolved(&run.run_id) {
+            let error = if notices.has_unresolved(&run.run_id) || run.state == RunState::Failed {
                 Failure::caused_by(
                     "ambiguousWrite",
                     "Needs-review comment may exist; retain the original notify invocation for reconciliation".to_owned(),
@@ -1367,6 +1385,7 @@ pub(crate) fn notify(
                 "ambiguousWrite" | "authentication" | "permissionDenied"
             ) {
                 run.error = Some(diagnostic);
+                run.error_pull_request_id = Some(input.number);
                 run.state = RunState::Failed;
             } else {
                 // Notification errors cannot replace a completed assessment's uncertainty.

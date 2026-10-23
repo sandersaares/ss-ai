@@ -21,6 +21,14 @@ pub(crate) enum Evidence {
 }
 
 impl Evidence {
+    /// Recovery needs authenticated PR identity even when vote history is no longer eligible.
+    pub(crate) fn validate_scope(&self, repository: &str, number: u32) -> Result<(), AppError> {
+        match self {
+            Self::AzureDevOps(evidence) => evidence.validate_scope(repository, number),
+            Self::GitHub(evidence) => evidence.validate_scope(repository, number),
+        }
+    }
+
     pub(crate) fn capture(api: &mut Api<'_>, target: &Target) -> Result<Self, AppError> {
         match target.platform {
             Platform::AzureDevOps => ado_approval::capture(api, target).map(Self::AzureDevOps),

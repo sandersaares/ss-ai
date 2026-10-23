@@ -33,6 +33,8 @@ impl Clock for FixedClock {
 
 /// Keeps all service writes in memory while real Git fetches from a test-owned repository.
 struct Provider {
+    number: u32,
+    candidates: Vec<u32>,
     repository: PathBuf,
     evidence: RefCell<Value>,
     writes: Cell<usize>,
@@ -63,6 +65,8 @@ impl Provider {
             .unwrap()
             .remove("ref");
         Self {
+            number: 1,
+            candidates: vec![1],
             repository: repository.to_owned(),
             evidence: RefCell::new(evidence),
             writes: Cell::new(0),
@@ -152,6 +156,15 @@ impl Provider {
         fs::create_dir_all(path).unwrap();
     }
 
+    /// Places repeat notices after the fixture's intervening approval and source push.
+    fn notice_time(&self) -> &'static str {
+        if self.writes.get() > 1 {
+            "2026-09-28T09:08:30Z"
+        } else {
+            "2026-09-28T09:05:00Z"
+        }
+    }
+
     /// Reporting faults begin only after the provider's terminal receipt is durable.
     fn observation_override(&self) -> Option<Value> {
         let fault = self.fault.get();
@@ -211,7 +224,10 @@ impl Process for Provider {
             ));
         }
         assert_eq!(program, "gh");
-        let path = arguments[1].as_str();
+        let path = arguments[1]
+            .replace(&format!("/pulls/{}", self.number), "/pulls/1")
+            .replace(&format!("/issues/{}", self.number), "/issues/1");
+        let path = path.as_str();
         let method = arguments[3].as_str();
         if method == "POST" && path == "repos/example/widgets/issues/1/comments" {
             self.writes.set(self.writes.get() + 1);
@@ -230,8 +246,8 @@ impl Process for Provider {
             }
             let request: Value = serde_json::from_slice(input).unwrap();
             let comment = json!({
-                "id": 50, "user": {"id": 42}, "body": request["body"],
-                "created_at": "2026-09-28T09:05:00Z", "updated_at": "2026-09-28T09:05:00Z"
+                "id": 50 + self.writes.get(), "user": {"id": 42}, "body": request["body"],
+                "created_at": self.notice_time(), "updated_at": self.notice_time()
             });
             if self.fault.get() != "noticeUnknown" {
                 self.evidence.borrow_mut()["comments"]
@@ -334,10 +350,16 @@ impl Process for Provider {
                 json!({"id": if self.fault.get() == "auth" { 99 } else { 42 }, "login": "reviewer", "type": "User"})
             }
             "repos/example/widgets" => json!({"id": 123}),
-            "repos/example/widgets/pulls?state=open&per_page=100" => json!([[
-                {"number": 1, "state": "open", "draft": false, "title": "Recent source"},
-                {"number": 2, "state": "open", "draft": false, "title": "Excluded old"}
-            ]]),
+            "repos/example/widgets/pulls?state=open&per_page=100" => {
+                let mut candidates = self.candidates.iter().map(|number| json!({
+                    "number": number, "state": "open", "draft": false, "title": "Recent source"
+                })).collect::<Vec<_>>();
+                candidates.push(json!({
+                    "number": self.candidates.iter().max().unwrap() + 1,
+                    "state": "open", "draft": false, "title": "Excluded old"
+                }));
+                json!([candidates])
+            }
             "repos/example/widgets/pulls/1" => {
                 self.target_reads.set(self.target_reads.get() + 1);
                 let mut value = evidence["pullRequest"].clone();
@@ -354,7 +376,11 @@ impl Process for Provider {
             "graphql" => {
                 let request: Value = serde_json::from_slice(input).unwrap();
                 if request["query"].as_str().unwrap().contains("committedDate") {
-                    let at = if request["variables"]["num"] == 1 {
+                    let at = if self
+                        .candidates
+                        .iter()
+                        .any(|number| request["variables"]["num"] == *number)
+                    {
                         "2026-09-27T00:00:00Z"
                     } else {
                         "2020-01-01T00:00:00Z"
@@ -364,7 +390,7 @@ impl Process for Provider {
                         "pageInfo": {"hasNextPage": false, "endCursor": null}
                     }}}}})
                 } else {
-                    assert_eq!(request["variables"]["num"], 1);
+                    assert_eq!(request["variables"]["num"], self.number);
                     json!({"data": {"repository": {"pullRequest": {"timelineItems": {
                         "nodes": evidence["timeline"], "pageInfo": {"hasNextPage": false, "endCursor": null}
                     }}}}})
@@ -501,8 +527,17 @@ impl Http for Provider {
             }
             assert!(path.ends_with("/threads"));
             assert_eq!(request["status"], 4);
-            let at = "2026-09-28T09:05:00Z";
-            let thread = json!({"id": 30, "publishedDate": at, "lastUpdatedDate": at, "status": "closed",
+            let notice = request["comments"][0]["content"]
+                .as_str()
+                .unwrap()
+                .contains("<!-- ss-autoreapprove-needs-review ");
+            let at = if notice {
+                self.notice_time()
+            } else {
+                "2026-09-28T09:05:00Z"
+            };
+            let thread = json!({"id": if notice { 30 + self.writes.get() } else { 30 },
+                "publishedDate": at, "lastUpdatedDate": at, "status": "closed",
                 "comments": [{"id": 1, "parentCommentId": 0, "commentType": "text",
                     "author": {"id": "10000000-0000-4000-8000-000000000001"},
                     "content": request["comments"][0]["content"], "publishedDate": at,
@@ -676,7 +711,7 @@ fn discover_inspect(root: &Path, provider: &Provider, dry_run: bool) -> Value {
             "--repository-url".into(),
             provider.url().into(),
             "--pull-request-id".into(),
-            "1".into(),
+            provider.number.to_string(),
         ],
     )
     .unwrap()
@@ -717,7 +752,7 @@ fn work(
 ) -> Result<Value, AppError> {
     let mut all = vec![
         "--pull-request-id".into(),
-        "1".into(),
+        provider.number.to_string(),
         "--snapshot-digest".into(),
         snapshot.to_owned(),
     ];
@@ -1209,6 +1244,161 @@ fn uncertain_assessment_diagnostic_survives_notification_retry() {
     }
 }
 
+/// Recovery cannot clear another PR's fatal write, even across a lost run save.
+fn notice_recovery_is_bound_to_the_failed_pull_request() {
+    let repository = TempDir::new().unwrap();
+    let (old, new) = sources(repository.path());
+    for interrupted_run_save in [false, true] {
+        let scope = TempDir::new().unwrap();
+        let root = scope.path().join("run");
+        let mut first = Provider::new(repository.path(), &old, &new);
+        first.candidates = vec![1, 2];
+        let mut second = Provider::new(repository.path(), &old, &new);
+        second.number = 2;
+        second.candidates = vec![2];
+        second.evidence.borrow_mut()["pullRequest"]["number"] = json!(2);
+        let (first_snapshot, prepared) = prepare(&root, &first, false);
+        assess_as(&root, &first, &first_snapshot, &prepared, "significant");
+        let (second_snapshot, prepared) = prepare(&root, &second, false);
+        assess_as(&root, &second, &second_snapshot, &prepared, "significant");
+        let run_path = root.join("run.json");
+        let before = fs::read(&run_path).unwrap();
+        notify(&root, &first, &first_snapshot).unwrap();
+        if interrupted_run_save {
+            // Preserve the verified host effect while replaying the last durable run.
+            fs::write(&run_path, before).unwrap();
+        }
+        second.fault.set("postReadFailure");
+        notify(&root, &second, &second_snapshot).unwrap_err();
+        let failed = fs::read(&run_path).unwrap();
+        let record: Value = serde_json::from_slice(&failed).unwrap();
+        assert_eq!(record["state"], "failed");
+        assert_eq!(record["errorPullRequestId"], 2);
+        notify(&root, &first, &first_snapshot).unwrap_err();
+        assert_eq!(fs::read(&run_path).unwrap(), failed);
+        second.fault.set("");
+        notify(&root, &second, &second_snapshot).unwrap();
+        let recovered = notify(&root, &first, &first_snapshot).unwrap();
+        assert_eq!(recovered["state"], "complete");
+        assert!(recovered["error"].is_null());
+        assert_eq!(first.writes.get(), 1);
+        assert_eq!(second.writes.get(), 1);
+    }
+}
+
+/// A later unproven vote reset cannot prevent verification of an existing comment.
+fn ado_notice_recovery_does_not_require_current_approval_eligibility() {
+    let repository = TempDir::new().unwrap();
+    let (old, new) = sources(repository.path());
+    let scope = TempDir::new().unwrap();
+    let root = scope.path().join("run");
+    let provider = Provider::ado(repository.path(), &old, &new);
+    let (snapshot, prepared) = prepare(&root, &provider, false);
+    assess_as(&root, &provider, &snapshot, &prepared, "significant");
+    provider.fault.set("postReadFailure");
+    notify(&root, &provider, &snapshot).unwrap_err();
+    provider.fault.set("");
+    provider.ado_push();
+    provider.evidence.borrow_mut()["reviewers"][0]["vote"] = json!(0);
+    provider.evidence.borrow_mut()["pullRequest"]["pullRequestId"] = json!(999);
+    assert_eq!(
+        ss_skills_util::classification(&notify(&root, &provider, &snapshot).unwrap_err()),
+        "ambiguousWrite"
+    );
+    provider.evidence.borrow_mut()["pullRequest"]["pullRequestId"] = json!(1);
+    let recovered = notify(&root, &provider, &snapshot).unwrap();
+    assert_eq!(recovered["items"][0]["status"], "needsReview");
+    assert!(recovered["error"].is_null());
+    assert_eq!(provider.writes.get(), 1);
+}
+
+/// Superseded edited notices cannot obstruct a later operation's exact readback.
+fn expired_edited_notices_do_not_block_new_notice_readback() {
+    let repository = TempDir::new().unwrap();
+    let (old, new) = sources(repository.path());
+    for ado in [false, true] {
+        let scope = TempDir::new().unwrap();
+        let root = scope.path().join("first");
+        let provider = if ado {
+            Provider::ado(repository.path(), &old, &new)
+        } else {
+            Provider::new(repository.path(), &old, &new)
+        };
+        let (snapshot, prepared) = prepare(&root, &provider, false);
+        assess_as(&root, &provider, &snapshot, &prepared, "significant");
+        let original = notify(&root, &provider, &snapshot).unwrap();
+        if ado {
+            provider.ado_vote(10, 40, "2026-09-28T09:06:00Z");
+            let mut evidence = provider.evidence.borrow_mut();
+            evidence["threads"]
+                .as_array_mut()
+                .unwrap()
+                .iter_mut()
+                .find(|thread| thread["comments"][0]["commentType"] == "text")
+                .unwrap()["comments"][0]["lastContentUpdatedDate"] = json!("2026-09-28T09:07:00Z");
+            drop(evidence);
+            provider.ado_push();
+            let mut evidence = provider.evidence.borrow_mut();
+            evidence["sourceCommit"] = json!(old);
+            evidence["iterations"][2]["sourceRefCommit"]["commitId"] = json!(old);
+            evidence["iterations"][2]["createdDate"] = json!("2026-09-28T09:08:00Z");
+        } else {
+            provider.later("APPROVED");
+            let mut evidence = provider.evidence.borrow_mut();
+            let review = evidence["reviews"]
+                .as_array_mut()
+                .unwrap()
+                .last_mut()
+                .unwrap();
+            review["submitted_at"] = json!("2026-09-28T09:06:00Z");
+            review["state"] = json!("DISMISSED");
+            evidence["comments"]
+                .as_array_mut()
+                .unwrap()
+                .last_mut()
+                .unwrap()["updated_at"] = json!("2026-09-28T09:07:00Z");
+            evidence["pullRequest"]["head"]["sha"] = json!(old);
+            evidence["timeline"]
+                .as_array_mut()
+                .unwrap()
+                .last_mut()
+                .unwrap()["state"] = json!("DISMISSED");
+            evidence["timeline"].as_array_mut().unwrap().push(json!({
+                "__typename": "ReviewDismissedEvent", "id": "later-dismissal",
+                "review": {"id": "later-review"}, "previousReviewState": "APPROVED",
+                "createdAt": "2026-09-28T09:08:00Z",
+                "pullRequestCommit": {"commit": {"oid": old}}
+            }));
+        }
+        let later = scope.path().join("later");
+        let (snapshot, prepared) = prepare(&later, &provider, false);
+        assess_as(&later, &provider, &snapshot, &prepared, "significant");
+        let result = notify(&later, &provider, &snapshot).unwrap();
+        assert_eq!(result["items"][0]["status"], "needsReview");
+        assert_ne!(
+            result["items"][0]["reviewNotice"],
+            original["items"][0]["reviewNotice"]
+        );
+        notify(&later, &provider, &snapshot).unwrap();
+        // Even an approval that expires this notice cannot prevent its readback.
+        if ado {
+            provider.ado_vote(10, 41, "2026-09-28T09:09:00Z");
+        } else {
+            let mut evidence = provider.evidence.borrow_mut();
+            evidence["reviews"].as_array_mut().unwrap().push(json!({
+                "id": 99, "node_id": "final-approval", "user": {"id": 42, "node_id": "user-42"},
+                "state": "APPROVED", "submitted_at": "2026-09-28T09:09:00Z",
+                "commit_id": old, "body": "Independent approval."
+            }));
+            evidence["timeline"].as_array_mut().unwrap().push(json!({
+                "__typename": "PullRequestReview", "id": "final-approval", "state": "APPROVED"
+            }));
+        }
+        notify(&later, &provider, &snapshot).unwrap();
+        assert_eq!(provider.writes.get(), 2);
+    }
+}
+
 fn publish(root: &Path, provider: &Provider, snapshot: &str) -> Result<Value, AppError> {
     work(
         root,
@@ -1335,6 +1525,9 @@ fn native_git_assessment_and_guarded_publication_have_exact_effect_boundaries() 
     publication_reporting_failures_are_persisted();
     notice_terminal_save_failures_preserve_original_recovery();
     uncertain_assessment_diagnostic_survives_notification_retry();
+    notice_recovery_is_bound_to_the_failed_pull_request();
+    ado_notice_recovery_does_not_require_current_approval_eligibility();
+    expired_edited_notices_do_not_block_new_notice_readback();
 }
 
 /// Exercises real command dispatch and records while ADO effects remain entirely in memory.

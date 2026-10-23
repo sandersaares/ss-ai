@@ -172,7 +172,7 @@ The producer and consumer validate the full record, including excluded PRs.
 
 | Record | Fields |
 | --- | --- |
-| Run | `schemaVersion: 6`; UUID `runId`; canonical `repositoryUrl`; nonempty string `repositoryId`, `accountId`, `utilityVersion`; `platform` (`gitHub` or `azureDevOps`); nullable string `tenant`; `policy`; Boolean `dryRun`, `enumerationComplete`; `state`; `inventory`; nullable `error`. |
+| Run | `schemaVersion: 7`; UUID `runId`; canonical `repositoryUrl`; nonempty string `repositoryId`, `accountId`, `utilityVersion`; `platform` (`gitHub` or `azureDevOps`); nullable string `tenant`; `policy`; Boolean `dryRun`, `enumerationComplete`; `state`; `inventory`; nullable `error` and positive integer `errorPullRequestId`. A PR-bound publication failure records its originating PR; only that PR's owned operation can recover the failed run. |
 | Policy | Absolute UTF-8 `sourcePath`; nonempty UTF-8 `content`; lowercase hexadecimal `sha256` of the captured content bytes. |
 | Inventory entry | Unique positive integer `pullRequestId`; canonical `url`; nonempty `title`; Boolean `draft`; `recency`; nullable `inspection`, `assessment`, `executionError`, `publication`, `reviewNotice`, and `automaticApproval`. Entries are in ascending PR order. |
 | Recency | `state` (`pending`, `recent`, `noRecentCommit`, `failed`); nullable UTC `checkedAt`, `latestNonfutureCommit`; Boolean `evidenceComplete`; nullable `error`. |

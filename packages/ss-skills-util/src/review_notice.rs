@@ -188,6 +188,7 @@ fn notices(
     scope: &Scope,
     now: Timestamp,
     external: Option<Timestamp>,
+    operation: Option<&str>,
 ) -> Result<Vec<(Marker, Notice, String)>, AppError> {
     let comments: Vec<(&Value, bool)> = match evidence {
         Evidence::GitHub(GitHubEvidence::History { comments, .. }) => {
@@ -223,6 +224,11 @@ fn notices(
         }
         let author = if ado { "author" } else { "user" };
         if identifier(field(field(comment, author)?, "id")?)? != scope.account_id {
+            continue;
+        }
+        // Readback validates only this operation, not unrelated expired or edited notices.
+        // Full marker, exact-body, and uniqueness checks still establish the owned effect.
+        if operation.is_some_and(|operation| !body.contains(operation)) {
             continue;
         }
         let created = text(field(
@@ -289,7 +295,7 @@ pub(crate) fn apply(
         .filter(|event| !event.automatic)
         .map(|event| event.at)
         .max();
-    let notices = notices(evidence, &scope, now, external)?;
+    let notices = notices(evidence, &scope, now, external, None)?;
     let mut active = None;
     for (_, notice, _) in notices {
         let at = timestamp(&notice.created_at)?;
@@ -429,13 +435,6 @@ impl<'a> Store<'a> {
             ));
         }
         let now = clock.now();
-        let decision = fresh.decide(
-            target.platform,
-            &self.record.scope.account_id,
-            &self.record.scope.repository_id,
-            self.record.scope.pull_request_id,
-            now,
-        )?;
         if let Some(index) = self
             .record
             .attempts
@@ -460,6 +459,14 @@ impl<'a> Store<'a> {
             }
             return self.reconcile(index, &fresh, now);
         }
+        // Existing effects need authenticated readback, not renewed approval eligibility.
+        let decision = fresh.decide(
+            target.platform,
+            &self.record.scope.account_id,
+            &self.record.scope.repository_id,
+            self.record.scope.pull_request_id,
+            now,
+        )?;
         self.ensure_resolved()?;
         if let Decision::NeedsReview { notice } = decision {
             return Ok(notice);
@@ -536,6 +543,10 @@ impl<'a> Store<'a> {
         evidence: &Evidence,
         now: Timestamp,
     ) -> Result<Notice, AppError> {
+        evidence.validate_scope(
+            &self.record.scope.repository_id,
+            self.record.scope.pull_request_id,
+        )?;
         let attempt = self
             .record
             .attempts
@@ -547,7 +558,13 @@ impl<'a> Store<'a> {
                 "Needs-review comment was refused; start a fresh run",
             ));
         }
-        let found = notices(evidence, &self.record.scope, now, None)?;
+        let found = notices(
+            evidence,
+            &self.record.scope,
+            now,
+            None,
+            Some(&attempt.marker.operation_id),
+        )?;
         let matching = found
             .iter()
             .filter(|(marker, _, body)| {
@@ -831,7 +848,7 @@ mod tests {
                 evaluations: Vec::new(),
                 threads: vec![deleted, json!({"id": "live-notice", "comments": [comment]})],
             });
-            let found = notices(&evidence, &marker.scope, now, None).unwrap();
+            let found = notices(&evidence, &marker.scope, now, None, None).unwrap();
             assert_eq!(found.len(), 1);
             assert_eq!(found[0].1.comment_id, "60");
             assert_eq!(found[0].1.rationale, marker.rationale);
@@ -840,7 +857,7 @@ mod tests {
                 unreachable!()
             };
             threads.last_mut().unwrap()["comments"][0]["content"] = Value::Null;
-            notices(&evidence, &marker.scope, now, None).unwrap_err();
+            notices(&evidence, &marker.scope, now, None, None).unwrap_err();
         }
     }
 }
