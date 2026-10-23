@@ -2,8 +2,8 @@
 
 Reusable instructions, [agent skills](https://agentskills.io/home), their
 native helper, and companion evaluations. See [LICENSE](LICENSE) for terms.
-This repository owns material used by agents. General machine setup and
-user-facing Copilot preferences belong to [dev-env](https://github.com/sandersaares/dev-env).
+This repository supplies material used by agents. Installation does not manage
+general machine setup or user-facing Copilot preferences.
 
 ## Skills in this repo
 
@@ -69,18 +69,17 @@ No installer changes Copilot mouse settings or other interaction preferences.
 Start a new shell and agent session after setup. Configure Windows and each
 WSL/Linux user environment separately.
 
-### Manual cutover
+### Updating an existing installation
 
 Finish active skill invocations. Remove only identified obsolete instruction
 registrations, skill links, and duplicate direct skill discovery roots through
 the client's supported settings. Preserve unrelated configuration and non-link
-installations. Refresh general machine setup so its generated Bash file contains
-only its own PATH configuration, then run `Install.ps1` here. If Cargo reports
+installations, then run `Install.ps1` here. If Cargo reports
 an actual source-ownership conflict, resolve that specific registration through
 Cargo before retrying. Do not run old and new workflow state together or replay
 uncertain remote writes; start fresh review sessions.
 
-From outside both repositories, confirm each skill appears once, instruction
+From outside this checkout, confirm each skill appears once, instruction
 applicability is retained, and `ss-skills-util --version` resolves successfully.
 Installation does not authenticate clients, enable schedules, or approve reviews.
 

@@ -3,11 +3,9 @@
 ## Agent reads from outside the per-task workspace
 
 If the per-task temp workspace looks empty, the agent will sometimes
-look outside it. For prompts that reference "this Rust workspace"
-without any seeded files, the agent has been observed to read files
-from `C:\Source\folo` directly. It has not modified those files, but
-the wasted compute is real. Seed a minimal fixture to keep the agent
-in-sandbox.
+look outside it. Prompts that reference "this Rust workspace"
+without any seeded files can lead the agent to inspect an unrelated local
+checkout. Seed a minimal fixture to keep the agent within the task workspace.
 
 ## PowerShell terminal output is compressed and buffered
 
