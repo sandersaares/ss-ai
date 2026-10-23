@@ -191,6 +191,10 @@ fn notices(
         Evidence::AzureDevOps(AdoEvidence::History { threads, .. }) => {
             let mut comments = Vec::new();
             for thread in threads {
+                // Deleted ADO threads may retain only a tombstone, without comments.
+                if thread.get("isDeleted") == Some(&Value::Bool(true)) {
+                    continue;
+                }
                 for comment in array(field(thread, "comments")?)? {
                     comments.push((comment, true));
                 }
@@ -201,8 +205,11 @@ fn notices(
     };
     let mut found = Vec::new();
     for (comment, ado) in comments {
-        // System history comments may omit content and never supply notice provenance.
-        if ado && comment.get("commentType").and_then(Value::as_str) != Some("text") {
+        // Only surviving text comments supply provenance; removed payloads may be absent.
+        if ado
+            && (comment.get("isDeleted") == Some(&Value::Bool(true))
+                || comment.get("commentType").and_then(Value::as_str) != Some("text"))
+        {
             continue;
         }
         let body = text(field(comment, if ado { "content" } else { "body" })?)?;
@@ -576,7 +583,8 @@ mod tests {
     use serde_json::{Value, json};
     use uuid::Uuid;
 
-    use super::Marker;
+    use super::{Marker, notices};
+    use crate::ado_approval::Evidence as AdoEvidence;
     use crate::approval::{Decision, Evidence};
     use crate::clock::timestamp;
     use crate::publication::Scope;
@@ -746,5 +754,54 @@ mod tests {
             .unwrap();
         comment["updated_at"] = json!("2026-01-09T02:00:00Z");
         assert_eq!(decide(&evidence).unwrap().status(), "alreadyValid");
+    }
+
+    /// Deleted discussion must neither break scanning nor satisfy notice readback.
+    #[test]
+    fn ado_notice_scanning_ignores_deleted_payloads_but_validates_live_comments() {
+        let marker = marker();
+        let now = timestamp("2026-01-10T00:00:00Z").unwrap();
+        let comment = json!({
+            "id": 60, "commentType": "text", "author": {"id": marker.scope.account_id},
+            "publishedDate": "2026-01-09T00:00:00Z",
+            "lastContentUpdatedDate": "2026-01-09T00:00:00Z",
+            "content": format!("<!-- ss-autoreapprove-needs-review {} -->", serde_json::to_string(&marker).unwrap())
+        });
+        let mut deleted_comment = comment.clone();
+        deleted_comment["isDeleted"] = json!(true);
+        for deleted in [
+            json!({"id": "deleted", "isDeleted": true}),
+            json!({
+                "id": "deleted", "isDeleted": true,
+                "comments": [{"commentType": "text", "content": null}]
+            }),
+            json!({
+                "id": "deleted-comment",
+                "comments": [{"isDeleted": true, "commentType": "text"}]
+            }),
+            json!({"id": "deleted-notice", "comments": [deleted_comment]}),
+            json!({"id": "deleted-thread", "isDeleted": true, "comments": [comment]}),
+        ] {
+            // The scanner consumes discussion only; its caller validates approval history.
+            let mut evidence = Evidence::AzureDevOps(AdoEvidence::History {
+                pull_request: Value::Null,
+                source_commit: String::new(),
+                reviewers: Vec::new(),
+                iterations: Vec::new(),
+                policies: Vec::new(),
+                evaluations: Vec::new(),
+                threads: vec![deleted, json!({"id": "live-notice", "comments": [comment]})],
+            });
+            let found = notices(&evidence, &marker.scope, now, None).unwrap();
+            assert_eq!(found.len(), 1);
+            assert_eq!(found[0].1.comment_id, "60");
+            assert_eq!(found[0].1.rationale, marker.rationale);
+
+            let Evidence::AzureDevOps(AdoEvidence::History { threads, .. }) = &mut evidence else {
+                unreachable!()
+            };
+            threads.last_mut().unwrap()["comments"][0]["content"] = Value::Null;
+            notices(&evidence, &marker.scope, now, None).unwrap_err();
+        }
     }
 }

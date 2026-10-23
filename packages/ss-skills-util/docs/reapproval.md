@@ -86,6 +86,9 @@ accounts' approvals cannot expire notices. A notice posted after a new external
 approval still applies. Edited, malformed, duplicate, or scope-mismatched owned
 markers fail explicitly.
 
+Deleted ADO threads and comments cannot supply notice evidence, and their
+removed payloads are not required.
+
 Notice publication holds the provider's retained publication lock before the
 notice journal and run locks. It refreshes source and decision evidence before
 persisting intent and posting once. Readback identifies a unique owned effect;
