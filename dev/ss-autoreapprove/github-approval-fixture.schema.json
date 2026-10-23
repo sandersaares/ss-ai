@@ -1,0 +1,39 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "GitHub approval service-contract fixture",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schemaVersion", "provenance", "accountId", "repositoryId", "observedAt", "evidence"],
+  "properties": {
+    "schemaVersion": { "const": 1 },
+    "provenance": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["kind", "source", "contract", "description", "limitations"],
+      "properties": {
+        "kind": { "const": "service-contract-projection" },
+        "source": { "type": "string", "format": "uri" },
+        "contract": { "type": "string", "format": "uri" },
+        "description": { "type": "string", "minLength": 1 },
+        "limitations": { "type": "string", "minLength": 1 }
+      }
+    },
+    "accountId": { "type": "string", "pattern": "^[1-9][0-9]*$" },
+    "repositoryId": { "type": "string", "pattern": "^[1-9][0-9]*$" },
+    "observedAt": { "type": "string", "format": "date-time" },
+    "evidence": {
+      "description": "Projected provider objects retain external field names and receive semantic validation through the native evidence consumer.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["scope", "pullRequest", "reviews", "timeline", "comments", "reviewComments"],
+      "properties": {
+        "scope": { "const": "history" },
+        "pullRequest": { "type": "object" },
+        "reviews": { "type": "array", "items": { "type": "object" } },
+        "timeline": { "type": "array", "items": { "type": "object" } },
+        "comments": { "type": "array", "items": { "type": "object" } },
+        "reviewComments": { "type": "array", "items": { "type": "object" } }
+      }
+    }
+  }
+}

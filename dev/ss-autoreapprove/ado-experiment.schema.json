@@ -1,0 +1,78 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Controlled ADO reapproval experiment",
+  "description": "Private service observations and per-effect acknowledgements. Raw API payloads are opaque evidence, not approval authority.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schemaVersion", "operationId", "pullRequestUrl", "tenant", "nextStep", "filePath", "accountId", "repositoryId", "projectId", "sourceRef", "targetRef", "sourceCommit", "targetCommit", "policyDigest", "voteHistoryDigest", "expectedReviewers", "captures", "effects", "error"],
+  "properties": {
+    "schemaVersion": { "const": 1 },
+    "operationId": { "type": "string", "format": "uuid" },
+    "pullRequestUrl": { "type": "string", "format": "uri" },
+    "tenant": { "type": ["string", "null"] },
+    "nextStep": { "enum": ["Approve", "AddFile", "RemoveFile", "RemoveReviewer", "Done", "Stopped"] },
+    "filePath": { "type": "string", "pattern": "^/\\.ss-autoreapprove-[0-9a-f-]+\\.txt$" },
+    "accountId": { "type": "string", "minLength": 1 },
+    "repositoryId": { "type": "string", "minLength": 1 },
+    "projectId": { "type": "string", "minLength": 1 },
+    "sourceRef": { "type": "string", "pattern": "^refs/heads/.+" },
+    "targetRef": { "type": "string", "pattern": "^refs/heads/.+" },
+    "sourceCommit": { "$ref": "#/$defs/commit" },
+    "targetCommit": { "$ref": "#/$defs/commit" },
+    "policyDigest": { "$ref": "#/$defs/digest" },
+    "voteHistoryDigest": { "$ref": "#/$defs/digest" },
+    "expectedReviewers": { "type": "array", "items": { "type": "object" } },
+    "captures": { "type": "array", "minItems": 1, "items": { "$ref": "#/$defs/capture" } },
+    "effects": { "type": "array", "maxItems": 4, "items": { "$ref": "#/$defs/effect" } },
+    "error": { "type": ["string", "null"] }
+  },
+  "$defs": {
+    "commit": { "type": "string", "pattern": "^[0-9a-f]{40}$" },
+    "digest": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+    "capture": {
+      "type": "object", "additionalProperties": false,
+      "required": ["capturedAt", "raw", "view"],
+      "properties": {
+        "capturedAt": { "type": "string", "format": "date-time" },
+        "raw": {
+          "type": "object", "additionalProperties": false,
+          "required": ["identity", "prBefore", "prAfter", "sourceRef", "targetRef", "reviewers", "iterations", "threads", "policyPages", "evaluationPages"],
+          "properties": {
+            "identity": { "type": "object" }, "prBefore": { "type": "object" }, "prAfter": { "type": "object" },
+            "sourceRef": { "type": "object" }, "targetRef": { "type": "object" },
+            "reviewers": { "type": "object" }, "iterations": { "type": "object" }, "threads": { "type": "object" },
+            "policyPages": { "type": "array", "minItems": 1, "items": { "type": "object" } },
+            "evaluationPages": { "type": "array", "minItems": 1, "items": { "type": "object" } }
+          }
+        },
+        "view": {
+          "type": "object", "additionalProperties": false,
+          "required": ["accountId", "repositoryId", "projectId", "authorId", "sourceRef", "targetRef", "sourceCommit", "targetCommit", "status", "draft", "autoComplete", "reviewers", "policyDigest", "voteHistoryDigest"],
+          "properties": {
+            "accountId": { "type": "string", "minLength": 1 }, "repositoryId": { "type": "string", "minLength": 1 },
+            "projectId": { "type": "string", "minLength": 1 }, "authorId": { "type": "string", "minLength": 1 },
+            "sourceRef": { "type": "string", "minLength": 1 }, "targetRef": { "type": "string", "minLength": 1 },
+            "sourceCommit": { "$ref": "#/$defs/commit" }, "targetCommit": { "$ref": "#/$defs/commit" },
+            "status": { "type": "string", "minLength": 1 }, "draft": { "type": "boolean" },
+            "autoComplete": { "type": "boolean" }, "reviewers": { "type": "array", "items": { "type": "object" } },
+            "policyDigest": { "$ref": "#/$defs/digest" }, "voteHistoryDigest": { "$ref": "#/$defs/digest" }
+          }
+        }
+      }
+    },
+    "effect": {
+      "type": "object", "additionalProperties": false,
+      "required": ["kind", "state", "request", "response", "error"],
+      "properties": {
+        "kind": { "enum": ["Approve", "AddFile", "RemoveFile", "RemoveReviewer"] },
+        "state": { "enum": ["intent", "acknowledged", "verified", "unknown"] },
+        "request": {
+          "type": "object", "additionalProperties": false, "required": ["method", "url", "body"],
+          "properties": { "method": { "enum": ["PUT", "POST", "DELETE"] }, "url": { "type": "string" }, "body": { "type": ["object", "null"] } }
+        },
+        "response": { "type": ["object", "null"] },
+        "error": { "type": ["string", "null"] }
+      }
+    }
+  }
+}

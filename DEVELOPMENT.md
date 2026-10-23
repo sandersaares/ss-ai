@@ -6,15 +6,15 @@ This document covers how to develop and test the skills in this repo. For end-us
 
 Required regardless of which area you work in:
 
-- PowerShell 7+ (`pwsh`).
+- Current stable PowerShell (`pwsh`), targeting the 7.6 release line.
 - Git.
-- Rust (latest stable toolchain via [rustup](https://rustup.rs/)). Some
-  skills (e.g. `ss-cargo-deps-tidy`) shell out to `cargo` during
-  evaluation, and a clean rustup install is the expected way to provide
-  it.
+- Rustup and the repository-pinned Rust toolchain, including Clippy/rustfmt.
+  Run Cargo from this checkout's root. Windows requires Visual Studio C++
+  Build Tools and Windows SDK; Ubuntu requires native compiler/linker tools
+  for mimalloc. Evaluation manifest fixtures are not workspace members.
 - [`just`](https://github.com/casey/just) command runner. The repo's
-  `justfile` is the canonical entry point for running tests and evals;
-  every workflow in the rest of this document is a `just` recipe.
+  `justfile` supplies shortcuts; `scripts/Invoke-Tests.ps1` is the canonical
+  test runner and works without `just`.
   Installs via `cargo` once the Rust toolchain above is in place:
 
   ```powershell
@@ -23,10 +23,11 @@ Required regardless of which area you work in:
 
 Required for skill-helper unit tests:
 
-- [Pester](https://pester.dev/) 5.5.0 or newer:
+- [Pester](https://pester.dev/) 5.x, at least 5.5.0. The runner deliberately
+  selects version 5 even when a newer major version is installed:
 
   ```powershell
-  Install-Module Pester -Scope CurrentUser -MinimumVersion 5.5.0 -Force
+  Install-Module Pester -Scope CurrentUser -RequiredVersion 5.7.1 -Force
   ```
 
 Required for eval tooling that reads/writes YAML (e.g. the
@@ -49,21 +50,26 @@ Some skills ship with executable helper scripts that have their own unit tests. 
 
 ## Running tests
 
-All test commands are `just` recipes that run from the repo root. Use
-`just --list` to enumerate everything available. Any extra arguments
-you pass after the recipe name are forwarded verbatim to
-`Invoke-Pester`.
+Run from the active checkout root. `just --list` lists shortcuts.
+The runner supports `-Suite All|Pester|Rust`, `-Path`, and `-FullNameFilter`.
+An explicit Pester path does not run Rust checks, but builds the local
+native utility when selected review suites need it. The runner never uses
+the user's installed utility as the test prerequisite. It propagates
+failure status; `All` retains Rust failures after Pester completes.
 
 Run every test in the repo:
 
 ```powershell
 just test
+just test-all
+just test-rust
 ```
 
 Run tests for a single skill:
 
 ```powershell
 just test-skill ss-cargo-deps-tidy
+pwsh -NoProfile -File ./scripts/Invoke-Tests.ps1 -Path ./tests/AgentInstallation.Tests.ps1
 ```
 
 Filter by `Describe` or `It` name:
@@ -86,6 +92,13 @@ under `evals/<skill-name>/tasks/**/*.yaml`.
 - Waza CLI (use the latest release).
 - Always invoke `waza run` from the repo root so relative paths in eval
   specs resolve correctly.
+- `waza preflight <spec>` inspects configuration and task discovery offline;
+  it does not run hooks, graders, or models. Model execution requires
+  explicit authorization. Confirm model availability and supply `--model`
+  for an authorized run rather than assuming a configured model remains available.
+- `dev/ss-cargo-deps-tidy/evals/Generate-FoloFullTask.ps1` prepares the
+  pinned Folo fixture and generated task. Run preparation in a disposable
+  checkout when checking it independently; it downloads public source.
 
 ## Running an eval
 
@@ -150,14 +163,16 @@ Avoid inventing additional tags. Per-skill or per-fixture distinctions
 (e.g. "folo", "cargo-only") belong in the task `id` and `name`, not in
 tags - tags are a CI/cost selector, not a categorisation system.
 
-CI mapping (see [.github/workflows](.github/workflows)):
+CI uses [tests.yml](.github/workflows/tests.yml) for Windows Pester and
+focused Ubuntu coverage, Windows/Ubuntu native Clippy and Cargo tests, and
+macOS PowerShell-only Cargo-helper/linking coverage. Pull requests have no
+narrow path filter that could skip installer-only changes. CI does not run
+paid model evaluations; the documented Waza recipes are explicit local entry points.
 
-- `eval.yml` (push to `main`, same-repo PRs) - runs every
-  `evals/*/trigger.eval.yaml`.
-- `eval-full.yml` (`workflow_dispatch`) - runs every
-  `evals/*/*.eval.yaml` by default; the operator can pass
-  `tags: workflow` to skip the heavy bucket or `tags: heavy` to run
-  only the expensive scenarios.
+Installation tests use test-owned homes, source copies, and Cargo install
+roots. Never run the real installer against the developer's profile as a test.
+Provider fixtures are sanitized; tests must not contact live review services.
+Report dependency setup is opt-in and documented in the skill's platform guide.
 
 ## Authoring eval specs
 

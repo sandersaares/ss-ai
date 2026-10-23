@@ -1,0 +1,39 @@
+[package]
+name = "ss-skills-util"
+description = "Shared native operations for the ss-ai skills"
+version = "0.1.0"
+publish = false
+authors.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+include.workspace = true
+
+[package.metadata.docs.rs]
+all-features = true
+
+[dependencies]
+clap = { workspace = true, features = ["derive"] }
+jiff = { workspace = true }
+mimalloc = { workspace = true }
+ohno = { workspace = true, features = ["app-err"] }
+regex = { workspace = true }
+reqwest = { workspace = true, features = ["blocking", "rustls", "system-proxy"] }
+serde = { workspace = true, features = ["derive"] }
+serde_json = { workspace = true }
+sha2 = { workspace = true }
+tempfile = { workspace = true }
+tick = { workspace = true, features = ["tokio"] }
+tokio = { workspace = true, features = ["rt", "time"] }
+url = { workspace = true }
+uuid = { workspace = true, features = ["v4"] }
+
+[dev-dependencies]
+static_assertions = { workspace = true }
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { workspace = true, features = ["Win32_Foundation", "Win32_Storage_FileSystem"] }
+
+[lints]
+workspace = true

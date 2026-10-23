@@ -104,9 +104,9 @@ graders:
       args:
         - -NoProfile
         - -File
-        - evals/ss-cargo-deps-tidy/scripts/Test-CargoTidied.ps1
+        - dev/ss-cargo-deps-tidy/evals/Test-CargoTidied.ps1
         - -ExpectationsPath
         - evals/ss-cargo-deps-tidy/fixtures/folo-3e1f241-expectations.json
         - -InventoryScript
-        - skills/ss-cargo-deps-tidy/Generate-Inventory.ps1
+        - skills/ss-cargo-deps-tidy/scripts/Generate-Inventory.ps1
       timeout: 60

@@ -1,0 +1,42 @@
+query ApprovalHistory($owner: String!, $repo: String!, $num: Int!, $cur: String) {
+  repository(owner: $owner, name: $repo) {
+    pullRequest(number: $num) {
+      timelineItems(
+        first: 100
+        after: $cur
+        itemTypes: [
+          PULL_REQUEST_REVIEW
+          REVIEW_DISMISSED_EVENT
+          REVIEW_REQUEST_REMOVED_EVENT
+        ]
+      ) {
+        nodes {
+          __typename
+          ... on PullRequestReview {
+            id
+            state
+          }
+          ... on ReviewDismissedEvent {
+            id
+            createdAt
+            previousReviewState
+            review { id }
+            pullRequestCommit { commit { oid } }
+          }
+          ... on ReviewRequestRemovedEvent {
+            id
+            createdAt
+            requestedReviewer {
+              __typename
+              ... on User { id }
+              ... on Team { id }
+              ... on Mannequin { id }
+              ... on Bot { id }
+            }
+          }
+        }
+        pageInfo { hasNextPage endCursor }
+      }
+    }
+  }
+}

@@ -1,0 +1,110 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "ss-review focus-area categorization map",
+  "$comment": "The handoff requires explicit fields and rejects aliases so independent workers share one representation. See focus-area-format.md.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schemaVersion", "categories", "chapters"],
+  "properties": {
+    "schemaVersion": { "const": 1 },
+    "categories": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["id", "title"],
+        "properties": {
+          "id": { "$ref": "#/$defs/id" },
+          "title": { "type": "string", "pattern": "^[^\\r\\n]+$", "minLength": 1 }
+        }
+      }
+    },
+    "chapters": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["id", "categoryId", "content", "sources", "applicability"],
+        "properties": {
+          "id": { "$ref": "#/$defs/id" },
+          "categoryId": { "$ref": "#/$defs/id" },
+          "content": { "$ref": "#/$defs/span" },
+          "sources": {
+            "type": "array",
+            "minItems": 1,
+            "items": { "$ref": "#/$defs/span" }
+          },
+          "applicability": {
+            "type": "array",
+            "minItems": 1,
+            "items": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["effectiveScope", "declarations", "origins", "uncertainties"],
+              "properties": {
+                "effectiveScope": { "$ref": "#/$defs/prose" },
+                "pathScope": {
+                  "$comment": "An optional conservative proof: absent or null requires review. Only complete path-only effective scopes may use this form.",
+                  "oneOf": [
+                    { "type": "null" },
+                    {
+                      "type": "object", "additionalProperties": false, "required": ["base", "include"],
+                      "properties": {
+                        "base": { "type": "string", "pattern": "^(\\.|[A-Za-z0-9_. -]+(?:/[A-Za-z0-9_. -]+)*)$" },
+                        "include": {
+                          "type": "array", "minItems": 1, "uniqueItems": true,
+                          "items": { "type": "string", "minLength": 1, "pattern": "^[A-Za-z0-9_.*? /-]+$" }
+                        }
+                      }
+                    }
+                  ]
+                },
+                "declarations": {
+                  "type": "array",
+                  "items": { "$ref": "#/$defs/span" }
+                },
+                "origins": {
+                  "type": "array",
+                  "items": { "$ref": "#/$defs/prose" }
+                },
+                "uncertainties": {
+                  "type": "array",
+                  "items": {
+                    "type": "object",
+                    "additionalProperties": false,
+                    "required": ["reason", "evidence"],
+                    "properties": {
+                      "reason": { "$ref": "#/$defs/prose" },
+                      "evidence": {
+                        "type": "array",
+                        "minItems": 1,
+                        "items": { "$ref": "#/$defs/span" }
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  },
+  "$defs": {
+    "id": { "type": "string", "pattern": "^[a-z0-9]+(?:-[a-z0-9]+)*$" },
+    "prose": { "type": "string", "pattern": "\\S" },
+    "span": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["root", "path", "startLine", "endLine"],
+      "properties": {
+        "root": { "enum": ["instruction-set-source", "instruction-set-raw"] },
+        "path": { "type": "string", "minLength": 1 },
+        "startLine": { "type": "integer", "minimum": 1 },
+        "endLine": { "type": "integer", "minimum": 1 }
+      }
+    }
+  }
+}

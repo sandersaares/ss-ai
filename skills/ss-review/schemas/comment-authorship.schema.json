@@ -1,0 +1,26 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schemaVersion", "policyVersion", "captureHash", "decisions"],
+  "properties": {
+    "schemaVersion": { "const": 1 },
+    "policyVersion": { "type": "string", "minLength": 1 },
+    "captureHash": { "type": "string", "pattern": "^[A-F0-9]{64}$" },
+    "decisions": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["threadId", "commentId", "inputHash", "kind", "origin"],
+        "properties": {
+          "threadId": { "type": "string", "minLength": 1 },
+          "commentId": { "type": "string", "minLength": 1 },
+          "inputHash": { "type": "string", "pattern": "^[A-F0-9]{64}$" },
+          "kind": { "enum": ["agent", "human"] },
+          "origin": { "enum": ["classified", "reused"] }
+        }
+      }
+    }
+  }
+}
