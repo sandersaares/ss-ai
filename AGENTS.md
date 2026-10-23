@@ -30,7 +30,7 @@ not real-time sleeps.
 
 Bash setup acquires its private environment lock before the retained
 `$HOME/.config/shell-startup.lock`, and releases them in reverse order.
-The independent `dev-env` installer uses the same shared lock convention.
+Any independent startup-file writer must follow the same shared lock convention.
 
 Machine-readable workflow records have explicit schemas and maintained
 writers/readers. Validate producer and consumer boundaries; never invent

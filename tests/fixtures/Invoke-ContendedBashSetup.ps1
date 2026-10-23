@@ -25,7 +25,7 @@ function Start-Sleep {
 
 if ($IndependentParticipant) {
     # Emulate the independent infrastructure installer's shared-file contract.
-    # No second checkout or installed dev-env implementation is a test prerequisite.
+    # The fixture exercises the contract without requiring another installed tool.
     $privatePath = Join-Path $HomeDirectory '.config\infrastructure\environment.sh'
     [void][IO.Directory]::CreateDirectory((Split-Path -Parent $privatePath))
     $privateLock = Open-BashEnvironmentLock -Path $privatePath
