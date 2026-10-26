@@ -1,4 +1,4 @@
-//! Real isolated Git objects with injected service effects exercise the full command lifecycle.
+//! Real Git lifecycles and strict recorded source replies share guarded publication coverage.
 #![allow(
     clippy::indexing_slicing,
     clippy::arithmetic_side_effects,
@@ -12,6 +12,7 @@ use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::rc::Rc;
 use std::time::Duration;
 
 use jiff::Timestamp;
@@ -20,6 +21,80 @@ use serde_json::{Value, json};
 use ss_skills_util::{Clock, Http, HttpResponse, NativeProcess, Process, ProcessOutput, run_in};
 use tempfile::TempDir;
 use url::Url;
+
+/// Counts actual integration work, independently of machine-dependent elapsed time.
+#[derive(Clone, Copy, Debug, Default)]
+struct WorkCounts {
+    source_git: usize,
+    assessment_git: usize,
+    recorded_git: usize,
+    reads: usize,
+}
+
+/// Owns immutable editorial source data shared by scenarios with private writable state.
+struct Sources {
+    repository: TempDir,
+    old: String,
+    new: String,
+    github: Rc<[GitReply]>,
+    ado: Rc<[GitReply]>,
+}
+
+impl Sources {
+    /// Captures provider-specific source replies through real preparation before replay.
+    fn new() -> Self {
+        let repository = TempDir::new().unwrap();
+        let (old, new) = sources(repository.path());
+        let scope = TempDir::new().unwrap();
+        let github = Provider::new(repository.path(), &old, &new);
+        let (_, github_prepared) = prepare(&scope.path().join("github"), &github, true);
+        let ado = Provider::ado(repository.path(), &old, &new);
+        let (_, ado_prepared) = prepare(&scope.path().join("ado"), &ado, true);
+        assert_eq!(github_prepared["changes"], ado_prepared["changes"]);
+        for provider in [&github, &ado] {
+            let replies = provider.recorded_git.borrow();
+            assert!(!replies.is_empty());
+            assert!(replies.iter().all(|reply| reply.output.success));
+        }
+        Self {
+            repository,
+            old,
+            new,
+            github: github.recorded_git.into_inner().into(),
+            ado: ado.recorded_git.into_inner().into(),
+        }
+    }
+
+    fn path(&self) -> &Path {
+        self.repository.path()
+    }
+
+    fn commits(&self) -> (String, String) {
+        (self.old.clone(), self.new.clone())
+    }
+
+    /// Publication matrices vary provider/journal state, not immutable Git objects.
+    fn provider(&self, ado: bool) -> Provider {
+        let mut provider = if ado {
+            Provider::ado(self.path(), &self.old, &self.new)
+        } else {
+            Provider::new(self.path(), &self.old, &self.new)
+        };
+        provider.git_replies = Some(Rc::clone(if ado { &self.ado } else { &self.github }));
+        provider
+    }
+}
+
+/// Replays only the exact ordered commands observed against the real immutable fixture.
+struct GitReply {
+    arguments: Vec<String>,
+    output: ProcessOutput,
+}
+
+thread_local! {
+    // The single entry point keeps fork away from other scenarios' retained locks.
+    static WORK_COUNTS: Cell<WorkCounts> = Cell::default();
+}
 
 struct FixedClock;
 impl Clock for FixedClock {
@@ -31,7 +106,7 @@ impl Clock for FixedClock {
     }
 }
 
-/// Keeps all service writes in memory while real Git fetches from a test-owned repository.
+/// Keeps service writes private and selects real or exact recorded Git responses.
 struct Provider {
     number: u32,
     candidates: Vec<u32>,
@@ -43,6 +118,9 @@ struct Provider {
     target_reads: Cell<usize>,
     host_directory: RefCell<Option<PathBuf>>,
     ado: bool,
+    git_replies: Option<Rc<[GitReply]>>,
+    git_position: Cell<usize>,
+    recorded_git: RefCell<Vec<GitReply>>,
 }
 
 impl Provider {
@@ -75,6 +153,9 @@ impl Provider {
             target_reads: Cell::new(0),
             host_directory: RefCell::new(None),
             ado: false,
+            git_replies: None,
+            git_position: Cell::new(0),
+            recorded_git: RefCell::new(Vec::new()),
         }
     }
 
@@ -429,16 +510,54 @@ impl Process for Provider {
     }
 
     fn isolated_git(&self, directory: &Path, arguments: &[String]) -> io::Result<ProcessOutput> {
-        let mut arguments = arguments.to_vec();
-        if arguments.iter().any(|argument| argument == "fetch") {
+        let fetching = arguments.iter().any(|argument| argument == "fetch");
+        if fetching {
             self.fetches.set(self.fetches.get() + 1);
-            let remote = arguments
+        }
+        if let Some(replies) = &self.git_replies {
+            let position = self.git_position.get();
+            let reply = &replies[position];
+            if arguments != reply.arguments {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    format!("Unexpected publication-matrix Git request: {arguments:?}"),
+                ));
+            }
+            self.git_position.set((position + 1) % replies.len());
+            WORK_COUNTS.set({
+                let mut counts = WORK_COUNTS.get();
+                counts.recorded_git += 1;
+                counts
+            });
+            return Ok(ProcessOutput::new(
+                reply.output.success,
+                reply.output.stdout.clone(),
+                reply.output.stderr.clone(),
+            ));
+        }
+        WORK_COUNTS.set({
+            let mut counts = WORK_COUNTS.get();
+            counts.assessment_git += 1;
+            counts
+        });
+        let mut local_arguments = arguments.to_vec();
+        if fetching {
+            let remote = local_arguments
                 .iter_mut()
                 .find(|argument| argument.as_str() == self.url())
                 .unwrap();
             self.repository.to_str().unwrap().clone_into(remote);
         }
-        NativeProcess::new(directory).isolated_git(directory, &arguments)
+        let output = NativeProcess::new(directory).isolated_git(directory, &local_arguments)?;
+        self.recorded_git.borrow_mut().push(GitReply {
+            arguments: arguments.to_vec(),
+            output: ProcessOutput::new(
+                output.success,
+                output.stdout.clone(),
+                output.stderr.clone(),
+            ),
+        });
+        Ok(output)
     }
 
     fn isolated_git_oauth(
@@ -648,6 +767,11 @@ impl Provider {
 }
 
 fn git(root: &Path, arguments: &[&str]) -> String {
+    WORK_COUNTS.set({
+        let mut counts = WORK_COUNTS.get();
+        counts.source_git += 1;
+        counts
+    });
     let output = Command::new("git")
         .current_dir(root)
         .args([
@@ -689,6 +813,13 @@ fn invoke(
     operation: &str,
     args: &[String],
 ) -> Result<Value, AppError> {
+    if operation == "read" {
+        WORK_COUNTS.set({
+            let mut counts = WORK_COUNTS.get();
+            counts.reads += 1;
+            counts
+        });
+    }
     let mut arguments = vec![
         OsString::from("ss-skills-util"),
         "autoreapprove".into(),
@@ -751,6 +882,13 @@ fn prepare(root: &Path, provider: &Provider, dry_run: bool) -> (String, Value) {
         .to_owned();
     let prepared = work(root, provider, "prepare", &snapshot, &[]).unwrap();
     if prepared.get("requiredDocuments").is_some() {
+        if provider.git_replies.is_some() {
+            assert_eq!(
+                provider.git_position.get(),
+                0,
+                "Incomplete recorded Git sequence"
+            );
+        }
         assert_eq!(
             prepared["requiredDocuments"],
             json!([
@@ -804,30 +942,7 @@ fn assess_as(
         }
     }
     for reference in references {
-        let mut offset = 0;
-        loop {
-            let read = work(
-                root,
-                provider,
-                "read",
-                snapshot,
-                &[
-                    "--reference".into(),
-                    reference.clone(),
-                    "--offset".into(),
-                    offset.to_string(),
-                    "--limit".into(),
-                    "113".into(),
-                ],
-            )
-            .unwrap();
-            if read["complete"] == true {
-                break;
-            }
-            let next = read["nextOffset"].as_u64().unwrap();
-            assert!(next > offset);
-            offset = next;
-        }
+        read_evidence(root, provider, snapshot, &reference, None);
     }
     for change in prepared["changes"].as_array().unwrap() {
         let id = change["id"].as_str().unwrap();
@@ -868,6 +983,96 @@ fn assess_as(
     work(root, provider, "complete", snapshot, &[]).unwrap();
 }
 
+/// Uses actual persisted read commands without retesting tiny pages in every matrix.
+fn read_evidence(
+    root: &Path,
+    provider: &Provider,
+    snapshot: &str,
+    reference: &str,
+    limit: Option<usize>,
+) -> String {
+    // Match Command::Read's ordinary default and Assessment::read's response cap.
+    let page_limit = limit.unwrap_or(4096).min(16_384);
+    let length = evidence_length(root, provider.number, reference);
+    let expected_pages = length.div_ceil(page_limit).max(1);
+    let mut offset = 0;
+    let mut pages = 0;
+    let mut text = String::new();
+    loop {
+        assert!(
+            pages < expected_pages,
+            "Evidence exceeded its captured length"
+        );
+        let mut arguments = vec![
+            "--reference".into(),
+            reference.into(),
+            "--offset".into(),
+            offset.to_string(),
+        ];
+        if let Some(limit) = limit {
+            arguments.extend(["--limit".into(), limit.to_string()]);
+        }
+        let read = work(root, provider, "read", snapshot, &arguments).unwrap();
+        assert_eq!(read["snapshotDigest"], snapshot);
+        assert_eq!(read["reference"], reference);
+        assert_eq!(read["offset"], offset);
+        let page = read["text"].as_str().unwrap();
+        let length = page.chars().count();
+        assert!(length <= page_limit);
+        text.push_str(page);
+        pages += 1;
+        if read["complete"] == true {
+            assert!(read["nextOffset"].is_null());
+            break;
+        }
+        // Full nonterminal pages and exact advancement prevent loops and skipped evidence.
+        assert_eq!(length, page_limit);
+        let next = read["nextOffset"].as_u64().unwrap();
+        assert_eq!(next, offset + u64::try_from(length).unwrap());
+        assert!(next > offset);
+        offset = next;
+    }
+    assert_eq!(pages, expected_pages);
+    assert_eq!(text.chars().count(), length);
+    text
+}
+
+/// Bounds command paging from captured input, without fabricating any read receipts.
+fn evidence_length(root: &Path, number: u32, reference: &str) -> usize {
+    let record: Value = serde_json::from_slice(&fs::read(root.join("run.json")).unwrap()).unwrap();
+    let entry = record["inventory"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|entry| entry["pullRequestId"] == number)
+        .unwrap();
+    match reference {
+        "policy" => record["policy"]["content"]
+            .as_str()
+            .unwrap()
+            .chars()
+            .count(),
+        // Pretty JSON key order does not affect the serialized character count.
+        "discussion" => serde_json::to_string_pretty(&entry["inspection"]["evidence"])
+            .unwrap()
+            .chars()
+            .count(),
+        _ => {
+            let (id, side) = reference.split_once(':').unwrap();
+            entry["assessment"]["inventory"]["changes"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|change| change["id"] == id)
+                .unwrap()[side]["content"]["text"]
+                .as_str()
+                .unwrap()
+                .chars()
+                .count()
+        }
+    }
+}
+
 /// Notice publication carries the same immutable snapshot and attribution as approval.
 fn notify(root: &Path, provider: &Provider, snapshot: &str) -> Result<Value, AppError> {
     work(
@@ -885,17 +1090,14 @@ fn notify(root: &Path, provider: &Provider, snapshot: &str) -> Result<Value, App
 }
 
 /// Exercises both providers' persistent refusal and independent-approval reset.
-fn needs_review_notices_short_circuit_and_expire_only_after_external_approval() {
-    let repository = TempDir::new().unwrap();
-    let (old, new) = sources(repository.path());
+fn needs_review_notices_short_circuit_and_expire_only_after_external_approval(
+    repository: &Sources,
+) {
+    let new = &repository.new;
     for ado in [false, true] {
         let scope = TempDir::new().unwrap();
         let root = scope.path().join("first");
-        let provider = if ado {
-            Provider::ado(repository.path(), &old, &new)
-        } else {
-            Provider::new(repository.path(), &old, &new)
-        };
+        let provider = repository.provider(ado);
         let (snapshot, prepared) = prepare(&root, &provider, false);
         assess_as(&root, &provider, &snapshot, &prepared, "significant");
         let overlapping = scope.path().join("overlapping");
@@ -1002,9 +1204,7 @@ fn needs_review_notices_short_circuit_and_expire_only_after_external_approval() 
 }
 
 /// Verifies that dry runs and uncertain comment effects never issue another POST.
-fn notice_dry_runs_refusals_and_uncertain_effects_do_not_duplicate_writes() {
-    let repository = TempDir::new().unwrap();
-    let (old, new) = sources(repository.path());
+fn notice_dry_runs_refusals_and_uncertain_effects_do_not_duplicate_writes(repository: &Sources) {
     for ado in [false, true] {
         for fault in [
             "dryRun",
@@ -1017,11 +1217,7 @@ fn notice_dry_runs_refusals_and_uncertain_effects_do_not_duplicate_writes() {
         ] {
             let scope = TempDir::new().unwrap();
             let root = scope.path().join("first");
-            let provider = if ado {
-                Provider::ado(repository.path(), &old, &new)
-            } else {
-                Provider::new(repository.path(), &old, &new)
-            };
+            let provider = repository.provider(ado);
             let (snapshot, prepared) = prepare(&root, &provider, fault == "dryRun");
             assess_as(
                 &root,
@@ -1091,17 +1287,11 @@ fn notice_dry_runs_refusals_and_uncertain_effects_do_not_duplicate_writes() {
 }
 
 /// Keeps automatic timestamps distinct from external approvals across fresh runs.
-fn valid_automatic_approval_timestamps_survive_later_invocations() {
-    let repository = TempDir::new().unwrap();
-    let (old, new) = sources(repository.path());
+fn valid_automatic_approval_timestamps_survive_later_invocations(repository: &Sources) {
     for ado in [false, true] {
         let scope = TempDir::new().unwrap();
         let root = scope.path().join("first");
-        let provider = if ado {
-            Provider::ado(repository.path(), &old, &new)
-        } else {
-            Provider::new(repository.path(), &old, &new)
-        };
+        let provider = repository.provider(ado);
         let (snapshot, prepared) = prepare(&root, &provider, false);
         assess(&root, &provider, &snapshot, &prepared);
         let overlapping = scope.path().join("overlapping");
@@ -1148,18 +1338,12 @@ fn valid_automatic_approval_timestamps_survive_later_invocations() {
 }
 
 /// A terminal provider receipt cannot leave reporting errors absent from results.
-fn publication_reporting_failures_are_persisted() {
-    let repository = TempDir::new().unwrap();
-    let (old, new) = sources(repository.path());
+fn publication_reporting_failures_are_persisted(repository: &Sources) {
     for ado in [false, true] {
         for fault in ["reportReadFailure", "reportStandingChanged"] {
             let scope = TempDir::new().unwrap();
             let root = scope.path().join("first");
-            let provider = if ado {
-                Provider::ado(repository.path(), &old, &new)
-            } else {
-                Provider::new(repository.path(), &old, &new)
-            };
+            let provider = repository.provider(ado);
             let (snapshot, prepared) = prepare(&root, &provider, false);
             assess(&root, &provider, &snapshot, &prepared);
             if ado {
@@ -1197,18 +1381,13 @@ fn publication_reporting_failures_are_persisted() {
 }
 
 /// A completed run retains its observed result rather than mixing it with later service state.
-fn persisted_already_valid_results_replay_without_refreshing_reporting() {
-    let repository = TempDir::new().unwrap();
-    let (old, new) = sources(repository.path());
+fn persisted_already_valid_results_replay_without_refreshing_reporting(repository: &Sources) {
+    let new = &repository.new;
     for ado in [false, true] {
         for fault in ["reportReadFailure", "reportStandingChanged"] {
             let scope = TempDir::new().unwrap();
             let root = scope.path().join("run");
-            let provider = if ado {
-                Provider::ado(repository.path(), &old, &new)
-            } else {
-                Provider::new(repository.path(), &old, &new)
-            };
+            let provider = repository.provider(ado);
             let (snapshot, prepared) = prepare(&root, &provider, false);
             assess(&root, &provider, &snapshot, &prepared);
             if ado {
@@ -1257,18 +1436,12 @@ fn persisted_already_valid_results_replay_without_refreshing_reporting() {
 }
 
 /// Failed terminal saves must retain recoverable intent in both journals.
-fn notice_terminal_save_failures_preserve_original_recovery() {
-    let repository = TempDir::new().unwrap();
-    let (old, new) = sources(repository.path());
+fn notice_terminal_save_failures_preserve_original_recovery(repository: &Sources) {
     for ado in [false, true] {
         for fault in ["noticeJournalFailure", "noticeRefusalJournalFailure"] {
             let scope = TempDir::new().unwrap();
             let root = scope.path().join("first");
-            let provider = if ado {
-                Provider::ado(repository.path(), &old, &new)
-            } else {
-                Provider::new(repository.path(), &old, &new)
-            };
+            let provider = repository.provider(ado);
             let (snapshot, prepared) = prepare(&root, &provider, false);
             assess_as(&root, &provider, &snapshot, &prepared, "significant");
             let directory = scope.path().join("host-store/review-notices");
@@ -1305,17 +1478,11 @@ fn notice_terminal_save_failures_preserve_original_recovery() {
 }
 
 /// A resolved notification error cannot replace the assessment's uncertainty.
-fn uncertain_assessment_diagnostic_survives_notification_retry() {
-    let repository = TempDir::new().unwrap();
-    let (old, new) = sources(repository.path());
+fn uncertain_assessment_diagnostic_survives_notification_retry(repository: &Sources) {
     for ado in [false, true] {
         let scope = TempDir::new().unwrap();
         let root = scope.path().join("first");
-        let provider = if ado {
-            Provider::ado(repository.path(), &old, &new)
-        } else {
-            Provider::new(repository.path(), &old, &new)
-        };
+        let provider = repository.provider(ado);
         let (snapshot, prepared) = prepare(&root, &provider, false);
         assess_as(&root, &provider, &snapshot, &prepared, "uncertain");
         let before = invoke(&root, &provider, "results", &[]).unwrap();
@@ -1334,15 +1501,13 @@ fn uncertain_assessment_diagnostic_survives_notification_retry() {
 }
 
 /// Recovery cannot clear another PR's fatal write, even across a lost run save.
-fn notice_recovery_is_bound_to_the_failed_pull_request() {
-    let repository = TempDir::new().unwrap();
-    let (old, new) = sources(repository.path());
+fn notice_recovery_is_bound_to_the_failed_pull_request(repository: &Sources) {
     for interrupted_run_save in [false, true] {
         let scope = TempDir::new().unwrap();
         let root = scope.path().join("run");
-        let mut first = Provider::new(repository.path(), &old, &new);
+        let mut first = repository.provider(false);
         first.candidates = vec![1, 2];
-        let mut second = Provider::new(repository.path(), &old, &new);
+        let mut second = repository.provider(false);
         second.number = 2;
         second.candidates = vec![2];
         second.evidence.borrow_mut()["pullRequest"]["number"] = json!(2);
@@ -1376,12 +1541,10 @@ fn notice_recovery_is_bound_to_the_failed_pull_request() {
 }
 
 /// A later unproven vote reset cannot prevent verification of an existing comment.
-fn ado_notice_recovery_does_not_require_current_approval_eligibility() {
-    let repository = TempDir::new().unwrap();
-    let (old, new) = sources(repository.path());
+fn ado_notice_recovery_does_not_require_current_approval_eligibility(repository: &Sources) {
     let scope = TempDir::new().unwrap();
     let root = scope.path().join("run");
-    let provider = Provider::ado(repository.path(), &old, &new);
+    let provider = repository.provider(true);
     let (snapshot, prepared) = prepare(&root, &provider, false);
     assess_as(&root, &provider, &snapshot, &prepared, "significant");
     provider.fault.set("postReadFailure");
@@ -1402,9 +1565,7 @@ fn ado_notice_recovery_does_not_require_current_approval_eligibility() {
 }
 
 /// Accepted comments remain recoverable after state changes without weakening ownership checks.
-fn notice_readback_survives_closure_and_draft_conversion() {
-    let repository = TempDir::new().unwrap();
-    let (old, new) = sources(repository.path());
+fn notice_readback_survives_closure_and_draft_conversion(repository: &Sources) {
     for ado in [false, true] {
         for fault in ["noticeClosed", "noticeDraft", "noticeAbandoned"] {
             if !ado && fault == "noticeAbandoned" {
@@ -1413,11 +1574,7 @@ fn notice_readback_survives_closure_and_draft_conversion() {
             for interrupted in [false, true] {
                 let scope = TempDir::new().unwrap();
                 let root = scope.path().join("run");
-                let provider = if ado {
-                    Provider::ado(repository.path(), &old, &new)
-                } else {
-                    Provider::new(repository.path(), &old, &new)
-                };
+                let provider = repository.provider(ado);
                 let (snapshot, prepared) = prepare(&root, &provider, false);
                 assess_as(&root, &provider, &snapshot, &prepared, "significant");
                 if interrupted {
@@ -1510,12 +1667,12 @@ fn assert_notice_readback_ownership(
 }
 
 /// Superseded edited notices cannot obstruct a later operation's exact readback.
-fn expired_edited_notices_do_not_block_new_notice_readback() {
-    let repository = TempDir::new().unwrap();
-    let (old, new) = sources(repository.path());
+fn expired_edited_notices_do_not_block_new_notice_readback(repository: &Sources) {
+    let (old, new) = repository.commits();
     for ado in [false, true] {
         let scope = TempDir::new().unwrap();
         let root = scope.path().join("first");
+        // This family reverses source endpoints after an independent approval.
         let provider = if ado {
             Provider::ado(repository.path(), &old, &new)
         } else {
@@ -1613,8 +1770,8 @@ fn publish(root: &Path, provider: &Provider, snapshot: &str) -> Result<Value, Ap
 
 #[test]
 fn native_git_assessment_and_guarded_publication_have_exact_effect_boundaries() {
-    let repository = TempDir::new().unwrap();
-    let (old, new) = sources(repository.path());
+    let repository = Sources::new();
+    let (old, new) = repository.commits();
     let baseline = git(repository.path(), &["status", "--porcelain=v1"]);
     for fault in [
         "",
@@ -1637,7 +1794,12 @@ fn native_git_assessment_and_guarded_publication_have_exact_effect_boundaries() 
     ] {
         let scope = TempDir::new().unwrap();
         let root = scope.path().join("first");
-        let provider = Provider::new(repository.path(), &old, &new);
+        // Keep a complete real-Git lifecycle; fault cases vary publication effects only.
+        let provider = if fault.is_empty() {
+            Provider::new(repository.path(), &old, &new)
+        } else {
+            repository.provider(false)
+        };
         let (snapshot, prepared) = prepare(&root, &provider, fault == "dryRun");
         assert_eq!(prepared["oldCommit"], old);
         assert_eq!(prepared["newCommit"], new);
@@ -1708,25 +1870,185 @@ fn native_git_assessment_and_guarded_publication_have_exact_effect_boundaries() 
         baseline
     );
     assert_eq!(git(repository.path(), &["rev-parse", "HEAD"]), new);
-    // Keep process launches in one test: fork must not inherit another test's retained file lock.
-    force_push_inventory_preserves_every_path_kind_and_rejects_missing_objects();
-    empty_source_diff_and_corrupted_assessments_never_bypass_discussion_or_coverage();
-    risk_judgments_and_uncertainty_prevent_publication();
-    prepared_run_cannot_bypass_another_runs_unknown_effect();
-    ado_publication_preserves_authority_and_never_replays_unknown_effects();
+    risk_judgments_and_uncertainty_prevent_publication(&repository);
+    prepared_run_cannot_bypass_another_runs_unknown_effect(&repository);
+    ado_publication_preserves_authority_and_never_replays_unknown_effects(&repository);
     // Keep subprocess scenarios in this binary's single test entry point:
     // concurrent process creation can briefly inherit another thread's held file lock.
-    needs_review_notices_short_circuit_and_expire_only_after_external_approval();
-    notice_dry_runs_refusals_and_uncertain_effects_do_not_duplicate_writes();
-    valid_automatic_approval_timestamps_survive_later_invocations();
-    publication_reporting_failures_are_persisted();
-    persisted_already_valid_results_replay_without_refreshing_reporting();
-    notice_terminal_save_failures_preserve_original_recovery();
-    uncertain_assessment_diagnostic_survives_notification_retry();
-    notice_recovery_is_bound_to_the_failed_pull_request();
-    ado_notice_recovery_does_not_require_current_approval_eligibility();
-    notice_readback_survives_closure_and_draft_conversion();
-    expired_edited_notices_do_not_block_new_notice_readback();
+    needs_review_notices_short_circuit_and_expire_only_after_external_approval(&repository);
+    notice_dry_runs_refusals_and_uncertain_effects_do_not_duplicate_writes(&repository);
+    valid_automatic_approval_timestamps_survive_later_invocations(&repository);
+    publication_reporting_failures_are_persisted(&repository);
+    persisted_already_valid_results_replay_without_refreshing_reporting(&repository);
+    notice_terminal_save_failures_preserve_original_recovery(&repository);
+    uncertain_assessment_diagnostic_survives_notification_retry(&repository);
+    notice_recovery_is_bound_to_the_failed_pull_request(&repository);
+    ado_notice_recovery_does_not_require_current_approval_eligibility(&repository);
+    notice_readback_survives_closure_and_draft_conversion(&repository);
+    expired_edited_notices_do_not_block_new_notice_readback(&repository);
+    assert_eq!(
+        git(repository.path(), &["status", "--porcelain=v1"]),
+        baseline
+    );
+    assert_eq!(git(repository.path(), &["rev-parse", "HEAD"]), new);
+    // Source-mutating scenarios own their repositories rather than the shared editorial fixture.
+    force_push_inventory_preserves_every_path_kind_and_rejects_missing_objects();
+    empty_source_diff_and_corrupted_assessments_never_bypass_discussion_or_coverage();
+    pagination_requires_complete_contiguous_snapshot_bound_unicode_evidence();
+    recorded_git_rejects_unknown_commands_and_changed_source(&repository);
+    eprintln!("Reapproval work: {:?}", WORK_COUNTS.get());
+}
+
+/// Pins recorded replies to their real-Git command sequence, with no native fallback.
+fn recorded_git_rejects_unknown_commands_and_changed_source(repository: &Sources) {
+    for ado in [false, true] {
+        let provider = repository.provider(ado);
+        let before = WORK_COUNTS.get();
+        let replies = provider.git_replies.as_ref().unwrap();
+        assert_eq!(
+            provider
+                .isolated_git(repository.path(), &["status".into()])
+                .unwrap_err()
+                .kind(),
+            io::ErrorKind::InvalidInput
+        );
+        assert_eq!(provider.git_position.get(), 0);
+        provider
+            .isolated_git(repository.path(), &replies[0].arguments)
+            .unwrap();
+        let mut wrong_source = replies[1].arguments.clone();
+        assert!(wrong_source.iter().any(|argument| argument == "fetch"));
+        *wrong_source.last_mut().unwrap() = "f".repeat(40);
+        assert_eq!(
+            provider
+                .isolated_git(repository.path(), &wrong_source)
+                .unwrap_err()
+                .kind(),
+            io::ErrorKind::InvalidInput
+        );
+        assert_eq!(provider.git_position.get(), 1);
+        assert_eq!(WORK_COUNTS.get().assessment_git, before.assessment_git);
+        assert_eq!(provider.writes.get(), 0);
+    }
+}
+
+/// Exercises paging once, independently of the publication fault matrices.
+fn pagination_requires_complete_contiguous_snapshot_bound_unicode_evidence() {
+    let repository = TempDir::new().unwrap();
+    // Multibyte content crosses the hard response cap without approaching the object-size cap.
+    let old_text = "\u{e9}\u{1f916}x".repeat(16_384);
+    let new_text = "\u{e9}\u{1f916}text\n";
+    git(repository.path(), &["init", "--quiet"]);
+    fs::write(repository.path().join("notes.txt"), &old_text).unwrap();
+    git(repository.path(), &["add", "--", "notes.txt"]);
+    git(
+        repository.path(),
+        &["commit", "--quiet", "-m", "Long Unicode source"],
+    );
+    let old = git(repository.path(), &["rev-parse", "HEAD"]);
+    fs::write(repository.path().join("notes.txt"), new_text).unwrap();
+    git(repository.path(), &["add", "--", "notes.txt"]);
+    git(
+        repository.path(),
+        &["commit", "--quiet", "-m", "Short Unicode source"],
+    );
+    let new = git(repository.path(), &["rev-parse", "HEAD"]);
+    let scope = TempDir::new().unwrap();
+    let root = scope.path().join("pagination");
+    let provider = Provider::new(repository.path(), &old, &new);
+    let (snapshot, prepared) = prepare(&root, &provider, true);
+    let id = prepared["changes"][0]["id"].as_str().unwrap();
+    let reference = format!("{id}:new");
+    let read = |snapshot: &str, offset: usize, limit: usize| {
+        work(
+            &root,
+            &provider,
+            "read",
+            snapshot,
+            &[
+                "--reference".into(),
+                reference.clone(),
+                "--offset".into(),
+                offset.to_string(),
+                "--limit".into(),
+                limit.to_string(),
+            ],
+        )
+    };
+    // Tiny pages split UTF-8 byte sequences unless offsets count Unicode scalar values.
+    let page_limit = 3;
+    let path = root.join("run.json");
+    let before = fs::read(&path).unwrap();
+    read(&snapshot, 1, page_limit).unwrap_err();
+    read(&"f".repeat(64), 0, page_limit).unwrap_err();
+    assert_eq!(fs::read(&path).unwrap(), before);
+    let first = read(&snapshot, 0, page_limit).unwrap();
+    assert_eq!(
+        first["text"],
+        new_text.chars().take(page_limit).collect::<String>()
+    );
+    assert_eq!(first["nextOffset"], page_limit);
+    assert_eq!(first["complete"], false);
+    assert_eq!(read(&snapshot, 0, page_limit).unwrap(), first);
+    let overlap = read(&snapshot, 1, 1).unwrap();
+    assert_eq!(overlap["text"], "\u{1f916}");
+    let saved: Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+    assert_eq!(
+        saved["inventory"][0]["assessment"]["reads"][&reference],
+        page_limit
+    );
+    let before = fs::read(&path).unwrap();
+    read(&snapshot, page_limit + 1, page_limit).unwrap_err();
+    assert_eq!(fs::read(&path).unwrap(), before);
+    for reference in ["policy", "discussion"] {
+        read_evidence(&root, &provider, &snapshot, reference, None);
+    }
+    // Oversized requests must still follow the production response cap.
+    assert_eq!(
+        read_evidence(
+            &root,
+            &provider,
+            &snapshot,
+            &format!("{id}:old"),
+            Some(2 * 16_384)
+        ),
+        old_text
+    );
+    for change in [id, "cumulative"] {
+        let references = if change == "cumulative" {
+            vec!["policy".to_owned(), "discussion".to_owned()]
+        } else {
+            vec![format!("{id}:old"), reference.clone()]
+        };
+        let mut arguments = vec![
+            "--change-id".into(),
+            change.into(),
+            "--disposition".into(),
+            "insignificant".into(),
+            "--rationale".into(),
+            "The fixture contains only an editorial text replacement.".into(),
+        ];
+        for reference in references {
+            arguments.extend(["--evidence".into(), reference]);
+        }
+        work(&root, &provider, "judge", &snapshot, &arguments).unwrap();
+    }
+    let error = work(&root, &provider, "complete", &snapshot, &[]).unwrap_err();
+    assert!(
+        error
+            .to_string()
+            .contains("complete policy, discussion, and changed-source reads")
+    );
+    publish(&root, &provider, &snapshot).unwrap_err();
+    assert_eq!(
+        read_evidence(&root, &provider, &snapshot, &reference, Some(page_limit)),
+        new_text
+    );
+    assert_eq!(
+        work(&root, &provider, "complete", &snapshot, &[]).unwrap()["status"],
+        "wouldReapprove"
+    );
+    assert_eq!(provider.writes.get(), 0);
 }
 
 /// Exercises real command dispatch and records while ADO effects remain entirely in memory.
@@ -1734,9 +2056,8 @@ fn native_git_assessment_and_guarded_publication_have_exact_effect_boundaries() 
     clippy::cognitive_complexity,
     reason = "The bounded scenario table verifies each distinct effect boundary"
 )]
-fn ado_publication_preserves_authority_and_never_replays_unknown_effects() {
-    let repository = TempDir::new().unwrap();
-    let (old, new) = sources(repository.path());
+fn ado_publication_preserves_authority_and_never_replays_unknown_effects(repository: &Sources) {
+    let (old, new) = repository.commits();
     for fault in [
         "",
         "suggestions",
@@ -1764,7 +2085,19 @@ fn ado_publication_preserves_authority_and_never_replays_unknown_effects() {
     ] {
         let scope = TempDir::new().unwrap();
         let root = scope.path().join("ado");
-        let provider = Provider::ado(repository.path(), &old, &new);
+        // Cumulative-anchor cases fetch a deliberately unavailable subsequent push.
+        let provider = if matches!(
+            fault,
+            "" | "suggestions"
+                | "lostVoteReply"
+                | "lostAuditReply"
+                | "postReadFailure"
+                | "auditRefused"
+        ) {
+            Provider::ado(repository.path(), &old, &new)
+        } else {
+            repository.provider(true)
+        };
         if fault == "suggestions" {
             let mut evidence = provider.evidence.borrow_mut();
             evidence["reviewers"][0]["vote"] = json!(5);
@@ -1891,13 +2224,11 @@ fn ado_publication_preserves_authority_and_never_replays_unknown_effects() {
 }
 
 /// A saved preparation does not reserve permission to write after another run becomes uncertain.
-fn prepared_run_cannot_bypass_another_runs_unknown_effect() {
-    let repository = TempDir::new().unwrap();
-    let (old, new) = sources(repository.path());
+fn prepared_run_cannot_bypass_another_runs_unknown_effect(repository: &Sources) {
     let scope = TempDir::new().unwrap();
     let first = scope.path().join("first");
     let second = scope.path().join("second");
-    let provider = Provider::new(repository.path(), &old, &new);
+    let provider = repository.provider(false);
     let (snapshot, prepared) = prepare(&first, &provider, false);
     assess(&first, &provider, &snapshot, &prepared);
     let run_path = first.join("run.json");
@@ -1930,9 +2261,7 @@ fn prepared_run_cannot_bypass_another_runs_unknown_effect() {
 }
 
 /// Each policy concern and insufficient evidence independently prevents a remote effect.
-fn risk_judgments_and_uncertainty_prevent_publication() {
-    let repository = TempDir::new().unwrap();
-    let (old, new) = sources(repository.path());
+fn risk_judgments_and_uncertainty_prevent_publication(repository: &Sources) {
     for (disposition, rationale, status) in [
         (
             "significant",
@@ -1957,7 +2286,7 @@ fn risk_judgments_and_uncertainty_prevent_publication() {
     ] {
         let scope = TempDir::new().unwrap();
         let root = scope.path().join("risk");
-        let provider = Provider::new(repository.path(), &old, &new);
+        let provider = repository.provider(false);
         let (snapshot, prepared) = prepare(&root, &provider, false);
         let id = prepared["changes"][0]["id"].as_str().unwrap();
         work(
