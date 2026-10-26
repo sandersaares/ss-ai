@@ -24,9 +24,13 @@ portion of the claim's 60-second interval, and checks the claim once. A
 result needs its own preparation before confirmation.
 
 The command writes the journal and emits one JSON object. Read `status`,
-`target`, and `diagnostics` as described in `SKILL.md`. Any nonzero exit or error
-requires human input; never reinterpret it as `noCandidate` or automatically
-repeat a possibly successful write.
+`target`, and `diagnostics` as described in `SKILL.md`. On a nonzero exit or error,
+apply the shared [error-recovery policy](../../ss-review/error-recovery.md).
+Correct invocation mistakes and retry safe transient failures only when no
+remote write was attempted and the journal lifecycle permits re-entry.
+Never reinterpret an error as `noCandidate` or automatically repeat a possibly
+successful write. A journal in `claiming` or another uncertain write state
+still requires human reconciliation.
 
 Invoke the installed executable directly on `PATH`. If it is unavailable,
 ask the user to run the `ss-ai` checkout's `Install.ps1`; do not install

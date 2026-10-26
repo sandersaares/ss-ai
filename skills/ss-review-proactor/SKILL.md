@@ -49,6 +49,10 @@ compaction. A later stop instruction overrides the original request to loop;
 restarting stage 1 must not re-enable looping from that original prompt.
 Loop control affects this invocation only, not future scheduled invocations.
 
+# Error recovery
+
+Apply the shared [review error-recovery policy](../ss-review/error-recovery.md) throughout selection, checkout preparation, and handoff. Correct orchestration mistakes and retry safe transient failures without human input. Unrecoverable external errors such as HTTP 403 permission denial still stop; human decision gates and ambiguous-write reconciliation remain unchanged. Recover the affected step in the current cycle, not by selecting another PR or replacing its journal.
+
 # Stage 1: configuration
 
 On the first cycle, resolve configuration below. On later cycles, retain that
@@ -146,11 +150,16 @@ Interpret the JSON result:
 | `claimed` | Use `target.webUrl` as the exact PR scope and continue to stage 3. |
 | `confirmed` | Emitted only by confirmation in stage 3. |
 
-Any command failure is a stop for human input, not evidence that no PR qualifies.
-Report the error and absolute journal path. A journal left in `claiming` or
-another intermediate state may represent a successful remote write whose
+On command failure, apply the shared error-recovery policy; an error is not
+evidence that no PR qualifies. A corrected invocation may be retried only when
+no remote write was attempted and the helper's journal lifecycle permits it.
+Use documented transport retries for transient reads; do not restart the whole
+write-capable command merely because its failing step was a read.
+A journal left in `claiming` or another intermediate state may represent a
+successful remote write whose
 response was lost. Do not rerun selection, erase the journal, or fabricate
 confirmation. Ask the real user to reconcile the journal and PR discussion.
+Report unrecoverable failures with the error and absolute journal path.
 Delete only claims owned by this attempt, never another session's claim.
 
 # Stage 3: checkout and confirmation
@@ -164,9 +173,11 @@ checkout available throughout the review, including pauses for user input.
 Prepare the selected PR's actual source-versus-target diff in that checkout,
 within this primary session. Verify the repository identity and PR scope,
 including fork source branches. Never substitute the skill's installation
-repository or a default-branch diff for the selected PR scope. If preparation
-cannot proceed in the temporary directory, ask the user and pause rather than
-replacing existing work or transferring ownership to another session.
+repository or a default-branch diff for the selected PR scope.
+Correct local preparation mistakes and retry safe transient failures under the
+shared error-recovery policy. If preparation still cannot proceed in the
+temporary directory, report the blocker and pause rather than replacing
+existing work or transferring ownership to another session.
 
 Use the claim's 60-second interval for this preparation and any required user
 interaction. If preparation takes longer, finish it before checking the claim;

@@ -103,6 +103,13 @@ and returns exact contiguous slices with explicit continuation and completion,
 including for a single very long line. The dispatch prompt contains a generated,
 quoted first-read command, not the shared document bodies or a default viewer
 invocation. Readers reload through the same route after compaction.
+The builder embeds canonical `error-recovery.md` text before the first-read
+instructions so a reader failure cannot prevent the worker from learning how
+to recover. An empty policy prevents assignment creation. Every preparation
+phase and original or replacement reviewer receives the same policy without
+adding unrelated shared-document roles. Workers retain the policy and reader
+command through compaction and apply recovery before reporting unresolved
+blockers to the primary session.
 PR dispatch prompts reference the calling-shell contract in their registered
 query recipe rather than repeating its instructions.
 
@@ -866,8 +873,21 @@ Cursors bind the effective capture snapshot, classification policy and original 
 comparison snapshot for changes. Continuation repeats those arguments with the
 opaque cursor. A semantic-decision update invalidates
 its cursors explicitly; a reader reports the error and starts a fresh query,
-not a guessed positional offset. Query errors stop the current reading task
-without authorizing a raw-file fallback.
+not a guessed positional offset. Query errors block dependent analysis until
+recovery succeeds, without authorizing a raw-file fallback. The shared
+`error-recovery.md` policy directs workers and the primary orchestrator to
+correct invocation mistakes and retry safe transient failures before escalating.
+For request creation, the existing capture is the input and the saved request
+is a separate output; confusing those paths requires a corrected invocation,
+not suspension of the review. Independent workers remain active during repair.
+
+Recovery uses documented retry/resume semantics and bounded transient retry
+budgets. It never clears durable state or treats missing output as completion.
+Before restarting a write-capable command, the orchestrator establishes that
+no remote write was attempted and that its lifecycle permits re-entry.
+Ambiguous or attempted publication writes retain their human-reconciliation
+boundary; absence of a receipt alone does not authorize replay. Unrecoverable
+external failures and required human decisions still suspend affected work.
 
 Prompt policy governs the aggregate reading budget: workers process relevant
 pages and retain identifiers, evidence references, and decisions instead of
