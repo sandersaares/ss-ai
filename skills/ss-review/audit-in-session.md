@@ -1,6 +1,6 @@
 # In-session audit
 
-Use this procedure only when the user selects "review findings one by one in this session" in phase 7 or resumes that mode. It changes presentation, not finding eligibility, approval authority, feedback handling, or publication. Follow phase 7's shared feedback and decision rules throughout.
+Use this procedure only when the user selects `Review findings in-session` in phase 7 or resumes that mode. It changes presentation, not finding eligibility, approval authority, feedback handling, or publication. Follow phase 7's shared feedback and decision rules throughout.
 
 Apply phase 7's PR reminder in both session text and the question UI for every per-finding and final merge question.
 

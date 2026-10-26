@@ -14,4 +14,4 @@ Placeholders to replace:
 
 Each `findingPath` names a complete UTF-8 finding JSON file following `review.md`, "Finding structure". Preserve multiline Markdown using `\n` for line feeds and `\n\n` for paragraph breaks; omit the tooling-owned fields even when copying a stored finding. Keep content in files rather than command-line arguments or encoded payloads.
 
-The command emits one JSON object with `artifactPath` and the `updated` identifiers. If it reports an error, stop and report it to the caller; a rejected batch leaves the artifact unchanged.
+The command emits one JSON object with `artifactPath` and the `updated` identifiers. On error, apply [error recovery](../error-recovery.md); a rejected batch leaves the artifact unchanged.

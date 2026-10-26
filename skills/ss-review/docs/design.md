@@ -77,6 +77,20 @@ substitute for a user who has not answered. This distinction lets the workflow
 remove predictable clerical decisions without manufacturing consent at an
 unresolved boundary.
 
+## Error recovery
+
+The workflow corrects orchestration mistakes and retries safe transient failures
+without requiring human input. A wrong query path or temporary service failure
+does not end the review or cancel unrelated work. Recovery preserves completed
+work and resumes the affected step.
+
+Unrecoverable external failures, such as permission denial, stop the affected
+workflow with an explicit diagnostic. Recovery never bypasses evidence-access
+rules or human decisions. A possibly successful external write requires
+reconciliation before replay; automatic recovery must not duplicate claims,
+publications, or tracker items. Defined best-effort publication and presentation
+fallbacks retain their non-blocking behavior.
+
 ## Guidance scope
 
 The `ss-ai` installation supplies reusable instructions from its canonical
@@ -299,6 +313,11 @@ repeated. Reviews without a pull request perform no external report publication.
 
 ## Report presentation
 
+Report-rendering tools are installed user-wide and reused across sessions and
+skill checkouts in the same execution environment. Different pinned dependency
+sets can coexist without replacing another review's tools. Setup does not require
+write access to a skill checkout or adding renderer commands to the user's `PATH`.
+
 Markdown is the canonical report prose. HTML is a mechanical reading view, not
 another source of findings or approval state. The audit prefers a self-contained
 HTML document containing the current overview and the exact findings requiring
@@ -394,6 +413,10 @@ claim the user inspected.
 Findings needing judgment are presented together by default so the user can
 assess the review as a coherent whole. The audit also offers an in-session
 walkthrough alongside the applicable whole-document approval choices.
+The document-audit question uses fixed wording and choice labels in a fixed
+order: findings approval, findings and merge approval, then in-session review.
+Only the PR identity varies; inapplicable choices and an inapplicable PR reminder
+are omitted. Resumed and amended document presentations use the same format.
 Selecting the walkthrough approves nothing. It shows the overview once, then
 each undecided finding's complete rendered text before asking `Approve/Other`.
 Approval applies only to that finding; rejection settles it, while clarification

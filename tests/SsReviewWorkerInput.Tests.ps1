@@ -54,6 +54,36 @@ Describe 'Prepared bounded worker inputs' {
             -RepositoryRoot $script:State -ArtifactDirectory (Join-Path $script:State 'findings')
     }
 
+    It 'supplies canonical recovery before initial reads and compaction reloads for <Phase> with Resume=<Resume>' -ForEach @(
+        @{ Phase = 'references'; Resume = $false }
+        @{ Phase = 'fileGroups'; Resume = $false }
+        @{ Phase = 'focusAreas'; Resume = $false }
+        @{ Phase = 'overview'; Resume = $false }
+        @{ Phase = 'review'; Resume = $false }
+        @{ Phase = 'review'; Resume = $true }
+    ) {
+        $parameters = @{
+            Phase = $Phase; SessionState = $script:State; ScopePath = $script:Scope
+            OutputDirectory = Join-Path $script:State 'attempt'
+        }
+        if ($Phase -eq 'review') {
+            $parameters.ManifestPath = $script:Work.manifestPath
+            $parameters.ReviewerId = 'focus-001'
+            $parameters.Resume = $Resume
+        }
+        $result = & (Join-Path $script:Scripts 'New-ReviewWorkerAssignment.ps1') @parameters |
+            ConvertFrom-Json -AsHashtable
+        $dispatch = $result.dispatchPrompt.Replace("`r`n", "`n")
+        $recovery = [IO.File]::ReadAllText((Join-Path $script:SkillRoot 'error-recovery.md')).
+            Replace("`r`n", "`n").TrimEnd()
+        $policyOffset = $dispatch.IndexOf($recovery, [StringComparison]::Ordinal)
+        $policyOffset | Should -BeGreaterOrEqual 0 -Because 'recovery must not depend on a successful shared read'
+        $policyOffset | Should -BeLessThan $dispatch.IndexOf('pwsh -NoProfile -NonInteractive', [StringComparison]::Ordinal)
+        $dispatch | Should -Match 'Apply this recovery policy before initial shared reads and compaction reloads'
+        $dispatch | Should -Match 'Keep this policy and the reader command in compaction notes'
+        $dispatch | Should -Not -Match 'On errors stop and report'
+    }
+
     It 'provides bounded initial reads and exact complete guidance for original and resumed reviewers' {
         foreach ($resume in @($false, $true)) {
             $result = & (Join-Path $script:Scripts 'New-ReviewWorkerAssignment.ps1') -Phase review `
@@ -156,22 +186,23 @@ Describe 'Prepared bounded worker inputs' {
         $counts.firstReadFailures | Should -Be 1
     }
 
-    It 'rejects an empty <_> instead of publishing an incomplete data guide' -ForEach @(
-        'workflow-data.md', 'data-guides\file-groups.md'
+    It 'rejects an empty <_> instead of publishing incomplete worker guidance' -ForEach @(
+        'workflow-data.md', 'data-guides\file-groups.md', 'error-recovery.md'
     ) {
         $emptyGuide = $_
         # Exercise the executable's real reads without modifying installed or shared source files.
         $isolatedSkill = Join-Path $script:State 'skill'
         $null = New-Item -ItemType Directory -Path $isolatedSkill
-        foreach ($relativePath in @('scripts', 'schemas', 'data-guides', 'workflow-data.md', 'prepare-file-groups.md')) {
+        foreach ($relativePath in @('scripts', 'schemas', 'data-guides', 'workflow-data.md', 'prepare-file-groups.md', 'error-recovery.md')) {
             Copy-Item -LiteralPath (Join-Path $script:SkillRoot $relativePath) -Destination $isolatedSkill -Recurse
         }
         [IO.File]::WriteAllText((Join-Path $isolatedSkill $emptyGuide), '')
         $output = Join-Path $script:State 'empty-guide'
+        $expectedError = if ($emptyGuide -eq 'error-recovery.md') { '*recovery policy*empty*' } else { '*data guide*empty*' }
         {
             & (Join-Path $isolatedSkill 'scripts\New-ReviewWorkerAssignment.ps1') -Phase fileGroups `
                 -SessionState $script:State -ScopePath $script:Scope -OutputDirectory $output
-        } | Should -Throw '*data guide*empty*'
+        } | Should -Throw $expectedError
         [IO.File]::Exists((Join-Path $output 'assignment.json')) | Should -BeFalse
     }
 

@@ -103,6 +103,13 @@ and returns exact contiguous slices with explicit continuation and completion,
 including for a single very long line. The dispatch prompt contains a generated,
 quoted first-read command, not the shared document bodies or a default viewer
 invocation. Readers reload through the same route after compaction.
+The builder embeds canonical `error-recovery.md` text before the first-read
+instructions so a reader failure cannot prevent the worker from learning how
+to recover. An empty policy prevents assignment creation. Every preparation
+phase and original or replacement reviewer receives the same policy without
+adding unrelated shared-document roles. Workers retain the policy and reader
+command through compaction and apply recovery before reporting unresolved
+blockers to the primary session.
 PR dispatch prompts reference the calling-shell contract in their registered
 query recipe rather than repeating its instructions.
 
@@ -551,6 +558,13 @@ Only the latter loads `../audit-in-session.md`. Both use the same rendering,
 feedback, decision, and approved-set commands; no separate queue or decision
 schema represents the walkthrough.
 
+`../SKILL.md` phase 7 owns the literal document-audit question template and ordered
+choice labels. The orchestrator substitutes the audited PR identity, omits its
+reminder when there is no PR, and filters out merge approval for self-authored
+PRs or non-PR destinations. It preserves all remaining wording and choice order,
+including after amendments or resumption, rather than composing a new prompt.
+Feedback uses the question tool's free-form response, not another explicit choice.
+
 The in-session loop selects the first pending `auditFindingIds` entry, then reads
 its destination-specific file from the renderer's `findings` path mapping. It
 emits the complete Markdown in session text before asking `Approve/Other`.
@@ -866,8 +880,21 @@ Cursors bind the effective capture snapshot, classification policy and original 
 comparison snapshot for changes. Continuation repeats those arguments with the
 opaque cursor. A semantic-decision update invalidates
 its cursors explicitly; a reader reports the error and starts a fresh query,
-not a guessed positional offset. Query errors stop the current reading task
-without authorizing a raw-file fallback.
+not a guessed positional offset. Query errors block dependent analysis until
+recovery succeeds, without authorizing a raw-file fallback. The shared
+`error-recovery.md` policy directs workers and the primary orchestrator to
+correct invocation mistakes and retry safe transient failures before escalating.
+For request creation, the existing capture is the input and the saved request
+is a separate output; confusing those paths requires a corrected invocation,
+not suspension of the review. Independent workers remain active during repair.
+
+Recovery uses documented retry/resume semantics and bounded transient retry
+budgets. It never clears durable state or treats missing output as completion.
+Before restarting a write-capable command, the orchestrator establishes that
+no remote write was attempted and that its lifecycle permits re-entry.
+Ambiguous or attempted publication writes retain their human-reconciliation
+boundary; absence of a receipt alone does not authorize replay. Unrecoverable
+external failures and required human decisions still suspend affected work.
 
 Prompt policy governs the aggregate reading budget: workers process relevant
 pages and retain identifiers, evidence references, and decisions instead of
@@ -1180,6 +1207,35 @@ preserving substantive replies and later human activity. A report label or
 exclude an entire thread.
 
 ## Report tools
+
+Renderer dependencies use shared user-local storage rather than skill checkouts,
+so relinking skills or starting from another worktree does not lose installed tools.
+The root is `LOCALAPPDATA/ss-review/tools` when that variable is set, otherwise
+`~/.local/share/ss-review/tools`. Portable Pandoc uses its pinned version directory;
+Mermaid uses a directory keyed by the SHA-256 hash of `tools/package-lock.json`.
+This keeps different dependency sets separate while sharing identical sets across
+skill copies. Discovery and rendering resolve that directory directly, without
+depending on npm's global prefix or exposing renderer commands on `PATH`.
+
+The installer copies the package manifests into a unique sibling staging directory,
+checks the copied lockfile against the selected directory key, and runs the locked
+npm installation there. A checkout update during the manifest copy produces an
+explicit failure rather than publishing dependencies under the wrong key.
+Only npm uses the staging working directory; browser setup uses the caller's
+working directory so its Puppeteer configuration matches discovery and rendering.
+
+A retained user-wide installation lock excludes checks and rendering during setup;
+rendering and discovery retain shared ownership. Reuse requires Mermaid's CLI,
+Puppeteer's installer and manifest, and the runtime entry point named by that
+manifest. Missing package files, malformed manifest JSON, and invalid manifest
+shapes cause setup to rebuild through staging; file-read errors remain explicit
+failures rather than triggering repair. Once npm and browser setup succeed, the
+installer publishes the complete tree by directory rename. Replacement retains
+the old tree until staging is ready and restores it
+if publication fails. Failed staging trees are removed without deleting existing
+installations. A complete dependency tree is reused while browser setup can still
+repair a missing browser download. Checkout-local dependencies are neither used
+nor deleted, and the skill directory requires no write access.
 
 The PowerShell tool check reports missing Pandoc, Node.js, Mermaid CLI, and
 Mermaid's browser explicitly, retaining browser-discovery diagnostics. Its JSON

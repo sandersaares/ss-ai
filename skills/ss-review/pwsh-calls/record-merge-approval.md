@@ -29,5 +29,5 @@ Success emits `status: "Recorded"` or `NoApproval`, plus `sourceCommit`.
 `NoApproval` means carry-forward found no true approval; preserve the absence of
 approval rather than asking again solely because the PR moved. If the source
 commit is unchanged and no new audit is required, leave the existing record
-unchanged. Stop on an error and resolve the inconsistent state; do not supply a
+unchanged. On error apply [error recovery](../error-recovery.md) and resolve the inconsistent state; do not supply a
 publication flag manually.

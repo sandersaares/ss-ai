@@ -15,4 +15,4 @@ Placeholders to replace:
 | `FEEDBACK_PATH` | Absolute `audit-feedback.json` path. Omit the argument only if no feedback log exists. |
 
 Success reports `recorded` identifiers. The command validates and joins feedback;
-stop on errors rather than writing a decision without its recorded human feedback.
+apply [error recovery](../error-recovery.md) on errors rather than writing a decision without its recorded human feedback.

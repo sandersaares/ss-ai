@@ -15,6 +15,20 @@ BeforeAll {
         [IO.File]::WriteAllText($Path, $Content)
         $Path
     }
+
+    # Minimal package entry points let setup and discovery share realistic fixtures offline.
+    function New-ReportMermaidTestPackages {
+        param([string] $Directory)
+        foreach ($relativePath in @(
+            'node_modules\@mermaid-js\mermaid-cli\src\cli.js',
+            'node_modules\puppeteer\install.mjs',
+            'node_modules\puppeteer\lib\puppeteer\puppeteer.js'
+        )) {
+            $null = New-ReportToolTestFile -Path (Join-Path $Directory $relativePath)
+        }
+        $null = New-ReportToolTestFile -Path (Join-Path $Directory 'node_modules\puppeteer\package.json') `
+            -Content '{"main":"./lib/puppeteer/puppeteer.js"}'
+    }
 }
 
 Describe 'Node.js discovery for report tools' {
@@ -178,6 +192,37 @@ nvm() {
     }
 }
 
+Describe 'User-wide report tool storage' {
+    BeforeEach {
+        $script:StorageRoot = Join-Path $TestDrive 'shared tools'
+        Mock Get-ReportToolsDirectory { $script:StorageRoot }
+        $script:FirstSkill = Join-Path $TestDrive 'first checkout\ss-review'
+        $script:SecondSkill = Join-Path $TestDrive 'second checkout\ss-review'
+        foreach ($root in @($script:FirstSkill, $script:SecondSkill)) {
+            $null = New-ReportToolTestFile -Path (Join-Path $root 'tools\package-lock.json') -Content '{"version":1}'
+        }
+    }
+
+    It 'shares one installation across skill copies with the same lockfile' {
+        $first = Get-ReportMermaidDirectory -SkillRoot $script:FirstSkill
+        $first | Should -BeExactly (Get-ReportMermaidDirectory -SkillRoot $script:SecondSkill)
+        Split-Path -Parent $first | Should -BeExactly $script:StorageRoot
+    }
+
+    It 'isolates different dependency sets without changing the shared lock or Pandoc location' {
+        $first = Get-ReportMermaidDirectory -SkillRoot $script:FirstSkill
+        Set-Content -LiteralPath (Join-Path $script:SecondSkill 'tools\package-lock.json') -Value '{"version":2}'
+        Get-ReportMermaidDirectory -SkillRoot $script:SecondSkill | Should -Not -BeExactly $first
+        Get-ReportToolsLockPath | Should -BeExactly (Join-Path $script:StorageRoot 'installation')
+        Split-Path -Parent (Get-ReportPandocDirectory) | Should -BeExactly $script:StorageRoot
+    }
+
+    It 'does not treat a missing lockfile as an installed dependency set' {
+        Remove-Item -LiteralPath (Join-Path $script:FirstSkill 'tools\package-lock.json')
+        { Get-ReportMermaidDirectory -SkillRoot $script:FirstSkill } | Should -Throw
+    }
+}
+
 Describe 'Report discovery uses the resolved runtime' {
     BeforeEach {
         $script:ReportRoot = Join-Path $TestDrive ([guid]::NewGuid().ToString('N'))
@@ -187,7 +232,10 @@ Describe 'Report discovery uses the resolved runtime' {
         $script:BrowserError = ''
         $script:BrowserArguments = $null
         $script:PandocPath = New-ReportToolTestFile -Path (Join-Path $script:ReportRoot 'pandoc')
-        $null = New-ReportToolTestFile -Path (Join-Path $script:ReportRoot 'tools\node_modules\@mermaid-js\mermaid-cli\src\cli.js')
+        Mock Get-ReportToolsDirectory { Join-Path $script:ReportRoot 'shared tools' }
+        $null = New-ReportToolTestFile -Path (Join-Path $script:ReportRoot 'tools\package-lock.json') -Content '{}'
+        $script:MermaidDirectory = Get-ReportMermaidDirectory -SkillRoot $script:ReportRoot
+        New-ReportMermaidTestPackages -Directory $script:MermaidDirectory
         Mock Get-Command { [pscustomobject]@{ Source = $script:PandocPath } } -ParameterFilter { $Name -eq 'pandoc' }
         Mock Get-ReportNodePath { $script:NodePath }
         Mock Get-ReportToolsLockPath { Join-Path $TestDrive 'report-tools' }
@@ -213,7 +261,26 @@ Describe 'Report discovery uses the resolved runtime' {
         $tools.missing | Should -BeNullOrEmpty
         $tools.diagnostics | Should -BeNullOrEmpty
         $script:BrowserArguments[0] | Should -BeExactly '-e'
-        $script:BrowserArguments[-1] | Should -BeExactly (Join-Path $script:ReportRoot 'tools\node_modules\puppeteer')
+        $script:BrowserArguments[-1] | Should -BeExactly (Join-Path $script:MermaidDirectory 'node_modules\puppeteer')
+    }
+
+    It 'finds the same installed tools from a fresh skill checkout without local node_modules' {
+        $otherSkill = Join-Path $script:ReportRoot 'fresh checkout'
+        $null = New-ReportToolTestFile -Path (Join-Path $otherSkill 'tools\package-lock.json') -Content '{}'
+        $first = Get-ReviewReportTools -SkillRoot $script:ReportRoot
+        $second = Get-ReviewReportTools -SkillRoot $otherSkill
+        $second.mermaid | Should -BeExactly $first.mermaid
+        $second.browser | Should -BeExactly $first.browser
+        $second.missing | Should -BeNullOrEmpty
+        Test-Path -LiteralPath (Join-Path $otherSkill 'tools\node_modules') | Should -BeFalse
+    }
+
+    It 'reports an uninstalled shared dependency set even when a checkout has local packages' {
+        Remove-Item -LiteralPath (Join-Path $script:MermaidDirectory 'node_modules\@mermaid-js\mermaid-cli\src\cli.js')
+        $null = New-ReportToolTestFile -Path (Join-Path $script:ReportRoot 'tools\node_modules\@mermaid-js\mermaid-cli\src\cli.js')
+        $tools = Get-ReviewReportTools -SkillRoot $script:ReportRoot
+        $tools.missing | Should -Be @('mermaid-cli')
+        $script:BrowserArguments | Should -BeNullOrEmpty
     }
 
     It 'retains missing-node reporting when no runtime is installed' {
@@ -221,6 +288,42 @@ Describe 'Report discovery uses the resolved runtime' {
         $tools = Get-ReviewReportTools -SkillRoot $script:ReportRoot
         $tools.node | Should -BeNullOrEmpty
         $tools.missing | Should -Be @('node')
+        $script:BrowserArguments | Should -BeNullOrEmpty
+    }
+
+    It 'reports incomplete Puppeteer packages as requiring package installation: <Missing>' -ForEach @(
+        @{ Missing = 'node_modules\puppeteer\install.mjs' }
+        @{ Missing = 'node_modules\puppeteer\package.json' }
+        @{ Missing = 'node_modules\puppeteer\lib\puppeteer\puppeteer.js' }
+    ) {
+        Remove-Item -LiteralPath (Join-Path $script:MermaidDirectory $Missing)
+        $tools = Get-ReviewReportTools -SkillRoot $script:ReportRoot
+        $tools.missing | Should -Be @('mermaid-cli')
+        $script:BrowserArguments | Should -BeNullOrEmpty
+    }
+
+    It 'reports malformed Puppeteer manifests as requiring package installation: <Case>' -ForEach @(
+        @{ Case = 'empty'; Content = '' }
+        @{ Case = 'whitespace'; Content = ' ' }
+        @{ Case = 'truncated'; Content = '{"main":' }
+        @{ Case = 'null'; Content = 'null' }
+        @{ Case = 'array'; Content = '[{"main":"./lib/puppeteer/puppeteer.js"}]' }
+        @{ Case = 'string'; Content = '"text"' }
+        @{ Case = 'number'; Content = '3' }
+        @{ Case = 'boolean'; Content = 'false' }
+        @{ Case = 'missing main'; Content = '{}' }
+        @{ Case = 'non-string main'; Content = '{"main":["./lib/puppeteer/puppeteer.js"]}' }
+    ) {
+        [IO.File]::WriteAllText((Join-Path $script:MermaidDirectory 'node_modules\puppeteer\package.json'), $Content)
+        $tools = Get-ReviewReportTools -SkillRoot $script:ReportRoot
+        $tools.missing | Should -Be @('mermaid-cli')
+        $script:BrowserArguments | Should -BeNullOrEmpty
+    }
+
+    It 'preserves package manifest read errors during discovery' {
+        Mock Get-Content { throw [IO.IOException]::new('Package manifest read failed.') } `
+            -ParameterFilter { $LiteralPath -eq (Join-Path $script:MermaidDirectory 'node_modules\puppeteer\package.json') }
+        { Get-ReviewReportTools -SkillRoot $script:ReportRoot } | Should -Throw '*Package manifest read failed*'
         $script:BrowserArguments | Should -BeNullOrEmpty
     }
 
@@ -268,20 +371,33 @@ Describe 'Report installation uses the discovered runtime' {
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 [IO.File]::WriteAllText((Join-Path $PSScriptRoot 'arguments.json'), (ConvertTo-Json -InputObject @($args) -Compress))
+[IO.File]::WriteAllText((Join-Path $PSScriptRoot 'working-directory'), (Get-Location).Path)
 exit ([int] (Get-Content -LiteralPath (Join-Path $PSScriptRoot 'exit-code')))
 '@
         $script:NodeDirectory = Split-Path -Parent $script:NodePath
         $script:NodeExitFile = New-ReportToolTestFile -Path (Join-Path $script:NodeDirectory 'exit-code') -Content '0'
-        $script:ToolsDirectory = Join-Path $script:InstallRoot 'tools'
-        [IO.Directory]::CreateDirectory($script:ToolsDirectory) | Out-Null
+        $script:InstallSkill = Join-Path $script:InstallRoot 'skill'
+        $null = New-ReportToolTestFile -Path (Join-Path $script:InstallSkill 'tools\package.json') -Content '{"private":true}'
+        $null = New-ReportToolTestFile -Path (Join-Path $script:InstallSkill 'tools\package-lock.json') -Content '{}'
+        Mock Get-ReportToolsDirectory { Join-Path $script:InstallRoot 'shared tools' }
+        $script:ToolsDirectory = Get-ReportMermaidDirectory -SkillRoot $script:InstallSkill
         $script:NpmExitCode = 0
         $script:NpmArguments = $null
+        $script:NpmDirectory = $null
+        $script:ExistingInstallation = $false
+        $script:OmittedPackage = $null
         $script:OriginalPath = $env:PATH
         $script:OriginalLocation = (Get-Location).Path
         Mock npm {
             $script:NpmArguments = @($args)
             $env:PATH.Split([IO.Path]::PathSeparator)[0] | Should -BeExactly $script:NodeDirectory
-            (Get-Location).Path | Should -BeExactly $script:ToolsDirectory
+            $script:NpmDirectory = (Get-Location).Path
+            Split-Path -Parent $script:NpmDirectory | Should -BeExactly (Get-ReportToolsDirectory)
+            Get-Content -LiteralPath (Join-Path $script:NpmDirectory 'package.json') -Raw | Should -BeExactly '{"private":true}'
+            Get-Content -LiteralPath (Join-Path $script:NpmDirectory 'package-lock.json') -Raw | Should -BeExactly '{}'
+            Test-Path -LiteralPath $script:ToolsDirectory | Should -Be $script:ExistingInstallation
+            New-ReportMermaidTestPackages -Directory $script:NpmDirectory
+            if ($script:OmittedPackage) { Remove-Item -LiteralPath (Join-Path $script:NpmDirectory $script:OmittedPackage) }
             $global:LASTEXITCODE = $script:NpmExitCode
         }
     }
@@ -292,23 +408,133 @@ exit ([int] (Get-Content -LiteralPath (Join-Path $PSScriptRoot 'exit-code')))
     }
 
     It 'exposes the selected runtime to npm and invokes that executable for browser setup' {
-        Install-ReviewMermaidTools -NodePath $script:NodePath -ToolsDirectory $script:ToolsDirectory
+        Install-ReviewMermaidTools -NodePath $script:NodePath -SkillRoot $script:InstallSkill
         $script:NpmArguments | Should -Be @('ci', '--ignore-scripts', '--engine-strict', '--no-audit', '--no-fund')
         $arguments = Get-Content -LiteralPath (Join-Path $script:NodeDirectory 'arguments.json') -Raw | ConvertFrom-Json
+        $arguments | Should -Be @((Join-Path $script:NpmDirectory 'node_modules\puppeteer\install.mjs'))
+        Get-Content -LiteralPath (Join-Path $script:NodeDirectory 'working-directory') -Raw | Should -BeExactly $script:OriginalLocation
+        Test-Path -LiteralPath (Join-Path $script:ToolsDirectory 'package-lock.json') | Should -BeTrue
+        Test-Path -LiteralPath (Join-Path $script:ToolsDirectory 'node_modules\@mermaid-js\mermaid-cli\src\cli.js') | Should -BeTrue
+        Test-Path -LiteralPath $script:NpmDirectory | Should -BeFalse
+        Test-Path -LiteralPath (Join-Path $script:InstallSkill 'tools\node_modules') | Should -BeFalse
+    }
+
+    It 'reuses the published dependency tree while allowing browser cache repair' {
+        Install-ReviewMermaidTools -NodePath $script:NodePath -SkillRoot $script:InstallSkill
+        $otherSkill = Join-Path $script:InstallRoot 'other checkout'
+        foreach ($name in @('package.json', 'package-lock.json')) {
+            $null = New-ReportToolTestFile -Path (Join-Path $otherSkill "tools\$name") `
+                -Content (Get-Content -LiteralPath (Join-Path $script:InstallSkill "tools\$name") -Raw)
+        }
+        Install-ReviewMermaidTools -NodePath $script:NodePath -SkillRoot $otherSkill
+        Should -Invoke npm -Times 1 -Exactly
+        $arguments = Get-Content -LiteralPath (Join-Path $script:NodeDirectory 'arguments.json') -Raw | ConvertFrom-Json
         $arguments | Should -Be @((Join-Path $script:ToolsDirectory 'node_modules\puppeteer\install.mjs'))
+        Get-Content -LiteralPath (Join-Path $script:NodeDirectory 'working-directory') -Raw | Should -BeExactly $script:OriginalLocation
+    }
+
+    It 'rebuilds incomplete shared packages without discarding the old tree during npm: <Missing>' -ForEach @(
+        @{ Missing = 'node_modules\@mermaid-js\mermaid-cli\src\cli.js' }
+        @{ Missing = 'node_modules\puppeteer\install.mjs' }
+        @{ Missing = 'node_modules\puppeteer\lib\puppeteer\puppeteer.js' }
+    ) {
+        Install-ReviewMermaidTools -NodePath $script:NodePath -SkillRoot $script:InstallSkill
+        $script:ExistingInstallation = $true
+        Remove-Item -LiteralPath (Join-Path $script:ToolsDirectory $Missing)
+        $marker = New-ReportToolTestFile -Path (Join-Path $script:ToolsDirectory 'old-tree')
+        Install-ReviewMermaidTools -NodePath $script:NodePath -SkillRoot $script:InstallSkill
+        Should -Invoke npm -Times 2 -Exactly
+        Test-ReportMermaidInstallation -Directory $script:ToolsDirectory | Should -BeTrue
+        Test-Path -LiteralPath $marker | Should -BeFalse
+        @(Get-ChildItem -LiteralPath (Get-ReportToolsDirectory) -Force).Count | Should -Be 1
+    }
+
+    It 'preserves an incomplete published tree when rebuilding fails during <Failure>' -ForEach @(
+        @{ Failure = 'npm' }
+        @{ Failure = 'browser' }
+    ) {
+        Install-ReviewMermaidTools -NodePath $script:NodePath -SkillRoot $script:InstallSkill
+        $script:ExistingInstallation = $true
+        Remove-Item -LiteralPath (Join-Path $script:ToolsDirectory 'node_modules\@mermaid-js\mermaid-cli\src\cli.js')
+        $marker = New-ReportToolTestFile -Path (Join-Path $script:ToolsDirectory 'old-tree')
+        if ($Failure -eq 'npm') { $script:NpmExitCode = 1 }
+        else { Set-Content -LiteralPath $script:NodeExitFile -Value '1' }
+        { Install-ReviewMermaidTools -NodePath $script:NodePath -SkillRoot $script:InstallSkill } | Should -Throw '*Installing*failed*'
+        Test-Path -LiteralPath $marker | Should -BeTrue
+        @(Get-ChildItem -LiteralPath (Get-ReportToolsDirectory) -Force).Count | Should -Be 1
+    }
+
+    It 'rebuilds shared packages with a malformed Puppeteer manifest: <Case>' -ForEach @(
+        @{ Case = 'empty'; Content = '' }
+        @{ Case = 'truncated'; Content = '{"main":' }
+        @{ Case = 'non-object'; Content = '[{"main":"./lib/puppeteer/puppeteer.js"}]' }
+    ) {
+        Install-ReviewMermaidTools -NodePath $script:NodePath -SkillRoot $script:InstallSkill
+        $script:ExistingInstallation = $true
+        [IO.File]::WriteAllText((Join-Path $script:ToolsDirectory 'node_modules\puppeteer\package.json'), $Content)
+        Install-ReviewMermaidTools -NodePath $script:NodePath -SkillRoot $script:InstallSkill
+        Should -Invoke npm -Times 2 -Exactly
+        Test-ReportMermaidInstallation -Directory $script:ToolsDirectory | Should -BeTrue
+    }
+
+    It 'preserves package manifest read errors without starting a repair' {
+        Install-ReviewMermaidTools -NodePath $script:NodePath -SkillRoot $script:InstallSkill
+        Mock Get-Content { throw [IO.IOException]::new('Package manifest read failed.') } `
+            -ParameterFilter { $LiteralPath -eq (Join-Path $script:ToolsDirectory 'node_modules\puppeteer\package.json') }
+        { Install-ReviewMermaidTools -NodePath $script:NodePath -SkillRoot $script:InstallSkill } |
+            Should -Throw '*Package manifest read failed*'
+        Should -Invoke npm -Times 1 -Exactly
+    }
+
+    It 'rejects a checkout lockfile change between selecting the directory and copying manifests' {
+        Mock Copy-Item {
+            param($LiteralPath, $Destination)
+            # Updating during the first copy deterministically reproduces a checkout change.
+            if ((Split-Path -Leaf $LiteralPath) -eq 'package.json') {
+                [IO.File]::WriteAllText((Join-Path $script:InstallSkill 'tools\package-lock.json'), '{"changed":true}')
+            }
+            [IO.File]::Copy($LiteralPath, $Destination)
+        }
+        { Install-ReviewMermaidTools -NodePath $script:NodePath -SkillRoot $script:InstallSkill } |
+            Should -Throw '*lockfile changed during setup*'
+        Should -Invoke npm -Times 0 -Exactly
+        Test-Path -LiteralPath (Join-Path $script:NodeDirectory 'arguments.json') | Should -BeFalse
+        Test-Path -LiteralPath $script:ToolsDirectory | Should -BeFalse
+        @(Get-ChildItem -LiteralPath (Get-ReportToolsDirectory) -Force).Count | Should -Be 0
+    }
+
+    It 'does not publish an npm success with missing required packages' {
+        $script:OmittedPackage = 'node_modules\puppeteer\lib\puppeteer\puppeteer.js'
+        { Install-ReviewMermaidTools -NodePath $script:NodePath -SkillRoot $script:InstallSkill } |
+            Should -Throw '*did not provide the required Mermaid and Puppeteer package files*'
+        Test-Path -LiteralPath $script:ToolsDirectory | Should -BeFalse
+        Test-Path -LiteralPath (Join-Path $script:NodeDirectory 'arguments.json') | Should -BeFalse
     }
 
     It 'restores PATH and location after npm fails without running browser setup' {
         $script:NpmExitCode = 1
-        { Install-ReviewMermaidTools -NodePath $script:NodePath -ToolsDirectory $script:ToolsDirectory } |
+        { Install-ReviewMermaidTools -NodePath $script:NodePath -SkillRoot $script:InstallSkill } |
             Should -Throw '*Installing Mermaid CLI failed*'
         Test-Path -LiteralPath (Join-Path $script:NodeDirectory 'arguments.json') | Should -BeFalse
+        Test-Path -LiteralPath $script:ToolsDirectory | Should -BeFalse
+        @(Get-ChildItem -LiteralPath (Get-ReportToolsDirectory) -Force).Count | Should -Be 0
     }
 
     It 'restores PATH and location after browser setup fails' {
         Set-Content -LiteralPath $script:NodeExitFile -Value '1'
-        { Install-ReviewMermaidTools -NodePath $script:NodePath -ToolsDirectory $script:ToolsDirectory } |
+        { Install-ReviewMermaidTools -NodePath $script:NodePath -SkillRoot $script:InstallSkill } |
             Should -Throw "*Installing Mermaid's browser failed*Incomplete browser cache recovery*separate approval*"
+        Test-Path -LiteralPath $script:ToolsDirectory | Should -BeFalse
+        @(Get-ChildItem -LiteralPath (Get-ReportToolsDirectory) -Force).Count | Should -Be 0
+    }
+
+    It 'preserves published packages when a later browser repair fails' {
+        Install-ReviewMermaidTools -NodePath $script:NodePath -SkillRoot $script:InstallSkill
+        Set-Content -LiteralPath $script:NodeExitFile -Value '1'
+        { Install-ReviewMermaidTools -NodePath $script:NodePath -SkillRoot $script:InstallSkill } |
+            Should -Throw "*Installing Mermaid's browser failed*"
+        Should -Invoke npm -Times 1 -Exactly
+        Test-Path -LiteralPath (Join-Path $script:ToolsDirectory 'node_modules\@mermaid-js\mermaid-cli\src\cli.js') | Should -BeTrue
     }
 }
 

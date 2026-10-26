@@ -15,5 +15,5 @@ pwsh -NoProfile -NonInteractive -File "{{SKILL_ROOT}}\scripts\Add-ReviewAuditFee
 | `FINDING_ID` | Existing finding addressed by the response. |
 | `TEXT_PATH` | Absolute text-file path containing the verbatim feedback fragment. |
 
-Success emits `status: "Recorded"`, `findingId`, and `responseId`. Stop on error;
+Success emits `status: "Recorded"`, `findingId`, and `responseId`. On error apply [error recovery](../error-recovery.md);
 do not lose feedback or turn clarification into approval.

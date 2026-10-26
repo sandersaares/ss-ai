@@ -123,6 +123,32 @@ Describe 'Saved PR query requests' {
         Write-PullRequestOutputFileAtomically -Path $script:Capture -Content (ConvertTo-JsonText -Value $script:Document)
     }
 
+    It 'recovers from using the request output as the capture input by correcting only the input path' {
+        $captureBefore = [IO.File]::ReadAllBytes($script:Capture)
+        $failed = Invoke-QueryExecutable -ScriptName New-PullRequestQueryRequest.ps1 -Arguments @(
+            '-Path', $script:Request, '-RequestPath', $script:Request, '-DiagnosticsPath', $script:Diagnostics,
+            '-Query', 'metadata', '-Field', 'title'
+        )
+        $failed.exitCode | Should -Not -Be 0
+        $failed.error | Should -Match 'Could not find file'
+        Test-Path -LiteralPath $script:Request | Should -BeFalse
+
+        $corrected = Invoke-QueryExecutable -ScriptName New-PullRequestQueryRequest.ps1 -Arguments @(
+            '-Path', $script:Capture, '-RequestPath', $script:Request, '-DiagnosticsPath', $script:Diagnostics,
+            '-Query', 'metadata', '-Field', 'title'
+        )
+        $corrected.exitCode | Should -Be 0 -Because $corrected.error
+        $page = Invoke-QueryExecutable -Arguments @('-RequestPath', $script:Request)
+        $page.exitCode | Should -Be 0 -Because $page.error
+        $result = ConvertFrom-JsonVerbatim -Text $page.output
+        $result.complete | Should -BeTrue
+        $result.items.Count | Should -Be 1
+        $result.items[0].field | Should -BeExactly 'title'
+        $result.items[0].content | Should -BeExactly $script:Document.pullRequest.title
+        [Convert]::ToBase64String([IO.File]::ReadAllBytes($script:Capture)) |
+            Should -BeExactly ([Convert]::ToBase64String($captureBefore))
+    }
+
     It 'preserves native arguments with backslashes, spaces, quotes, Unicode and multiline text' {
         $text = "C:\space path\quoted `"value`" O'Brien $([char]0xe9)`nnext line"
         $script:Document.threads[0].comments[0].content = $text

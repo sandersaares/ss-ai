@@ -15,4 +15,4 @@ The command emits a single JSON object with `isComplete`, `remainingCount`, `fin
 
 `auditFindingIds` lists live findings with no decision or with `needs-audit`, not rejected or dropped findings. After phase 6 verifies `isComplete`, phase 7 uses these identifiers for human presentation. On a direct return to phase 7, unclassified new findings in this list require the user's decision too; do not rerun policy classification.
 
-A missing decision log means nothing has been classified yet. Missing findings or invalid input are errors, not completion. On an error, stop and report it to the caller.
+A missing decision log means nothing has been classified yet. Missing findings or invalid input are errors, not completion. On an error, apply [error recovery](../error-recovery.md) before continuing.

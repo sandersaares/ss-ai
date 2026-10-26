@@ -840,12 +840,30 @@ Describe 'Audit presentation instructions' {
 
     It 'offers an opt-in walkthrough after the applicable document approval choices' {
         $script:AuditPresentation | Should -Match 'Offer the combined document by default'
-        $script:AuditPresentation | Should -Match 'Omit the merge approval form when.*isAuthoredBySelf.*or the destination is not the pull request'
-        $script:AuditPresentation | Should -Match 'Always append "review findings one by one in this session" after the applicable approval choices'
-        $script:AuditPresentation | Should -Match 'third option when both approval forms apply'
+        $script:AuditPresentation | Should -Match 'Omit the merge approval choice when.*isAuthoredBySelf.*or the destination is not the pull request'
         $script:AuditPresentation | Should -Match 'selecting it approves nothing'
         $script:AuditPresentation | Should -Match 'Load that guide only when the user chooses the walkthrough or resumes one'
+        $script:InSessionAudit | Should -Match 'user selects `Review findings in-session` in phase 7'
         $script:AuditPresentation | Should -Not -Match 'Do not present the findings one by one|do not ask a separate question per finding'
+    }
+
+    It 'defines one literal document-audit question and ordered choice list for every presentation' {
+        $question = [regex]::Match(
+            $script:AuditPresentation, '(?s)```text\r?\n(.*?)\r?\n```'
+        ).Groups[1].Value -replace "`r`n", "`n"
+        $question | Should -Be (
+            'PR #{{PR_ID}}: {{PR_TITLE}}' + "`n`n" +
+            'How would you like to proceed with the linked audit? Provide any per-finding feedback using finding IDs.'
+        )
+        $choices = [regex]::Matches(
+            $script:AuditPresentation, '(?m)^[1-3]\. `([^`]+)`\r?$'
+        ) | ForEach-Object { $_.Groups[1].Value }
+        ($choices -join '|') | Should -Be 'Approve findings|Approve findings and approve merge|Review findings in-session'
+        $script:AuditPresentation | Should -Match 'Replace `\{\{PR_ID\}\}` and `\{\{PR_TITLE\}\}` with the audited snapshot''s `id` and full `title`'
+        $script:AuditPresentation | Should -Match 'Omit the PR reminder line and its following blank line when the review has no associated pull request'
+        $script:AuditPresentation | Should -Match 'preserve the question wording, choice labels, and relative order exactly, including on resumed or amended document presentations'
+        $script:AuditPresentation | Should -Match 'Do not paraphrase, reorder, add recommendation suffixes, or add explicit choices for feedback or Other'
+        $script:AuditPresentation | Should -Match 'use the tool''s free-form response for feedback'
     }
 
     It 'uses pending identifiers and existing records rather than a second audit queue' {

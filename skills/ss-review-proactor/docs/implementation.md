@@ -53,6 +53,16 @@ provide GitHub CLI execution, Azure OAuth acquisition, UTF-8 REST, structured
 errors, and bounded read retries. Claim creation and deletion disable retries.
 Azure DevOps comment deletion explicitly permits an empty successful response.
 
+The primary agent applies `../ss-review/error-recovery.md` to command failures.
+It corrects invocation and checkout mistakes and uses bounded retries for safe
+transient operations. Restarting selection or confirmation requires evidence
+that no remote write was attempted and that the journal lifecycle permits
+re-entry; a transient read failure inside either command is not sufficient.
+Intermediate claim states remain subject to human reconciliation. Recovery
+does not erase journals, choose another PR to bypass a failed review, cancel
+independent preparation workers, or answer human gates. Permission denials and
+other unrecoverable external failures still stop the affected workflow.
+
 ## Platform reads
 
 GitHub lists open pull requests through paginated REST and reads their commits
@@ -135,7 +145,9 @@ discussion as diagnostics.
 
 Instruction contract tests cover opt-in control, the latest-user-instruction
 boundary, completion-only continuation, empty-selection termination, and
-per-cycle state isolation across the proactor and review handoff.
+per-cycle state isolation across the proactor and review handoff. Recovery
+contracts cover corrected invocations, bounded transient retries, preserved
+human gates, and reconciliation before replaying ambiguous external writes.
 
 The clock and waiting operation are injected. Offline tests advance a fake
 clock and mutate fake discussion state during the wait, never sleeping or
