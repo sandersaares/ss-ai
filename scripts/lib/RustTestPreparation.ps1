@@ -31,7 +31,11 @@ function Get-RustTestIdentity {
     param([string] $RepositoryRoot)
     $files = @(
         Get-ChildItem -LiteralPath $RepositoryRoot -File |
-            Where-Object Name -In @('Cargo.toml', 'Cargo.lock', 'rust-toolchain.toml')
+            Where-Object Name -In @('Cargo.toml', 'Cargo.lock', 'rust-toolchain.toml', 'Install.ps1')
+        $installerLibraries = Join-Path $RepositoryRoot 'scripts/lib'
+        if (Test-Path -LiteralPath $installerLibraries) {
+            Get-ChildItem -LiteralPath $installerLibraries -File -Filter '*.ps1'
+        }
         foreach ($directory in @('packages', '.cargo')) {
             $path = Join-Path $RepositoryRoot $directory
             if (Test-Path -LiteralPath $path) {
@@ -126,6 +130,7 @@ function New-RustTestPreparation {
         $target = Join-Path $owned 'target'
         $selection = @()
         foreach ($name in $TestTarget) { $selection += @('--test', $name) }
+        $installationExecutables = [Collections.Generic.List[string]]::new()
         $artifacts = @(Invoke-TestPhase -Name 'compile selected Rust tests' -Action {
             & cargo test --workspace --all-features --locked --no-run --message-format=json --target-dir $target @selection |
                 ForEach-Object {
@@ -133,18 +138,38 @@ function New-RustTestPreparation {
                     if ($message.reason -eq 'compiler-message') { Write-Host $message.message.rendered }
                     if ($message.reason -eq 'compiler-artifact') {
                         Write-Host "Cargo artifact: $($message.target.name); fresh=$($message.fresh)"
+                        if ($message.target.name -ceq 'installation' -and $message.profile.test -and $message.executable) {
+                            $installationExecutables.Add($message.executable)
+                        }
                         if ($message.executable) { Get-TestArtifact -Path $message.executable }
                     }
                 }
             if ($LASTEXITCODE -ne 0) { throw 'Compiling Rust test prerequisites failed.' }
         })
         if ($artifacts.Count -eq 0) { throw 'Cargo returned no executable artifacts.' }
+        $installation = $null
+        $installationFailure = $null
+        if (-not $TestTarget -or $TestTarget -contains 'installation') {
+            try {
+                $installation = Invoke-TestPhase -Name 'verified installation preparation (real release/native source rebuild)' -Action {
+                    New-RustInstallationPreparation -OwnedDirectory $owned -Executables $installationExecutables.ToArray()
+                }
+            } catch {
+                # Release preparation is independent of already compiled provider and ordinary tests.
+                $installationFailure = $_.ToString()
+                Write-Host "Installation preparation failed; installation tests are blocked: $installationFailure"
+            }
+        }
         $after = Get-RustTestIdentity -RepositoryRoot $RepositoryRoot
         if ($after.sourceSha256 -ne $identity.sourceSha256) { throw 'Rust sources changed during preparation.' }
         $record = @{
             schemaVersion = 1
-            status = $(if ($providerFailure) { 'providerFailed' } else { 'complete' })
+            status = $(if ($providerFailure -and $installationFailure) { 'providerAndInstallationFailed' }
+                elseif ($providerFailure) { 'providerFailed' }
+                elseif ($installationFailure) { 'installationFailed' }
+                else { 'complete' })
             providerFailure = $providerFailure
+            installationFailure = $installationFailure
             identity = $identity
             testTargets = @($TestTarget | Where-Object { $null -ne $_ })
             ownedDirectory = $owned
@@ -154,6 +179,7 @@ function New-RustTestPreparation {
                 source = Get-TestArtifact -Path $providerSource
             } } else { $null })
             executables = $artifacts
+            installation = $installation
         }
         $temporary = Join-Path $owned 'prerequisites.json'
         [IO.File]::WriteAllText($temporary, ($record | ConvertTo-Json -Depth 20))
@@ -169,7 +195,8 @@ function New-RustTestPreparation {
 
 # Reject absent, incomplete, changed-source, incompatible, or modified owned outputs before execution.
 function Read-RustTestPreparation {
-    param([string] $RepositoryRoot, [string] $PrerequisitePath, [string[]] $TestTarget, [switch] $AllowProviderFailure)
+    param([string] $RepositoryRoot, [string] $PrerequisitePath, [string[]] $TestTarget,
+        [Alias('AllowPrerequisiteFailure')][switch] $AllowProviderFailure)
     if (-not [IO.Path]::IsPathFullyQualified($PrerequisitePath) -or
         -not (Test-Path -LiteralPath $PrerequisitePath -PathType Leaf)) {
         throw 'An existing absolute -PrerequisitePath is required; run -Phase Prepare first.'
@@ -180,12 +207,14 @@ function Read-RustTestPreparation {
         $record = $reader.ReadToEnd() | ConvertFrom-Json -AsHashtable
     } finally { $reader.Dispose() }
     Assert-RustRecordFields -Record $record -Fields @(
-        'schemaVersion', 'status', 'providerFailure', 'identity', 'testTargets',
-        'ownedDirectory', 'targetDirectory', 'provider', 'executables'
+        'schemaVersion', 'status', 'providerFailure', 'installationFailure', 'identity', 'testTargets',
+        'ownedDirectory', 'targetDirectory', 'provider', 'executables', 'installation'
     )
     if ($record -isnot [System.Collections.IDictionary] -or
         $record.schemaVersion -isnot [long] -or $record.schemaVersion -ne 1 -or
-        ($record.status -cne 'complete' -and -not ($AllowProviderFailure -and $record.status -ceq 'providerFailed'))) {
+        ($record.status -cne 'complete' -and -not ($AllowProviderFailure -and $record.status -cin @(
+            'providerFailed', 'installationFailed', 'providerAndInstallationFailed'
+        )))) {
         throw 'Incomplete or unsupported Rust prerequisites.'
     }
     if ($record.testTargets -isnot [array] -or $record.executables -isnot [array]) { throw 'Rust prerequisite selections and executables must be arrays.' }
@@ -193,7 +222,9 @@ function Read-RustTestPreparation {
         if ($name -isnot [string] -or [string]::IsNullOrWhiteSpace($name)) { throw 'Malformed Rust test target.' }
     }
     $requiresProvider = -not $TestTarget -or $TestTarget -contains 'native'
-    if ($record.status -ceq 'providerFailed') {
+    $providerFailed = $record.status -cin @('providerFailed', 'providerAndInstallationFailed')
+    $installationFailed = $record.status -cin @('installationFailed', 'providerAndInstallationFailed')
+    if ($providerFailed) {
         if (-not $requiresProvider -or $null -ne $record.provider -or
             $record.providerFailure -isnot [string] -or [string]::IsNullOrWhiteSpace($record.providerFailure)) {
             throw 'Malformed failed-provider prerequisites.'
@@ -201,6 +232,15 @@ function Read-RustTestPreparation {
     } elseif ($null -ne $record.providerFailure -or ($requiresProvider -and -not $record.provider) -or
         (-not $requiresProvider -and $null -ne $record.provider)) {
         throw 'Incomplete provider prerequisites.'
+    }
+    $requiresInstallation = -not $TestTarget -or $TestTarget -contains 'installation'
+    if ($installationFailed) {
+        if (-not $requiresInstallation -or $null -ne $record.installation -or
+            $record.installationFailure -isnot [string] -or [string]::IsNullOrWhiteSpace($record.installationFailure)) {
+            throw 'Malformed failed-installation prerequisites.'
+        }
+    } elseif ($null -ne $record.installationFailure) {
+        throw 'Unexpected installation failure in completed prerequisites.'
     }
     $identity = Get-RustTestIdentity -RepositoryRoot $RepositoryRoot
     Assert-RustRecordFields -Record $record.identity -Fields @($identity.Keys)
@@ -250,6 +290,9 @@ function Read-RustTestPreparation {
             throw "Test executable is outside its owned target directory: $($artifact.path)"
         }
     }
+    if (-not $installationFailed) {
+        Read-RustInstallationPreparation -Preparation $record -Required:$requiresInstallation
+    }
     return $record
 }
 
@@ -261,21 +304,30 @@ function Invoke-PreparedRustTests {
         $env:SS_AI_RUST_TEST_PREREQUISITES = $PrerequisitePath
         $selection = @()
         $includeDoctests = $false
-        if ($Preparation.status -ceq 'providerFailed') {
+        $blockedTargets = @()
+        if ($null -ne $Preparation.providerFailure) {
             Write-Host "Blocked native tests: $($Preparation.providerFailure)"
+            $blockedTargets += 'native'
+        }
+        if ($null -ne $Preparation.installationFailure) {
+            Write-Host "Blocked installation tests: $($Preparation.installationFailure)"
+            $blockedTargets += 'installation'
+        }
+        if ($blockedTargets) {
             if (-not $TestTarget) {
                 $metadata = & cargo metadata --no-deps --format-version 1 --locked | ConvertFrom-Json
                 if ($LASTEXITCODE -ne 0) { throw 'Locating provider-independent Rust tests failed.' }
                 $TestTarget = @($metadata.packages |
                     Where-Object id -In $metadata.workspace_members |
-                    ForEach-Object targets | Where-Object { $_.kind -contains 'test' -and $_.name -ne 'native' } |
+                    ForEach-Object targets | Where-Object { $_.kind -contains 'test' -and $_.name -notin $blockedTargets } |
                     Select-Object -ExpandProperty name -Unique)
                 $selection += @('--lib', '--bins')
                 $includeDoctests = $true
             } else {
-                $TestTarget = @($TestTarget | Where-Object { $_ -ne 'native' })
-                if (-not $TestTarget) { throw 'All selected Rust tests are blocked by provider preparation failure.' }
+                $TestTarget = @($TestTarget | Where-Object { $_ -notin $blockedTargets })
+                if (-not $TestTarget) { throw 'All selected Rust tests are blocked by prerequisite preparation failure.' }
             }
+
         }
         foreach ($name in $TestTarget) { $selection += @('--test', $name) }
         if ($TestFilter) { $selection += $TestFilter }
@@ -287,8 +339,85 @@ function Invoke-PreparedRustTests {
             & cargo test --workspace --all-features --locked --doc --target-dir $Preparation.targetDirectory @filter
             if ($LASTEXITCODE -ne 0) { $executionFailed = $true }
         }
-        if ($executionFailed -or $Preparation.status -ceq 'providerFailed') { throw 'Rust test execution failed.' }
+        if ($executionFailed -or $Preparation.status -cne 'complete') { throw 'Rust test execution failed.' }
     } finally {
         $env:SS_AI_RUST_TEST_PREREQUISITES = $previous
+    }
+}
+
+# The ignored, explicitly named compiler integration owns release outputs separately from test outputs.
+function New-RustInstallationPreparation {
+    param([string] $OwnedDirectory, [string[]] $Executables)
+    if ($Executables.Count -ne 1) { throw 'Cargo must identify exactly one installation test executable.' }
+    $directory = Join-Path $OwnedDirectory 'installation'
+    New-Item -ItemType Directory -Path $directory | Out-Null
+    $previous = $env:SS_AI_INSTALLATION_PREPARATION_DIRECTORY
+    try {
+        $env:SS_AI_INSTALLATION_PREPARATION_DIRECTORY = $directory
+        & $Executables[0] --ignored --exact prepare_real_release_installation --nocapture |
+            ForEach-Object { Write-Host $_ }
+        if ($LASTEXITCODE -ne 0) { throw 'Verified real release installation preparation failed.' }
+    } finally { $env:SS_AI_INSTALLATION_PREPARATION_DIRECTORY = $previous }
+    Get-TestArtifact -Path (Join-Path $directory 'evidence.json')
+}
+
+# The outer record hashes the complete evidence; every retained input/output is independently bound.
+function Read-RustInstallationPreparation {
+    param([hashtable] $Preparation, [bool] $Required)
+    if (-not $Required) {
+        if ($null -ne $Preparation.installation) { throw 'Unexpected installation prerequisites for this selection.' }
+        return
+    }
+    $artifact = $Preparation.installation
+    Assert-RustRecordFields -Record $artifact -Fields @('path', 'sha256')
+    $directory = Join-Path $Preparation.ownedDirectory 'installation'
+    if ($artifact.path -cne (Join-Path $directory 'evidence.json') -or
+        $artifact.sha256 -isnot [string] -or $artifact.sha256 -cnotmatch '^[0-9A-F]{64}$' -or
+        (Get-TestArtifact -Path $artifact.path).sha256 -cne $artifact.sha256) {
+        throw 'Missing, modified, or unowned installation evidence.'
+    }
+    $stream = Open-RustTestInput -Path $artifact.path
+    $reader = [IO.StreamReader]::new($stream)
+    try { $evidence = $reader.ReadToEnd() | ConvertFrom-Json -AsHashtable } finally { $reader.Dispose() }
+    Assert-RustRecordFields -Record $evidence -Fields @('schemaVersion', 'status', 'artifacts', 'commands', 'nativeFlags', 'baseline', 'changed')
+    if ($evidence.schemaVersion -isnot [long] -or $evidence.schemaVersion -ne 1 -or
+        $evidence.status -cne 'complete' -or $evidence.artifacts -isnot [array] -or
+        $evidence.artifacts.Count -ne 6 -or $evidence.nativeFlags -isnot [string] -or
+        -not $evidence.nativeFlags.EndsWith("-C$([char]0x1f)target-cpu=native")) {
+        throw 'Incomplete or malformed installation evidence.'
+    }
+    foreach ($observation in @($evidence.baseline, $evidence.changed)) {
+        Assert-RustRecordFields -Record $observation -Fields @('version', 'help')
+        if ($observation.version -isnot [string] -or $observation.version -cnotmatch '^ss-skills-util \S+' -or
+            $observation.help -isnot [string] -or [string]::IsNullOrWhiteSpace($observation.help)) {
+            throw 'Malformed installed executable observation.'
+        }
+    }
+    if ($evidence.baseline.version -cne $evidence.changed.version -or
+        $evidence.baseline.help -ceq $evidence.changed.help -or
+        -not $evidence.changed.help.Contains('Test-owned replacement from changed local source')) {
+        throw 'Installation did not demonstrate same-version changed-source behavior.'
+    }
+    foreach ($inputArtifact in $evidence.artifacts) {
+        Assert-RustRecordFields -Record $inputArtifact -Fields @('path', 'sha256')
+        if ($inputArtifact.path -isnot [string] -or $inputArtifact.sha256 -isnot [string] -or
+            $inputArtifact.sha256 -cnotmatch '^[0-9A-F]{64}$') { throw 'Malformed installation artifact.' }
+        $relative = [IO.Path]::GetRelativePath($directory, $inputArtifact.path)
+        if ([IO.Path]::IsPathFullyQualified($relative) -or $relative -eq '..' -or
+            $relative.StartsWith('..' + [IO.Path]::DirectorySeparatorChar) -or
+            (Get-TestArtifact -Path $inputArtifact.path).sha256 -cne $inputArtifact.sha256) {
+            throw 'Modified or unowned installation artifact.'
+        }
+    }
+    $names = @('conflict', 'baseline', 'baselineSetup', 'changed', 'stale', 'shadowed', 'missing', 'finalSetup')
+    Assert-RustRecordFields -Record $evidence.commands -Fields $names
+    foreach ($name in $names) {
+        $command = $evidence.commands[$name]
+        Assert-RustRecordFields -Record $command -Fields @('exitCode', 'stdout', 'stderr', 'cargoArtifacts')
+        if ($command.exitCode -isnot [long] -or $command.stdout -isnot [string] -or
+            $command.stderr -isnot [string] -or $command.cargoArtifacts -isnot [array] -or
+            (($command.exitCode -eq 0) -ne ($name -in @('baseline', 'baselineSetup', 'changed', 'finalSetup')))) {
+            throw "Unexpected installation outcome: $name"
+        }
     }
 }

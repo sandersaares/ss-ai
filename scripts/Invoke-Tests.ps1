@@ -122,8 +122,8 @@ if ($Suite -in @('All', 'Rust')) {
                 if ($preparation.status -ne 'complete') { $failed = $true }
             }
             if ($Phase -ne 'Prepare') {
-                $preparation = Read-RustTestPreparation -RepositoryRoot $root -PrerequisitePath $PrerequisitePath -TestTarget $RustTest -AllowProviderFailure
-                Invoke-TestPhase -Name 'Rust execution (includes installation lifecycle)' -Action {
+                $preparation = Read-RustTestPreparation -RepositoryRoot $root -PrerequisitePath $PrerequisitePath -TestTarget $RustTest -AllowPrerequisiteFailure
+                Invoke-TestPhase -Name 'Rust execution (installation evidence checks; no installation compilation)' -Action {
                     Invoke-PreparedRustTests -Preparation $preparation -PrerequisitePath $PrerequisitePath -TestTarget $RustTest -TestFilter $RustFilter
                 }
             }

@@ -18,7 +18,8 @@ BeforeAll {
             [IO.File]::WriteAllText((Join-Path $root 'SsReviewGitDiff.Tests.ps1'), "throw 'A blocked native consumer must not run'")
         }
         $testPath = if ($FailNativePester) { $root } else { $test }
-        $suiteArgument = if ($Suite) { " -Suite $Suite" } else { '' }
+        # Provider compilation exercises dispatch; the release lifecycle is verified separately.
+        $suiteArgument = if ($Suite) { " -Suite $Suite -RustTest native" } else { '' }
         $clippyExit = if ($FailClippy) { 19 } else { 0 }
         $code = @'
 function Get-Command {

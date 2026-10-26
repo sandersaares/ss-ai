@@ -18,7 +18,7 @@ BeforeAll {
         $script:CargoCalls.Add(@($args))
         if ($script:FailCargo) { $global:LASTEXITCODE = 17; return }
         if ($args[0] -eq 'metadata') {
-            return '{"workspace_members":["fixture"],"packages":[{"id":"fixture","targets":[{"name":"native","kind":["test"]},{"name":"git","kind":["test"]}]}]}'
+            return '{"workspace_members":["fixture"],"packages":[{"id":"fixture","targets":[{"name":"native","kind":["test"]},{"name":"installation","kind":["test"]},{"name":"git","kind":["test"]}]}]}'
         }
         $target = $args[[array]::IndexOf($args, '--target-dir') + 1]
         [IO.Directory]::CreateDirectory($target) | Out-Null
@@ -41,6 +41,9 @@ BeforeAll {
 
 Describe 'Rust preparation boundary' {
     BeforeEach {
+        # This suite isolates the outer provider/test graph; installation has its own boundary suite.
+        Mock New-RustInstallationPreparation { $null }
+        Mock Read-RustInstallationPreparation {}
         $script:ProviderBuilds = 0
         $script:CargoCalls = [Collections.Generic.List[object]]::new()
         $script:FailProvider = $false
@@ -87,6 +90,61 @@ Describe 'Rust preparation boundary' {
         $script:ProviderBuilds | Should -Be 0
     }
 
+    It 'blocks installation only, or installation and native together, while independent tests and doctests run (provider failure = <ProviderFailure>)' -ForEach @(
+        @{ ProviderFailure = $false }, @{ ProviderFailure = $true }
+    ) {
+        $script:FailProvider = $ProviderFailure
+        Mock New-RustInstallationPreparation { throw 'release fixture compilation failed' }
+        $prepared = New-RustTestPreparation -RepositoryRoot $fixture.root -PrerequisitePath $fixture.record
+        $prepared.status | Should -Be $(if ($ProviderFailure) { 'providerAndInstallationFailed' } else { 'installationFailed' })
+        $prepared.installation | Should -BeNullOrEmpty
+        $prepared.installationFailure | Should -Match 'release fixture compilation failed'
+        if ($ProviderFailure) { $prepared.provider | Should -BeNullOrEmpty }
+        else { $prepared.provider.executable | Should -Not -BeNullOrEmpty }
+        { Read-RustTestPreparation -RepositoryRoot $fixture.root -PrerequisitePath $fixture.record } | Should -Throw '*Incomplete*'
+        $prepared = Read-RustTestPreparation -RepositoryRoot $fixture.root -PrerequisitePath $fixture.record -AllowPrerequisiteFailure
+        { Invoke-PreparedRustTests -Preparation $prepared -PrerequisitePath $fixture.record } | Should -Throw '*execution failed*'
+        $script:CargoCalls.Count | Should -Be 4
+        $script:CargoCalls[2] | Should -Contain 'git'
+        $script:CargoCalls[2] | Should -Contain '--lib'
+        $script:CargoCalls[2] | Should -Not -Contain 'installation'
+        if ($ProviderFailure) { $script:CargoCalls[2] | Should -Not -Contain 'native' }
+        else { $script:CargoCalls[2] | Should -Contain 'native' }
+        $script:CargoCalls[3] | Should -Contain '--doc'
+    }
+
+    It 'keeps explicitly selected independent tests after installation failure, without widening selection' {
+        Mock New-RustInstallationPreparation { throw 'release fixture compilation failed' }
+        $prepared = New-RustTestPreparation -RepositoryRoot $fixture.root -PrerequisitePath $fixture.record -TestTarget @('installation', 'git')
+        { Invoke-PreparedRustTests -Preparation $prepared -PrerequisitePath $fixture.record -TestTarget @('installation', 'git') } |
+            Should -Throw '*execution failed*'
+        $script:CargoCalls.Count | Should -Be 2
+        $script:CargoCalls[1] | Should -Contain 'git'
+        $script:CargoCalls[1] | Should -Not -Contain 'installation'
+        $script:CargoCalls[1] | Should -Not -Contain '--lib'
+        { Invoke-PreparedRustTests -Preparation $prepared -PrerequisitePath $fixture.record -TestTarget installation } |
+            Should -Throw '*All selected Rust tests are blocked*'
+    }
+
+    It 'rejects inconsistent failed-installation records rather than treating them as completed' {
+        Mock New-RustInstallationPreparation { throw 'release fixture compilation failed' }
+        $prepared = New-RustTestPreparation -RepositoryRoot $fixture.root -PrerequisitePath $fixture.record
+        $original = $prepared | ConvertTo-Json -Depth 30
+        foreach ($change in @(
+            { param($r) $r.installationFailure = '' }
+            { param($r) $r.installationFailure = 17 }
+            { param($r) $r.installation = @{ path = 'success-shaped'; sha256 = 'invalid' } }
+            { param($r) $r.status = 'complete' }
+            { param($r) $r.status = 'providerAndInstallationFailed' }
+        )) {
+            $invalid = $original | ConvertFrom-Json -AsHashtable
+            & $change $invalid
+            [IO.File]::WriteAllText($fixture.record, ($invalid | ConvertTo-Json -Depth 30))
+            { Read-RustTestPreparation -RepositoryRoot $fixture.root -PrerequisitePath $fixture.record -AllowPrerequisiteFailure } |
+                Should -Throw
+        }
+    }
+
     It 'rejects missing records and mismatched selection instead of building on demand' {
         { Read-RustTestPreparation -RepositoryRoot $fixture.root -PrerequisitePath $fixture.record } | Should -Throw '*Prepare first*'
         $null = New-RustTestPreparation -RepositoryRoot $fixture.root -PrerequisitePath $fixture.record -TestTarget native
@@ -98,6 +156,20 @@ Describe 'Rust preparation boundary' {
         $null = New-RustTestPreparation -RepositoryRoot $fixture.root -PrerequisitePath $fixture.record
         Add-Content -LiteralPath (Join-Path $fixture.root 'packages/ss-skills-util/tests/support/provider.rs') -Value 'changed'
         { Read-RustTestPreparation -RepositoryRoot $fixture.root -PrerequisitePath $fixture.record } | Should -Throw '*sourceSha256*'
+    }
+
+    It 'invalidates installer and installer-library edits as well as Rust source' {
+        $library = Join-Path $fixture.root 'scripts/lib'
+        New-Item -ItemType Directory -Path $library -Force | Out-Null
+        foreach ($path in @((Join-Path $fixture.root 'Install.ps1'), (Join-Path $library 'NativeUtility.ps1'))) {
+            [IO.File]::WriteAllText($path, 'baseline installer')
+        }
+        $null = New-RustTestPreparation -RepositoryRoot $fixture.root -PrerequisitePath $fixture.record
+        foreach ($path in @((Join-Path $fixture.root 'Install.ps1'), (Join-Path $library 'NativeUtility.ps1'))) {
+            [IO.File]::WriteAllText($path, 'changed installer')
+            { Read-RustTestPreparation -RepositoryRoot $fixture.root -PrerequisitePath $fixture.record } | Should -Throw '*sourceSha256*'
+            [IO.File]::WriteAllText($path, 'baseline installer')
+        }
     }
 
     It 'rejects incomplete records, changed artifacts, and incompatible flags' {
@@ -182,7 +254,7 @@ Describe 'Rust preparation boundary' {
                 @{ reason = 'compiler-artifact'; target = @{ name = 'fixture' }; fresh = $false; executable = $executable } |
                     ConvertTo-Json -Compress
             }
-            New-RustTestPreparation -RepositoryRoot $Root -PrerequisitePath $Record
+            New-RustTestPreparation -RepositoryRoot $Root -PrerequisitePath $Record -TestTarget native
         }
         $first = [PowerShell]::Create()
         $second = [PowerShell]::Create()
@@ -208,8 +280,8 @@ Describe 'Rust preparation boundary' {
                 $results.Count | Should -Be 2
                 $results[0].ownedDirectory | Should -Not -Be $results[1].ownedDirectory
             }
-            $null = Read-RustTestPreparation -RepositoryRoot $fixture.root -PrerequisitePath $fixture.record
-            $null = Read-RustTestPreparation -RepositoryRoot $fixture.root -PrerequisitePath $other
+            $null = Read-RustTestPreparation -RepositoryRoot $fixture.root -PrerequisitePath $fixture.record -TestTarget native
+            $null = Read-RustTestPreparation -RepositoryRoot $fixture.root -PrerequisitePath $other -TestTarget native
         } finally {
             $first.Dispose()
             $second.Dispose()

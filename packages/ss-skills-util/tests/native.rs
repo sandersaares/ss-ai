@@ -120,7 +120,10 @@ impl Fixture {
         )
         .expect("Malformed Rust prerequisites");
         assert_eq!(record["schemaVersion"], 1, "Unsupported prerequisites");
-        assert_eq!(record["status"], "complete", "Incomplete prerequisites");
+        assert!(
+            record["status"] == "complete" || record["status"] == "installationFailed",
+            "Incomplete provider prerequisites"
+        );
         let provider = &record["provider"];
         let source = Path::new(provider["source"]["path"].as_str().unwrap());
         assert!(source.is_absolute(), "Provider source must be absolute");
@@ -208,9 +211,15 @@ fn provider_prerequisites_reject_missing_incomplete_stale_and_modified_artifacts
     });
     fs::write(&record, serde_json::to_vec(&valid).unwrap()).unwrap();
     assert_eq!(Fixture::prepared_provider_from(&record), executable);
+    let mut independent_failure = valid.clone();
+    independent_failure["status"] = json!("installationFailed");
+    fs::write(&record, serde_json::to_vec(&independent_failure).unwrap()).unwrap();
+    assert_eq!(Fixture::prepared_provider_from(&record), executable);
     for (pointer, replacement) in [
         ("/schemaVersion", json!(2)),
         ("/status", json!("preparing")),
+        ("/status", json!("providerFailed")),
+        ("/status", json!("providerAndInstallationFailed")),
         ("/provider/source/path", json!("relative.rs")),
         ("/provider/executable/path", json!("relative")),
         ("/provider/executable/sha256", json!("modified")),
