@@ -875,6 +875,39 @@ Describe 'Rendering executable' {
         $combined.IndexOf('# Synthesis finding') | Should -BeLessThan $combined.IndexOf('# Reviewer finding')
     }
 
+    # Execute the documented self-review recipe itself so its paths and all-findings
+    # selection stay coupled to the renderer, including a clean review's empty report.
+    It 'delivers the self-review recipe without approval records: empty = <Empty>' -ForEach @(
+        @{ Empty = $false }
+        @{ Empty = $true }
+    ) {
+        if ($Empty) {
+            Write-FindingArtifact -Path $script:ArtifactPath -Document (New-FindingArtifactDocument -Kind 'consolidated')
+        }
+        Copy-Item -LiteralPath $script:ArtifactPath -Destination (Join-Path $script:WorkRoot 'findings.json')
+
+        $skillRoot = Split-Path -Parent $script:ExecutableRoot
+        $recipe = Get-Content -LiteralPath (Join-Path $skillRoot 'pwsh-calls/render-self-review.md') -Raw
+        $command = [regex]::Match($recipe, '(?s)```powershell\s*(.*?)```').Groups[1].Value
+        $command = $command.Replace('{{SKILL_ROOT}}', $skillRoot).Replace('{{SESSION_STATE}}', $script:WorkRoot)
+        $recipePath = Join-Path $script:WorkRoot 'render.ps1'
+        Write-PullRequestOutputFile -Path $recipePath -Content $command
+
+        $output = & $script:PowerShellPath -NoProfile -NonInteractive -File $recipePath
+        $LASTEXITCODE | Should -Be 0
+        $result = ($output -join "`n") | ConvertFrom-Json
+        $result.combinedPath | Should -BeExactly (Join-Path $script:WorkRoot 'self-review-findings.md')
+        Test-Path -LiteralPath $result.combinedPath -PathType Leaf | Should -BeTrue
+        $result.findings.Count | Should -Be $(if ($Empty) { 0 } else { 2 })
+        foreach ($finding in $result.findings) {
+            [IO.Path]::IsPathFullyQualified($finding.path) | Should -BeTrue
+            $text = Get-Content -LiteralPath $finding.path -Raw
+            $text | Should -Not -BeNullOrEmpty
+            (Get-Content -LiteralPath $result.combinedPath -Raw) | Should -Match ([regex]::Escape($text.Replace('[Copilot speaking]', '').Trim()))
+        }
+        Test-Path -LiteralPath (Join-Path $script:WorkRoot 'audit-decisions.json') | Should -BeFalse
+    }
+
     It 'writes the audit document when asked for one, labelling each finding by identifier' {
         $auditDirectory = Join-Path $script:WorkRoot 'audit files (local)'
         $auditPath = Join-Path $auditDirectory 'audit-findings.md'

@@ -66,6 +66,14 @@ judgment: schema validation, state transitions, deterministic rendering,
 comparison, target resolution, and publication. This allocation keeps judgment
 where context is available and keeps safety properties in executable code.
 
+## Self-review routing
+
+The orchestrator records explicit self-review selection in its checkpoint and gates side effects before preparation starts. It skips reviewer registration, report-tool setup, and overview publication while retaining inventory and local overview preparation. Analysis and policy classification use the ordinary workers and artifacts. PR scopes retain the pre-audit evidence refresh; local scopes check for content movement before classification.
+
+After classification, `self-review.md` replaces audit and all later phases. It uses `ConvertTo-FindingMarkdown.ps1` directly on the consolidated artifact, not the approved set, because undecided findings are part of this local deliverable. The renderer's existing all-findings path supplies per-finding absolute paths and a combined report without publication anchor checks. `auditFindingIds` partitions the emitted paths for session presentation without mutating decision records or introducing another persisted schema.
+
+The mode never creates synthetic human verdicts or merge decisions. It stops on unresolved questions instead of invoking interactive recovery. Learning is outside this route because it has no human audit feedback and must not create remote side effects.
+
 ## Worker input boundary
 
 The installed skill resolves its filesystem link to the canonical checkout.
