@@ -190,9 +190,11 @@ impl Evidence {
             }
         }
         for thread in threads {
-            if thread.get("status").and_then(Value::as_str) == Some("pending")
+            if !is_deleted(thread)
+                && thread.get("status").and_then(Value::as_str) == Some("pending")
                 && array(field(thread, "comments")?)?.iter().any(|comment| {
-                    comment.pointer("/author/id").and_then(Value::as_str) == Some(account)
+                    !is_deleted(comment)
+                        && comment.pointer("/author/id").and_then(Value::as_str) == Some(account)
                 })
             {
                 return Ok(Decision::Ineligible {
@@ -200,7 +202,25 @@ impl Evidence {
                 });
             }
         }
-        let renewals = renewals(
+        // Deleted audit attribution cannot turn an automatic vote into an external
+        // anchor. Retained marker bytes only veto authority (docs/reapproval.md).
+        let deleted_audit = threads.iter().any(|thread| {
+            thread
+                .get("comments")
+                .and_then(Value::as_array)
+                .is_some_and(|comments| {
+                    comments.iter().any(|comment| {
+                        (is_deleted(thread) || is_deleted(comment))
+                            && comment.pointer("/author/id").and_then(Value::as_str)
+                                == Some(account)
+                            && comment
+                                .get("content")
+                                .and_then(Value::as_str)
+                                .is_some_and(|body| body.contains("<!-- ss-autoreapprove"))
+                    })
+                })
+        });
+        let mut renewals = renewals(
             threads,
             &events,
             iterations,
@@ -209,7 +229,33 @@ impl Evidence {
             number,
             observed_at,
         )?;
-        decide_history(&events, iterations, &policy, account, current, &renewals)
+        if deleted_audit {
+            // Lost attribution prevents interpreting a renewal chain. Still replay
+            // surviving explicit decisions below, but never grant approval authority.
+            renewals.clear();
+        }
+        let deleted_history = threads.iter().any(|thread| {
+            is_deleted(thread)
+                || thread
+                    .get("comments")
+                    .and_then(Value::as_array)
+                    .is_some_and(|comments| comments.iter().any(is_deleted))
+        });
+        let decision = decide_history(
+            &events,
+            iterations,
+            &policy,
+            account,
+            current,
+            &renewals,
+            deleted_history,
+        )?;
+        if deleted_audit && !matches!(decision, Decision::Ineligible { .. }) {
+            return Ok(Decision::Ineligible {
+                reason: "approvalEvidenceDeleted".to_owned(),
+            });
+        }
+        Ok(decision)
     }
 }
 
@@ -701,22 +747,27 @@ fn validate_iterations(iterations: &[Value], source: &str, now: Timestamp) -> Re
     Ok(())
 }
 
-/// User prose cannot become a vote event, even when it contains system property names.
+/// Deleted records cannot supply authority or require their removed payloads.
+fn is_deleted(value: &Value) -> bool {
+    value.get("isDeleted") == Some(&Value::Bool(true))
+}
+
+/// Only surviving system comments make structured thread properties authoritative.
+fn has_system_comment(thread: &Value) -> Result<bool, AppError> {
+    if is_deleted(thread) {
+        return Ok(false);
+    }
+    Ok(array(field(thread, "comments")?)?.iter().any(|comment| {
+        !is_deleted(comment) && comment.get("commentType") == Some(&json!("system"))
+    }))
+}
+
+/// User prose and deleted comments cannot turn a thread into a vote event.
 fn ordered_events(threads: &[Value], now: Timestamp) -> Result<Vec<Event<'_>>, AppError> {
     unique(threads, "id")?;
     let mut events = Vec::new();
     for thread in threads {
-        if thread.get("isDeleted") == Some(&Value::Bool(true)) {
-            return Err(fail(
-                "service",
-                "Deleted ADO history cannot prove an approval",
-            ));
-        }
-        let comments = array(field(thread, "comments")?)?;
-        let system = comments
-            .iter()
-            .any(|comment| comment.get("commentType") == Some(&json!("system")));
-        if !system {
+        if !has_system_comment(thread)? {
             continue;
         }
         let at = timestamp(text(field(thread, "publishedDate")?)?)?;
@@ -778,6 +829,7 @@ fn decide_history(
     account: &str,
     current: Option<i64>,
     renewals: &HashMap<String, Renewal>,
+    deleted_history: bool,
 ) -> Result<Decision, AppError> {
     let mut latest = None;
     let mut approval = None;
@@ -799,21 +851,33 @@ fn decide_history(
                 })?;
                 vote(&json!(value))?;
                 if voter == account {
+                    let mut applicable = initiator == account && matches!(value, 5 | 10);
                     if let Some(renewal) = renewals.get(&event.id) {
-                        let previous: &Event<'_> = approval.ok_or_else(|| {
-                            fail("service", "ADO renewal has no preceding approval authority")
-                        })?;
-                        if initiator != account
-                            || !matches!(value, 5 | 10)
-                            || anchor.as_ref() != Some(&renewal.audit.anchor)
-                            || latest != Some(value)
-                            || field(iteration_at(iterations, previous.at)?, "id")?
-                                == field(iteration_at(iterations, event.at)?, "id")?
+                        if deleted_history
+                            && (approval.is_none()
+                                || !events
+                                    .iter()
+                                    .any(|event| event.id == renewal.audit.anchor.review_id))
                         {
-                            return Err(fail(
-                                "service",
-                                "ADO renewal does not preserve invalidated external authority",
-                            ));
+                            // A renewal cannot replace its deleted external anchor.
+                            applicable = false;
+                            anchor = None;
+                        } else {
+                            let previous: &Event<'_> = approval.ok_or_else(|| {
+                                fail("service", "ADO renewal has no preceding approval authority")
+                            })?;
+                            if initiator != account
+                                || !matches!(value, 5 | 10)
+                                || anchor.as_ref() != Some(&renewal.audit.anchor)
+                                || latest != Some(value)
+                                || field(iteration_at(iterations, previous.at)?, "id")?
+                                    == field(iteration_at(iterations, event.at)?, "id")?
+                            {
+                                return Err(fail(
+                                    "service",
+                                    "ADO renewal does not preserve invalidated external authority",
+                                ));
+                            }
                         }
                     } else {
                         anchor = (initiator == account && matches!(value, 5 | 10))
@@ -834,7 +898,7 @@ fn decide_history(
                     }
                     latest = Some(value);
                     // A proxy positive vote is not the account's approval authority.
-                    approval = (initiator == account && matches!(value, 5 | 10)).then_some(event);
+                    approval = applicable.then_some(event);
                     removed = false;
                     true
                 } else {
@@ -929,6 +993,11 @@ fn decide_history(
             reason: "approvalWithdrawn".to_owned(),
         });
     }
+    if latest.is_none() && deleted_history {
+        // A current positive vote alone supplies neither an external approval
+        // event nor an approved source. Missing deleted authority is not work.
+        return Ok(Decision::NoPriorApproval);
+    }
     if let Some(approval) = approval {
         let approved_iteration = iteration_at(iterations, approval.at)?;
         let latest_iteration = iterations
@@ -937,6 +1006,11 @@ fn decide_history(
             .ok_or_else(|| fail("service", "Missing ADO source iteration"))?;
         let advanced = field(approved_iteration, "id")? != field(latest_iteration, "id")?;
         if current != latest {
+            if deleted_history {
+                return Ok(Decision::Ineligible {
+                    reason: "approvalEvidenceDeleted".to_owned(),
+                });
+            }
             // Current settings cannot prove which policy applied to a past push.
             // Missing reset evidence must not turn a possible withdrawal into authority.
             return Err(fail(
@@ -958,6 +1032,11 @@ fn decide_history(
         }
         return Ok(Decision::AlreadyValid {
             approval_event_id: approval.id.clone(),
+        });
+    }
+    if deleted_history {
+        return Ok(Decision::Ineligible {
+            reason: "approvalEvidenceDeleted".to_owned(),
         });
     }
     if current == latest {
@@ -1029,9 +1108,7 @@ pub(crate) fn new_vote(
     for thread in threads {
         let id = identifier(field(thread, "id")?)?;
         if old_ids.contains(&id)
-            || !array(field(thread, "comments")?)?
-                .iter()
-                .any(|comment| comment.get("commentType").and_then(Value::as_str) == Some("system"))
+            || !has_system_comment(thread)?
             || system_event_kind(thread)? != Some("VoteUpdate")
         {
             continue;
@@ -1059,13 +1136,18 @@ pub(crate) fn matching_audit(
     body: &str,
     account: &str,
 ) -> Result<String, AppError> {
-    let comments = array(field(thread, "comments")?)?;
-    let [comment] = comments else {
+    let mut comments = array(field(thread, "comments")?)?
+        .iter()
+        .filter(|comment| !is_deleted(comment));
+    let comment = comments
+        .next()
+        .ok_or_else(|| fail("service", "ADO renewal audit has missing discussion"))?;
+    if comments.next().is_some() {
         return Err(fail(
             "service",
-            "ADO renewal audit has additional or missing discussion",
+            "ADO renewal audit has additional discussion",
         ));
-    };
+    }
     if thread.get("isDeleted") == Some(&json!(true))
         || comment.get("isDeleted") == Some(&json!(true))
         || text(field(comment, "commentType")?)? != "text"
@@ -1104,8 +1186,13 @@ fn renewals(
     let mut result = HashMap::new();
     let mut operations = HashSet::new();
     for thread in threads {
+        if is_deleted(thread) {
+            continue;
+        }
         for comment in array(field(thread, "comments")?)? {
-            if comment.pointer("/author/id").and_then(Value::as_str) != Some(account) {
+            if is_deleted(comment)
+                || comment.pointer("/author/id").and_then(Value::as_str) != Some(account)
+            {
                 continue;
             }
             let Some(body) = comment.get("content").and_then(Value::as_str) else {
@@ -1127,30 +1214,50 @@ fn renewals(
             let renewal: Renewal = serde_json::from_str(document.trim())?;
             renewal.audit.validate()?;
             matching_audit(thread, body, account)?;
-            let event = events
-                .iter()
-                .find(|event| event.id == renewal.vote_event_id)
-                .ok_or_else(|| {
-                    fail(
-                        "service",
-                        "ADO renewal audit refers to a missing vote event",
-                    )
-                })?;
-            let iteration = iteration_at(iterations, event.at)?;
             let audit_at = timestamp(text(field(comment, "publishedDate")?)?)?;
             if suffix.contains("<!-- ss-autoreapprove")
                 || renewal.audit.account_id != account
                 || renewal.audit.repository_id != repository
                 || renewal.audit.pull_request_id != number
-                || event.kind != "VoteUpdate"
+                || audit_at > now
+                || !operations.insert(renewal.audit.operation_id.clone())
+            {
+                return Err(fail(
+                    "service",
+                    "ADO renewal audit has conflicting scope, source, event or ordering",
+                ));
+            }
+            let event = events
+                .iter()
+                .find(|event| event.id == renewal.vote_event_id);
+            if event.is_none() {
+                let mut deleted_vote = false;
+                for thread in threads {
+                    if identifier(field(thread, "id")?)? == renewal.vote_event_id {
+                        deleted_vote = is_deleted(thread)
+                            || (array(field(thread, "comments")?)?.iter().any(is_deleted)
+                                && !has_system_comment(thread)?);
+                    }
+                }
+                if deleted_vote {
+                    // A surviving audit is attribution, not authority for its deleted vote.
+                    continue;
+                }
+            }
+            let event = event.ok_or_else(|| {
+                fail(
+                    "service",
+                    "ADO renewal audit refers to a missing vote event",
+                )
+            })?;
+            let iteration = iteration_at(iterations, event.at)?;
+            if event.kind != "VoteUpdate"
                 || actor(event.value, "CodeReviewVotedByIdentity")? != account
                 || actor(event.value, "CodeReviewVotedByInitiatorIdentity")? != account
                 || field(iteration, "id")?.as_u64() != Some(renewal.iteration_id)
                 || text(field(field(iteration, "sourceRefCommit")?, "commitId")?)?
                     != renewal.audit.source_commit
                 || audit_at < event.at
-                || audit_at > now
-                || !operations.insert(renewal.audit.operation_id.clone())
                 || result
                     .insert(renewal.vote_event_id.clone(), renewal)
                     .is_some()
@@ -1258,7 +1365,9 @@ mod tests {
     use uuid::Uuid;
 
     use super::{Decision, Evidence};
+    use crate::approval::Evidence as ProviderEvidence;
     use crate::clock::timestamp;
+    use crate::renewal::Anchor;
 
     fn fixture() -> Value {
         serde_json::from_str(include_str!(
@@ -1414,8 +1523,6 @@ mod tests {
             decide(value).unwrap_err();
         }
         for (path, replacement) in [
-            ("/isDeleted", json!(true)),
-            ("/comments/0/isDeleted", json!(true)),
             ("/comments/0/lastUpdatedDate", json!("2026-01-01T02:00:00Z")),
             (
                 "/comments/0/content",
@@ -1806,11 +1913,10 @@ mod tests {
     }
 
     #[test]
-    fn untyped_notifications_still_require_complete_nonfuture_nondeleted_history() {
+    fn untyped_notifications_still_require_complete_nonfuture_surviving_history() {
         for (key, replacement) in [
             ("publishedDate", Value::Null),
             ("publishedDate", json!("2027-01-01T00:00:00Z")),
-            ("isDeleted", json!(true)),
             ("identities", json!({"1": {"id": "unresolved-actor"}})),
             ("identities", json!([])),
         ] {
@@ -1932,19 +2038,352 @@ mod tests {
     }
 
     #[test]
-    fn duplicate_deleted_and_simultaneous_decisions_are_explicit_gaps() {
+    fn duplicate_and_simultaneous_decisions_are_explicit_gaps() {
         let original = evidence(&fixture()["stages"][1]);
         let mut duplicate = original.clone();
         let event = duplicate["threads"][1].clone();
         duplicate["threads"].as_array_mut().unwrap().push(event);
         decide(duplicate).unwrap_err();
-        let mut deleted = original.clone();
-        deleted["threads"][1]["isDeleted"] = json!(true);
-        decide(deleted).unwrap_err();
         let mut simultaneous = original;
         simultaneous["threads"][1]["publishedDate"] =
             simultaneous["threads"][0]["publishedDate"].clone();
         decide(simultaneous).unwrap_err();
+    }
+
+    #[test]
+    fn deleted_threads_and_comments_leave_surviving_authority_unchanged() {
+        for stage in fixture()["stages"].as_array().unwrap() {
+            let mut original = evidence(stage);
+            reviewer_policy(&mut original, json!({"requireVoteOnLastIteration": true}));
+            let expected = decide(original.clone()).unwrap();
+            for deleted in [
+                // Tombstones need not retain the payload required of live history.
+                json!({"id": "deleted-thread", "isDeleted": true}),
+                json!({"id": "deleted-thread", "isDeleted": true, "status": "pending",
+                    "comments": [{"author": {"id": fixture()["accountId"]},
+                        "commentType": "system"}]}),
+                json!({"id": "deleted-comment", "status": "pending",
+                    "comments": [{"isDeleted": true, "commentType": "system",
+                        "author": {"id": fixture()["accountId"]}}]}),
+            ] {
+                let mut value = original.clone();
+                value["threads"].as_array_mut().unwrap().push(deleted);
+                assert_eq!(decide(value).unwrap(), expected);
+            }
+        }
+    }
+
+    #[test]
+    fn deleted_approvals_never_supply_an_anchor_from_current_votes_or_prose() {
+        for comment_only in [false, true] {
+            for current in [
+                Value::Null,
+                json!(0),
+                json!(5),
+                json!(10),
+                json!(-5),
+                json!(-10),
+            ] {
+                let mut value = evidence(&fixture()["stages"][2]);
+                if comment_only {
+                    value["threads"][1]["comments"][0]["isDeleted"] = json!(true);
+                } else {
+                    value["threads"][1] = json!({"id": 2, "isDeleted": true});
+                }
+                value["reviewers"] = if current.is_null() {
+                    json!([])
+                } else {
+                    json!([{"id": fixture()["accountId"], "vote": current}])
+                };
+                let expected = if current.as_i64().is_some_and(|vote| vote < 0) {
+                    Decision::Ineligible {
+                        reason: "negativeDecision".to_owned(),
+                    }
+                } else {
+                    Decision::NoPriorApproval
+                };
+                assert_eq!(decide(value).unwrap(), expected);
+            }
+        }
+    }
+
+    #[test]
+    fn deleted_history_does_not_override_surviving_decisions_or_pending_reviews() {
+        for (vote, reason) in [
+            (0, "approvalWithdrawn"),
+            (-5, "negativeDecision"),
+            (-10, "negativeDecision"),
+        ] {
+            let mut value = evidence(&fixture()["stages"][2]);
+            let mut event = value["threads"][1].clone();
+            event["id"] = json!("later-decision");
+            event["publishedDate"] = json!("2026-01-01T18:00:00Z");
+            event["properties"]["CodeReviewVoteResult"]["$value"] = json!(vote.to_string());
+            value["threads"]
+                .as_array_mut()
+                .unwrap()
+                .extend([json!({"id": "deleted", "isDeleted": true}), event]);
+            value["reviewers"][0]["vote"] = json!(vote);
+            assert_eq!(
+                decide(value).unwrap(),
+                Decision::Ineligible {
+                    reason: reason.to_owned()
+                }
+            );
+        }
+        let mut value = evidence(&fixture()["stages"][2]);
+        value["threads"].as_array_mut().unwrap().push(json!({
+            "id": "pending", "status": "pending", "comments": [
+                {"isDeleted": true},
+                {"author": {"id": fixture()["accountId"]}}
+            ]
+        }));
+        assert_eq!(
+            decide(value).unwrap(),
+            Decision::Ineligible {
+                reason: "pendingHumanReview".to_owned()
+            }
+        );
+        for flag in ["isFlagged", "hasDeclined"] {
+            let mut value = evidence(&fixture()["stages"][2]);
+            value["threads"]
+                .as_array_mut()
+                .unwrap()
+                .push(json!({"id": "deleted", "isDeleted": true}));
+            value["reviewers"][0][flag] = json!(true);
+            assert_eq!(
+                decide(value).unwrap(),
+                Decision::Ineligible {
+                    reason: "pendingHumanReview".to_owned()
+                }
+            );
+        }
+        let mut value = evidence(&fixture()["stages"][2]);
+        value["threads"]
+            .as_array_mut()
+            .unwrap()
+            .push(json!({"id": "deleted", "isDeleted": true}));
+        value["reviewers"][0]["vote"] = json!(0);
+        assert_eq!(
+            decide(value).unwrap(),
+            Decision::Ineligible {
+                reason: "approvalEvidenceDeleted".to_owned()
+            }
+        );
+    }
+
+    #[test]
+    fn deleted_renewal_provenance_cannot_manufacture_external_authority() {
+        for path in ["/isDeleted", "/comments/0/isDeleted"] {
+            let mut value = renewed();
+            *value["threads"]
+                .as_array_mut()
+                .unwrap()
+                .last_mut()
+                .unwrap()
+                .pointer_mut(path)
+                .unwrap() = json!(true);
+            assert_eq!(
+                decide(value).unwrap(),
+                Decision::Ineligible {
+                    reason: "approvalEvidenceDeleted".to_owned()
+                }
+            );
+            let mut value = renewed();
+            *value["threads"]
+                .as_array_mut()
+                .unwrap()
+                .last_mut()
+                .unwrap()
+                .pointer_mut(path)
+                .unwrap() = json!(true);
+            let mut withdrawal = value["threads"][1].clone();
+            withdrawal["id"] = json!(40);
+            withdrawal["publishedDate"] = json!("2026-01-01T02:00:00Z");
+            withdrawal["properties"]["CodeReviewVoteResult"]["$value"] = json!("0");
+            value["threads"].as_array_mut().unwrap().push(withdrawal);
+            value["reviewers"][0]["vote"] = json!(0);
+            assert_eq!(
+                decide(value).unwrap(),
+                Decision::Ineligible {
+                    reason: "approvalWithdrawn".to_owned()
+                }
+            );
+        }
+        for comment_only in [false, true] {
+            let mut value = renewed();
+            if comment_only {
+                value["threads"][1]["comments"][0]["isDeleted"] = json!(true);
+            } else {
+                value["threads"][1]["isDeleted"] = json!(true);
+            }
+            assert_eq!(
+                decide(value).unwrap(),
+                Decision::Ineligible {
+                    reason: "approvalEvidenceDeleted".to_owned()
+                }
+            );
+
+            let mut value = renewed();
+            let event = value["threads"]
+                .as_array_mut()
+                .unwrap()
+                .iter_mut()
+                .find(|thread| thread["id"] == 20)
+                .unwrap();
+            if comment_only {
+                event["comments"][0]["isDeleted"] = json!(true);
+            } else {
+                *event = json!({"id": 20, "isDeleted": true});
+            }
+            assert_eq!(
+                decide(value).unwrap(),
+                Decision::AssessmentRequired {
+                    anchor: Anchor {
+                        review_id: "2".to_owned(),
+                        source_commit:
+                            fixture()["stages"][2]["iterations"][0]["sourceRefCommit"]["commitId"]
+                                .as_str()
+                                .unwrap()
+                                .to_owned(),
+                    },
+                    approval_event_id: "2".to_owned(),
+                }
+            );
+        }
+    }
+
+    #[test]
+    fn publication_readback_requires_a_surviving_new_vote() {
+        let before = ProviderEvidence::AzureDevOps(
+            serde_json::from_value(evidence(&fixture()["stages"][2])).unwrap(),
+        );
+        for comment_only in [false, true] {
+            let mut value = renewed();
+            let event = value["threads"]
+                .as_array_mut()
+                .unwrap()
+                .iter_mut()
+                .find(|thread| thread["id"] == 20)
+                .unwrap();
+            let mut surviving = event.clone();
+            if comment_only {
+                event["comments"][0]["isDeleted"] = json!(true);
+            } else {
+                *event = json!({"id": 20, "isDeleted": true});
+            }
+            let after =
+                ProviderEvidence::AzureDevOps(serde_json::from_value(value.clone()).unwrap());
+            let account = fixture()["accountId"].as_str().unwrap().to_owned();
+            assert!(
+                super::new_vote(&before, &after, &account, 10)
+                    .unwrap_err()
+                    .to_string()
+                    .contains("exactly one new")
+            );
+            surviving["id"] = json!(21);
+            value["threads"].as_array_mut().unwrap().push(surviving);
+            let after = ProviderEvidence::AzureDevOps(serde_json::from_value(value).unwrap());
+            assert_eq!(
+                super::new_vote(&before, &after, &account, 10).unwrap(),
+                "21"
+            );
+        }
+    }
+
+    #[test]
+    fn deleted_replies_do_not_hide_surviving_system_votes_or_renewal_audits() {
+        let mut value = renewed();
+        for thread in value["threads"].as_array_mut().unwrap() {
+            thread["comments"]
+                .as_array_mut()
+                .unwrap()
+                .push(json!({"isDeleted": true}));
+        }
+        assert_eq!(
+            decide(value).unwrap(),
+            Decision::AlreadyValid {
+                approval_event_id: "20".to_owned()
+            }
+        );
+    }
+
+    #[test]
+    fn deleted_audit_in_a_renewal_chain_is_ineligible_not_a_new_anchor_or_failure() {
+        let mut value = renewed();
+        let body = value["threads"].as_array().unwrap().last().unwrap()["comments"][0]["content"]
+            .as_str()
+            .unwrap();
+        let document = body
+            .split_once("-ado ")
+            .unwrap()
+            .1
+            .split_once("-->")
+            .unwrap()
+            .0;
+        let mut marker: Value = serde_json::from_str(document).unwrap();
+        // A later source and renewal exercise lost attribution inside a chain.
+        value["sourceCommit"] = json!("d".repeat(40));
+        let source = value["sourceCommit"].clone();
+        value["iterations"].as_array_mut().unwrap().push(json!({
+            "id": 3, "createdDate": "2026-01-01T02:00:00Z",
+            "sourceRefCommit": {"commitId": source}
+        }));
+        let mut event = value["threads"][1].clone();
+        event["id"] = json!(21);
+        event["publishedDate"] = json!("2026-01-01T03:00:00Z");
+        value["threads"].as_array_mut().unwrap().push(event);
+        marker["audit"]["operationId"] = json!(Uuid::new_v4().to_string());
+        marker["audit"]["sourceCommit"] = value["sourceCommit"].clone();
+        marker["voteEventId"] = json!("21");
+        marker["iterationId"] = json!(3);
+        append_audit(&mut value, &marker);
+        let thread = value["threads"].as_array_mut().unwrap().last_mut().unwrap();
+        thread["id"] = json!(31);
+        thread["comments"][0]["publishedDate"] = json!("2026-01-01T03:05:00Z");
+        thread["comments"][0]["lastUpdatedDate"] = json!("2026-01-01T03:05:00Z");
+        assert_eq!(
+            decide(value.clone()).unwrap(),
+            Decision::AlreadyValid {
+                approval_event_id: "21".to_owned()
+            }
+        );
+        value["threads"]
+            .as_array_mut()
+            .unwrap()
+            .iter_mut()
+            .find(|thread| thread["id"] == 30)
+            .unwrap()["isDeleted"] = json!(true);
+        assert_eq!(
+            decide(value).unwrap(),
+            Decision::Ineligible {
+                reason: "approvalEvidenceDeleted".to_owned()
+            }
+        );
+    }
+
+    #[test]
+    fn deleted_records_do_not_hide_malformed_surviving_evidence() {
+        for path in [
+            "/threads/1/properties/CodeReviewVoteResult",
+            "/policies/3/type/id",
+            "/iterations/1/sourceRefCommit/commitId",
+        ] {
+            let mut value = evidence(&fixture()["stages"][2]);
+            value["threads"]
+                .as_array_mut()
+                .unwrap()
+                .push(json!({"id": "deleted", "isDeleted": true}));
+            *value.pointer_mut(path).unwrap() = Value::Null;
+            decide(value).unwrap_err();
+        }
+        let original: Evidence = serde_json::from_value(evidence(&fixture()["stages"][2])).unwrap();
+        let mut changed = original.clone();
+        let Evidence::History { threads, .. } = &mut changed else {
+            unreachable!()
+        };
+        threads[1]["isDeleted"] = json!(true);
+        assert!(!super::equivalent(&original, &changed).unwrap());
     }
 
     #[test]

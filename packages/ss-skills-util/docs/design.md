@@ -55,6 +55,13 @@ Current reset settings and a later push alone do not prove why a vote is zero.
 Routine untyped system notifications do not change approval standing or supply
 vote-reset authority.
 
+Deleted ADO threads and comments supply no approval, withdrawal, or pending-review
+authority. Inspection ignores their removed payloads and retains the returned
+records in its snapshot. If no applicable approval survives, inspection reports
+`noPriorApproval`; deletion-related gaps in otherwise present authority produce
+`ineligible` with reason `approvalEvidenceDeleted`. Neither outcome permits renewal.
+Surviving explicit decisions and pending reviews still prevent automatic renewal.
+
 Inspection does not create or renew approvals. It emits bounded terminal
 outcomes and leaves failed evidence explicit. A new run obtains
 new evidence rather than replacing an existing immutable observation.

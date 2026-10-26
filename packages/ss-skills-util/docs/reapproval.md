@@ -132,6 +132,23 @@ draft activity does not change approval authority.
 System notifications with null or omitted property bags do not supply vote,
 reset, or reviewer authority. Inspection does not interpret their prose.
 
+Deleted threads and comments do not contribute events, pending reviews, or
+renewal authority. Their payloads may be absent; complete observations still retain
+the returned tombstones and fence changes to them. A current positive vote alone
+cannot replace a deleted approving event or identify its source. With no surviving
+applicable approval, inspection reports `noPriorApproval`. A deletion-related
+current-vote mismatch or a renewal without its preceding external authority is
+`ineligible` with reason `approvalEvidenceDeleted`, not permission to renew.
+Surviving withdrawals, negative decisions, removals, and pending reviews remain
+authoritative.
+
+Retained account-owned renewal markers in deleted records conservatively make the
+inspection `ineligible` with reason `approvalEvidenceDeleted`. Their bytes can veto
+authority but cannot establish an anchor or turn a surviving automatic vote into
+an external approval. A surviving audit for an explicitly deleted vote supplies no
+vote authority. Malformed surviving evidence and genuine service, authentication,
+or transport failures remain explicit failures.
+
 Minimum-reviewer evaluations identify applicable policy configurations. Their
 settings must agree with the captured configurations. Inspection combines
 `requireVoteOnLastIteration` and `requireVoteOnEachIteration` across applicable
@@ -189,7 +206,7 @@ It changes no existing discussion. Its `<!-- ss-autoreapprove-ado {JSON} -->`
 marker contains `audit` (the shared schema-1 scope, operation, policy, assessment,
 source and original anchor), `voteEventId`, and positive `iterationId`.
 The marker joins the service-authenticated comment author to the structured vote
-actor, initiator and source iteration. Duplicate, edited, deleted, mismatched,
+actor, initiator and source iteration. Duplicate, edited, mismatched,
 or malformed owned markers fail explicitly. Recognition processes the joined
 vote chronologically and preserves the existing external anchor; later human
 approvals establish new anchors, while withdrawals, negatives and removals

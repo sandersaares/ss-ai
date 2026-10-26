@@ -104,7 +104,11 @@ ADO inspection interprets ordinary reviewer and merge policies. Retained
 positive votes require source assessment when an applicable policy requires
 fresh iteration approval. Routine system activity and group contributions do
 not invalidate an individual's vote. Explicit withdrawals, negative votes,
-and removals prevent renewal. Missing reset-cause evidence and unrecognized
+and removals prevent renewal. Ignore deleted threads and comments as authority.
+The utility retains their records and returns `noPriorApproval` or
+`ineligible` when deletion leaves no usable approval authority; neither outcome
+permits renewal. Surviving decisions and pending reviews still apply.
+Missing reset-cause evidence without a deletion-related gap and unrecognized
 policy/history shapes are actionable tooling failures; do not guess approval
 authority or conduct additional service experiments.
 
