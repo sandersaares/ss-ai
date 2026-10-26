@@ -1,4 +1,4 @@
-// Standalone native process fixture, compiled with the repository's rustc by integration tests.
+// Standalone native process fixture, compiled once by the repository test preparation phase.
 // It requires no installed provider CLI or credentials and never reaches a remote service.
 use std::env;
 use std::fs;

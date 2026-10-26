@@ -14,6 +14,7 @@ use std::net::{TcpListener, TcpStream};
 use std::os::unix::fs::PermissionsExt;
 #[cfg(windows)]
 use std::os::windows::fs::OpenOptionsExt;
+use std::panic::catch_unwind;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 use std::sync::mpsc;
@@ -23,6 +24,7 @@ use std::time::Duration;
 use jiff::Timestamp;
 use ohno::AppError;
 use serde_json::{Value, json};
+use sha2::{Digest, Sha256};
 use ss_skills_util::{
     Clock, Http, HttpResponse, NativeHttp, NativeProcess, Process, ProcessOutput, SystemClock, run,
 };
@@ -71,6 +73,7 @@ struct Fixture {
 }
 
 impl Fixture {
+    /// Copies immutable prerequisites into a private launcher and response directory.
     fn new() -> Self {
         let root = tempfile::Builder::new()
             .prefix("skills fixture with spaces ")
@@ -81,19 +84,7 @@ impl Fixture {
         } else {
             "provider"
         });
-        let output = Command::new("rustc")
-            .args(["--edition", "2024"])
-            .arg(
-                Path::new(env!("CARGO_MANIFEST_DIR"))
-                    .join("tests")
-                    .join("support")
-                    .join("provider.rs"),
-            )
-            .arg("-o")
-            .arg(&program)
-            .output()
-            .unwrap();
-        successful(&output);
+        fs::copy(Self::prepared_provider(), &program).unwrap();
         for name in ["gh", "az"] {
             #[cfg(windows)]
             fs::write(
@@ -112,6 +103,56 @@ impl Fixture {
             program,
             path,
         }
+    }
+
+    /// Enforces the standalone helper prerequisite even when Cargo bypasses the repository runner.
+    fn prepared_provider() -> PathBuf {
+        let record = std::env::var_os("SS_AI_RUST_TEST_PREREQUISITES")
+            .expect("Run scripts/Invoke-Tests.ps1 -Suite Rust -Phase Prepare and set SS_AI_RUST_TEST_PREREQUISITES to its absolute record path");
+        Self::prepared_provider_from(Path::new(&record))
+    }
+
+    /// Validates completion, exact paths, compiled source identity, and immutable artifact bytes.
+    fn prepared_provider_from(record: &Path) -> PathBuf {
+        assert!(record.is_absolute(), "Prerequisite record must be absolute");
+        let record: Value = serde_json::from_slice(
+            &fs::read(record).expect("Cannot read prepared Rust prerequisites"),
+        )
+        .expect("Malformed Rust prerequisites");
+        assert_eq!(record["schemaVersion"], 1, "Unsupported prerequisites");
+        assert_eq!(record["status"], "complete", "Incomplete prerequisites");
+        let provider = &record["provider"];
+        let source = Path::new(provider["source"]["path"].as_str().unwrap());
+        assert!(source.is_absolute(), "Provider source must be absolute");
+        let source_bytes = fs::read(source).expect("Missing provider source");
+        assert_eq!(
+            source_bytes,
+            include_bytes!("support/provider.rs"),
+            "Provider source changed; prepare and compile tests again"
+        );
+        let executable = Path::new(provider["executable"]["path"].as_str().unwrap());
+        assert!(
+            executable.is_absolute(),
+            "Provider executable must be absolute"
+        );
+        for (artifact, bytes) in [
+            (&provider["source"], source_bytes),
+            (
+                &provider["executable"],
+                fs::read(executable).expect("Missing prepared provider executable"),
+            ),
+        ] {
+            assert!(
+                Path::new(artifact["path"].as_str().unwrap()).is_absolute(),
+                "Prepared provider paths must be absolute"
+            );
+            assert_eq!(
+                format!("{:X}", Sha256::digest(bytes)),
+                artifact["sha256"].as_str().unwrap(),
+                "Modified provider prerequisite; prepare again"
+            );
+        }
+        PathBuf::from(provider["executable"]["path"].as_str().unwrap())
     }
 
     fn command(&self) -> Command {
@@ -144,6 +185,76 @@ impl Fixture {
             ]);
         command
     }
+}
+
+#[test]
+fn provider_prerequisites_reject_missing_incomplete_stale_and_modified_artifacts() {
+    let root = TempDir::new().unwrap();
+    let source = root.path().join("provider.rs");
+    let executable = root.path().join("provider");
+    let record = root.path().join("prerequisites.json");
+    let source_bytes = include_bytes!("support/provider.rs");
+    // Validation needs artifact bytes, not another compiler invocation or a runnable substitute.
+    let executable_bytes = b"immutable artifact";
+    fs::write(&source, source_bytes).unwrap();
+    fs::write(&executable, executable_bytes).unwrap();
+    let valid = json!({
+        "schemaVersion": 1,
+        "status": "complete",
+        "provider": {
+            "source": {"path": source, "sha256": format!("{:X}", Sha256::digest(source_bytes))},
+            "executable": {"path": executable, "sha256": format!("{:X}", Sha256::digest(executable_bytes))}
+        }
+    });
+    fs::write(&record, serde_json::to_vec(&valid).unwrap()).unwrap();
+    assert_eq!(Fixture::prepared_provider_from(&record), executable);
+    for (pointer, replacement) in [
+        ("/schemaVersion", json!(2)),
+        ("/status", json!("preparing")),
+        ("/provider/source/path", json!("relative.rs")),
+        ("/provider/executable/path", json!("relative")),
+        ("/provider/executable/sha256", json!("modified")),
+        (
+            "/provider/executable/path",
+            json!(root.path().join("missing")),
+        ),
+    ] {
+        let mut invalid = valid.clone();
+        *invalid.pointer_mut(pointer).unwrap() = replacement;
+        fs::write(&record, serde_json::to_vec(&invalid).unwrap()).unwrap();
+        catch_unwind(|| Fixture::prepared_provider_from(&record)).unwrap_err();
+    }
+    fs::write(&record, serde_json::to_vec(&valid).unwrap()).unwrap();
+    fs::write(&source, b"changed source at the same package version").unwrap();
+    catch_unwind(|| Fixture::prepared_provider_from(&record)).unwrap_err();
+    catch_unwind(|| Fixture::prepared_provider_from(&root.path().join("absent"))).unwrap_err();
+}
+
+#[test]
+fn concurrent_provider_fixtures_own_independent_mutable_state() {
+    // Construction overlaps without spawning children while another test may hold retained locks.
+    thread::scope(|scope| {
+        let first = scope.spawn(Fixture::new);
+        let second = scope.spawn(Fixture::new);
+        let first = first.join().unwrap();
+        let second = second.join().unwrap();
+        assert_ne!(first.root.path(), second.root.path());
+        let response = "remote-claim.json";
+        fs::write(first.root.path().join(response), b"first").unwrap();
+        fs::write(second.root.path().join(response), b"second").unwrap();
+        assert_eq!(
+            fs::read(first.root.path().join(response)).unwrap(),
+            b"first"
+        );
+        assert_eq!(
+            fs::read(second.root.path().join(response)).unwrap(),
+            b"second"
+        );
+        assert_eq!(
+            fs::read(&first.program).unwrap(),
+            fs::read(&second.program).unwrap()
+        );
+    });
 }
 
 fn successful(output: &Output) {

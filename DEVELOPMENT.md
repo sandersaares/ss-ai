@@ -57,6 +57,14 @@ native utility when selected review suites need it. The runner never uses
 the user's installed utility as the test prerequisite. It propagates
 failure status; `All` retains Rust failures after Pester completes.
 
+Rust checks report separate Clippy, preparation, and execution elapsed times.
+Preparation compiles the shared provider once and discovers selected test
+executables from Cargo artifact JSON. Every run owns its build directory; no
+mutable fixture state or final binaries are shared between invocations.
+An unfiltered run retains all integration tests and doctests. The real
+installation lifecycle remains an explicit compilation-bearing integration
+test; its release/native-CPU builds are independent of provider preparation.
+
 Run every test in the repo:
 
 ```powershell
@@ -64,6 +72,39 @@ just test
 just test-all
 just test-rust
 ```
+
+Prepare once for repeated native execution, using an existing directory outside
+the checkout for the invocation's record:
+
+```powershell
+$record = Join-Path ([IO.Path]::GetTempPath()) ('rust-prerequisites-' + [guid]::NewGuid() + '.json')
+just test-rust-prepare -PrerequisitePath $record -RustTest native
+just test-rust-execute -PrerequisitePath $record -RustTest native
+just test-rust-execute -PrerequisitePath $record -RustTest native -RustFilter provider
+```
+
+The PowerShell equivalents use `scripts/Invoke-Tests.ps1 -Suite Rust` with
+`-Phase Prepare` or `-Phase Execute`. Omit `-RustTest` from both phases for the
+full Rust suite. `-RustFilter` selects runtime test names without rebuilding.
+Preparation refuses an existing record. Execution rejects missing, incomplete,
+modified, stale-source, mismatched-selection, and incompatible-toolchain or
+flag records instead of building a missing helper. Cargo still checks freshness;
+ordinary execution uses its prepared target directory and preserves
+`CARGO_BIN_EXE` and doctest behavior.
+
+For a direct Cargo invocation, first prepare the matching selection, set
+`SS_AI_RUST_TEST_PREREQUISITES` to the absolute record path, and pass the
+record's `targetDirectory` as `--target-dir`. Prefer the canonical execution
+phase, which also validates the complete source/toolchain/flag identity.
+Native fixtures validate the record's provider source and executable bytes
+and never compile a missing prerequisite. They copy the immutable helper
+into private directories with spaces, keeping response files and PATH private.
+
+Without an explicit record, the runner cleans up its private artifacts after
+tests exit. With an explicit record, retain the record and its `ownedDirectory`
+until every consumer finishes, then remove those exact owned paths. A new
+preparation uses new owned outputs and cannot invalidate an active consumer.
+No cross-run build cache or runner-specific process isolation is required.
 
 Run tests for a single skill:
 

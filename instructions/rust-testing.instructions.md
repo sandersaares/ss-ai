@@ -17,6 +17,15 @@ Do not start new processes in unit tests - any logic that is more than "testing 
 Similarly, other resources outside the current process are inappropriate in unit tests - do not access the filesystem or the network.
 Unit tests must use mock/simulated external dependencies and leave testing with real resources to integration tests.
 
+# Prepare shared test prerequisites before execution
+
+Prepare shared test executables before invoking the test runner and pass their
+exact paths. Fixture constructors must not invoke Cargo or rustc. Share immutable
+artifacts, not mutable test state. Keep real subprocess coverage where process
+behavior is the contract; use injected effects for unrelated scenario matrices.
+Compilation-bearing installation or compiler integration scenarios must be
+explicit and reuse compatible prerequisites.
+
 # Scope Miri incompatibilities to individual tests
 
 When only some tests execute dependency behavior that Miri does not support,

@@ -22,6 +22,48 @@ Windows command shims, large UTF-8 streams, and installed-tool discovery.
 Synchronization uses explicit signals and progress checks, not real-time
 sleeps. Tests preserve valid schema-2 journals and ambiguous-write states.
 
+## Shared test preparation
+
+`scripts/Invoke-Tests.ps1` owns the `Prepare` and `Execute` phases; `just`
+recipes only forward arguments. The dot-sourced
+`scripts/lib/RustTestPreparation.ps1` supplies the reusable boundary.
+`New-RustTestPreparation` takes an absolute repository root, an absolute
+previously unused prerequisite record path, and optional integration target
+names. `Read-RustTestPreparation` validates the same selection and identity.
+`Invoke-PreparedRustTests` runs Cargo against the owned target directory.
+The boundary does not install anything or select an installation profile.
+
+The schema-1 successful record contains `status: complete`, `identity`, `testTargets`,
+`ownedDirectory`, `targetDirectory`, `provider`, and `executables`.
+Identity binds the checkout root, Rust source/manifests/lockfile/configuration
+digest, verbose Rust compiler identity, Cargo version, all-feature test profile,
+and compiler/build/target/profile environment. Provider source and executable
+records, and Cargo-discovered executable records, contain exact absolute paths
+and SHA-256 digests. The producer rechecks source identity and validates the
+consumer boundary before atomically publishing. Failed Cargo preparation publishes
+no record and removes only its own outputs. Provider-independent selections
+omit the provider build. A provider-only failure retains compiled test artifacts
+in an explicit `status: providerFailed` record with `providerFailure` text and
+no provider artifact. Only the canonical orchestrator accepts that state: it
+reports the failure, blocks native tests, runs independent tests and doctests,
+and fails the overall invocation. Ordinary prerequisite readers reject it.
+
+Every preparation creates a unique owned directory beside the record. Cargo
+uses its private `target` child, so another preparation cannot replace final
+executables held by active tests. Explicit records retain these outputs until
+their owner removes them after consumers exit; the combined runner removes
+implicitly allocated outputs. Independent runs never clean another run's
+directory. Native fixtures copy the provider into private launcher directories
+and retain `CARGO_BIN_EXE_ss-skills-util` for the ordinary executable.
+
+These choices adopt [Folo's helper preparation and Cargo artifact discovery](https://github.com/folo-rs/folo/blob/eba896a8e20465b4efe0e041c34aabb92a466aaf/justfiles/just_testing.just#L153-L227),
+[owned final artifacts](https://github.com/folo-rs/folo/blob/eba896a8e20465b4efe0e041c34aabb92a466aaf/packages/cargo-bench-history-faker/docs/implementation.md#L8-L47),
+and [strict prerequisite lookup](https://github.com/folo-rs/folo/blob/eba896a8e20465b4efe0e041c34aabb92a466aaf/packages/dure-test-helper/src/locate.rs#L35-L58)
+without adding a helper package, fallback compilation, or nextest dependency.
+Phase elapsed times include preparation; Cargo artifact freshness appears in
+the preparation log. Warm execution can reuse one retained preparation, but a
+new invocation intentionally pays for a private build graph.
+
 ## Installation verification
 
 Local installation appends `-C target-cpu=native` to the installer child's

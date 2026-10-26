@@ -20,12 +20,20 @@ test-skill SKILL *ARGS:
     & ./scripts/Invoke-Tests.ps1 -Path ./tests/{{SKILL}}/ {{ARGS}}
 
 # Run native Clippy and Cargo tests without Pester.
-test-rust:
-    & ./scripts/Invoke-Tests.ps1 -Suite Rust
+test-rust *ARGS:
+    & ./scripts/Invoke-Tests.ps1 -Suite Rust {{ARGS}}
+
+# Prepare owned Rust artifacts; pass an absolute record path via -PrerequisitePath.
+test-rust-prepare *ARGS:
+    & ./scripts/Invoke-Tests.ps1 -Suite Rust -Phase Prepare {{ARGS}}
+
+# Execute a matching prepared selection, including doctests when unfiltered.
+test-rust-execute *ARGS:
+    & ./scripts/Invoke-Tests.ps1 -Suite Rust -Phase Execute {{ARGS}}
 
 # Run all Pester and native checks.
-test-all:
-    & ./scripts/Invoke-Tests.ps1 -Suite All
+test-all *ARGS:
+    & ./scripts/Invoke-Tests.ps1 -Suite All {{ARGS}}
 
 # Run a single eval spec. Extra args are forwarded to `waza run`.
 #   just eval evals/ss-cargo-deps-tidy/trigger.eval.yaml
