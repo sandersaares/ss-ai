@@ -408,6 +408,10 @@ claim the user inspected.
 Findings needing judgment are presented together by default so the user can
 assess the review as a coherent whole. The audit also offers an in-session
 walkthrough alongside the applicable whole-document approval choices.
+The document-audit question uses fixed wording and choice labels in a fixed
+order: findings approval, findings and merge approval, then in-session review.
+Only the PR identity varies; inapplicable choices and an inapplicable PR reminder
+are omitted. Resumed and amended document presentations use the same format.
 Selecting the walkthrough approves nothing. It shows the overview once, then
 each undecided finding's complete rendered text before asking `Approve/Other`.
 Approval applies only to that finding; rejection settles it, while clarification

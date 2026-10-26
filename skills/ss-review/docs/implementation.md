@@ -558,6 +558,13 @@ Only the latter loads `../audit-in-session.md`. Both use the same rendering,
 feedback, decision, and approved-set commands; no separate queue or decision
 schema represents the walkthrough.
 
+`../SKILL.md` phase 7 owns the literal document-audit question template and ordered
+choice labels. The orchestrator substitutes the audited PR identity, omits its
+reminder when there is no PR, and filters out merge approval for self-authored
+PRs or non-PR destinations. It preserves all remaining wording and choice order,
+including after amendments or resumption, rather than composing a new prompt.
+Feedback uses the question tool's free-form response, not another explicit choice.
+
 The in-session loop selects the first pending `auditFindingIds` entry, then reads
 its destination-specific file from the renderer's `findings` path mapping. It
 emits the complete Markdown in session text before asking `Approve/Other`.
