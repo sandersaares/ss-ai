@@ -16,6 +16,11 @@ jobs:
   pester:
     name: Pester (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
+    env:
+      # Native prerequisites build on disposable runners; retain backtrace lines without full debug data.
+      CARGO_INCREMENTAL: "0"
+      CARGO_PROFILE_DEV_DEBUG: line-tables-only
+      CARGO_PROFILE_TEST_DEBUG: line-tables-only
     strategy:
       fail-fast: false
       matrix:
@@ -51,6 +56,10 @@ jobs:
         os: [windows-latest, ubuntu-latest]
     env:
       RUST_BACKTRACE: 1
+      # Disposable runners do not reuse incremental state; line tables preserve useful backtraces.
+      CARGO_INCREMENTAL: "0"
+      CARGO_PROFILE_DEV_DEBUG: line-tables-only
+      CARGO_PROFILE_TEST_DEBUG: line-tables-only
     steps:
       - uses: actions/checkout@v4
       # Hosted runners supply native compiler/linker prerequisites for mimalloc.

@@ -628,11 +628,9 @@ impl Http for Provider {
         } else if path.ends_with("/policy/configurations") {
             values(&evidence["policies"])
         } else if path.ends_with("/policy/evaluations") {
-            if query.get("$skip").unwrap() == "0" {
-                values(&evidence["evaluations"])
-            } else {
-                values(&json!([]))
-            }
+            assert!(!query.contains_key("$top"));
+            assert!(!query.contains_key("$skip"));
+            values(&evidence["evaluations"])
         } else {
             panic!("Unexpected ADO route {url}");
         };

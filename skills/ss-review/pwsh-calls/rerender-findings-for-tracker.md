@@ -16,4 +16,4 @@ Placeholders to replace:
 | `SESSION_STATE` | Session state directory for this review. |
 | `CONTEXT_PATH` | Absolute path to the latest checked capture, when reviewing a pull request. |
 
-The renderer consumes the full capture programmatically; agent inspection of its metadata or discussion must use `query-pr-context.md` instead. Do not replace `-ContextPath` with a query projection. Check the emitted JSON for the rendered outputs and use them for the destination-change handling in phase 9. On an error, stop and report it before publication.
+The renderer consumes the full capture programmatically; agent inspection of its metadata or discussion must use `query-pr-context.md` instead. Do not replace `-ContextPath` with a query projection. Check the emitted JSON for the rendered outputs and use them for the destination-change handling in phase 9. On an error, apply [error recovery](../error-recovery.md) before publication.

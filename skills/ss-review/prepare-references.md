@@ -6,7 +6,7 @@ Explore the content to be reviewed to identify important related files in the sa
 
 The purpose of this is to collect important references and avoid duplicated searches for the same data later on in the process.
 
-If pull request context is supplied, use `pwsh-calls/query-pr-context.md` for any relevant metadata or discussion lookup. The full capture is a data store, not a reading document; do not view or dump it, bypass the recipe with a provider fetch, or concatenate pages. Retain relevant references rather than discussion dumps, and stop and report query errors.
+If pull request context is supplied, use `pwsh-calls/query-pr-context.md` for any relevant metadata or discussion lookup. The full capture is a data store, not a reading document; do not view or dump it, bypass the recipe with a provider fetch, or concatenate pages. Retain relevant references rather than discussion dumps. Apply [error recovery](error-recovery.md) to query and other command errors: correct orchestration mistakes and retry safe transient failures before reporting an unresolved blocker.
 
 Emit your findings as `references.md` file in session state, containing a categorized list of references. For example:
 

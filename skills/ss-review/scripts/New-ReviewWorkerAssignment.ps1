@@ -60,6 +60,9 @@ try {
     }
     $capture = if ($ContextPath) { Resolve-PullRequestPath -Path $ContextPath } else { $null }
     if ($capture) { $null = Read-PullRequestContextDocument -Path $capture }
+    # Recovery must be available even when the worker's first shared-document read fails.
+    $recoveryPolicy = Read-PullRequestFileText -Path (Join-Path $skillRoot 'error-recovery.md')
+    if ([string]::IsNullOrWhiteSpace($recoveryPolicy)) { throw "Worker recovery policy 'error-recovery.md' is empty." }
     $templates = @{
         references = 'prepare-references.md'; fileGroups = 'prepare-file-groups.md'
         focusAreas = 'prepare-focus-areas.md'; overview = 'prepare-content-overview.md'; review = 'review.md'
@@ -140,6 +143,9 @@ try {
     $assignmentLiteral = "'" + $assignmentPath.Replace("'", "''") + "'"
     $dispatch = @(
         "Execute authorized bounded '$Phase' work, not the ss-review skill. Orchestration and human decisions remain with the primary session."
+        'Apply this recovery policy before initial shared reads and compaction reloads:'
+        $recoveryPolicy
+        'Keep this policy and the reader command in compaction notes.'
         'Read each document below using the prepared command in PowerShell. Do not use the default file viewer.'
         if ($capture) {
             'Follow the Calling shell contract in the assigned queryRecipe, including for any permitted nested worker.'
@@ -149,7 +155,7 @@ try {
         '| --- | --- |'
         '| DOCUMENT_ID | One ID from the list below. |'
         'Process each page, then repeat with its exact nextOffset until complete is true. Never truncate, summarize unread pages, or apply this reader to a PR capture.'
-        'On errors stop and report the diagnostic. Keep this command for reloads after compaction.'
+        'On errors apply the recovery policy above before reporting an unresolved blocker to the primary session.'
         ($documents | ForEach-Object { "$($_['id']): $($_['sizeBytes']) bytes, $($_['lineCount']) lines; $($_['path'])" })
         'After all shared reads, execute the prompt document within its stated boundary.'
     ) -join "`n"
