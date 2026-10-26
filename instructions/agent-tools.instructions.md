@@ -84,7 +84,9 @@ than assuming Windows `Get-Command` can discover them.
 
 For a substantial script, prefer a script file and `-File` with a path visible
 to the target process. If inline PowerShell is necessary across WSL, use a
-single-quoted here-string and `-EncodedCommand` to preserve the script literally:
+single-quoted here-string and `-EncodedCommand` to preserve the script literally.
+The encoded child must also check its version explicitly because
+`-EncodedCommand` does not enforce `#Requires`:
 
 ```powershell
 #Requires -Version 7.6
@@ -100,6 +102,10 @@ $scriptText = @'
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 $PSNativeCommandUseErrorActionPreference = $true
+
+if ($PSVersionTable.PSVersion -lt [version]'7.6') {
+    throw 'PowerShell 7.6 or later is required.'
+}
 
 Get-Module -ListAvailable Pester | Select-Object Name, Version
 '@
