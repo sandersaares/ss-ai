@@ -18,8 +18,7 @@ BeforeAll {
             [IO.File]::WriteAllText((Join-Path $root 'SsReviewGitDiff.Tests.ps1'), "throw 'A blocked native consumer must not run'")
         }
         $testPath = if ($FailNativePester) { $root } else { $test }
-        # Provider compilation exercises dispatch; the release lifecycle is verified separately.
-        $suiteArgument = if ($Suite) { " -Suite $Suite -RustTest native" } else { '' }
+        $suiteArgument = if ($Suite) { " -Suite $Suite" } else { '' }
         $clippyExit = if ($FailClippy) { 19 } else { 0 }
         $code = @'
 function Get-Command {
@@ -47,7 +46,6 @@ function cargo {
 function rustc {
     $global:LASTEXITCODE = 0
     if ($args[0] -eq '-vV') { return 'rustc fixture' }
-    if ($args[0] -eq '--print') { return 'target_feature=fixture' }
     $executable = $args[[array]::IndexOf($args, '-o') + 1]
     [IO.File]::WriteAllText($executable, 'provider')
 }

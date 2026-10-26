@@ -61,12 +61,12 @@ Rust checks report separate Clippy, preparation, and execution elapsed times.
 Preparation compiles the shared provider once and discovers selected test
 executables from Cargo artifact JSON. Every run owns its build directory; no
 mutable fixture state or final binaries are shared between invocations.
-An unfiltered run retains all integration tests and doctests. Verified
-installation preparation runs the explicitly named compiler integration
-`prepare_real_release_installation`, with real release/native-CPU builds.
-Ordinary installation tests check its retained evidence without Cargo or rustc.
-Preparation and execution times must be added when comparing total elapsed time;
-moving release builds into preparation does not itself save that compilation.
+An unfiltered run retains all integration tests and doctests. Installer coverage
+lives in `tests/NativeInstallation.Tests.ps1`: simulated Cargo responses exercise
+our arguments, errors and artifact parsing, while isolated fixture launchers
+exercise PATH discovery and executable identity. These tests use the existing
+PowerShell executable; they never compile or install a utility. Cargo owns
+compilation, replacement and source-rebuild behavior.
 
 Run every test in the repo:
 
@@ -106,31 +106,16 @@ Native fixtures validate the record's provider source and executable bytes
 and never compile a missing prerequisite. They copy the immutable helper
 into private directories with spaces, keeping response files and PATH private.
 
-Select `-RustTest installation` in both phases to focus on installation.
-The ignored compiler integration runs only during preparation, not ordinary
-Cargo execution. It copies real source, rejects an unrelated destination,
-installs the baseline, edits source at the same version, and really reinstalls.
-Baseline and changed-source binaries remain separately owned. Cargo artifact
-JSON proves dependency reuse during the changed-source rebuild and that
-redundant installer checks perform no code generation. Stale, shadowed, and
-missing PATH checks and unchanged lockfile assertions belong to that verified
-sequence; runtime checks revalidate its hashes, outcomes, version, and help.
-The root prerequisite identity also binds `Install.ps1` and installer libraries.
-Failed installation preparation publishes no successful record.
-The canonical runner retains an explicit failed prerequisite record when only
-provider or installation preparation fails. It blocks the affected integration
-targets, runs already-built independent targets and doctests, and still exits
-unsuccessfully. Missing test executables remain an invocation-wide blocker.
+The canonical runner retains an explicit failed prerequisite record when
+provider preparation fails. It blocks native tests, runs already-built
+independent targets and doctests, and still exits unsuccessfully. Missing test
+executables remain an invocation-wide blocker.
 
 Without an explicit record, the runner cleans up its private artifacts after
 tests exit. With an explicit record, retain the record and its `ownedDirectory`
 until every consumer finishes, then remove those exact owned paths. A new
 preparation uses new owned outputs and cannot invalidate an active consumer.
 No cross-run build cache or runner-specific process isolation is required.
-Release installation uses its own private build graph, not the ordinary test
-profile's target directory. Repeated execution reuses verified evidence; a new
-preparation intentionally pays for a new release graph. No shared-intermediate
-cache or `CARGO_BUILD_BUILD_DIR` reuse is claimed.
 
 Run tests for a single skill:
 
@@ -242,8 +227,8 @@ environment settings keep backtrace source locations while avoiding unused
 incremental state and full debug information on disposable runners.
 Local developer builds retain Cargo's default settings.
 
-Installation tests use test-owned homes, source copies, and Cargo install
-roots. Never run the real installer against the developer's profile as a test.
+Installation tests use test-owned homes and isolated fixture launchers with
+simulated Cargo results. Never run the real installer against the developer's profile as a test.
 Provider fixtures are sanitized; tests must not contact live review services.
 Report dependency setup is opt-in and documented in the skill's platform guide.
 

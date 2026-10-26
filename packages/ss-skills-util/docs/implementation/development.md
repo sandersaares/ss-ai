@@ -31,16 +31,11 @@ recipes only forward arguments. The dot-sourced
 previously unused prerequisite record path, and optional integration target
 names. `Read-RustTestPreparation` validates the same selection and identity.
 `Invoke-PreparedRustTests` runs Cargo against the owned target directory.
-When installation is selected, the boundary also invokes the explicit,
-compiler-bearing installation preparation before ordinary runtime execution.
-
 The schema-1 successful record contains `status: complete`, null
-`providerFailure`/`installationFailure`, `identity`, `testTargets`,
-`ownedDirectory`, `targetDirectory`, `provider`, `executables`, and `installation`.
+`providerFailure`, `identity`, `testTargets`,
+`ownedDirectory`, `targetDirectory`, `provider`, and `executables`.
 Identity binds the checkout root, Rust source/manifests/lockfile/configuration
-digest (including root `Install.ps1` and installer PowerShell libraries),
-verbose Rust compiler identity, Cargo version, native CPU compilation
-capabilities reported by `rustc --print cfg -C target-cpu=native`, all-feature test profile,
+digest, verbose Rust compiler identity, Cargo version, all-feature test profile,
 and compiler/build/target/profile environment. Provider source and executable
 records, and Cargo-discovered executable records, contain exact absolute paths
 and SHA-256 digests. The producer rechecks source identity and validates the
@@ -51,15 +46,8 @@ in an explicit `status: providerFailed` record with `providerFailure` text and
 no provider artifact. Only the canonical orchestrator accepts that state: it
 reports the failure, blocks native tests, runs independent tests and doctests,
 and fails the overall invocation. Ordinary prerequisite readers reject it.
-An installation-only failure uses `status: installationFailed`, nonempty
-`installationFailure`, and no installation evidence. Simultaneous failures use
-`providerAndInstallationFailed` and both failure messages. The canonical reader's
-`-AllowPrerequisiteFailure` switch permits these explicit failed records only
-for continuing already prepared independent tests. It excludes precisely the
-failed targets, preserves unit tests and doctests in a full selection, and
-still fails the overall run. Native consumers accept installation-only failure
-when their own provider is intact. General test compilation failure remains
-an invocation-wide blocker because its executable set is incomplete.
+General test compilation failure remains an invocation-wide blocker because
+its executable set is incomplete.
 Publication opens a retained `<record>.lock` sibling exclusively and holds it
 across the final nonexistence check and atomic move. Competing writers fail
 explicitly; readers need no publication lock. The producer never deletes a
@@ -89,42 +77,20 @@ plain `RUSTFLAGS`. It leaves the caller's environment unchanged. These binaries
 target the installing machine's CPU and are not portable across CPUs. Ordinary
 build and CI commands do not receive this installation-only flag.
 
-The explicitly ignored `prepare_real_release_installation` integration runs
-only during the canonical preparation phase. It copies source into an owned directory, uses a
-test-owned Cargo installation root already on the child `PATH`, installs with
-`--locked`, changes that copy without changing the package version, and proves
-reinstallation replaced the executable. It never runs full machine setup or
-changes the user's installed utility. It calls only the installer function
-against test-owned locations and rejects an older same-version binary on
-`PATH`, whether the new installation directory is missing or shadowed. It
-also rejects a PATH without any utility. Ambient utility directories are
-excluded from these child PATH values; necessary Cargo/Rustup launchers in
-those directories receive private copies.
+`tests/NativeInstallation.Tests.ps1` exercises our installer boundary without
+running `cargo install`. Command construction tests assert locked local-source
+arguments, caller flag precedence, native CPU optimization and child-only
+environment changes. Simulated Cargo output covers process failures, JSON
+parsing, exact executable selection and incomplete evidence. Existing PowerShell
+executables drive test-owned launchers and version responses; isolated child
+PATH values cover correct, stale, missing and shadowed executable discovery.
+The tests preserve caller location and verify that failed installation blocks
+instruction and skill activation. They neither compile fixtures nor change
+the user's installation.
 
-The root record's optional `installation` field is an absolute, SHA-256-bound
-artifact record for `ownedDirectory/installation/evidence.json`. It is required
-for full or installation selections and null for other selections. The
-schema-1 evidence contains completion status, native compiler flags, retained
-artifact hashes, baseline/changed version and help observations, and exact
-command outcomes with Cargo artifact JSON. Both
-boundaries validate the record before use. Preparation uses one copied source
-workspace and one release target graph, separate from `targetDirectory`.
-The same-version edit genuinely rebuilds the real utility; dependencies must
-remain fresh. Repeated setup calls must report only fresh artifacts. The old
-binary has an independent owned path, so rebuilding cannot replace it.
-Unsuccessful installation preparation publishes no successful evidence. Its
-explicit failed outer record retains independent executables and diagnostics.
-
-The canonical reader checks toolchain and CPU compatibility before running
-tests; these compiler identity queries do not generate code. The ordinary,
-prominently named installation test revalidates source and
-lockfile bytes, ownership, hashes, expected command outcomes and freshness,
-then compares version/help from the exact retained executables. It launches
-no compiler, Cargo, or installer and never builds absent evidence. Preparation
-elapsed time includes the real release compilation; report it alongside
-execution rather than treating relocation as a speedup. A new preparation
-uses a private release graph; repeated execution can reuse retained evidence.
-No cross-run cache or shared Cargo intermediate-directory benefit is assumed.
+Cargo owns compilation, replacement, registration and source rebuilding.
+Tests exercise our handling of Cargo's reported artifacts rather than repeat
+those Cargo responsibilities with a real release installation.
 
 Setup reads Cargo's compiler-artifact JSON and compares the build's SHA-256
 with the executable resolved on `PATH`. This detects stale, shadowing copies

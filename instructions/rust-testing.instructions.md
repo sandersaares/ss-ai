@@ -23,8 +23,6 @@ Prepare shared test executables before invoking the test runner and pass their
 exact paths. Fixture constructors must not invoke Cargo or rustc. Share immutable
 artifacts, not mutable test state. Keep real subprocess coverage where process
 behavior is the contract; use injected effects for unrelated scenario matrices.
-Compilation-bearing installation or compiler integration scenarios must be
-explicit and reuse compatible prerequisites.
 
 # Scope Miri incompatibilities to individual tests
 
