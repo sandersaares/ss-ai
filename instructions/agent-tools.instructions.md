@@ -14,6 +14,8 @@ in session state rather than a densely nested one-liner.
 
 # Establish prerequisites in each execution environment
 
+Applies to: agent workflows invoking commands or scripts through tools.
+
 Treat a new tool invocation as a fresh process unless the tool explicitly promises
 otherwise. A previous invocation's `Set-Location`, environment changes, imported
 modules, and functions do not establish the next invocation's state. Windows and
@@ -47,6 +49,8 @@ $configuration = [PesterConfiguration]::Default
 ```
 
 # Keep code and data out of nested shell parsing
+
+Applies to: agent workflows passing commands or arguments across shell or launcher boundaries.
 
 You are crossing a parsing boundary when invoking `sh -c`, `bash -lc`,
 `pwsh -Command`, `cmd /c`, or a Windows `.cmd`/`.bat` launcher. Identify which
@@ -99,6 +103,8 @@ double-quoted PowerShell strings interpolate those names as variables.
 
 # Use PowerShell expressions at pipeline boundaries
 
+Applies to: agent workflows constructing or executing PowerShell commands.
+
 An "empty pipe element" after `foreach (...) { ... }` means a language statement
 was used where a pipeline expression is required. Collect its output, then pipe:
 
@@ -144,6 +150,8 @@ if ($parseErrors.Count -gt 0) {
 ```
 
 # Preserve failures before running dependent commands
+
+Applies to: agent workflows executing commands through tools or consuming their results.
 
 A tool reporting success may only mean that it delivered the command result.
 A final exit code of zero may belong to a later successful command, not the
