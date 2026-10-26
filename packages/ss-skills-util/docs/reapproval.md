@@ -280,6 +280,9 @@ unresolved effects under the host lock. The host record is saved before the run
 record. If execution stops between those saves, recovery copies the validated
 terminal receipt into its original run without another service request; the
 original immutable assessment and scope must still match.
+Replaying a successfully persisted publication reuses its receipt and reporting
+metadata without refreshing service standing. A new run captures later approval
+or withdrawal events.
 
 `review_notice.rs` owns the distinct refusal marker, authenticated creation-time
 expiry, automatic-approval summary metadata, and schema-1 notice-intent journal.

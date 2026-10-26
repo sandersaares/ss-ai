@@ -305,6 +305,9 @@ new run rather than reinterpretation under a different judgment contract.
 
 ### Publication records and recovery
 
+Replaying a completed successful `publish` returns its persisted receipt and
+approval metadata. Start a new run to evaluate later service state.
+
 Needs-review comments use a separate schema-1 host journal under `review-notices`,
 with the shared provider publication lock held before the notice and run locks.
 The journal contains `schemaVersion`, `scope`, and `attempts`. Each attempt has

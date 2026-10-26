@@ -585,10 +585,11 @@ impl Http for Provider {
         if self.fault.get() == "postReadFailure" && self.writes.get() > 0 {
             return response(403, json!({}));
         }
-        if path.ends_with("/pullRequests/1")
-            && let Some(value) = self.observation_override()
-        {
-            return response(200, value);
+        if path.ends_with("/pullRequests/1") {
+            self.target_reads.set(self.target_reads.get() + 1);
+            if let Some(value) = self.observation_override() {
+                return response(200, value);
+            }
         }
         let evidence = self.evidence.borrow();
         let values =
@@ -1120,6 +1121,13 @@ fn valid_automatic_approval_timestamps_survive_later_invocations() {
         let shared = publish(&overlapping, &provider, &overlapping_snapshot).unwrap();
         assert_eq!(shared["items"][0]["status"], "alreadyValid");
         assert_eq!(&shared["items"][0]["automaticApproval"], automatic);
+        provider.fault.set("preflightReadFailure");
+        assert_eq!(publish(&root, &provider, &snapshot).unwrap(), published);
+        assert_eq!(
+            publish(&overlapping, &provider, &overlapping_snapshot).unwrap(),
+            shared
+        );
+        provider.fault.set("");
         let later = discover_inspect(&scope.path().join("later"), &provider, false);
         assert_eq!(later["items"][0]["status"], "alreadyValid");
         assert_eq!(&later["items"][0]["automaticApproval"], automatic);
@@ -1186,6 +1194,66 @@ fn publication_reporting_failures_are_persisted() {
             provider.fault.set("");
             publish(&root, &provider, &snapshot).unwrap_err();
             assert_eq!(invoke(&root, &provider, "results", &[]).unwrap(), result);
+        }
+    }
+}
+
+/// A completed run retains its observed result rather than mixing it with later service state.
+fn persisted_already_valid_results_replay_without_refreshing_reporting() {
+    let repository = TempDir::new().unwrap();
+    let (old, new) = sources(repository.path());
+    for ado in [false, true] {
+        for fault in ["reportReadFailure", "reportStandingChanged"] {
+            let scope = TempDir::new().unwrap();
+            let root = scope.path().join("run");
+            let provider = if ado {
+                Provider::ado(repository.path(), &old, &new)
+            } else {
+                Provider::new(repository.path(), &old, &new)
+            };
+            let (snapshot, prepared) = prepare(&root, &provider, false);
+            assess(&root, &provider, &snapshot, &prepared);
+            if ado {
+                provider.ado_vote(10, 40, "2026-09-28T09:06:00Z");
+            } else {
+                provider.later("APPROVED");
+            }
+            provider
+                .host_directory
+                .replace(Some(scope.path().join("host-store/publications")));
+            let published = publish(&root, &provider, &snapshot).unwrap();
+            assert_eq!(published["state"], "complete");
+            assert_eq!(published["items"][0]["status"], "alreadyValid");
+            assert!(published["items"][0]["publication"].is_object());
+            assert!(published["items"][0]["automaticApproval"].is_null());
+            let run_bytes = fs::read(root.join("run.json")).unwrap();
+            if fault == "reportStandingChanged" {
+                if ado {
+                    provider.ado_vote(0, 41, "2026-09-28T09:07:00Z");
+                } else {
+                    let mut evidence = provider.evidence.borrow_mut();
+                    evidence["reviews"].as_array_mut().unwrap().push(json!({
+                        "id": 99, "node_id": "later-withdrawal",
+                        "user": {"id": 42, "node_id": "user-42"},
+                        "state": "CHANGES_REQUESTED", "submitted_at": "2026-09-28T09:07:00Z",
+                        "commit_id": new, "body": "Independent later decision."
+                    }));
+                    evidence["timeline"].as_array_mut().unwrap().push(json!({
+                        "__typename": "PullRequestReview", "id": "later-withdrawal",
+                        "state": "CHANGES_REQUESTED"
+                    }));
+                }
+            } else {
+                provider.fault.set(fault);
+            }
+            let reads = provider.target_reads.get();
+            let replayed = publish(&root, &provider, &snapshot)
+                .unwrap_or_else(|error| panic!("{ado}: {fault}: {error}"));
+            assert_eq!(replayed, published, "{ado}: {fault}");
+            assert_eq!(invoke(&root, &provider, "results", &[]).unwrap(), published);
+            assert_eq!(fs::read(root.join("run.json")).unwrap(), run_bytes);
+            assert_eq!(provider.target_reads.get(), reads);
+            assert_eq!(provider.writes.get(), 0);
         }
     }
 }
@@ -1654,6 +1722,7 @@ fn native_git_assessment_and_guarded_publication_have_exact_effect_boundaries() 
     notice_dry_runs_refusals_and_uncertain_effects_do_not_duplicate_writes();
     valid_automatic_approval_timestamps_survive_later_invocations();
     publication_reporting_failures_are_persisted();
+    persisted_already_valid_results_replay_without_refreshing_reporting();
     notice_terminal_save_failures_preserve_original_recovery();
     uncertain_assessment_diagnostic_survives_notification_retry();
     notice_recovery_is_bound_to_the_failed_pull_request();

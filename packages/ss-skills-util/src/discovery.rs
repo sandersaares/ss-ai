@@ -1171,6 +1171,15 @@ pub(crate) fn publish(
     );
     // Reporting is part of publication completion, so its failures need the same durable diagnostic.
     let result = result.and_then(|receipt| {
+        // A completed invocation reports its persisted observation, not later service standing.
+        // The provider has already checked the original immutable assessment before replaying it.
+        if matches!(receipt.outcome, Outcome::Reapproved | Outcome::AlreadyValid)
+            && entry.publication.as_ref().is_some_and(|saved| {
+                saved.operation_id == receipt.operation_id && saved.outcome == receipt.outcome
+            })
+        {
+            return Ok((receipt, entry.automatic_approval.clone()));
+        }
         let mut automatic_approval =
             if matches!(receipt.outcome, Outcome::Reapproved | Outcome::AlreadyValid) {
                 store.automatic_approval(&run.run_id)?
