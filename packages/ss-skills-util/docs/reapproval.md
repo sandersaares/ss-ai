@@ -64,6 +64,55 @@ absent sides represent additions or deletions, not missing evidence. Structural 
 behavioral edits are not automatically significant. Mixed significant or uncertain
 judgments prevent approval. See the package command contract for schemas and bounds.
 
+The orchestrator dispatches a fresh GPT 6.1 Sol assessment worker per eligible PR
+with explicit medium reasoning and regular context. That worker owns preparation,
+bounded evidence reads, judgments, and completion. It returns scalar results and
+a concise reason, not source or discussion text, and cannot publish.
+
+## Persistent needs-review decisions
+
+A completed significant or uncertain assessment produces a standalone attributed comment
+through native `notify`. Its `<!-- ss-autoreapprove-needs-review {JSON} -->`
+marker binds the account, repository, PR, original anchor, assessed source,
+policy, and assessment. The comment states that a separate new review is required.
+It does not cast a negative vote or modify existing discussion. Uncertainty keeps
+its explicit diagnostic and partial run status even after the notice is posted.
+
+Inspection recognizes only service-authenticated comments by the account and
+uses their service creation times. An active notice returns `needsReview`
+without preparing source or repeating semantic assessment. A strictly later
+external approval by the account expires every older notice. Renewals and other
+accounts' approvals cannot expire notices. A notice posted after a new external
+approval still applies. Edited, malformed, duplicate, or scope-mismatched owned
+markers fail explicitly.
+
+Deleted ADO threads and comments cannot supply notice evidence, and their
+removed payloads are not required.
+
+Notice publication holds the provider's retained publication lock before the
+notice journal and run locks. It refreshes source and decision evidence before
+persisting intent and posting once. Readback identifies a unique owned effect;
+recovery never repeats an uncertain POST. Unresolved notices block later approval
+publication, and unresolved approval effects block new notices. Dry runs have
+no remote effects. Tooling failures before a completed assessment and missing approval authority do not produce
+semantic refusal markers.
+
+Recovery verifies the original operation's authenticated comment independently
+of current approval eligibility, including after closure or draft conversion.
+It captures PR identity and complete discussion without requiring source refs
+or approval history. It ignores unrelated expired notices but
+retains the intended comment's scope, timestamp, exact-body, and uniqueness
+checks. A run-wide publication failure records its originating PR; reconciling
+another PR cannot clear that failure.
+
+The final summary lists each in-range candidate as a linked PR number and title.
+It identifies current and retained needs-review decisions and distinguishes
+valid automatic approval standing from external approvals. Automatic metadata
+uses the review submission time on GitHub and structured vote time on ADO,
+including when a previous invocation created the automatic approval.
+
+## Approval publication
+
 Publication refreshes identity, authority, source, and discussion. GitHub submits
 the assessed source SHA explicitly; ADO binds the source through its structured
 iteration history and separate audit. A retained same-host lock encloses intent,
@@ -203,7 +252,7 @@ counterexamples, not claims of a live manual-dismissal experiment.
 
 ## Implementation responsibilities
 
-`discovery.rs` owns the schema-5 run and applies shared recency before dispatching
+`discovery.rs` owns the persisted run and applies shared recency before dispatching
 provider inspection. `github_approval.rs` joins complete REST reviews to the
 cursor-paged GraphQL history; filtered timeline totals are not pagination limits.
 `ado_approval.rs` validates structured actors, source iterations, and policy
@@ -248,6 +297,15 @@ unresolved effects under the host lock. The host record is saved before the run
 record. If execution stops between those saves, recovery copies the validated
 terminal receipt into its original run without another service request; the
 original immutable assessment and scope must still match.
+Replaying a successfully persisted publication reuses its receipt and reporting
+metadata without refreshing service standing. A new run captures later approval
+or withdrawal events.
+
+`review_notice.rs` owns the distinct refusal marker, authenticated creation-time
+expiry, automatic-approval summary metadata, and schema-1 notice-intent journal.
+The shared approval evidence boundary applies notices only after provider
+authority interpretation. Notice parsing remains separate from renewal audits;
+a discussion marker never becomes approval authority.
 
 Shared `git.rs` and `git_diff.rs` operations also serve full-review consumers.
 They compare exact immutable endpoints, decode quoted paths, and reject truncated

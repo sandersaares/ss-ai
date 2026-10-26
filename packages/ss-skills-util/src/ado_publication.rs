@@ -23,6 +23,7 @@ use crate::journal::FileJournal;
 use crate::json::{field, identifier, required_optional};
 use crate::publication::{Diagnostic, Input, Outcome, Receipt, Scope, hash};
 use crate::renewal::{Audit, State as AuditState};
+use crate::review_notice::{self, AutomaticApproval};
 use crate::target::{Platform, Target, escape};
 
 /// Retains the same stable host lock until the enclosing run has persisted.
@@ -315,6 +316,31 @@ impl<'a> Store<'a> {
             .operations
             .iter()
             .any(|item| item.run_id == run && item.vote_state != EffectState::Prepared)
+    }
+
+    /// A vote without verified audit remains unresolved even when readback is positive.
+    pub(crate) fn unresolved(&self) -> bool {
+        self.record.operations.iter().any(Operation::unresolved)
+    }
+
+    /// Reports only the source-valid automatic vote retained in verified readback.
+    pub(crate) fn automatic_approval(
+        &self,
+        run: &str,
+    ) -> Result<Option<AutomaticApproval>, AppError> {
+        let verification = self
+            .record
+            .operations
+            .iter()
+            .find(|operation| operation.run_id == run)
+            .and_then(|operation| operation.verification.as_ref());
+        verification.map_or(Ok(None), |verification| {
+            review_notice::automatic_approval(
+                &verification.evidence,
+                &self.record.scope,
+                timestamp(&verification.observed_at)?,
+            )
+        })
     }
 
     pub(crate) fn may_write(&self, run: &str) -> bool {

@@ -33,6 +33,8 @@ impl Clock for FixedClock {
 
 /// Keeps all service writes in memory while real Git fetches from a test-owned repository.
 struct Provider {
+    number: u32,
+    candidates: Vec<u32>,
     repository: PathBuf,
     evidence: RefCell<Value>,
     writes: Cell<usize>,
@@ -63,6 +65,8 @@ impl Provider {
             .unwrap()
             .remove("ref");
         Self {
+            number: 1,
+            candidates: vec![1],
             repository: repository.to_owned(),
             evidence: RefCell::new(evidence),
             writes: Cell::new(0),
@@ -144,6 +148,86 @@ impl Provider {
             );
         }
     }
+
+    /// Prevents atomic replacement without touching the active sibling lock.
+    fn fail_journal_save(&self) {
+        let path = host_journal(self.host_directory.borrow().as_ref().unwrap());
+        fs::rename(&path, path.with_extension("saved")).unwrap();
+        fs::create_dir_all(path).unwrap();
+    }
+
+    /// Places repeat notices after the fixture's intervening approval and source push.
+    fn notice_time(&self) -> &'static str {
+        if self.writes.get() > 1 {
+            "2026-09-28T09:08:30Z"
+        } else {
+            "2026-09-28T09:05:00Z"
+        }
+    }
+
+    /// Reporting faults begin only after the provider's terminal receipt is durable.
+    fn observation_override(&self) -> Option<Value> {
+        let fault = self.fault.get();
+        if fault == "preflightReadFailure" {
+            return Some(Value::Null);
+        }
+        if self.writes.get() > 0
+            && matches!(fault, "noticeClosed" | "noticeDraft" | "noticeAbandoned")
+        {
+            let mut evidence = self.evidence.borrow_mut();
+            if self.ado {
+                evidence["pullRequest"]["isDraft"] = json!(fault == "noticeDraft");
+                evidence["pullRequest"]["status"] = json!(match fault {
+                    "noticeClosed" => "completed",
+                    "noticeAbandoned" => "abandoned",
+                    _ => "active",
+                });
+                // A completed PR may have no source ref; recovery needs only its discussion.
+                evidence["sourceCommit"] = Value::Null;
+            } else {
+                evidence["pullRequest"]["draft"] = json!(fault == "noticeDraft");
+                evidence["pullRequest"]["state"] = json!(if fault == "noticeClosed" {
+                    "closed"
+                } else {
+                    "open"
+                });
+                evidence["pullRequest"]["head"]["repo"] = Value::Null;
+            }
+        }
+        if !matches!(fault, "reportReadFailure" | "reportStandingChanged") {
+            return None;
+        }
+        let path = host_journal(self.host_directory.borrow().as_ref().unwrap());
+        let record: Value = serde_json::from_slice(&fs::read(path).unwrap()).unwrap();
+        if !record["operations"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|operation| operation["result"]["outcome"] == "alreadyValid")
+        {
+            return None;
+        }
+        if fault == "reportReadFailure" {
+            return Some(Value::Null);
+        }
+        self.fault.set("");
+        if self.ado {
+            self.ado_vote(0, 41, "2026-09-28T09:07:00Z");
+        } else {
+            let mut evidence = self.evidence.borrow_mut();
+            let source = evidence["pullRequest"]["head"]["sha"].clone();
+            evidence["reviews"].as_array_mut().unwrap().push(json!({
+                "id": 99, "node_id": "reporting-withdrawal", "user": {"id": 42, "node_id": "user-42"},
+                "state": "CHANGES_REQUESTED", "submitted_at": "2026-09-28T09:07:00Z",
+                "commit_id": source, "body": "Independent later decision."
+            }));
+            evidence["timeline"].as_array_mut().unwrap().push(json!({
+                "__typename": "PullRequestReview", "id": "reporting-withdrawal",
+                "state": "CHANGES_REQUESTED"
+            }));
+        }
+        None
+    }
 }
 
 impl Process for Provider {
@@ -163,8 +247,48 @@ impl Process for Provider {
             ));
         }
         assert_eq!(program, "gh");
-        let path = arguments[1].as_str();
+        let path = arguments[1]
+            .replace(&format!("/pulls/{}", self.number), "/pulls/1")
+            .replace(&format!("/issues/{}", self.number), "/issues/1");
+        let path = path.as_str();
         let method = arguments[3].as_str();
+        if method == "POST" && path == "repos/example/widgets/issues/1/comments" {
+            self.writes.set(self.writes.get() + 1);
+            if matches!(
+                self.fault.get(),
+                "noticeRefused" | "noticeRefusalJournalFailure"
+            ) {
+                if self.fault.get() == "noticeRefusalJournalFailure" {
+                    self.fail_journal_save();
+                }
+                return Ok(ProcessOutput::new(
+                    false,
+                    b"HTTP/2.0 403 Forbidden\r\n\r\n{}".to_vec(),
+                    Vec::new(),
+                ));
+            }
+            let request: Value = serde_json::from_slice(input).unwrap();
+            let comment = json!({
+                "id": 50 + self.writes.get(), "user": {"id": 42}, "body": request["body"],
+                "created_at": self.notice_time(), "updated_at": self.notice_time()
+            });
+            if self.fault.get() != "noticeUnknown" {
+                self.evidence.borrow_mut()["comments"]
+                    .as_array_mut()
+                    .unwrap()
+                    .push(comment.clone());
+            }
+            if self.fault.get() == "noticeJournalFailure" {
+                self.fail_journal_save();
+            }
+            return Ok(
+                if matches!(self.fault.get(), "noticeUnknown" | "lostNoticeReply") {
+                    ProcessOutput::new(false, Vec::new(), b"connection lost".to_vec())
+                } else {
+                    ProcessOutput::new(true, serde_json::to_vec(&comment).unwrap(), Vec::new())
+                },
+            );
+        }
         if method == "POST" && path.ends_with("/reviews") {
             self.writes.set(self.writes.get() + 1);
             if self.fault.get() == "rateLimit" {
@@ -215,9 +339,7 @@ impl Process for Provider {
             }
             if self.fault.get() == "journalFailure" {
                 // A directory at the journal name deterministically refuses atomic file replacement.
-                let path = host_journal(self.host_directory.borrow().as_ref().unwrap());
-                fs::rename(&path, path.with_extension("saved")).unwrap();
-                fs::create_dir_all(path).unwrap();
+                self.fail_journal_save();
             }
             return Ok(if matches!(self.fault.get(), "lostReply" | "unknown") {
                 ProcessOutput::new(false, Vec::new(), b"connection lost".to_vec())
@@ -236,16 +358,31 @@ impl Process for Provider {
                 Vec::new(),
             ));
         }
+        if path == "repos/example/widgets/pulls/1"
+            && let Some(value) = self.observation_override()
+        {
+            return Ok(ProcessOutput::new(
+                true,
+                serde_json::to_vec(&value).unwrap(),
+                Vec::new(),
+            ));
+        }
         let evidence = self.evidence.borrow();
         let value = match path {
             "user" => {
                 json!({"id": if self.fault.get() == "auth" { 99 } else { 42 }, "login": "reviewer", "type": "User"})
             }
             "repos/example/widgets" => json!({"id": 123}),
-            "repos/example/widgets/pulls?state=open&per_page=100" => json!([[
-                {"number": 1, "state": "open", "draft": false, "title": "Recent source"},
-                {"number": 2, "state": "open", "draft": false, "title": "Excluded old"}
-            ]]),
+            "repos/example/widgets/pulls?state=open&per_page=100" => {
+                let mut candidates = self.candidates.iter().map(|number| json!({
+                    "number": number, "state": "open", "draft": false, "title": "Recent source"
+                })).collect::<Vec<_>>();
+                candidates.push(json!({
+                    "number": self.candidates.iter().max().unwrap() + 1,
+                    "state": "open", "draft": false, "title": "Excluded old"
+                }));
+                json!([candidates])
+            }
             "repos/example/widgets/pulls/1" => {
                 self.target_reads.set(self.target_reads.get() + 1);
                 let mut value = evidence["pullRequest"].clone();
@@ -262,7 +399,11 @@ impl Process for Provider {
             "graphql" => {
                 let request: Value = serde_json::from_slice(input).unwrap();
                 if request["query"].as_str().unwrap().contains("committedDate") {
-                    let at = if request["variables"]["num"] == 1 {
+                    let at = if self
+                        .candidates
+                        .iter()
+                        .any(|number| request["variables"]["num"] == *number)
+                    {
                         "2026-09-27T00:00:00Z"
                     } else {
                         "2020-01-01T00:00:00Z"
@@ -272,7 +413,7 @@ impl Process for Provider {
                         "pageInfo": {"hasNextPage": false, "endCursor": null}
                     }}}}})
                 } else {
-                    assert_eq!(request["variables"]["num"], 1);
+                    assert_eq!(request["variables"]["num"], self.number);
                     json!({"data": {"repository": {"pullRequest": {"timelineItems": {
                         "nodes": evidence["timeline"], "pageInfo": {"hasNextPage": false, "endCursor": null}
                     }}}}})
@@ -345,8 +486,15 @@ impl Http for Provider {
             assert!(vote || method == "POST");
             if self.fault.get() == "rateLimit"
                 || self.fault.get() == "permission"
-                || !vote && self.fault.get() == "auditRefused"
+                || !vote
+                    && matches!(
+                        self.fault.get(),
+                        "auditRefused" | "noticeRefused" | "noticeRefusalJournalFailure"
+                    )
             {
+                if self.fault.get() == "noticeRefusalJournalFailure" {
+                    self.fail_journal_save();
+                }
                 return response(
                     if self.fault.get() == "rateLimit" {
                         429
@@ -402,25 +550,46 @@ impl Http for Provider {
             }
             assert!(path.ends_with("/threads"));
             assert_eq!(request["status"], 4);
-            let at = "2026-09-28T09:05:00Z";
-            let thread = json!({"id": 30, "publishedDate": at, "lastUpdatedDate": at, "status": "closed",
+            let notice = request["comments"][0]["content"]
+                .as_str()
+                .unwrap()
+                .contains("<!-- ss-autoreapprove-needs-review ");
+            let at = if notice {
+                self.notice_time()
+            } else {
+                "2026-09-28T09:05:00Z"
+            };
+            let thread = json!({"id": if notice { 30 + self.writes.get() } else { 30 },
+                "publishedDate": at, "lastUpdatedDate": at, "status": "closed",
                 "comments": [{"id": 1, "parentCommentId": 0, "commentType": "text",
                     "author": {"id": "10000000-0000-4000-8000-000000000001"},
                     "content": request["comments"][0]["content"], "publishedDate": at,
                     "lastContentUpdatedDate": at, "lastUpdatedDate": at}], "isDeleted": false, "properties": {}});
-            if self.fault.get() != "auditUnknown" {
+            if !matches!(self.fault.get(), "auditUnknown" | "noticeUnknown") {
                 self.evidence.borrow_mut()["threads"]
                     .as_array_mut()
                     .unwrap()
                     .push(thread.clone());
             }
-            if matches!(self.fault.get(), "lostAuditReply" | "auditUnknown") {
+            if self.fault.get() == "noticeJournalFailure" {
+                self.fail_journal_save();
+            }
+            if matches!(
+                self.fault.get(),
+                "lostAuditReply" | "auditUnknown" | "lostNoticeReply" | "noticeUnknown"
+            ) {
                 return Err(io::Error::other("Lost audit reply").into());
             }
             return response(200, thread);
         }
         if self.fault.get() == "postReadFailure" && self.writes.get() > 0 {
             return response(403, json!({}));
+        }
+        if path.ends_with("/pullRequests/1") {
+            self.target_reads.set(self.target_reads.get() + 1);
+            if let Some(value) = self.observation_override() {
+                return response(200, value);
+            }
         }
         let evidence = self.evidence.borrow();
         let values =
@@ -539,7 +708,8 @@ fn invoke(
     )?)?)
 }
 
-fn prepare(root: &Path, provider: &Provider, dry_run: bool) -> (String, Value) {
+/// Starts a fresh run without requiring its inspection to need source assessment.
+fn discover_inspect(root: &Path, provider: &Provider, dry_run: bool) -> Value {
     fs::create_dir_all(root).unwrap();
     fs::write(
         root.join("policy.md"),
@@ -557,7 +727,7 @@ fn prepare(root: &Path, provider: &Provider, dry_run: bool) -> (String, Value) {
     }
     let discovered = invoke(root, provider, "discover", &args).unwrap();
     assert_eq!(discovered["counts"]["noRecentCommit"], 1);
-    let inspected = invoke(
+    invoke(
         root,
         provider,
         "inspect",
@@ -565,11 +735,18 @@ fn prepare(root: &Path, provider: &Provider, dry_run: bool) -> (String, Value) {
             "--repository-url".into(),
             provider.url().into(),
             "--pull-request-id".into(),
-            "1".into(),
+            provider.number.to_string(),
         ],
     )
-    .unwrap();
-    assert_eq!(inspected["items"][0]["status"], "assessmentRequired");
+    .unwrap()
+}
+
+fn prepare(root: &Path, provider: &Provider, dry_run: bool) -> (String, Value) {
+    let inspected = discover_inspect(root, provider, dry_run);
+    assert_eq!(
+        inspected["items"][0]["status"], "assessmentRequired",
+        "{inspected}"
+    );
     let snapshot = inspected["items"][0]["snapshotDigest"]
         .as_str()
         .unwrap()
@@ -599,7 +776,7 @@ fn work(
 ) -> Result<Value, AppError> {
     let mut all = vec![
         "--pull-request-id".into(),
-        "1".into(),
+        provider.number.to_string(),
         "--snapshot-digest".into(),
         snapshot.to_owned(),
     ];
@@ -608,6 +785,17 @@ fn work(
 }
 
 fn assess(root: &Path, provider: &Provider, snapshot: &str, prepared: &Value) {
+    assess_as(root, provider, snapshot, prepared, "insignificant");
+}
+
+/// Shares complete evidence coverage while varying the cumulative policy decision.
+fn assess_as(
+    root: &Path,
+    provider: &Provider,
+    snapshot: &str,
+    prepared: &Value,
+    disposition: &str,
+) {
     let mut references = vec!["policy".to_owned(), "discussion".to_owned()];
     for change in prepared["changes"].as_array().unwrap() {
         let id = change["id"].as_str().unwrap();
@@ -661,9 +849,13 @@ fn assess(root: &Path, provider: &Provider, snapshot: &str, prepared: &Value) {
         "--change-id".into(),
         "cumulative".into(),
         "--disposition".into(),
-        "insignificant".into(),
+        disposition.into(),
         "--rationale".into(),
-        "Combined fixture changes have no significant design change or likely performance/correctness regression; discussion has no new objection.".into(),
+        match disposition {
+            "significant" => "A significant design change requires a separate new review.",
+            "uncertain" => "Missing contract context prevents assessing correctness.",
+            _ => "Combined fixture changes have no significant design change or likely performance/correctness regression; discussion has no new objection.",
+        }.into(),
         "--evidence".into(),
         "policy".into(),
         "--evidence".into(),
@@ -676,6 +868,734 @@ fn assess(root: &Path, provider: &Provider, snapshot: &str, prepared: &Value) {
     }
     work(root, provider, "judge", snapshot, &cumulative).unwrap();
     work(root, provider, "complete", snapshot, &[]).unwrap();
+}
+
+/// Notice publication carries the same immutable snapshot and attribution as approval.
+fn notify(root: &Path, provider: &Provider, snapshot: &str) -> Result<Value, AppError> {
+    work(
+        root,
+        provider,
+        "notify",
+        snapshot,
+        &[
+            "--repository-url".into(),
+            provider.url().into(),
+            "--attribution".into(),
+            "[Copilot speaking]".into(),
+        ],
+    )
+}
+
+/// Exercises both providers' persistent refusal and independent-approval reset.
+fn needs_review_notices_short_circuit_and_expire_only_after_external_approval() {
+    let repository = TempDir::new().unwrap();
+    let (old, new) = sources(repository.path());
+    for ado in [false, true] {
+        let scope = TempDir::new().unwrap();
+        let root = scope.path().join("first");
+        let provider = if ado {
+            Provider::ado(repository.path(), &old, &new)
+        } else {
+            Provider::new(repository.path(), &old, &new)
+        };
+        let (snapshot, prepared) = prepare(&root, &provider, false);
+        assess_as(&root, &provider, &snapshot, &prepared, "significant");
+        let overlapping = scope.path().join("overlapping");
+        let (overlapping_snapshot, overlapping_prepared) = prepare(&overlapping, &provider, false);
+        assess_as(
+            &overlapping,
+            &provider,
+            &overlapping_snapshot,
+            &overlapping_prepared,
+            "significant",
+        );
+        publish(&root, &provider, &snapshot).unwrap_err();
+        let result = notify(&root, &provider, &snapshot).unwrap();
+        assert_eq!(result["state"], "complete");
+        assert_eq!(result["items"][0]["status"], "needsReview");
+        assert_eq!(
+            result["items"][0]["reviewNotice"]["createdAt"],
+            "2026-09-28T09:05:00Z"
+        );
+        assert_eq!(provider.writes.get(), 1);
+        notify(&root, &provider, &snapshot).unwrap();
+        let shared = notify(&overlapping, &provider, &overlapping_snapshot).unwrap();
+        assert_eq!(
+            shared["items"][0]["reviewNotice"],
+            result["items"][0]["reviewNotice"]
+        );
+        assert_eq!(provider.writes.get(), 1);
+        let body = if ado {
+            provider.evidence.borrow()["threads"]
+                .as_array()
+                .unwrap()
+                .last()
+                .unwrap()["comments"][0]["content"]
+                .as_str()
+                .unwrap()
+                .to_owned()
+        } else {
+            provider.evidence.borrow()["comments"]
+                .as_array()
+                .unwrap()
+                .last()
+                .unwrap()["body"]
+                .as_str()
+                .unwrap()
+                .to_owned()
+        };
+        assert!(body.starts_with("[Copilot speaking]"));
+        assert!(body.contains("<!-- ss-autoreapprove-needs-review "));
+        assert!(body.contains("separate new review"));
+        let fetches = provider.fetches.get();
+        let retained = discover_inspect(&scope.path().join("retained"), &provider, false);
+        assert_eq!(retained["items"][0]["status"], "needsReview");
+        assert_eq!(
+            retained["items"][0]["reviewNotice"],
+            result["items"][0]["reviewNotice"]
+        );
+        assert_eq!(
+            provider.fetches.get(),
+            fetches,
+            "Retained notices skip source work"
+        );
+        assert_eq!(provider.writes.get(), 1);
+        if ado {
+            // An external positive vote on the same source is a new approval event.
+            provider.ado_vote(10, 40, "2026-09-28T09:06:00Z");
+        } else {
+            provider.later("APPROVED");
+            provider.evidence.borrow_mut()["reviews"]
+                .as_array_mut()
+                .unwrap()
+                .last_mut()
+                .unwrap()["submitted_at"] = json!("2026-09-28T09:06:00Z");
+        }
+        let reset = discover_inspect(&scope.path().join("reset"), &provider, false);
+        assert_eq!(reset["items"][0]["status"], "alreadyValid");
+        assert!(reset["items"][0]["automaticApproval"].is_null());
+        if ado {
+            provider.ado_push();
+            provider.evidence.borrow_mut()["iterations"][2]["createdDate"] =
+                json!("2026-09-28T09:08:00Z");
+        } else {
+            let mut evidence = provider.evidence.borrow_mut();
+            evidence["reviews"]
+                .as_array_mut()
+                .unwrap()
+                .last_mut()
+                .unwrap()["state"] = json!("DISMISSED");
+            evidence["timeline"]
+                .as_array_mut()
+                .unwrap()
+                .last_mut()
+                .unwrap()["state"] = json!("DISMISSED");
+            evidence["timeline"].as_array_mut().unwrap().push(json!({
+                "__typename": "ReviewDismissedEvent", "id": "later-dismissal",
+                "review": {"id": "later-review"}, "previousReviewState": "APPROVED",
+                "createdAt": "2026-09-28T09:08:00Z",
+                "pullRequestCommit": {"commit": {"oid": new}}
+            }));
+        }
+        let resumed = discover_inspect(&scope.path().join("resumed"), &provider, true);
+        assert_eq!(resumed["items"][0]["status"], "assessmentRequired");
+        assert_eq!(provider.writes.get(), 1);
+    }
+}
+
+/// Verifies that dry runs and uncertain comment effects never issue another POST.
+fn notice_dry_runs_refusals_and_uncertain_effects_do_not_duplicate_writes() {
+    let repository = TempDir::new().unwrap();
+    let (old, new) = sources(repository.path());
+    for ado in [false, true] {
+        for fault in [
+            "dryRun",
+            "uncertain",
+            "noticeRefused",
+            "lostNoticeReply",
+            "noticeUnknown",
+            "postReadFailure",
+            "prePush",
+        ] {
+            let scope = TempDir::new().unwrap();
+            let root = scope.path().join("first");
+            let provider = if ado {
+                Provider::ado(repository.path(), &old, &new)
+            } else {
+                Provider::new(repository.path(), &old, &new)
+            };
+            let (snapshot, prepared) = prepare(&root, &provider, fault == "dryRun");
+            assess_as(
+                &root,
+                &provider,
+                &snapshot,
+                &prepared,
+                if fault == "uncertain" {
+                    "uncertain"
+                } else {
+                    "significant"
+                },
+            );
+            provider.fault.set(fault);
+            if fault == "prePush" {
+                if ado {
+                    provider.ado_push();
+                } else {
+                    provider.evidence.borrow_mut()["pullRequest"]["head"]["sha"] =
+                        json!("f".repeat(40));
+                }
+            }
+            let result = notify(&root, &provider, &snapshot);
+            if fault == "lostNoticeReply" {
+                assert_eq!(result.unwrap()["items"][0]["status"], "needsReview");
+                notify(&root, &provider, &snapshot).unwrap();
+            } else if fault == "uncertain" {
+                let result = result.unwrap();
+                assert_eq!(result["items"][0]["status"], "failed");
+                assert_eq!(result["items"][0]["error"]["kind"], "service");
+                assert_eq!(result["state"], "partial");
+                let later = discover_inspect(&scope.path().join("later"), &provider, false);
+                assert_eq!(later["items"][0]["status"], "needsReview");
+                notify(&root, &provider, &snapshot).unwrap();
+            } else if fault == "postReadFailure" {
+                assert_eq!(
+                    ss_skills_util::classification(&result.unwrap_err()),
+                    "ambiguousWrite"
+                );
+                provider.fault.set("");
+                assert_eq!(
+                    notify(&root, &provider, &snapshot).unwrap()["items"][0]["status"],
+                    "needsReview"
+                );
+            } else {
+                result.unwrap_err();
+                notify(&root, &provider, &snapshot).unwrap_err();
+            }
+            if fault == "noticeUnknown" {
+                provider.fault.set("");
+                let later = scope.path().join("later");
+                let (snapshot, prepared) = prepare(&later, &provider, false);
+                assess(&later, &provider, &snapshot, &prepared);
+                assert_eq!(
+                    ss_skills_util::classification(
+                        &publish(&later, &provider, &snapshot).unwrap_err()
+                    ),
+                    "ambiguousWrite"
+                );
+            }
+            assert_eq!(
+                provider.writes.get(),
+                usize::from(!matches!(fault, "dryRun" | "prePush")),
+                "{ado}: {fault}"
+            );
+        }
+    }
+}
+
+/// Keeps automatic timestamps distinct from external approvals across fresh runs.
+fn valid_automatic_approval_timestamps_survive_later_invocations() {
+    let repository = TempDir::new().unwrap();
+    let (old, new) = sources(repository.path());
+    for ado in [false, true] {
+        let scope = TempDir::new().unwrap();
+        let root = scope.path().join("first");
+        let provider = if ado {
+            Provider::ado(repository.path(), &old, &new)
+        } else {
+            Provider::new(repository.path(), &old, &new)
+        };
+        let (snapshot, prepared) = prepare(&root, &provider, false);
+        assess(&root, &provider, &snapshot, &prepared);
+        let overlapping = scope.path().join("overlapping");
+        let (overlapping_snapshot, overlapping_prepared) = prepare(&overlapping, &provider, false);
+        assess(
+            &overlapping,
+            &provider,
+            &overlapping_snapshot,
+            &overlapping_prepared,
+        );
+        let published = publish(&root, &provider, &snapshot).unwrap();
+        let automatic = &published["items"][0]["automaticApproval"];
+        assert_eq!(automatic["approvedAt"], "2026-09-28T09:00:00Z");
+        assert_eq!(published["items"][0]["status"], "reapproved");
+        let shared = publish(&overlapping, &provider, &overlapping_snapshot).unwrap();
+        assert_eq!(shared["items"][0]["status"], "alreadyValid");
+        assert_eq!(&shared["items"][0]["automaticApproval"], automatic);
+        provider.fault.set("preflightReadFailure");
+        assert_eq!(publish(&root, &provider, &snapshot).unwrap(), published);
+        assert_eq!(
+            publish(&overlapping, &provider, &overlapping_snapshot).unwrap(),
+            shared
+        );
+        provider.fault.set("");
+        let later = discover_inspect(&scope.path().join("later"), &provider, false);
+        assert_eq!(later["items"][0]["status"], "alreadyValid");
+        assert_eq!(&later["items"][0]["automaticApproval"], automatic);
+        assert_eq!(
+            later["items"][0]["title"],
+            if ado { "Recent" } else { "Recent source" }
+        );
+        assert!(
+            later["items"][0]["url"]
+                .as_str()
+                .unwrap()
+                .starts_with(provider.url())
+        );
+        assert_eq!(
+            later["items"].as_array().unwrap().len(),
+            1,
+            "Out-of-range PRs appear only in counts"
+        );
+    }
+}
+
+/// A terminal provider receipt cannot leave reporting errors absent from results.
+fn publication_reporting_failures_are_persisted() {
+    let repository = TempDir::new().unwrap();
+    let (old, new) = sources(repository.path());
+    for ado in [false, true] {
+        for fault in ["reportReadFailure", "reportStandingChanged"] {
+            let scope = TempDir::new().unwrap();
+            let root = scope.path().join("first");
+            let provider = if ado {
+                Provider::ado(repository.path(), &old, &new)
+            } else {
+                Provider::new(repository.path(), &old, &new)
+            };
+            let (snapshot, prepared) = prepare(&root, &provider, false);
+            assess(&root, &provider, &snapshot, &prepared);
+            if ado {
+                provider.ado_vote(10, 40, "2026-09-28T09:06:00Z");
+            } else {
+                provider.later("APPROVED");
+            }
+            provider
+                .host_directory
+                .replace(Some(scope.path().join("host-store/publications")));
+            provider.fault.set(fault);
+            let error = publish(&root, &provider, &snapshot).unwrap_err();
+            let result = invoke(&root, &provider, "results", &[]).unwrap();
+            assert_eq!(result["state"], "partial");
+            assert_eq!(
+                result["items"][0]["status"],
+                if fault == "reportStandingChanged" {
+                    "staleDuringExecution"
+                } else {
+                    "failed"
+                }
+            );
+            assert_eq!(
+                result["items"][0]["error"]["kind"],
+                ss_skills_util::classification(&error)
+            );
+            assert!(result["items"][0]["publication"].is_null());
+            assert!(result["items"][0]["automaticApproval"].is_null());
+            assert_eq!(provider.writes.get(), 0);
+            provider.fault.set("");
+            publish(&root, &provider, &snapshot).unwrap_err();
+            assert_eq!(invoke(&root, &provider, "results", &[]).unwrap(), result);
+        }
+    }
+}
+
+/// A completed run retains its observed result rather than mixing it with later service state.
+fn persisted_already_valid_results_replay_without_refreshing_reporting() {
+    let repository = TempDir::new().unwrap();
+    let (old, new) = sources(repository.path());
+    for ado in [false, true] {
+        for fault in ["reportReadFailure", "reportStandingChanged"] {
+            let scope = TempDir::new().unwrap();
+            let root = scope.path().join("run");
+            let provider = if ado {
+                Provider::ado(repository.path(), &old, &new)
+            } else {
+                Provider::new(repository.path(), &old, &new)
+            };
+            let (snapshot, prepared) = prepare(&root, &provider, false);
+            assess(&root, &provider, &snapshot, &prepared);
+            if ado {
+                provider.ado_vote(10, 40, "2026-09-28T09:06:00Z");
+            } else {
+                provider.later("APPROVED");
+            }
+            provider
+                .host_directory
+                .replace(Some(scope.path().join("host-store/publications")));
+            let published = publish(&root, &provider, &snapshot).unwrap();
+            assert_eq!(published["state"], "complete");
+            assert_eq!(published["items"][0]["status"], "alreadyValid");
+            assert!(published["items"][0]["publication"].is_object());
+            assert!(published["items"][0]["automaticApproval"].is_null());
+            let run_bytes = fs::read(root.join("run.json")).unwrap();
+            if fault == "reportStandingChanged" {
+                if ado {
+                    provider.ado_vote(0, 41, "2026-09-28T09:07:00Z");
+                } else {
+                    let mut evidence = provider.evidence.borrow_mut();
+                    evidence["reviews"].as_array_mut().unwrap().push(json!({
+                        "id": 99, "node_id": "later-withdrawal",
+                        "user": {"id": 42, "node_id": "user-42"},
+                        "state": "CHANGES_REQUESTED", "submitted_at": "2026-09-28T09:07:00Z",
+                        "commit_id": new, "body": "Independent later decision."
+                    }));
+                    evidence["timeline"].as_array_mut().unwrap().push(json!({
+                        "__typename": "PullRequestReview", "id": "later-withdrawal",
+                        "state": "CHANGES_REQUESTED"
+                    }));
+                }
+            } else {
+                provider.fault.set(fault);
+            }
+            let reads = provider.target_reads.get();
+            let replayed = publish(&root, &provider, &snapshot)
+                .unwrap_or_else(|error| panic!("{ado}: {fault}: {error}"));
+            assert_eq!(replayed, published, "{ado}: {fault}");
+            assert_eq!(invoke(&root, &provider, "results", &[]).unwrap(), published);
+            assert_eq!(fs::read(root.join("run.json")).unwrap(), run_bytes);
+            assert_eq!(provider.target_reads.get(), reads);
+            assert_eq!(provider.writes.get(), 0);
+        }
+    }
+}
+
+/// Failed terminal saves must retain recoverable intent in both journals.
+fn notice_terminal_save_failures_preserve_original_recovery() {
+    let repository = TempDir::new().unwrap();
+    let (old, new) = sources(repository.path());
+    for ado in [false, true] {
+        for fault in ["noticeJournalFailure", "noticeRefusalJournalFailure"] {
+            let scope = TempDir::new().unwrap();
+            let root = scope.path().join("first");
+            let provider = if ado {
+                Provider::ado(repository.path(), &old, &new)
+            } else {
+                Provider::new(repository.path(), &old, &new)
+            };
+            let (snapshot, prepared) = prepare(&root, &provider, false);
+            assess_as(&root, &provider, &snapshot, &prepared, "significant");
+            let directory = scope.path().join("host-store/review-notices");
+            provider.host_directory.replace(Some(directory.clone()));
+            provider.fault.set(fault);
+            let error = notify(&root, &provider, &snapshot).unwrap_err();
+            assert_eq!(ss_skills_util::classification(&error), "ambiguousWrite");
+            let result = invoke(&root, &provider, "results", &[]).unwrap();
+            assert_eq!(result["state"], "failed");
+            assert_eq!(result["error"]["kind"], "ambiguousWrite");
+            assert!(result["items"][0]["error"].is_null());
+            let path = host_journal(&directory);
+            let intent: Value =
+                serde_json::from_slice(&fs::read(path.with_extension("saved")).unwrap()).unwrap();
+            assert_eq!(intent["attempts"][0]["state"], "intent");
+            fs::remove_dir(&path).unwrap();
+            fs::rename(path.with_extension("saved"), &path).unwrap();
+            provider.fault.set("");
+            let recovered = notify(&root, &provider, &snapshot);
+            if fault == "noticeJournalFailure" {
+                assert_eq!(recovered.unwrap()["items"][0]["status"], "needsReview");
+                let settled: Value = serde_json::from_slice(&fs::read(path).unwrap()).unwrap();
+                assert_eq!(settled["attempts"][0]["state"], "verified");
+            } else {
+                // The lost refusal is not durable evidence permitting another POST.
+                assert_eq!(
+                    ss_skills_util::classification(&recovered.unwrap_err()),
+                    "ambiguousWrite"
+                );
+            }
+            assert_eq!(provider.writes.get(), 1);
+        }
+    }
+}
+
+/// A resolved notification error cannot replace the assessment's uncertainty.
+fn uncertain_assessment_diagnostic_survives_notification_retry() {
+    let repository = TempDir::new().unwrap();
+    let (old, new) = sources(repository.path());
+    for ado in [false, true] {
+        let scope = TempDir::new().unwrap();
+        let root = scope.path().join("first");
+        let provider = if ado {
+            Provider::ado(repository.path(), &old, &new)
+        } else {
+            Provider::new(repository.path(), &old, &new)
+        };
+        let (snapshot, prepared) = prepare(&root, &provider, false);
+        assess_as(&root, &provider, &snapshot, &prepared, "uncertain");
+        let before = invoke(&root, &provider, "results", &[]).unwrap();
+        provider.fault.set("preflightReadFailure");
+        notify(&root, &provider, &snapshot).unwrap_err();
+        let failed = invoke(&root, &provider, "results", &[]).unwrap();
+        assert_eq!(failed["items"][0]["error"], before["items"][0]["error"]);
+        provider.fault.set("");
+        let recovered = notify(&root, &provider, &snapshot).unwrap();
+        assert_eq!(recovered["items"][0]["error"], before["items"][0]["error"]);
+        assert_eq!(recovered["items"][0]["status"], "failed");
+        assert_eq!(recovered["state"], "partial");
+        assert!(recovered["items"][0]["reviewNotice"].is_object());
+        assert_eq!(provider.writes.get(), 1);
+    }
+}
+
+/// Recovery cannot clear another PR's fatal write, even across a lost run save.
+fn notice_recovery_is_bound_to_the_failed_pull_request() {
+    let repository = TempDir::new().unwrap();
+    let (old, new) = sources(repository.path());
+    for interrupted_run_save in [false, true] {
+        let scope = TempDir::new().unwrap();
+        let root = scope.path().join("run");
+        let mut first = Provider::new(repository.path(), &old, &new);
+        first.candidates = vec![1, 2];
+        let mut second = Provider::new(repository.path(), &old, &new);
+        second.number = 2;
+        second.candidates = vec![2];
+        second.evidence.borrow_mut()["pullRequest"]["number"] = json!(2);
+        let (first_snapshot, prepared) = prepare(&root, &first, false);
+        assess_as(&root, &first, &first_snapshot, &prepared, "significant");
+        let (second_snapshot, prepared) = prepare(&root, &second, false);
+        assess_as(&root, &second, &second_snapshot, &prepared, "significant");
+        let run_path = root.join("run.json");
+        let before = fs::read(&run_path).unwrap();
+        notify(&root, &first, &first_snapshot).unwrap();
+        if interrupted_run_save {
+            // Preserve the verified host effect while replaying the last durable run.
+            fs::write(&run_path, before).unwrap();
+        }
+        second.fault.set("postReadFailure");
+        notify(&root, &second, &second_snapshot).unwrap_err();
+        let failed = fs::read(&run_path).unwrap();
+        let record: Value = serde_json::from_slice(&failed).unwrap();
+        assert_eq!(record["state"], "failed");
+        assert_eq!(record["errorPullRequestId"], 2);
+        notify(&root, &first, &first_snapshot).unwrap_err();
+        assert_eq!(fs::read(&run_path).unwrap(), failed);
+        second.fault.set("");
+        notify(&root, &second, &second_snapshot).unwrap();
+        let recovered = notify(&root, &first, &first_snapshot).unwrap();
+        assert_eq!(recovered["state"], "complete");
+        assert!(recovered["error"].is_null());
+        assert_eq!(first.writes.get(), 1);
+        assert_eq!(second.writes.get(), 1);
+    }
+}
+
+/// A later unproven vote reset cannot prevent verification of an existing comment.
+fn ado_notice_recovery_does_not_require_current_approval_eligibility() {
+    let repository = TempDir::new().unwrap();
+    let (old, new) = sources(repository.path());
+    let scope = TempDir::new().unwrap();
+    let root = scope.path().join("run");
+    let provider = Provider::ado(repository.path(), &old, &new);
+    let (snapshot, prepared) = prepare(&root, &provider, false);
+    assess_as(&root, &provider, &snapshot, &prepared, "significant");
+    provider.fault.set("postReadFailure");
+    notify(&root, &provider, &snapshot).unwrap_err();
+    provider.fault.set("");
+    provider.ado_push();
+    provider.evidence.borrow_mut()["reviewers"][0]["vote"] = json!(0);
+    provider.evidence.borrow_mut()["pullRequest"]["pullRequestId"] = json!(999);
+    assert_eq!(
+        ss_skills_util::classification(&notify(&root, &provider, &snapshot).unwrap_err()),
+        "ambiguousWrite"
+    );
+    provider.evidence.borrow_mut()["pullRequest"]["pullRequestId"] = json!(1);
+    let recovered = notify(&root, &provider, &snapshot).unwrap();
+    assert_eq!(recovered["items"][0]["status"], "needsReview");
+    assert!(recovered["error"].is_null());
+    assert_eq!(provider.writes.get(), 1);
+}
+
+/// Accepted comments remain recoverable after state changes without weakening ownership checks.
+fn notice_readback_survives_closure_and_draft_conversion() {
+    let repository = TempDir::new().unwrap();
+    let (old, new) = sources(repository.path());
+    for ado in [false, true] {
+        for fault in ["noticeClosed", "noticeDraft", "noticeAbandoned"] {
+            if !ado && fault == "noticeAbandoned" {
+                continue;
+            }
+            for interrupted in [false, true] {
+                let scope = TempDir::new().unwrap();
+                let root = scope.path().join("run");
+                let provider = if ado {
+                    Provider::ado(repository.path(), &old, &new)
+                } else {
+                    Provider::new(repository.path(), &old, &new)
+                };
+                let (snapshot, prepared) = prepare(&root, &provider, false);
+                assess_as(&root, &provider, &snapshot, &prepared, "significant");
+                if interrupted {
+                    provider.fault.set("postReadFailure");
+                    assert_eq!(
+                        ss_skills_util::classification(
+                            &notify(&root, &provider, &snapshot).unwrap_err()
+                        ),
+                        "ambiguousWrite"
+                    );
+                    assert_eq!(
+                        invoke(&root, &provider, "results", &[]).unwrap()["state"],
+                        "failed"
+                    );
+                }
+                provider.fault.set(fault);
+                if interrupted {
+                    assert_notice_readback_ownership(&root, &provider, &snapshot, fault);
+                }
+                let recovered = notify(&root, &provider, &snapshot)
+                    .unwrap_or_else(|error| panic!("{ado}: {fault}: {interrupted}: {error}"));
+                assert_eq!(recovered["state"], "complete");
+                assert_eq!(recovered["items"][0]["status"], "needsReview");
+                assert!(recovered["items"][0]["reviewNotice"].is_object());
+                assert!(recovered["error"].is_null());
+                let record: Value =
+                    serde_json::from_slice(&fs::read(root.join("run.json")).unwrap()).unwrap();
+                assert!(record["errorPullRequestId"].is_null());
+                assert_eq!(provider.writes.get(), 1);
+            }
+        }
+    }
+}
+
+/// Recovery of an inactive PR still requires a unique, exact, account-owned effect.
+fn assert_notice_readback_ownership(
+    root: &Path,
+    provider: &Provider,
+    snapshot: &str,
+    fault: &'static str,
+) {
+    let ado = provider.ado;
+    let original = provider.evidence.borrow().clone();
+    // Replacement identities deliberately lie outside the fixture's original service scope.
+    for mutation in ["account", "scope", "author", "body", "duplicate"] {
+        let mut evidence = provider.evidence.borrow_mut();
+        match mutation {
+            "account" => provider.fault.set("auth"),
+            "scope" => {
+                evidence["pullRequest"][if ado { "pullRequestId" } else { "number" }] = json!(999);
+            }
+            _ => {
+                let collection = evidence[if ado { "threads" } else { "comments" }]
+                    .as_array_mut()
+                    .unwrap();
+                if mutation == "duplicate" {
+                    let mut duplicate = collection.last().unwrap().clone();
+                    duplicate["id"] = json!(999);
+                    collection.push(duplicate);
+                } else {
+                    let comment = collection.last_mut().unwrap();
+                    let comment = if ado {
+                        &mut comment["comments"][0]
+                    } else {
+                        comment
+                    };
+                    if mutation == "author" {
+                        comment[if ado { "author" } else { "user" }]["id"] =
+                            json!("another-account");
+                    } else {
+                        let key = if ado { "content" } else { "body" };
+                        comment[key] = json!(format!("{}\nEdited", comment[key].as_str().unwrap()));
+                    }
+                }
+            }
+        }
+        drop(evidence);
+        assert_eq!(
+            ss_skills_util::classification(&notify(root, provider, snapshot).unwrap_err()),
+            "ambiguousWrite",
+            "{ado}: {fault}: {mutation}"
+        );
+        let failed = invoke(root, provider, "results", &[]).unwrap();
+        assert_eq!(failed["state"], "failed");
+        assert_eq!(failed["error"]["kind"], "ambiguousWrite");
+        assert_eq!(provider.writes.get(), 1);
+        provider.evidence.replace(original.clone());
+        provider.fault.set(fault);
+    }
+}
+
+/// Superseded edited notices cannot obstruct a later operation's exact readback.
+fn expired_edited_notices_do_not_block_new_notice_readback() {
+    let repository = TempDir::new().unwrap();
+    let (old, new) = sources(repository.path());
+    for ado in [false, true] {
+        let scope = TempDir::new().unwrap();
+        let root = scope.path().join("first");
+        let provider = if ado {
+            Provider::ado(repository.path(), &old, &new)
+        } else {
+            Provider::new(repository.path(), &old, &new)
+        };
+        let (snapshot, prepared) = prepare(&root, &provider, false);
+        assess_as(&root, &provider, &snapshot, &prepared, "significant");
+        let original = notify(&root, &provider, &snapshot).unwrap();
+        if ado {
+            provider.ado_vote(10, 40, "2026-09-28T09:06:00Z");
+            let mut evidence = provider.evidence.borrow_mut();
+            evidence["threads"]
+                .as_array_mut()
+                .unwrap()
+                .iter_mut()
+                .find(|thread| thread["comments"][0]["commentType"] == "text")
+                .unwrap()["comments"][0]["lastContentUpdatedDate"] = json!("2026-09-28T09:07:00Z");
+            drop(evidence);
+            provider.ado_push();
+            let mut evidence = provider.evidence.borrow_mut();
+            evidence["sourceCommit"] = json!(old);
+            evidence["iterations"][2]["sourceRefCommit"]["commitId"] = json!(old);
+            evidence["iterations"][2]["createdDate"] = json!("2026-09-28T09:08:00Z");
+        } else {
+            provider.later("APPROVED");
+            let mut evidence = provider.evidence.borrow_mut();
+            let review = evidence["reviews"]
+                .as_array_mut()
+                .unwrap()
+                .last_mut()
+                .unwrap();
+            review["submitted_at"] = json!("2026-09-28T09:06:00Z");
+            review["state"] = json!("DISMISSED");
+            evidence["comments"]
+                .as_array_mut()
+                .unwrap()
+                .last_mut()
+                .unwrap()["updated_at"] = json!("2026-09-28T09:07:00Z");
+            evidence["pullRequest"]["head"]["sha"] = json!(old);
+            evidence["timeline"]
+                .as_array_mut()
+                .unwrap()
+                .last_mut()
+                .unwrap()["state"] = json!("DISMISSED");
+            evidence["timeline"].as_array_mut().unwrap().push(json!({
+                "__typename": "ReviewDismissedEvent", "id": "later-dismissal",
+                "review": {"id": "later-review"}, "previousReviewState": "APPROVED",
+                "createdAt": "2026-09-28T09:08:00Z",
+                "pullRequestCommit": {"commit": {"oid": old}}
+            }));
+        }
+        let later = scope.path().join("later");
+        let (snapshot, prepared) = prepare(&later, &provider, false);
+        assess_as(&later, &provider, &snapshot, &prepared, "significant");
+        let result = notify(&later, &provider, &snapshot).unwrap();
+        assert_eq!(result["items"][0]["status"], "needsReview");
+        assert_ne!(
+            result["items"][0]["reviewNotice"],
+            original["items"][0]["reviewNotice"]
+        );
+        notify(&later, &provider, &snapshot).unwrap();
+        // Even an approval that expires this notice cannot prevent its readback.
+        if ado {
+            provider.ado_vote(10, 41, "2026-09-28T09:09:00Z");
+        } else {
+            let mut evidence = provider.evidence.borrow_mut();
+            evidence["reviews"].as_array_mut().unwrap().push(json!({
+                "id": 99, "node_id": "final-approval", "user": {"id": 42, "node_id": "user-42"},
+                "state": "APPROVED", "submitted_at": "2026-09-28T09:09:00Z",
+                "commit_id": old, "body": "Independent approval."
+            }));
+            evidence["timeline"].as_array_mut().unwrap().push(json!({
+                "__typename": "PullRequestReview", "id": "final-approval", "state": "APPROVED"
+            }));
+        }
+        notify(&later, &provider, &snapshot).unwrap();
+        assert_eq!(provider.writes.get(), 2);
+    }
 }
 
 fn publish(root: &Path, provider: &Provider, snapshot: &str) -> Result<Value, AppError> {
@@ -796,6 +1716,19 @@ fn native_git_assessment_and_guarded_publication_have_exact_effect_boundaries() 
     risk_judgments_and_uncertainty_prevent_publication();
     prepared_run_cannot_bypass_another_runs_unknown_effect();
     ado_publication_preserves_authority_and_never_replays_unknown_effects();
+    // Keep subprocess scenarios in this binary's single test entry point:
+    // concurrent process creation can briefly inherit another thread's held file lock.
+    needs_review_notices_short_circuit_and_expire_only_after_external_approval();
+    notice_dry_runs_refusals_and_uncertain_effects_do_not_duplicate_writes();
+    valid_automatic_approval_timestamps_survive_later_invocations();
+    publication_reporting_failures_are_persisted();
+    persisted_already_valid_results_replay_without_refreshing_reporting();
+    notice_terminal_save_failures_preserve_original_recovery();
+    uncertain_assessment_diagnostic_survives_notification_retry();
+    notice_recovery_is_bound_to_the_failed_pull_request();
+    ado_notice_recovery_does_not_require_current_approval_eligibility();
+    notice_readback_survives_closure_and_draft_conversion();
+    expired_edited_notices_do_not_block_new_notice_readback();
 }
 
 /// Exercises real command dispatch and records while ADO effects remain entirely in memory.

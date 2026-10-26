@@ -75,6 +75,17 @@ enum Operation {
 #[derive(Debug, Subcommand)]
 #[command(about = None, long_about = None)]
 enum Autoreapprove {
+    /// Publish a durable needs-review notice, or reconcile its original comment intent.
+    Notify {
+        #[command(flatten)]
+        input: WorkInput,
+        #[arg(long)]
+        repository_url: String,
+        #[arg(long)]
+        attribution: String,
+        #[arg(long)]
+        tenant: Option<String>,
+    },
     /// Revalidate and publish a fully assessed renewal, or reconcile its previous effect.
     Publish {
         #[command(flatten)]
@@ -396,19 +407,35 @@ fn execute(
     };
     let value = match cli.command {
         Operation::Autoreapprove { command } => match command {
-            Autoreapprove::Publish {
-                input,
-                repository_url,
-                attribution,
-                tenant,
-            } => {
+            action @ (Autoreapprove::Publish { .. } | Autoreapprove::Notify { .. }) => {
+                let notify = matches!(&action, Autoreapprove::Notify { .. });
+                let (Autoreapprove::Publish {
+                    input,
+                    repository_url,
+                    attribution,
+                    tenant,
+                }
+                | Autoreapprove::Notify {
+                    input,
+                    repository_url,
+                    attribution,
+                    tenant,
+                }) = action
+                else {
+                    return Err(fail("invalidInput", "Not a publication operation"));
+                };
                 let repository = Target::repository(&repository_url)?;
                 let directory = directory
                     .map_or_else(publication::data_directory, |path| Ok(path.to_owned()))?;
                 let mut api = Api {
                     transport: Transport::new(&repository, tenant.as_deref(), process, http, clock),
                 };
-                discovery::publish(
+                let publish = if notify {
+                    discovery::notify
+                } else {
+                    discovery::publish
+                };
+                publish(
                     &mut api,
                     clock,
                     &discovery::PublishInput {

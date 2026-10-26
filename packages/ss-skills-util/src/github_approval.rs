@@ -33,14 +33,8 @@ pub(crate) enum Evidence {
 }
 
 impl Evidence {
-    /// Reconstructs source-bound service standing without historical target prerequisites.
-    pub(crate) fn decide(
-        &self,
-        account: &str,
-        repository: &str,
-        number: u32,
-        observed_at: Timestamp,
-    ) -> Result<Decision, AppError> {
+    /// Notice readback shares PR identity checks without requiring approval standing.
+    pub(crate) fn validate_scope(&self, repository: &str, number: u32) -> Result<(), AppError> {
         let pr = match self {
             Self::State { pull_request } | Self::History { pull_request, .. } => pull_request,
         };
@@ -52,6 +46,21 @@ impl Evidence {
                 "GitHub approval evidence has another PR identity",
             ));
         }
+        Ok(())
+    }
+
+    /// Reconstructs source-bound service standing without historical target prerequisites.
+    pub(crate) fn decide(
+        &self,
+        account: &str,
+        repository: &str,
+        number: u32,
+        observed_at: Timestamp,
+    ) -> Result<Decision, AppError> {
+        let pr = match self {
+            Self::State { pull_request } | Self::History { pull_request, .. } => pull_request,
+        };
+        self.validate_scope(repository, number)?;
         if let Some(decision) = excluded(pr)? {
             return Ok(decision);
         }
