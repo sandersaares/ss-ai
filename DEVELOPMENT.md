@@ -210,6 +210,12 @@ macOS PowerShell-only Cargo-helper/linking coverage. Pull requests have no
 narrow path filter that could skip installer-only changes. CI does not run
 paid model evaluations; the documented Waza recipes are explicit local entry points.
 
+The Rust and Pester CI jobs disable Cargo incremental compilation and use
+line-table-only debug information for dev and test builds. These job-level
+environment settings keep backtrace source locations while avoiding unused
+incremental state and full debug information on disposable runners.
+Local developer builds retain Cargo's default settings.
+
 Installation tests use test-owned homes, source copies, and Cargo install
 roots. Never run the real installer against the developer's profile as a test.
 Provider fixtures are sanitized; tests must not contact live review services.
