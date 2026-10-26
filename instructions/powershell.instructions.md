@@ -14,7 +14,10 @@ This applies to PowerShell code wherever it lives, including justfile recipes. A
 
 # Use strict language mode with error handling enabled
 
-PowerShell scripts should enable strict mode and abort on any errors. A typical script header looks like this:
+Every PowerShell script and executable documentation snippet must require
+PowerShell 7.6 or later, enable strict mode, and stop on PowerShell and native
+command failures. Start each independent snippet with this header, even when
+nearby examples repeat it:
 
 ```powershell
 #Requires -Version 7.6
@@ -23,3 +26,15 @@ Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 $PSNativeCommandUseErrorActionPreference = $true
 ```
+
+Apply this discipline to ad hoc tool commands and generated scripts as well as
+checked-in files. Initialize each fresh PowerShell process, including child
+processes launched through WSL; do not assume a parent process's settings carry
+over. When a command tool does not honor `#Requires`, check its PowerShell
+version explicitly before executing the snippet.
+
+If a native program uses nonzero exit codes for expected results, narrowly
+disable `$PSNativeCommandUseErrorActionPreference` for that invocation, interpret
+`$LASTEXITCODE` immediately, and restore the preference in `finally`. Do not
+disable strict mode or failure handling for the rest of the script to accommodate
+one command.
