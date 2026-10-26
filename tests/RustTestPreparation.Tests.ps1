@@ -162,7 +162,8 @@ Describe 'Rust preparation boundary' {
         try {
             $replacement = Join-Path $fixture.root 'replacement.json'
             [IO.File]::WriteAllBytes($replacement, [IO.File]::ReadAllBytes($fixture.record))
-            [IO.File]::Move($replacement, $fixture.record, $true)
+            # ReplaceFile supports Windows delete-sharing readers; an overwrite move does not.
+            [IO.File]::Replace($replacement, $fixture.record, [NullString]::Value)
             $null = Read-RustTestPreparation -RepositoryRoot $fixture.root -PrerequisitePath $fixture.record
         } finally { $stream.Dispose() }
     }
