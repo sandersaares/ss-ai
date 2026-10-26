@@ -158,6 +158,13 @@ The account's approval and satisfaction of the aggregate merge policy are
 different facts. The original approving thread and its source iteration bind
 the comparison; an approval on the current iteration is already valid.
 
+Inspection uses the [evaluation endpoint's complete-list request](https://learn.microsoft.com/en-us/rest/api/azure/devops/policy/evaluations/list?view=azure-devops-rest-7.1)
+without optional `$top` or `$skip` parameters and includes not-applicable
+evaluations. ADO can omit underlying records from offset-page results, so the
+number of returned evaluations does not reliably identify the next offset.
+Unexpected continuations and duplicate evaluation identifiers remain service
+failures. Configuration reads independently follow their continuation tokens.
+
 Build, status, comment-resolution, merge-strategy, required-reviewer, secrets
 scanning, and proof-of-presence checks do not establish individual approval
 freshness. Repository vote settings and unknown policy types still require

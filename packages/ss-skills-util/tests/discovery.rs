@@ -718,6 +718,7 @@ struct AzureApproval {
     identity_reads: Cell<usize>,
     move_source: bool,
     repeat_policy: bool,
+    evaluation_continuation: bool,
     deny_threads: bool,
     change_identity: bool,
 }
@@ -733,6 +734,7 @@ impl AzureApproval {
             identity_reads: Cell::new(0),
             move_source: false,
             repeat_policy: false,
+            evaluation_continuation: false,
             deny_threads: false,
             change_identity: false,
         }
@@ -852,11 +854,19 @@ impl Http for AzureApproval {
             };
             values(&json!([stage["policies"][index]]))
         } else if url.path().ends_with("/policy/evaluations") {
-            if query.get("$skip").unwrap() == "0" {
-                values(&stage["evaluations"])
-            } else {
-                values(&json!([]))
+            // ADO can page underlying records before omitting missing evaluations.
+            // Returned evaluation counts therefore cannot supply the next offset.
+            let mut records = vec![None];
+            records.extend(stage["evaluations"].as_array().unwrap().iter().map(Some));
+            let skip = query.get("$skip").map_or(0, |value| value.parse().unwrap());
+            let top = query
+                .get("$top")
+                .map_or(records.len(), |value| value.parse().unwrap());
+            let evaluations: Vec<_> = records.into_iter().skip(skip).take(top).flatten().collect();
+            if self.evaluation_continuation {
+                headers.insert("x-ms-continuationtoken".to_owned(), "unexpected".to_owned());
             }
+            values(&json!(evaluations))
         } else {
             panic!("Unexpected ADO inspection endpoint {url}")
         };
@@ -1091,6 +1101,126 @@ fn ado_inspection_persists_untyped_notifications_without_losing_approval_authori
             &FixedClock,
         )
         .unwrap();
+    }
+}
+
+#[test]
+fn ado_inspection_reads_all_evaluations_without_count_based_offsets() {
+    // Cover empty responses and both sides of the former page-size boundary.
+    for count in [1, 0, 100, 101] {
+        let root = fixture();
+        let mut provider = AzureApproval::new(2);
+        provider.require_iteration_approval();
+        let evaluations = provider.fixture["stages"][2]["evaluations"]
+            .as_array_mut()
+            .unwrap();
+        let reviewer = evaluations.pop().unwrap();
+        for index in 1..count {
+            evaluations.push(json!({
+                "evaluationId": format!("merge-check-{index}"),
+                "configuration": {
+                    "id": index,
+                    "type": {"id": "0609b952-1397-4640-95ec-e00a01b2c241"}
+                },
+                "status": "approved"
+            }));
+        }
+        if count == 0 {
+            // With no reviewer policy, an empty evaluation list is complete evidence.
+            provider.fixture["stages"][2]["policies"]
+                .as_array_mut()
+                .unwrap()
+                .pop();
+        } else {
+            // The final record must still enforce fresh iteration approval.
+            evaluations.push(reviewer);
+        }
+        discover_azure_approval(root.path(), &provider, true);
+        let output: Value = serde_json::from_str(
+            &run(
+                &inspect_arguments(root.path(), 1),
+                &AzureToken,
+                &provider,
+                &FixedClock,
+            )
+            .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(output["counts"]["failed"], 0, "{output}");
+        assert_eq!(
+            output["items"][0]["status"],
+            if count == 0 {
+                "alreadyValid"
+            } else {
+                "assessmentRequired"
+            }
+        );
+        let saved = record(root.path());
+        assert_eq!(
+            saved["inventory"][0]["inspection"]["evidence"]["observation"]["evaluations"]
+                .as_array()
+                .unwrap()
+                .len(),
+            count
+        );
+        let calls = provider.calls.borrow();
+        let evaluations: Vec<_> = calls
+            .iter()
+            .filter(|url| url.contains("/policy/evaluations?"))
+            .collect();
+        // Inspection fences the same complete evidence with two observations.
+        assert_eq!(evaluations.len(), 2);
+        for url in evaluations {
+            let url = Url::parse(url).unwrap();
+            let query: BTreeMap<_, _> = url.query_pairs().collect();
+            assert!(!query.contains_key("$top"));
+            assert!(!query.contains_key("$skip"));
+            assert_eq!(query["includeNotApplicable"], "true");
+            assert_eq!(query["api-version"], "7.1-preview.1");
+        }
+    }
+}
+
+#[test]
+fn ado_inspection_rejects_duplicate_or_incomplete_evaluations() {
+    for (continuation, diagnostic) in [
+        (false, "Repeated ADO evidence identifier"),
+        (true, "Unexpected ADO evaluation continuation"),
+    ] {
+        let root = fixture();
+        let mut provider = AzureApproval::new(2);
+        provider.require_iteration_approval();
+        provider.evaluation_continuation = continuation;
+        if !continuation {
+            let evaluations = provider.fixture["stages"][2]["evaluations"]
+                .as_array_mut()
+                .unwrap();
+            evaluations.push(evaluations[0].clone());
+        }
+        discover_azure_approval(root.path(), &provider, true);
+        let output: Value = serde_json::from_str(
+            &run(
+                &inspect_arguments(root.path(), 1),
+                &AzureToken,
+                &provider,
+                &FixedClock,
+            )
+            .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(output["state"], "partial");
+        assert_eq!(output["counts"]["failed"], 1);
+        let saved = record(root.path());
+        let inspection = &saved["inventory"][0]["inspection"];
+        assert!(inspection["evidence"].is_null());
+        assert!(inspection["decision"].is_null());
+        assert_eq!(inspection["error"]["kind"], "service");
+        assert!(
+            inspection["error"]["message"]
+                .as_str()
+                .unwrap()
+                .contains(diagnostic)
+        );
     }
 }
 

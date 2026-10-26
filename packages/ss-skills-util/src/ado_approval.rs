@@ -310,8 +310,8 @@ fn observe(api: &mut Api<'_>, target: &Target) -> Result<Evidence, AppError> {
         })
         .collect::<Result<Vec<_>, _>>()?;
     let threads = unique_list(api, &format!("{}/threads", target.pr_api()), "id")?;
-    let evaluations = policies(api, target, &pr, true)?;
-    let policies = policies(api, target, &pr, false)?;
+    let evaluations = evaluations(api, target, &pr)?;
+    let policies = policies(api, &pr)?;
     Ok(Evidence::History {
         pull_request: pr,
         source_commit,
@@ -424,76 +424,70 @@ fn unique_list(api: &mut Api<'_>, path: &str, key: &str) -> Result<Vec<Value>, A
     Ok(values)
 }
 
-/// Configuration continuations and evaluation offsets have different provider contracts.
-fn policies(
-    api: &mut Api<'_>,
-    target: &Target,
-    pr: &Value,
-    evaluations: bool,
-) -> Result<Vec<Value>, AppError> {
+/// Reads all evaluations without deriving offsets from filtered service records.
+fn evaluations(api: &mut Api<'_>, target: &Target, pr: &Value) -> Result<Vec<Value>, AppError> {
+    let project_id = identifier(field(field(field(pr, "repository")?, "project")?, "id")?)?;
+    // The endpoint returns all evaluations when optional $top/$skip are omitted.
+    // Offset paging can omit underlying records, so returned counts are not offsets.
+    // Ref: docs/reapproval.md, "Azure DevOps evidence and policy interpretation".
+    let page = api.transport.ado(
+        &format!("{}/_apis/policy/evaluations", escape(&project_id)),
+        "GET",
+        None,
+        &[
+            (
+                "artifactId",
+                format!(
+                    "vstfs:///CodeReview/CodeReviewId/{project_id}/{}",
+                    target.pull_request_id
+                ),
+            ),
+            ("includeNotApplicable", "true".to_owned()),
+        ],
+        "7.1-preview.1",
+    )?;
+    if page.continuation.is_some() {
+        return Err(fail("service", "Unexpected ADO evaluation continuation"));
+    }
+    let mut values = ado_items(&page.payload)?;
+    unique(&values, "evaluationId")?;
+    // Provider ordering is not part of snapshot identity.
+    values.sort_by_key(|value| value.get("evaluationId").map(Value::to_string));
+    Ok(values)
+}
+
+/// Configuration enumeration follows opaque continuations, not evaluation offsets.
+fn policies(api: &mut Api<'_>, pr: &Value) -> Result<Vec<Value>, AppError> {
     let repository = field(pr, "repository")?;
     let repository_id = identifier(field(repository, "id")?)?;
     let project_id = identifier(field(field(repository, "project")?, "id")?)?;
-    let (path, version, key) = if evaluations {
-        (
-            format!("{}/_apis/policy/evaluations", escape(&project_id)),
-            "7.1-preview.1",
-            "evaluationId",
-        )
-    } else {
-        (
-            format!("{}/_apis/git/policy/configurations", escape(&project_id)),
-            "7.1",
-            "id",
-        )
-    };
+    let path = format!("{}/_apis/git/policy/configurations", escape(&project_id));
     let mut values = Vec::new();
     let mut cursor: Option<String> = None;
     let mut cursors = HashSet::new();
     // Match the existing capture safety bound for endlessly advancing bad pages.
     for _ in 0..1000 {
-        let mut query = vec![("$top", "100".to_owned())];
-        if evaluations {
-            query.extend([
-                (
-                    "artifactId",
-                    format!(
-                        "vstfs:///CodeReview/CodeReviewId/{project_id}/{}",
-                        target.pull_request_id
-                    ),
-                ),
-                ("includeNotApplicable", "true".to_owned()),
-                ("$skip", values.len().to_string()),
-            ]);
-        } else {
-            query.extend([
-                ("repositoryId", repository_id.clone()),
-                ("refName", text(field(pr, "targetRefName")?)?.to_owned()),
-            ]);
-            if let Some(cursor) = &cursor {
-                query.push(("continuationToken", cursor.clone()));
-            }
+        // Match the bounded configuration page size used by the provider capture.
+        let mut query = vec![
+            ("$top", "100".to_owned()),
+            ("repositoryId", repository_id.clone()),
+            ("refName", text(field(pr, "targetRefName")?)?.to_owned()),
+        ];
+        if let Some(cursor) = &cursor {
+            query.push(("continuationToken", cursor.clone()));
         }
-        let page = api.transport.ado(&path, "GET", None, &query, version)?;
+        let page = api.transport.ado(&path, "GET", None, &query, "7.1")?;
         let items = ado_items(&page.payload)?;
         let empty = items.is_empty();
         values.extend(items);
-        unique(&values, key)?;
-        if evaluations {
-            if page.continuation.is_some() {
-                return Err(fail("service", "Unexpected ADO evaluation continuation"));
-            }
-            if empty {
-                values.sort_by_key(|value| value.get(key).map(Value::to_string));
-                return Ok(values);
-            }
-        } else if let Some(next) = page.continuation {
+        unique(&values, "id")?;
+        if let Some(next) = page.continuation {
             if empty || !cursors.insert(next.clone()) {
                 return Err(fail("service", "ADO policy pagination made no progress"));
             }
             cursor = Some(next);
         } else {
-            values.sort_by_key(|value| value.get(key).map(Value::to_string));
+            values.sort_by_key(|value| value.get("id").map(Value::to_string));
             return Ok(values);
         }
     }
