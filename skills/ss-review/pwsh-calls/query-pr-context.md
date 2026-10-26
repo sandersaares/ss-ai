@@ -209,7 +209,11 @@ The result contains paged delta entries with references to the baseline, current
 
 # Stage 2: handle output and continue deliberately
 
-After every command, check for an error before using its response. On any error, stop and report it to the caller; never fall back to a raw file read. Read the first page, or replay the last returned page after interruption:
+After every command, check for an error before using its response. Apply [error recovery](../error-recovery.md): correct orchestration mistakes and retry safe transient failures instead of stopping the review. Never fall back to a raw file read.
+
+In request creation, `-Path` must name the existing capture, such as `pr-context.json`, while `-RequestPath` names the separate query request output, such as `pr-author-request.json`. If `-Path` accidentally names that not-yet-created request, correct it to the assigned capture path, verify existence without reading the capture into context, and rerun request creation with the intended request output path. Do not ask the user, rerun proactor selection, or cancel unrelated preparation workers for this local invocation mistake.
+
+Read the first page, or replay the last returned page after interruption:
 
 ```powershell
 pwsh -NoProfile -NonInteractive -File '{{SKILL_ROOT}}\scripts\Read-PullRequestContext.ps1' `

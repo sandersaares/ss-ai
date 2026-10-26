@@ -25,7 +25,7 @@ For `review`, add `-ManifestPath '{{MANIFEST_PATH}}' -ReviewerId '{{REVIEWER_ID}
 
 Add `-ContextPath '{{CONTEXT_PATH}}'` for a PR review, choosing the intended initial or refreshed capture. `CONTEXT_PATH` is its absolute path. Pass `-RepositoryInstructions` and `-IncludePreExisting` only when the user authorized those exceptions. In PowerShell single-quoted arguments, double any embedded apostrophe; do not JSON-escape backslashes.
 
-On error stop and report it. On success dispatch the returned `dispatchPrompt` verbatim with the phase's prescribed model, reasoning effort, and context tier. The output contains instructions, not the document bodies. Do not replace it with a hand-built prompt or open the generated prompt with the default viewer.
+On error apply [error recovery](../error-recovery.md). On success dispatch the returned `dispatchPrompt` verbatim with the phase's prescribed model, reasoning effort, and context tier. The output contains instructions, not the document bodies. Do not replace it with a hand-built prompt or open the generated prompt with the default viewer.
 
 # Stage 2: read and recover
 

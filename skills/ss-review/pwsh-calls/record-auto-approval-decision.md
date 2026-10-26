@@ -11,7 +11,7 @@ Records one policy classification. `auto-approved` carries the finding into the 
 `needs-audit` advances the classification loop but leaves the finding undecided for publication.
 `-PolicyClassification` rejects user verdicts and feedback. The command emits a single JSON object with `decisionsPath` and
 `recorded`; verify that `recorded` contains the finding identifier, then poll for the next finding.
-On an error, stop and report it to the caller. The primary orchestrator also uses `needs-audit`
+On an error, apply [error recovery](../error-recovery.md). The primary orchestrator also uses `needs-audit`
 when a substantive revision requires renewed user approval; it then returns directly to the audit.
 
 Placeholders to replace:

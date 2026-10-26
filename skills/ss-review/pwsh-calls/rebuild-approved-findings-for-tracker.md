@@ -13,4 +13,4 @@ Placeholders to replace:
 | `SESSION_STATE` | Session state directory for this review. |
 | `CONTEXT_PATH` | Absolute path to the latest checked capture, when reviewing a pull request. |
 
-For a pull request, append `-ContextPath "{{CONTEXT_PATH}}"` to retain the checked evidence binding and follow-up validation. Omit only `-RepositoryPath`: tracker findings do not need anchors in the PR diff. With no pull request, omit both parameters. Inspect the emitted approval diagnostics and stop on validation errors.
+For a pull request, append `-ContextPath "{{CONTEXT_PATH}}"` to retain the checked evidence binding and follow-up validation. Omit only `-RepositoryPath`: tracker findings do not need anchors in the PR diff. With no pull request, omit both parameters. Inspect the emitted approval diagnostics and apply [error recovery](../error-recovery.md) to validation errors before continuing; never supply a missing human decision.

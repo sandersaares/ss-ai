@@ -31,6 +31,6 @@ The command preserves existing captures and writes a new prefixed `pr-context.js
 | `reviewedSourceCommitChanged`, `previousReviewedSourceCommit`, `reviewedSourceCommit` | Source movement flag and compared commits. |
 | `reviewedMergeBaseCommitChanged`, `previousReviewedMergeBaseCommit`, `reviewedMergeBaseCommit` | Merge-base movement flag and compared commits. |
 
-The summary has no changed-ID or indeterminate-comment lists. If the command reports an error, stop and report it to the caller. Otherwise classify any indeterminate comments with `classify-comment-authorship.md`, using the refreshed path, before beginning a cursor-based freshness pass.
+The summary has no changed-ID or indeterminate-comment lists. On error, apply [error recovery](../error-recovery.md) before continuing. Otherwise classify any indeterminate comments with `classify-comment-authorship.md`, using the refreshed path, before beginning a cursor-based freshness pass.
 
 Use `query-pr-context.md` for every agent read: `changes` with `BASELINE_PATH` as `-ComparePath` and the returned `contextPath` as `-Path` discovers the intervening delta in bounded pages. Targeted metadata or conversation queries provide evidence; the `reviewEvidence` entry also requires checking relevant metadata and thread context. Exhaust delta discovery in bounded batches, including removals and resolution changes; do not dump either capture or concatenate the pages into a replacement capture. Advance the checked capture only after revalidation, and preserve the audit capture across a human wait.

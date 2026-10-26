@@ -127,8 +127,12 @@ approve a pull request. Only the real user's direct response in the owning
 session can resume a question-dependent action. The defined question-free
 policy approvals in `ss-review` remain unchanged.
 
-Unexpected authentication, permission, service, or local-state failures stop
-the run for human input. No error is treated as an empty candidate list.
+The workflow corrects orchestration mistakes and retries safe transient failures
+without human input, preserving the current cycle and unrelated work.
+Unrecoverable external failures, such as permission denial or authentication
+requiring user action, stop the run with an explicit diagnostic. Exhausted or
+unsafe recovery is reported as a blocker. No error is treated as an empty
+candidate list.
 Ambiguous writes are not retried automatically. A claim left by an interrupted
 run expires naturally; another invocation cannot resume its ownership merely
 by reusing a session token.

@@ -866,8 +866,21 @@ Cursors bind the effective capture snapshot, classification policy and original 
 comparison snapshot for changes. Continuation repeats those arguments with the
 opaque cursor. A semantic-decision update invalidates
 its cursors explicitly; a reader reports the error and starts a fresh query,
-not a guessed positional offset. Query errors stop the current reading task
-without authorizing a raw-file fallback.
+not a guessed positional offset. Query errors block dependent analysis until
+recovery succeeds, without authorizing a raw-file fallback. The shared
+`error-recovery.md` policy directs workers and the primary orchestrator to
+correct invocation mistakes and retry safe transient failures before escalating.
+For request creation, the existing capture is the input and the saved request
+is a separate output; confusing those paths requires a corrected invocation,
+not suspension of the review. Independent workers remain active during repair.
+
+Recovery uses documented retry/resume semantics and bounded transient retry
+budgets. It never clears durable state or treats missing output as completion.
+Before restarting a write-capable command, the orchestrator establishes that
+no remote write was attempted and that its lifecycle permits re-entry.
+Ambiguous or attempted publication writes retain their human-reconciliation
+boundary; absence of a receipt alone does not authorize replay. Unrecoverable
+external failures and required human decisions still suspend affected work.
 
 Prompt policy governs the aggregate reading budget: workers process relevant
 pages and retain identifiers, evidence references, and decisions instead of

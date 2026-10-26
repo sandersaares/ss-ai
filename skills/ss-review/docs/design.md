@@ -77,6 +77,20 @@ substitute for a user who has not answered. This distinction lets the workflow
 remove predictable clerical decisions without manufacturing consent at an
 unresolved boundary.
 
+## Error recovery
+
+The workflow corrects orchestration mistakes and retries safe transient failures
+without requiring human input. A wrong query path or temporary service failure
+does not end the review or cancel unrelated work. Recovery preserves completed
+work and resumes the affected step.
+
+Unrecoverable external failures, such as permission denial, stop the affected
+workflow with an explicit diagnostic. Recovery never bypasses evidence-access
+rules or human decisions. A possibly successful external write requires
+reconciliation before replay; automatic recovery must not duplicate claims,
+publications, or tracker items. Defined best-effort publication and presentation
+fallbacks retain their non-blocking behavior.
+
 ## Guidance scope
 
 The `ss-ai` installation supplies reusable instructions from its canonical
