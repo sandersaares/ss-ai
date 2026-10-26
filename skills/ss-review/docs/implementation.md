@@ -103,6 +103,13 @@ and returns exact contiguous slices with explicit continuation and completion,
 including for a single very long line. The dispatch prompt contains a generated,
 quoted first-read command, not the shared document bodies or a default viewer
 invocation. Readers reload through the same route after compaction.
+The builder embeds canonical `error-recovery.md` text before the first-read
+instructions so a reader failure cannot prevent the worker from learning how
+to recover. An empty policy prevents assignment creation. Every preparation
+phase and original or replacement reviewer receives the same policy without
+adding unrelated shared-document roles. Workers retain the policy and reader
+command through compaction and apply recovery before reporting unresolved
+blockers to the primary session.
 PR dispatch prompts reference the calling-shell contract in their registered
 query recipe rather than repeating its instructions.
 
