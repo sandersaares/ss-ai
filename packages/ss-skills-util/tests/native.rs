@@ -85,6 +85,7 @@ impl Fixture {
             "provider"
         });
         fs::copy(Self::prepared_provider(), &program).unwrap();
+
         for name in ["gh", "az"] {
             #[cfg(windows)]
             fs::write(
@@ -95,6 +96,7 @@ impl Fixture {
             #[cfg(not(windows))]
             fs::copy(&program, root.path().join(name)).unwrap();
         }
+
         let mut paths = vec![root.path().to_owned()];
         paths.extend(std::env::split_paths(&std::env::var_os("PATH").unwrap()));
         let path = std::env::join_paths(paths).unwrap();
@@ -121,6 +123,7 @@ impl Fixture {
         .expect("Malformed Rust prerequisites");
         assert_eq!(record["schemaVersion"], 1, "Unsupported prerequisites");
         assert_eq!(record["status"], "complete", "Incomplete prerequisites");
+
         let provider = &record["provider"];
         let source = Path::new(provider["source"]["path"].as_str().unwrap());
         assert!(source.is_absolute(), "Provider source must be absolute");
@@ -130,11 +133,13 @@ impl Fixture {
             include_bytes!("support/provider.rs"),
             "Provider source changed; prepare and compile tests again"
         );
+
         let executable = Path::new(provider["executable"]["path"].as_str().unwrap());
         assert!(
             executable.is_absolute(),
             "Provider executable must be absolute"
         );
+
         for (artifact, bytes) in [
             (&provider["source"], source_bytes),
             (
@@ -152,9 +157,11 @@ impl Fixture {
                 "Modified provider prerequisite; prepare again"
             );
         }
+
         PathBuf::from(provider["executable"]["path"].as_str().unwrap())
     }
 
+    /// Keeps launcher state and working-directory effects private to this fixture.
     fn command(&self) -> Command {
         let mut command = Command::new(env!("CARGO_BIN_EXE_ss-skills-util"));
         command
@@ -166,6 +173,7 @@ impl Fixture {
         command
     }
 
+    /// Supplies one stable review identity for executable transaction scenarios.
     fn review(&self, operation: &str) -> Command {
         let mut command = self.command();
         command
@@ -208,6 +216,7 @@ fn provider_prerequisites_reject_missing_incomplete_stale_and_modified_artifacts
     });
     fs::write(&record, serde_json::to_vec(&valid).unwrap()).unwrap();
     assert_eq!(Fixture::prepared_provider_from(&record), executable);
+
     for (pointer, replacement) in [
         ("/schemaVersion", json!(2)),
         ("/status", json!("preparing")),
@@ -225,6 +234,7 @@ fn provider_prerequisites_reject_missing_incomplete_stale_and_modified_artifacts
         fs::write(&record, serde_json::to_vec(&invalid).unwrap()).unwrap();
         catch_unwind(|| Fixture::prepared_provider_from(&record)).unwrap_err();
     }
+
     fs::write(&record, serde_json::to_vec(&valid).unwrap()).unwrap();
     fs::write(&source, b"changed source at the same package version").unwrap();
     catch_unwind(|| Fixture::prepared_provider_from(&record)).unwrap_err();
@@ -240,6 +250,7 @@ fn concurrent_provider_fixtures_own_independent_mutable_state() {
         let first = first.join().unwrap();
         let second = second.join().unwrap();
         assert_ne!(first.root.path(), second.root.path());
+
         let response = "remote-claim.json";
         fs::write(first.root.path().join(response), b"first").unwrap();
         fs::write(second.root.path().join(response), b"second").unwrap();
@@ -258,6 +269,7 @@ fn concurrent_provider_fixtures_own_independent_mutable_state() {
     });
 }
 
+/// Preserves both output streams when a native fixture command unexpectedly fails.
 fn successful(output: &Output) {
     assert!(
         output.status.success(),
@@ -267,6 +279,7 @@ fn successful(output: &Output) {
     );
 }
 
+/// Requires successful execution before decoding a command's JSON contract.
 fn value(output: &Output) -> Value {
     successful(output);
     serde_json::from_slice(&output.stdout).unwrap()

@@ -6,8 +6,16 @@ BeforeAll {
     # A child hosts the actual runner and Pester. Cargo is a command-boundary fixture,
     # keeping test dispatch independent of native builds or a global tool installation.
     function Invoke-TestRunnerFixture {
-        param([string] $Suite, [switch] $FailPester, [switch] $FailClippy, [switch] $FailPrepare,
-            [switch] $FailNativePester, [int] $PreviousExit = 0, [int] $TestExit = 0)
+        param(
+            [string] $Suite,
+            [switch] $FailPester,
+            [switch] $FailClippy,
+            [switch] $FailPrepare,
+            [switch] $FailNativePester,
+            [int] $PreviousExit = 0,
+            [int] $TestExit = 0
+        )
+
         $root = Join-Path $TestDrive ([guid]::NewGuid().ToString('N'))
         New-Item -ItemType Directory -Path $root | Out-Null
         $test = Join-Path $root 'Sample.Tests.ps1'
@@ -19,36 +27,64 @@ BeforeAll {
         }
         $testPath = if ($FailNativePester) { $root } else { $test }
         $suiteArgument = if ($Suite) { " -Suite $Suite" } else { '' }
+
+        # Distinct nonzero statuses identify which command boundary supplied a failure.
         $clippyExit = if ($FailClippy) { 19 } else { 0 }
         $code = @'
+# Supply Cargo discovery without depending on an installed native toolchain.
 function Get-Command {
     param($Name, $CommandType, $ErrorAction)
-    if ($Name -eq 'cargo') { return [pscustomobject]@{ Name = 'cargo' } }
+
+    if ($Name -eq 'cargo') {
+        return [pscustomobject]@{ Name = 'cargo' }
+    }
     Microsoft.PowerShell.Core\Get-Command @PSBoundParameters
 }
+
+# Emit only the build artifacts and statuses that the runner consumes.
 function cargo {
     if ($args[0] -eq '--version') {
         $global:LASTEXITCODE = 0
         return 'cargo fixture'
     }
+
     [IO.File]::AppendAllText('__LOG__', "$($args[0])`n")
-    if ($args[0] -eq 'build') { $global:LASTEXITCODE = 29; return }
+    if ($args[0] -eq 'build') {
+        $global:LASTEXITCODE = 29
+        return
+    }
+
     $global:LASTEXITCODE = if ($args[0] -eq 'clippy') { __CLIPPY_EXIT__ } else { 0 }
     if ($args -contains '--no-run') {
-        if (__FAIL_PREPARE__) { $global:LASTEXITCODE = 27; return }
+        if (__FAIL_PREPARE__) {
+            $global:LASTEXITCODE = 27
+            return
+        }
+
         $target = $args[[array]::IndexOf($args, '--target-dir') + 1]
         [IO.Directory]::CreateDirectory($target) | Out-Null
         $executable = Join-Path $target 'fixture'
         [IO.File]::WriteAllText($executable, 'fixture')
-        @{ reason = 'compiler-artifact'; target = @{ name = 'fixture' }; executable = $executable; fresh = $false } | ConvertTo-Json -Compress
+        @{
+            reason = 'compiler-artifact'
+            target = @{ name = 'fixture' }
+            executable = $executable
+            fresh = $false
+        } | ConvertTo-Json -Compress
     }
 }
+
+# Stand in for the prebuilt provider without invoking a compiler.
 function rustc {
     $global:LASTEXITCODE = 0
-    if ($args[0] -eq '-vV') { return 'rustc fixture' }
+    if ($args[0] -eq '-vV') {
+        return 'rustc fixture'
+    }
+
     $executable = $args[[array]::IndexOf($args, '-o') + 1]
     [IO.File]::WriteAllText($executable, 'provider')
 }
+
 $global:LASTEXITCODE = __PREVIOUS_EXIT__
 & '__RUNNER__' -Path '__TEST__'__SUITE__
 exit $LASTEXITCODE
@@ -57,6 +93,7 @@ exit $LASTEXITCODE
             Replace('__RUNNER__', $script:TestRunner.Replace("'", "''")).Replace('__TEST__', $testPath.Replace("'", "''")).
             Replace('__SUITE__', $suiteArgument).Replace('__PREVIOUS_EXIT__', [string]$PreviousExit).
             Replace('__FAIL_PREPARE__', $(if ($FailPrepare) { '$true' } else { '$false' }))
+
         $start = [Diagnostics.ProcessStartInfo]::new((Get-Process -Id $PID).Path)
         $start.UseShellExecute = $false
         $start.RedirectStandardOutput = $true
@@ -64,17 +101,21 @@ exit $LASTEXITCODE
         foreach ($argument in @('-NoProfile', '-NonInteractive', '-EncodedCommand', [Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($code)))) {
             $start.ArgumentList.Add($argument)
         }
+
         $process = [Diagnostics.Process]::Start($start)
         try {
             $errorTask = $process.StandardError.ReadToEndAsync()
             $output = $process.StandardOutput.ReadToEnd()
             $process.WaitForExit()
+
             @{
                 code = $process.ExitCode
                 output = $output + $errorTask.GetAwaiter().GetResult()
                 calls = if (Test-Path $log) { @(Get-Content $log) } else { @() }
             }
-        } finally { $process.Dispose() }
+        } finally {
+            $process.Dispose()
+        }
     }
 }
 

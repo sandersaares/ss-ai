@@ -46,6 +46,7 @@ impl Sources {
         let repository = TempDir::new().unwrap();
         let (old, new) = sources(repository.path());
         let scope = TempDir::new().unwrap();
+
         let github = Provider::new(repository.path(), &old, &new);
         let (_, github_prepared) = prepare(&scope.path().join("github"), &github, true);
         let ado = Provider::ado(repository.path(), &old, &new);
@@ -56,6 +57,7 @@ impl Sources {
             assert!(!replies.is_empty());
             assert!(replies.iter().all(|reply| reply.output.success));
         }
+
         Self {
             repository,
             old,
@@ -65,10 +67,12 @@ impl Sources {
         }
     }
 
+    /// Exposes the shared source tree without transferring its lifetime to a scenario.
     fn path(&self) -> &Path {
         self.repository.path()
     }
 
+    /// Supplies owned commit identities while the source repository remains shared.
     fn commits(&self) -> (String, String) {
         (self.old.clone(), self.new.clone())
     }
@@ -80,6 +84,7 @@ impl Sources {
         } else {
             Provider::new(self.path(), &self.old, &self.new)
         };
+
         provider.git_replies = Some(Rc::clone(if ado { &self.ado } else { &self.github }));
         provider
     }
@@ -96,11 +101,13 @@ thread_local! {
     static WORK_COUNTS: Cell<WorkCounts> = Cell::default();
 }
 
+/// Keeps approval recency deterministic and rejects unexpected retry paths.
 struct FixedClock;
 impl Clock for FixedClock {
     fn now(&self) -> Timestamp {
         "2026-09-28T10:00:00Z".parse().unwrap()
     }
+
     fn wait(&self, _: Duration) -> Result<(), AppError> {
         panic!("No test response requires a timed retry")
     }
@@ -124,6 +131,7 @@ struct Provider {
 }
 
 impl Provider {
+    /// Starts each scenario with independent evidence and effect counters.
     fn new(repository: &Path, old: &str, new: &str) -> Self {
         let fixture: Value =
             serde_json::from_str(include_str!("fixtures/github-approval.json")).unwrap();
@@ -514,6 +522,8 @@ impl Process for Provider {
         if fetching {
             self.fetches.set(self.fetches.get() + 1);
         }
+
+        // Replay only known complete preparations; a changed command must not fall back to Git.
         if let Some(replies) = &self.git_replies {
             let position = self.git_position.get();
             let reply = &replies[position];
@@ -523,6 +533,8 @@ impl Process for Provider {
                     format!("Unexpected publication-matrix Git request: {arguments:?}"),
                 ));
             }
+
+            // Wrap only after a complete sequence so later preparations reuse immutable replies.
             self.git_position.set((position + 1) % replies.len());
             WORK_COUNTS.set({
                 let mut counts = WORK_COUNTS.get();
@@ -535,6 +547,7 @@ impl Process for Provider {
                 reply.output.stderr.clone(),
             ));
         }
+
         WORK_COUNTS.set({
             let mut counts = WORK_COUNTS.get();
             counts.assessment_git += 1;
@@ -548,6 +561,7 @@ impl Process for Provider {
                 .unwrap();
             self.repository.to_str().unwrap().clone_into(remote);
         }
+
         let output = NativeProcess::new(directory).isolated_git(directory, &local_arguments)?;
         self.recorded_git.borrow_mut().push(GitReply {
             arguments: arguments.to_vec(),
@@ -766,12 +780,14 @@ impl Provider {
     }
 }
 
+/// Builds deterministic local Git history while counting actual source-fixture work.
 fn git(root: &Path, arguments: &[&str]) -> String {
     WORK_COUNTS.set({
         let mut counts = WORK_COUNTS.get();
         counts.source_git += 1;
         counts
     });
+
     let output = Command::new("git")
         .current_dir(root)
         .args([
@@ -795,18 +811,21 @@ fn git(root: &Path, arguments: &[&str]) -> String {
     String::from_utf8(output.stdout).unwrap().trim().to_owned()
 }
 
+/// Creates the editorial-only change shared by publication scenarios.
 fn sources(root: &Path) -> (String, String) {
     git(root, &["init", "--quiet"]);
     fs::write(root.join("notes.txt"), "An ordinary sentnce.\n").unwrap();
     git(root, &["add", "--", "notes.txt"]);
     git(root, &["commit", "--quiet", "-m", "Original source"]);
     let old = git(root, &["rev-parse", "HEAD"]);
+
     fs::write(root.join("notes.txt"), "An ordinary sentence.\n").unwrap();
     git(root, &["add", "--", "notes.txt"]);
     git(root, &["commit", "--quiet", "-m", "Editorial correction"]);
     (old, git(root, &["rev-parse", "HEAD"]))
 }
 
+/// Dispatches real commands with injected service effects and a scope-owned host journal.
 fn invoke(
     root: &Path,
     provider: &Provider,
@@ -820,6 +839,7 @@ fn invoke(
             counts
         });
     }
+
     let mut arguments = vec![
         OsString::from("ss-skills-util"),
         "autoreapprove".into(),
@@ -870,6 +890,7 @@ fn discover_inspect(root: &Path, provider: &Provider, dry_run: bool) -> Value {
     .unwrap()
 }
 
+/// Requires assessment eligibility and verifies complete replay before returning work.
 fn prepare(root: &Path, provider: &Provider, dry_run: bool) -> (String, Value) {
     let inspected = discover_inspect(root, provider, dry_run);
     assert_eq!(
@@ -881,6 +902,7 @@ fn prepare(root: &Path, provider: &Provider, dry_run: bool) -> (String, Value) {
         .unwrap()
         .to_owned();
     let prepared = work(root, provider, "prepare", &snapshot, &[]).unwrap();
+
     if prepared.get("requiredDocuments").is_some() {
         if provider.git_replies.is_some() {
             assert_eq!(
@@ -900,9 +922,11 @@ fn prepare(root: &Path, provider: &Provider, dry_run: bool) -> (String, Value) {
     } else {
         assert_eq!(prepared["items"][0]["status"], "failed");
     }
+
     (snapshot, prepared)
 }
 
+/// Binds each assessment or publication command to its PR and immutable snapshot.
 fn work(
     root: &Path,
     provider: &Provider,
@@ -920,6 +944,7 @@ fn work(
     invoke(root, provider, operation, &all)
 }
 
+/// Completes the ordinary insignificant assessment used by publication fault matrices.
 fn assess(root: &Path, provider: &Provider, snapshot: &str, prepared: &Value) {
     assess_as(root, provider, snapshot, prepared, "insignificant");
 }
@@ -944,11 +969,20 @@ fn assess_as(
     for reference in references {
         read_evidence(root, provider, snapshot, &reference, None);
     }
+
     for change in prepared["changes"].as_array().unwrap() {
         let id = change["id"].as_str().unwrap();
         let mut arguments = vec![
-            "--change-id".into(), id.into(), "--disposition".into(), "insignificant".into(),
-            "--rationale".into(), "The complete fixture change has no significant design change or likely performance/correctness regression.".into(),
+            "--change-id".into(),
+            id.into(),
+            "--disposition".into(),
+            "insignificant".into(),
+            "--rationale".into(),
+            concat!(
+                "The complete fixture change has no significant design change ",
+                "or likely performance/correctness regression."
+            )
+            .into(),
         ];
         for side in ["old", "new"] {
             if !change[side].is_null() {
@@ -957,6 +991,7 @@ fn assess_as(
         }
         work(root, provider, "judge", snapshot, &arguments).unwrap();
     }
+
     let current = work(root, provider, "assessment", snapshot, &[]).unwrap();
     let mut cumulative = vec![
         "--change-id".into(),
@@ -979,6 +1014,7 @@ fn assess_as(
         work(root, provider, "judge", snapshot, &cumulative).unwrap_err();
         cumulative.extend(["--previous-digest".into(), previous.to_owned()]);
     }
+
     work(root, provider, "judge", snapshot, &cumulative).unwrap();
     work(root, provider, "complete", snapshot, &[]).unwrap();
 }
@@ -998,6 +1034,7 @@ fn read_evidence(
     let mut offset = 0;
     let mut pages = 0;
     let mut text = String::new();
+
     loop {
         assert!(
             pages < expected_pages,
@@ -1012,6 +1049,7 @@ fn read_evidence(
         if let Some(limit) = limit {
             arguments.extend(["--limit".into(), limit.to_string()]);
         }
+
         let read = work(root, provider, "read", snapshot, &arguments).unwrap();
         assert_eq!(read["snapshotDigest"], snapshot);
         assert_eq!(read["reference"], reference);
@@ -1021,10 +1059,12 @@ fn read_evidence(
         assert!(length <= page_limit);
         text.push_str(page);
         pages += 1;
+
         if read["complete"] == true {
             assert!(read["nextOffset"].is_null());
             break;
         }
+
         // Full nonterminal pages and exact advancement prevent loops and skipped evidence.
         assert_eq!(length, page_limit);
         let next = read["nextOffset"].as_u64().unwrap();
@@ -1032,6 +1072,7 @@ fn read_evidence(
         assert!(next > offset);
         offset = next;
     }
+
     assert_eq!(pages, expected_pages);
     assert_eq!(text.chars().count(), length);
     text
@@ -1046,6 +1087,7 @@ fn evidence_length(root: &Path, number: u32, reference: &str) -> usize {
         .iter()
         .find(|entry| entry["pullRequestId"] == number)
         .unwrap();
+
     match reference {
         "policy" => record["policy"]["content"]
             .as_str()
@@ -1753,6 +1795,7 @@ fn expired_edited_notices_do_not_block_new_notice_readback(repository: &Sources)
     }
 }
 
+/// Exercises guarded approval publication with the same attribution as notice writes.
 fn publish(root: &Path, provider: &Provider, snapshot: &str) -> Result<Value, AppError> {
     work(
         root,
@@ -1865,16 +1908,18 @@ fn native_git_assessment_and_guarded_publication_have_exact_effect_boundaries() 
         }
         check_publication(&root, &provider, &snapshot, fault);
     }
+
     assert_eq!(
         git(repository.path(), &["status", "--porcelain=v1"]),
         baseline
     );
     assert_eq!(git(repository.path(), &["rev-parse", "HEAD"]), new);
+
+    // Keep subprocess scenarios in this binary's single test entry point:
+    // concurrent process creation can briefly inherit another thread's held file lock.
     risk_judgments_and_uncertainty_prevent_publication(&repository);
     prepared_run_cannot_bypass_another_runs_unknown_effect(&repository);
     ado_publication_preserves_authority_and_never_replays_unknown_effects(&repository);
-    // Keep subprocess scenarios in this binary's single test entry point:
-    // concurrent process creation can briefly inherit another thread's held file lock.
     needs_review_notices_short_circuit_and_expire_only_after_external_approval(&repository);
     notice_dry_runs_refusals_and_uncertain_effects_do_not_duplicate_writes(&repository);
     valid_automatic_approval_timestamps_survive_later_invocations(&repository);
@@ -1886,11 +1931,13 @@ fn native_git_assessment_and_guarded_publication_have_exact_effect_boundaries() 
     ado_notice_recovery_does_not_require_current_approval_eligibility(&repository);
     notice_readback_survives_closure_and_draft_conversion(&repository);
     expired_edited_notices_do_not_block_new_notice_readback(&repository);
+
     assert_eq!(
         git(repository.path(), &["status", "--porcelain=v1"]),
         baseline
     );
     assert_eq!(git(repository.path(), &["rev-parse", "HEAD"]), new);
+
     // Source-mutating scenarios own their repositories rather than the shared editorial fixture.
     force_push_inventory_preserves_every_path_kind_and_rejects_missing_objects();
     empty_source_diff_and_corrupted_assessments_never_bypass_discussion_or_coverage();
@@ -1913,6 +1960,7 @@ fn recorded_git_rejects_unknown_commands_and_changed_source(repository: &Sources
             io::ErrorKind::InvalidInput
         );
         assert_eq!(provider.git_position.get(), 0);
+
         provider
             .isolated_git(repository.path(), &replies[0].arguments)
             .unwrap();
@@ -1946,6 +1994,7 @@ fn pagination_requires_complete_contiguous_snapshot_bound_unicode_evidence() {
         &["commit", "--quiet", "-m", "Long Unicode source"],
     );
     let old = git(repository.path(), &["rev-parse", "HEAD"]);
+
     fs::write(repository.path().join("notes.txt"), new_text).unwrap();
     git(repository.path(), &["add", "--", "notes.txt"]);
     git(
@@ -1953,12 +2002,14 @@ fn pagination_requires_complete_contiguous_snapshot_bound_unicode_evidence() {
         &["commit", "--quiet", "-m", "Short Unicode source"],
     );
     let new = git(repository.path(), &["rev-parse", "HEAD"]);
+
     let scope = TempDir::new().unwrap();
     let root = scope.path().join("pagination");
     let provider = Provider::new(repository.path(), &old, &new);
     let (snapshot, prepared) = prepare(&root, &provider, true);
     let id = prepared["changes"][0]["id"].as_str().unwrap();
     let reference = format!("{id}:new");
+
     let read = |snapshot: &str, offset: usize, limit: usize| {
         work(
             &root,
@@ -1975,6 +2026,7 @@ fn pagination_requires_complete_contiguous_snapshot_bound_unicode_evidence() {
             ],
         )
     };
+
     // Tiny pages split UTF-8 byte sequences unless offsets count Unicode scalar values.
     let page_limit = 3;
     let path = root.join("run.json");
@@ -1982,6 +2034,7 @@ fn pagination_requires_complete_contiguous_snapshot_bound_unicode_evidence() {
     read(&snapshot, 1, page_limit).unwrap_err();
     read(&"f".repeat(64), 0, page_limit).unwrap_err();
     assert_eq!(fs::read(&path).unwrap(), before);
+
     let first = read(&snapshot, 0, page_limit).unwrap();
     assert_eq!(
         first["text"],
@@ -1997,12 +2050,14 @@ fn pagination_requires_complete_contiguous_snapshot_bound_unicode_evidence() {
         saved["inventory"][0]["assessment"]["reads"][&reference],
         page_limit
     );
+
     let before = fs::read(&path).unwrap();
     read(&snapshot, page_limit + 1, page_limit).unwrap_err();
     assert_eq!(fs::read(&path).unwrap(), before);
     for reference in ["policy", "discussion"] {
         read_evidence(&root, &provider, &snapshot, reference, None);
     }
+
     // Oversized requests must still follow the production response cap.
     assert_eq!(
         read_evidence(
@@ -2014,6 +2069,7 @@ fn pagination_requires_complete_contiguous_snapshot_bound_unicode_evidence() {
         ),
         old_text
     );
+
     for change in [id, "cumulative"] {
         let references = if change == "cumulative" {
             vec!["policy".to_owned(), "discussion".to_owned()]
@@ -2033,6 +2089,7 @@ fn pagination_requires_complete_contiguous_snapshot_bound_unicode_evidence() {
         }
         work(&root, &provider, "judge", &snapshot, &arguments).unwrap();
     }
+
     let error = work(&root, &provider, "complete", &snapshot, &[]).unwrap_err();
     assert!(
         error

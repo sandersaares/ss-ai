@@ -6,26 +6,45 @@ BeforeAll {
     # Command-boundary fixtures make compiler counts and failures deterministic without compiling.
     function rustc {
         $global:LASTEXITCODE = 0
-        if ($args[0] -eq '-vV') { return 'rustc fixture host' }
+        if ($args[0] -eq '-vV') {
+            return 'rustc fixture host'
+        }
+
         $script:ProviderBuilds++
-        if ($script:FailProvider) { $global:LASTEXITCODE = 13; return }
+        if ($script:FailProvider) {
+            # Distinct native exit statuses keep provider and Cargo failures distinguishable.
+            $global:LASTEXITCODE = 13
+            return
+        }
         [IO.File]::WriteAllText($args[[array]::IndexOf($args, '-o') + 1], 'provider')
     }
 
+    # Emit only the metadata and artifact evidence consumed by preparation and execution.
     function cargo {
         $global:LASTEXITCODE = 0
-        if ($args[0] -eq '--version') { return 'cargo fixture' }
+        if ($args[0] -eq '--version') {
+            return 'cargo fixture'
+        }
+
         $script:CargoCalls.Add(@($args))
-        if ($script:FailCargo) { $global:LASTEXITCODE = 17; return }
+        if ($script:FailCargo) {
+            $global:LASTEXITCODE = 17
+            return
+        }
         if ($args[0] -eq 'metadata') {
             return '{"workspace_members":["fixture"],"packages":[{"id":"fixture","targets":[{"name":"native","kind":["test"]},{"name":"git","kind":["test"]}]}]}'
         }
+
         $target = $args[[array]::IndexOf($args, '--target-dir') + 1]
         [IO.Directory]::CreateDirectory($target) | Out-Null
         $executable = Join-Path $target 'test with spaces'
         [IO.File]::WriteAllText($executable, 'test')
-        @{ reason = 'compiler-artifact'; target = @{ name = 'fixture' }; fresh = $false; executable = $executable } |
-            ConvertTo-Json -Compress
+        @{
+            reason = 'compiler-artifact'
+            target = @{ name = 'fixture' }
+            fresh = $false
+            executable = $executable
+        } | ConvertTo-Json -Compress
     }
 
     # Each invocation gets a source tree and record parent independent of the real checkout.
@@ -35,7 +54,11 @@ BeforeAll {
         New-Item -ItemType Directory -Path $support -Force | Out-Null
         [IO.File]::WriteAllText((Join-Path $support 'provider.rs'), 'source')
         [IO.File]::WriteAllText((Join-Path $root 'Cargo.lock'), 'lock')
-        @{ root = $root; record = Join-Path $root 'prerequisites.json' }
+
+        @{
+            root = $root
+            record = Join-Path $root 'prerequisites.json'
+        }
     }
 }
 
@@ -50,6 +73,7 @@ Describe 'Rust preparation boundary' {
 
     It 'builds the provider once and discovers exact selected executable paths through Cargo JSON' {
         $prepared = New-RustTestPreparation -RepositoryRoot $fixture.root -PrerequisitePath $fixture.record -TestTarget native
+
         $script:ProviderBuilds | Should -Be 1
         $script:CargoCalls.Count | Should -Be 1
         $script:CargoCalls[0] | Should -Contain '--no-run'
@@ -62,6 +86,7 @@ Describe 'Rust preparation boundary' {
     It 'never publishes a record after Cargo compilation fails' {
         $script:FailCargo = $true
         { New-RustTestPreparation -RepositoryRoot $fixture.root -PrerequisitePath $fixture.record } | Should -Throw
+
         Test-Path -LiteralPath $fixture.record | Should -BeFalse
         @(Get-ChildItem -LiteralPath $fixture.root -Directory -Filter 'rust-tests-*') | Should -BeNullOrEmpty
     }
@@ -70,9 +95,11 @@ Describe 'Rust preparation boundary' {
         $script:FailProvider = $true
         $prepared = New-RustTestPreparation -RepositoryRoot $fixture.root -PrerequisitePath $fixture.record
         $prepared.status | Should -Be 'providerFailed'
+
         { Read-RustTestPreparation -RepositoryRoot $fixture.root -PrerequisitePath $fixture.record } | Should -Throw '*Incomplete*'
         $prepared = Read-RustTestPreparation -RepositoryRoot $fixture.root -PrerequisitePath $fixture.record -AllowProviderFailure
         { Invoke-PreparedRustTests -Preparation $prepared -PrerequisitePath $fixture.record } | Should -Throw '*execution failed*'
+
         $script:CargoCalls.Count | Should -Be 4
         $script:CargoCalls[2] | Should -Contain 'git'
         $script:CargoCalls[2] | Should -Contain '--lib'
@@ -82,6 +109,7 @@ Describe 'Rust preparation boundary' {
 
     It 'does not prepare a provider for a provider-independent target' {
         $prepared = New-RustTestPreparation -RepositoryRoot $fixture.root -PrerequisitePath $fixture.record -TestTarget git
+
         $prepared.status | Should -Be 'complete'
         $prepared.provider | Should -BeNullOrEmpty
         $script:ProviderBuilds | Should -Be 0
@@ -89,6 +117,7 @@ Describe 'Rust preparation boundary' {
 
     It 'rejects missing records and mismatched selection instead of building on demand' {
         { Read-RustTestPreparation -RepositoryRoot $fixture.root -PrerequisitePath $fixture.record } | Should -Throw '*Prepare first*'
+
         $null = New-RustTestPreparation -RepositoryRoot $fixture.root -PrerequisitePath $fixture.record -TestTarget native
         { Read-RustTestPreparation -RepositoryRoot $fixture.root -PrerequisitePath $fixture.record } | Should -Throw '*selection*'
         $script:ProviderBuilds | Should -Be 1
@@ -97,6 +126,7 @@ Describe 'Rust preparation boundary' {
     It 'invalidates a same-version source edit' {
         $null = New-RustTestPreparation -RepositoryRoot $fixture.root -PrerequisitePath $fixture.record
         Add-Content -LiteralPath (Join-Path $fixture.root 'packages/ss-skills-util/tests/support/provider.rs') -Value 'changed'
+
         { Read-RustTestPreparation -RepositoryRoot $fixture.root -PrerequisitePath $fixture.record } | Should -Throw '*sourceSha256*'
     }
 
@@ -111,11 +141,13 @@ Describe 'Rust preparation boundary' {
         [IO.File]::WriteAllText($assetPath, 'original embedded input')
         $prepared = New-RustTestPreparation -RepositoryRoot $fixture.root -PrerequisitePath $fixture.record
         $null = Read-RustTestPreparation -RepositoryRoot $fixture.root -PrerequisitePath $fixture.record
+
         [IO.File]::WriteAllText($assetPath, 'modified embedded input')
         {
             $validated = Read-RustTestPreparation -RepositoryRoot $fixture.root -PrerequisitePath $fixture.record
             Invoke-PreparedRustTests -Preparation $validated -PrerequisitePath $fixture.record
         } | Should -Throw '*sourceSha256*'
+
         $script:CargoCalls.Count | Should -Be 1
         foreach ($artifact in $prepared.executables) {
             (Get-TestArtifact -Path $artifact.path).sha256 | Should -Be $artifact.sha256
@@ -128,12 +160,16 @@ Describe 'Rust preparation boundary' {
         $prepared.status = 'preparing'
         [IO.File]::WriteAllText($fixture.record, ($prepared | ConvertTo-Json -Depth 20))
         { Read-RustTestPreparation -RepositoryRoot $fixture.root -PrerequisitePath $fixture.record } | Should -Throw '*Incomplete*'
+
         [IO.File]::WriteAllBytes($fixture.record, $bytes)
         $previous = $env:RUSTFLAGS
         try {
             $env:RUSTFLAGS = 'different fixture flags'
             { Read-RustTestPreparation -RepositoryRoot $fixture.root -PrerequisitePath $fixture.record } | Should -Throw '*environment*'
-        } finally { $env:RUSTFLAGS = $previous }
+        } finally {
+            $env:RUSTFLAGS = $previous
+        }
+
         [IO.File]::WriteAllText($prepared.provider.executable.path, 'modified')
         { Read-RustTestPreparation -RepositoryRoot $fixture.root -PrerequisitePath $fixture.record } | Should -Throw '*Modified prepared artifact*'
     }
@@ -159,19 +195,24 @@ Describe 'Rust preparation boundary' {
     It 'allows concurrent readers and atomic replacement while a record is open' {
         $null = New-RustTestPreparation -RepositoryRoot $fixture.root -PrerequisitePath $fixture.record
         $stream = Open-RustTestInput -Path $fixture.record
+
         try {
             $replacement = Join-Path $fixture.root 'replacement.json'
             [IO.File]::WriteAllBytes($replacement, [IO.File]::ReadAllBytes($fixture.record))
+
             # ReplaceFile supports Windows delete-sharing readers; an overwrite move does not.
             [IO.File]::Replace($replacement, $fixture.record, [NullString]::Value)
             $null = Read-RustTestPreparation -RepositoryRoot $fixture.root -PrerequisitePath $fixture.record
-        } finally { $stream.Dispose() }
+        } finally {
+            $stream.Dispose()
+        }
     }
 
     It 'retains existing owned outputs across additional preparations and refuses record replacement' {
         $first = New-RustTestPreparation -RepositoryRoot $fixture.root -PrerequisitePath $fixture.record
         $other = Join-Path $fixture.root 'second.json'
         $second = New-RustTestPreparation -RepositoryRoot $fixture.root -PrerequisitePath $other
+
         $first.ownedDirectory | Should -Not -Be $second.ownedDirectory
         $null = Read-RustTestPreparation -RepositoryRoot $fixture.root -PrerequisitePath $fixture.record
         { New-RustTestPreparation -RepositoryRoot $fixture.root -PrerequisitePath $fixture.record } | Should -Throw '*already exists*'
@@ -186,7 +227,10 @@ Describe 'Rust preparation boundary' {
             Test-Path -LiteralPath $fixture.record | Should -BeFalse
             Test-Path -LiteralPath $lockPath | Should -BeTrue
             @(Get-ChildItem -LiteralPath $fixture.root -Directory -Filter 'rust-tests-*') | Should -BeNullOrEmpty
-        } finally { $held.Dispose() }
+        } finally {
+            $held.Dispose()
+        }
+
         $null = New-RustTestPreparation -RepositoryRoot $fixture.root -PrerequisitePath $fixture.record -TestTarget native
         Test-Path -LiteralPath $lockPath | Should -BeTrue
         $null = Read-RustTestPreparation -RepositoryRoot $fixture.root -PrerequisitePath $fixture.record -TestTarget native
@@ -196,6 +240,7 @@ Describe 'Rust preparation boundary' {
         @{ SharedRecord = $false }, @{ SharedRecord = $true }
     ) {
         $library = Join-Path (Split-Path -Parent $PSScriptRoot) 'scripts/lib/RustTestPreparation.ps1'
+
         # Both workers reach Cargo preparation before either publishes, forcing an actual overlap.
         $barrier = [Threading.Barrier]::new(2)
         $worker = {
@@ -203,37 +248,64 @@ Describe 'Rust preparation boundary' {
             Set-StrictMode -Version Latest
             $ErrorActionPreference = 'Stop'
             . $Library
+
+            # Each worker owns its commands and outputs; only the publication barrier is shared.
             function rustc {
                 $global:LASTEXITCODE = 0
-                if ($args[0] -eq '-vV') { return 'rustc fixture host' }
+                if ($args[0] -eq '-vV') {
+                    return 'rustc fixture host'
+                }
+
                 [IO.File]::WriteAllText($args[[array]::IndexOf($args, '-o') + 1], 'provider')
             }
+
+            # Synchronize after artifact creation so neither worker publishes before the other builds.
             function cargo {
                 $global:LASTEXITCODE = 0
-                if ($args[0] -eq '--version') { return 'cargo fixture' }
+                if ($args[0] -eq '--version') {
+                    return 'cargo fixture'
+                }
+
                 $target = $args[[array]::IndexOf($args, '--target-dir') + 1]
                 [IO.Directory]::CreateDirectory($target) | Out-Null
                 $executable = Join-Path $target 'test'
                 [IO.File]::WriteAllText($executable, 'test')
                 $Barrier.SignalAndWait() | Out-Null
-                @{ reason = 'compiler-artifact'; target = @{ name = 'fixture' }; fresh = $false; executable = $executable } |
-                    ConvertTo-Json -Compress
+                @{
+                    reason = 'compiler-artifact'
+                    target = @{ name = 'fixture' }
+                    fresh = $false
+                    executable = $executable
+                } | ConvertTo-Json -Compress
             }
+
             New-RustTestPreparation -RepositoryRoot $Root -PrerequisitePath $Record -TestTarget native
         }
+
         $first = [PowerShell]::Create()
         $second = [PowerShell]::Create()
         try {
             $other = if ($SharedRecord) { $fixture.record } else { Join-Path $fixture.root 'other.json' }
             $null = $first.AddScript($worker).AddArgument($library).AddArgument($fixture.root).AddArgument($fixture.record).AddArgument($barrier)
             $null = $second.AddScript($worker).AddArgument($library).AddArgument($fixture.root).AddArgument($other).AddArgument($barrier)
+
             $firstPending = $first.BeginInvoke()
             $secondPending = $second.BeginInvoke()
             $results = @()
             $failures = @()
+
             # The shared-record race must have one explicit loser, not an overwritten winner.
-            try { $results += $first.EndInvoke($firstPending) } catch { $failures += $_ }
-            try { $results += $second.EndInvoke($secondPending) } catch { $failures += $_ }
+            try {
+                $results += $first.EndInvoke($firstPending)
+            } catch {
+                $failures += $_
+            }
+            try {
+                $results += $second.EndInvoke($secondPending)
+            } catch {
+                $failures += $_
+            }
+
             if ($SharedRecord) {
                 $results.Count | Should -Be 1
                 $failures.Count | Should -Be 1
@@ -245,6 +317,7 @@ Describe 'Rust preparation boundary' {
                 $results.Count | Should -Be 2
                 $results[0].ownedDirectory | Should -Not -Be $results[1].ownedDirectory
             }
+
             $null = Read-RustTestPreparation -RepositoryRoot $fixture.root -PrerequisitePath $fixture.record -TestTarget native
             $null = Read-RustTestPreparation -RepositoryRoot $fixture.root -PrerequisitePath $other -TestTarget native
         } finally {
@@ -264,6 +337,8 @@ Describe 'Rust preparation boundary' {
             $script:CargoCalls[1] | Should -Not -Contain '--tests'
             $script:CargoCalls[1] | Should -Not -Contain '--no-run'
             $env:SS_AI_RUST_TEST_PREREQUISITES | Should -Be $previous
-        } finally { $env:SS_AI_RUST_TEST_PREREQUISITES = $previous }
+        } finally {
+            $env:SS_AI_RUST_TEST_PREREQUISITES = $previous
+        }
     }
 }
