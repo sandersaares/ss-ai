@@ -55,7 +55,7 @@ try {
         }
     }
 
-    Install-ReviewMermaidTools -NodePath $tools.node -ToolsDirectory (Join-Path $skillRoot 'tools')
+    Install-ReviewMermaidTools -NodePath $tools.node -SkillRoot $skillRoot
     $installed = Get-ReviewReportTools -SkillRoot $skillRoot -InstallationLocked
     Assert-ReviewReportTools -Tools $installed -InstallationAttempted
     if ($InstallBrowserDependencies) {

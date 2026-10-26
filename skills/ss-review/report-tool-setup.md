@@ -13,11 +13,18 @@ Chrome does not install its Ubuntu system packages.
 | PowerShell | The stable release line required by the skill scripts, currently 7.6. Use `pwsh`, not Windows PowerShell. |
 | Node.js and npm | A supported Node.js LTS release with npm; the locked Puppeteer dependency requires Node.js 22.12.0 or later. Mermaid CLI's own lower Node requirement is not sufficient. |
 | Pandoc | 3.8 or later with `--syntax-highlighting` support. The portable installer pins 3.11. Ubuntu's repository version may be too old; the render probe checks the actual executable. |
-| JavaScript packages | The active skill's `tools/package-lock.json`, installed with `npm ci` and strict engine checking. Do not substitute global Mermaid CLI, install a different Puppeteer version, or regenerate the lockfile. |
+| JavaScript packages | The active skill's `tools/package-lock.json`, installed user-wide with `npm ci` and strict engine checking. Skill copies with the same lockfile share an installation. Do not substitute an unrelated Mermaid CLI, install a different Puppeteer version, or regenerate the lockfile. |
 | Browser | The Chrome for Testing revision selected by the locked Puppeteer installation. Download it explicitly because npm lifecycle scripts are disabled. An unrelated installed Chrome/Edge or Playwright browser is not a substitute. |
 | Host | Windows x64 or Ubuntu x64 for the pinned browser's documented support. Do not assume that regular Chrome's platform support also applies to this pinned Chrome for Testing build, especially on Linux ARM64. |
-| Storage and environment | Writable skill `tools` directory, user browser cache, temporary/profile storage, and report output directory. Keep the same user, host, working directory, and Puppeteer configuration for install, check, and rendering. |
+| Storage and environment | Writable user-local tool storage, user browser cache, temporary/profile storage, and report output directory. The skill directory needs only read access. Keep the same user, host, working directory, and Puppeteer configuration for install, check, and rendering. |
 | Installation access | Access to the lockfile's npm registry, the official Pandoc release when needed, and Puppeteer's browser download host. Ubuntu also needs access to its configured apt repositories. Rendering itself needs no network resources. |
+
+Report tools live under `%LOCALAPPDATA%/ss-review/tools` when `LOCALAPPDATA` is set,
+or `~/.local/share/ss-review/tools` otherwise. Mermaid dependency directories are keyed by
+the lockfile's SHA-256 hash so different skill versions can coexist. Installation applies
+across sessions and checkouts for the same user and environment; it does not require a
+checkout-local `node_modules` or changes to `PATH`. Existing checkout-local packages are
+not used or deleted.
 
 Puppeteer normally caches browsers under the user's `~/.cache/puppeteer`, including on Windows;
 `PUPPETEER_CACHE_DIR` can override it. Check `PUPPETEER_EXECUTABLE_PATH`, download-skip variables,
@@ -66,7 +73,8 @@ pwsh -NoProfile -NonInteractive -File "{{SKILL_ROOT}}/scripts/Install-ReviewRepo
 | `SKILL_ROOT` | Absolute path of the active skill. |
 
 The installer downloads digest-verified portable Pandoc into user-local storage when Pandoc is
-absent, installs the pinned npm packages and browser, and runs the HTML/Mermaid probe before
+absent, installs the pinned npm packages in shared user-local storage and the browser in its
+user cache, and runs the HTML/Mermaid probe before
 emitting the tool record. An existing incompatible Pandoc on `PATH` requires an approved upgrade;
 the portable copy does not override it. If Chrome reports access-denied, sandbox, or enterprise
 policy errors, preserve the diagnostic and request an approved host repair. Do not disable the
@@ -157,7 +165,7 @@ sudo -n apt-get install --yes "{{PANDOC_DEB}}"
 Check the exit status. Merely installing Ubuntu's `pandoc` package does not prove that it supports
 the renderer's options.
 
-Install the JavaScript packages, browser, and its system dependencies together:
+Install the user-wide JavaScript packages, browser, and its system dependencies together:
 
 ```powershell
 pwsh -NoProfile -NonInteractive -File "{{SKILL_ROOT}}/scripts/Install-ReviewReportTools.ps1" `

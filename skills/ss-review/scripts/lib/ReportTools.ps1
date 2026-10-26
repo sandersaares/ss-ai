@@ -8,14 +8,29 @@ $ErrorActionPreference = 'Stop'
 # Pin the portable Pandoc installation so rendering does not depend on a moving download.
 $script:ReportPandocVersion = '3.11'
 
-function Get-ReportPandocDirectory {
+# User-wide storage survives skill relinking and disposable review checkouts.
+function Get-ReportToolsDirectory {
     $root = if ($env:LOCALAPPDATA) { $env:LOCALAPPDATA } else { Join-Path $HOME '.local\share' }
-    Join-Path $root "ss-review\tools\pandoc-$script:ReportPandocVersion"
+    Join-Path $root 'ss-review\tools'
+}
+
+function Get-ReportPandocDirectory {
+    Join-Path (Get-ReportToolsDirectory) "pandoc-$script:ReportPandocVersion"
+}
+
+# Lockfile-addressed installations let different skill versions coexist without replacing
+# another session's renderer. Ref: docs/implementation.md, "Report tools".
+function Get-ReportMermaidDirectory {
+    param([Parameter(Mandatory)][string] $SkillRoot)
+
+    $lockfile = Join-Path $SkillRoot 'tools\package-lock.json'
+    $hash = (Get-FileHash -LiteralPath $lockfile -Algorithm SHA256).Hash.ToLowerInvariant()
+    Join-Path (Get-ReportToolsDirectory) "mermaid-$hash"
 }
 
 # Pandoc and Puppeteer's browser cache are shared by skill copies as well as sessions.
 function Get-ReportToolsLockPath {
-    Join-Path (Split-Path -Parent (Get-ReportPandocDirectory)) 'installation'
+    Join-Path (Get-ReportToolsDirectory) 'installation'
 }
 
 # Ask nvm to resolve its aliases rather than duplicating its version-selection rules.
@@ -71,7 +86,8 @@ function Get-ReviewReportTools {
             Join-Path (Get-ReportPandocDirectory) $name
         }
         $nodePath = Get-ReportNodePath
-        $mermaid = Join-Path $SkillRoot 'tools\node_modules\@mermaid-js\mermaid-cli\src\cli.js'
+        $mermaidDirectory = Get-ReportMermaidDirectory -SkillRoot $SkillRoot
+        $mermaid = Join-Path $mermaidDirectory 'node_modules\@mermaid-js\mermaid-cli\src\cli.js'
         $missing = [Collections.Generic.List[string]]::new()
         if (-not [IO.File]::Exists($pandocPath)) { $missing.Add('pandoc') }
         if (-not $nodePath) { $missing.Add('node') }
@@ -82,7 +98,7 @@ function Get-ReviewReportTools {
             # Puppeteer owns the browser version and cache layout; ask it rather than guessing a path.
             $browserResult = & (Get-ReportProcessInvoker) -FilePath $nodePath -ArgumentList @(
                 '-e', 'require(process.argv[1]).executablePath().then(p => process.stdout.write(p))',
-                (Join-Path $SkillRoot 'tools\node_modules\puppeteer')
+                (Join-Path $mermaidDirectory 'node_modules\puppeteer')
             )
             if ($null -eq $browserResult) { throw 'Browser discovery returned no process result.' }
             if ($browserResult['exitCode'] -eq 0) {
@@ -114,24 +130,48 @@ function Get-ReviewReportTools {
 function Install-ReviewMermaidTools {
     param(
         [Parameter(Mandatory)][string] $NodePath,
-        [Parameter(Mandatory)][string] $ToolsDirectory
+        [Parameter(Mandatory)][string] $SkillRoot
     )
 
+    $toolsDirectory = Get-ReportMermaidDirectory -SkillRoot $SkillRoot
+    $staging = $null
+    $installationDirectory = $toolsDirectory
+    if (-not [IO.Directory]::Exists($toolsDirectory)) {
+        # Publish a complete dependency tree only after setup succeeds. The caller holds
+        # the user-wide installation lock, so no reader can observe an unfinished tree.
+        $staging = Join-Path (Get-ReportToolsDirectory) ".mermaid-$([guid]::NewGuid().ToString('N'))"
+        [IO.Directory]::CreateDirectory($staging) | Out-Null
+        $installationDirectory = $staging
+    }
     $originalPath = $env:PATH
-    Push-Location -LiteralPath $ToolsDirectory
     try {
-        $env:PATH = (Split-Path -Parent $NodePath) + [IO.Path]::PathSeparator + $originalPath
-        & npm ci --ignore-scripts --engine-strict --no-audit --no-fund | ForEach-Object { [Console]::Error.WriteLine([string] $_) }
-        if ($LASTEXITCODE -ne 0) { throw "Installing Mermaid CLI failed with exit code $LASTEXITCODE." }
-        # Only the browser installer is needed; do not enable arbitrary dependency lifecycle scripts.
-        & $NodePath (Join-Path $ToolsDirectory 'node_modules\puppeteer\install.mjs') |
-            ForEach-Object { [Console]::Error.WriteLine([string] $_) }
-        if ($LASTEXITCODE -ne 0) {
-            throw "Installing Mermaid's browser failed with exit code $LASTEXITCODE. Preserve Puppeteer's diagnostic. For IncompleteInstallationError, follow report-tool-setup.md, 'Incomplete browser cache recovery'; cache deletion requires separate approval."
+        if ($staging) {
+            foreach ($name in @('package.json', 'package-lock.json')) {
+                Copy-Item -LiteralPath (Join-Path $SkillRoot "tools\$name") -Destination (Join-Path $staging $name)
+            }
         }
+        Push-Location -LiteralPath $installationDirectory
+        try {
+            $env:PATH = (Split-Path -Parent $NodePath) + [IO.Path]::PathSeparator + $originalPath
+            if ($staging) {
+                & npm ci --ignore-scripts --engine-strict --no-audit --no-fund | ForEach-Object { [Console]::Error.WriteLine([string] $_) }
+                if ($LASTEXITCODE -ne 0) { throw "Installing Mermaid CLI failed with exit code $LASTEXITCODE." }
+            }
+            # Only the browser installer is needed; do not enable arbitrary dependency lifecycle scripts.
+            & $NodePath (Join-Path $installationDirectory 'node_modules\puppeteer\install.mjs') |
+                ForEach-Object { [Console]::Error.WriteLine([string] $_) }
+            if ($LASTEXITCODE -ne 0) {
+                throw "Installing Mermaid's browser failed with exit code $LASTEXITCODE. Preserve Puppeteer's diagnostic. For IncompleteInstallationError, follow report-tool-setup.md, 'Incomplete browser cache recovery'; cache deletion requires separate approval."
+            }
+        } finally {
+            $env:PATH = $originalPath
+            Pop-Location
+        }
+        if ($staging) { [IO.Directory]::Move($staging, $toolsDirectory) }
     } finally {
-        $env:PATH = $originalPath
-        Pop-Location
+        if ($staging -and [IO.Directory]::Exists($staging)) {
+            Remove-Item -LiteralPath $staging -Recurse -Force
+        }
     }
 }
 

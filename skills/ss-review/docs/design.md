@@ -299,6 +299,11 @@ repeated. Reviews without a pull request perform no external report publication.
 
 ## Report presentation
 
+Report-rendering tools are installed user-wide and reused across sessions and
+skill checkouts in the same execution environment. Different pinned dependency
+sets can coexist without replacing another review's tools. Setup does not require
+write access to a skill checkout or adding renderer commands to the user's `PATH`.
+
 Markdown is the canonical report prose. HTML is a mechanical reading view, not
 another source of findings or approval state. The audit prefers a self-contained
 HTML document containing the current overview and the exact findings requiring

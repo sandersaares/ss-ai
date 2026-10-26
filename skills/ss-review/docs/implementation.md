@@ -1181,6 +1181,24 @@ exclude an entire thread.
 
 ## Report tools
 
+Renderer dependencies use shared user-local storage rather than skill checkouts,
+so relinking skills or starting from another worktree does not lose installed tools.
+The root is `LOCALAPPDATA/ss-review/tools` when that variable is set, otherwise
+`~/.local/share/ss-review/tools`. Portable Pandoc uses its pinned version directory;
+Mermaid uses a directory keyed by the SHA-256 hash of `tools/package-lock.json`.
+This keeps different dependency sets separate while sharing identical sets across
+skill copies. Discovery and rendering resolve that directory directly, without
+depending on npm's global prefix or exposing renderer commands on `PATH`.
+
+The installer copies the package manifests into a unique sibling staging directory,
+runs the locked npm installation and browser setup there, then atomically renames
+the complete directory into place. A retained user-wide installation lock excludes
+checks and rendering during setup; rendering and discovery retain shared ownership.
+Failed staging trees are removed without publishing them or deleting existing
+installations. An existing dependency tree is reused; browser setup can still
+repair a missing browser download. Checkout-local dependencies are neither used
+nor deleted, and the skill directory requires no write access.
+
 The PowerShell tool check reports missing Pandoc, Node.js, Mermaid CLI, and
 Mermaid's browser explicitly, retaining browser-discovery diagnostics. Its JSON
 record always contains `pandoc` and `mermaid` paths, nullable `node` and `browser`
