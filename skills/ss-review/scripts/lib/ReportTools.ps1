@@ -41,8 +41,19 @@ function Test-ReportMermaidInstallation {
         if (-not [IO.File]::Exists((Join-Path $Directory $relativePath))) { return $false }
     }
     $puppeteer = Join-Path $Directory 'node_modules\puppeteer'
-    $manifest = Get-Content -LiteralPath (Join-Path $puppeteer 'package.json') -Raw | ConvertFrom-Json -AsHashtable
-    if (-not $manifest.Contains('main') -or [string]::IsNullOrWhiteSpace($manifest['main'])) { return $false }
+    $manifestText = Get-Content -LiteralPath (Join-Path $puppeteer 'package.json') -Raw
+    if ([string]::IsNullOrWhiteSpace($manifestText)) { return $false }
+
+    try {
+        $manifest = ConvertFrom-Json -InputObject $manifestText -AsHashtable -NoEnumerate -ErrorAction Stop
+    } catch [ArgumentException] {
+        # Invalid JSON means the cached package needs rebuilding. File-read failures stay
+        # outside this catch so setup does not attempt to repair an access or storage error.
+        return $false
+    }
+
+    if ($manifest -isnot [Collections.IDictionary] -or -not $manifest.Contains('main') -or
+        $manifest['main'] -isnot [string] -or [string]::IsNullOrWhiteSpace($manifest['main'])) { return $false }
     [IO.File]::Exists((Join-Path $puppeteer $manifest['main']))
 }
 

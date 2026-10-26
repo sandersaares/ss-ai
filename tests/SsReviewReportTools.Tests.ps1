@@ -302,6 +302,31 @@ Describe 'Report discovery uses the resolved runtime' {
         $script:BrowserArguments | Should -BeNullOrEmpty
     }
 
+    It 'reports malformed Puppeteer manifests as requiring package installation: <Case>' -ForEach @(
+        @{ Case = 'empty'; Content = '' }
+        @{ Case = 'whitespace'; Content = ' ' }
+        @{ Case = 'truncated'; Content = '{"main":' }
+        @{ Case = 'null'; Content = 'null' }
+        @{ Case = 'array'; Content = '[{"main":"./lib/puppeteer/puppeteer.js"}]' }
+        @{ Case = 'string'; Content = '"text"' }
+        @{ Case = 'number'; Content = '3' }
+        @{ Case = 'boolean'; Content = 'false' }
+        @{ Case = 'missing main'; Content = '{}' }
+        @{ Case = 'non-string main'; Content = '{"main":["./lib/puppeteer/puppeteer.js"]}' }
+    ) {
+        [IO.File]::WriteAllText((Join-Path $script:MermaidDirectory 'node_modules\puppeteer\package.json'), $Content)
+        $tools = Get-ReviewReportTools -SkillRoot $script:ReportRoot
+        $tools.missing | Should -Be @('mermaid-cli')
+        $script:BrowserArguments | Should -BeNullOrEmpty
+    }
+
+    It 'preserves package manifest read errors during discovery' {
+        Mock Get-Content { throw [IO.IOException]::new('Package manifest read failed.') } `
+            -ParameterFilter { $LiteralPath -eq (Join-Path $script:MermaidDirectory 'node_modules\puppeteer\package.json') }
+        { Get-ReviewReportTools -SkillRoot $script:ReportRoot } | Should -Throw '*Package manifest read failed*'
+        $script:BrowserArguments | Should -BeNullOrEmpty
+    }
+
     It 'preserves browser discovery failures instead of reporting only a missing executable' {
         $script:BrowserExitCode = 1
         $script:BrowserError = 'Cannot load Puppeteer with this Node.js runtime.'
@@ -437,6 +462,28 @@ exit ([int] (Get-Content -LiteralPath (Join-Path $PSScriptRoot 'exit-code')))
         { Install-ReviewMermaidTools -NodePath $script:NodePath -SkillRoot $script:InstallSkill } | Should -Throw '*Installing*failed*'
         Test-Path -LiteralPath $marker | Should -BeTrue
         @(Get-ChildItem -LiteralPath (Get-ReportToolsDirectory) -Force).Count | Should -Be 1
+    }
+
+    It 'rebuilds shared packages with a malformed Puppeteer manifest: <Case>' -ForEach @(
+        @{ Case = 'empty'; Content = '' }
+        @{ Case = 'truncated'; Content = '{"main":' }
+        @{ Case = 'non-object'; Content = '[{"main":"./lib/puppeteer/puppeteer.js"}]' }
+    ) {
+        Install-ReviewMermaidTools -NodePath $script:NodePath -SkillRoot $script:InstallSkill
+        $script:ExistingInstallation = $true
+        [IO.File]::WriteAllText((Join-Path $script:ToolsDirectory 'node_modules\puppeteer\package.json'), $Content)
+        Install-ReviewMermaidTools -NodePath $script:NodePath -SkillRoot $script:InstallSkill
+        Should -Invoke npm -Times 2 -Exactly
+        Test-ReportMermaidInstallation -Directory $script:ToolsDirectory | Should -BeTrue
+    }
+
+    It 'preserves package manifest read errors without starting a repair' {
+        Install-ReviewMermaidTools -NodePath $script:NodePath -SkillRoot $script:InstallSkill
+        Mock Get-Content { throw [IO.IOException]::new('Package manifest read failed.') } `
+            -ParameterFilter { $LiteralPath -eq (Join-Path $script:ToolsDirectory 'node_modules\puppeteer\package.json') }
+        { Install-ReviewMermaidTools -NodePath $script:NodePath -SkillRoot $script:InstallSkill } |
+            Should -Throw '*Package manifest read failed*'
+        Should -Invoke npm -Times 1 -Exactly
     }
 
     It 'rejects a checkout lockfile change between selecting the directory and copying manifests' {

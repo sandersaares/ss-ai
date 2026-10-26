@@ -1227,9 +1227,11 @@ working directory so its Puppeteer configuration matches discovery and rendering
 A retained user-wide installation lock excludes checks and rendering during setup;
 rendering and discovery retain shared ownership. Reuse requires Mermaid's CLI,
 Puppeteer's installer and manifest, and the runtime entry point named by that
-manifest. Missing package files cause setup to rebuild through staging. Once npm
-and browser setup succeed, the installer publishes the complete tree by directory
-rename. Replacement retains the old tree until staging is ready and restores it
+manifest. Missing package files, malformed manifest JSON, and invalid manifest
+shapes cause setup to rebuild through staging; file-read errors remain explicit
+failures rather than triggering repair. Once npm and browser setup succeed, the
+installer publishes the complete tree by directory rename. Replacement retains
+the old tree until staging is ready and restores it
 if publication fails. Failed staging trees are removed without deleting existing
 installations. A complete dependency tree is reused while browser setup can still
 repair a missing browser download. Checkout-local dependencies are neither used
