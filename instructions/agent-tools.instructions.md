@@ -223,6 +223,37 @@ in the PowerShell instructions and check `$LASTEXITCODE` immediately, before
 another native command can replace it. A search reporting no matches is not
 necessarily a broken invocation.
 
+For example, ripgrep (`rg`) returns exit code 0 for matches, 1 for no matches,
+and 2 for an error. Temporarily disable native exit-code errors only around
+that invocation, capture its result immediately, and restore the preference
+even if invocation fails. Keep strict mode and PowerShell error handling enabled:
+
+```powershell
+#Requires -Version 7.6
+
+Set-StrictMode -Version Latest
+$ErrorActionPreference = 'Stop'
+$PSNativeCommandUseErrorActionPreference = $true
+
+$previousNativeErrorPreference = $PSNativeCommandUseErrorActionPreference
+try {
+    $PSNativeCommandUseErrorActionPreference = $false
+    $searchOutput = rg --line-number --fixed-strings -- 'TODO' '.\src'
+    $searchExitCode = $LASTEXITCODE
+} finally {
+    $PSNativeCommandUseErrorActionPreference = $previousNativeErrorPreference
+}
+
+switch ($searchExitCode) {
+    0 { $searchOutput }
+    1 { Write-Output 'No matches.' }
+    default { throw "Search failed with exit code $searchExitCode." }
+}
+```
+
+The search text and directory are examples; choose them for the current task.
+Do not treat every nonzero code as "no matches" or suppress diagnostic stderr.
+
 Do not parse failed command output as data or continue dependent work. For
 example, native failure handling stops a failed GitHub API call before its
 response reaches JSON conversion:
