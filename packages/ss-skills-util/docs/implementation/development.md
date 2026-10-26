@@ -36,7 +36,9 @@ The schema-1 successful record contains `status: complete`, null
 `ownedDirectory`, `targetDirectory`, `provider`, and `executables`.
 Identity binds the checkout root, Rust source/manifests/lockfile/configuration
 digest, verbose Rust compiler identity, Cargo version, all-feature test profile,
-and compiler/build/target/profile environment. Provider source and executable
+and compiler/build/target/profile environment. The source digest includes embedded
+GraphQL queries, JSON fixtures, and the shared reapproval significance policy.
+Provider source and executable
 records, and Cargo-discovered executable records, contain exact absolute paths
 and SHA-256 digests. The producer rechecks source identity and validates the
 consumer boundary before atomically publishing. Failed Cargo preparation publishes

@@ -100,6 +100,28 @@ Describe 'Rust preparation boundary' {
         { Read-RustTestPreparation -RepositoryRoot $fixture.root -PrerequisitePath $fixture.record } | Should -Throw '*sourceSha256*'
     }
 
+    It 'rejects changed embedded input <Asset> before Cargo execution' -ForEach @(
+        # Cover each embedded input kind, including the policy outside the package tree.
+        @{ Asset = 'packages/ss-skills-util/src/commits.graphql' }
+        @{ Asset = 'packages/ss-skills-util/tests/fixtures/github-approval.json' }
+        @{ Asset = 'skills/ss-autoreapprove/significance.md' }
+    ) {
+        $assetPath = Join-Path $fixture.root $Asset
+        New-Item -ItemType Directory -Path (Split-Path -Parent $assetPath) -Force | Out-Null
+        [IO.File]::WriteAllText($assetPath, 'original embedded input')
+        $prepared = New-RustTestPreparation -RepositoryRoot $fixture.root -PrerequisitePath $fixture.record
+        $null = Read-RustTestPreparation -RepositoryRoot $fixture.root -PrerequisitePath $fixture.record
+        [IO.File]::WriteAllText($assetPath, 'modified embedded input')
+        {
+            $validated = Read-RustTestPreparation -RepositoryRoot $fixture.root -PrerequisitePath $fixture.record
+            Invoke-PreparedRustTests -Preparation $validated -PrerequisitePath $fixture.record
+        } | Should -Throw '*sourceSha256*'
+        $script:CargoCalls.Count | Should -Be 1
+        foreach ($artifact in $prepared.executables) {
+            (Get-TestArtifact -Path $artifact.path).sha256 | Should -Be $artifact.sha256
+        }
+    }
+
     It 'rejects incomplete records, changed artifacts, and incompatible flags' {
         $prepared = New-RustTestPreparation -RepositoryRoot $fixture.root -PrerequisitePath $fixture.record
         $bytes = [IO.File]::ReadAllBytes($fixture.record)

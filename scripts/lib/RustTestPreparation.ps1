@@ -26,7 +26,7 @@ function Get-RustTestFileHash {
     } finally { $stream.Dispose() }
 }
 
-# Bind reusable prerequisites to actual source bytes, including untracked Rust inputs.
+# Bind reusable prerequisites to source bytes, including untracked and embedded inputs.
 function Get-RustTestIdentity {
     param([string] $RepositoryRoot)
     $files = @(
@@ -36,9 +36,13 @@ function Get-RustTestIdentity {
             $path = Join-Path $RepositoryRoot $directory
             if (Test-Path -LiteralPath $path) {
                 Get-ChildItem -LiteralPath $path -Recurse -File |
-                    Where-Object { $_.Extension -eq '.rs' -or $_.Name -in @('Cargo.toml', 'config', 'config.toml') }
+                    # Rust embeds the GraphQL queries and JSON service fixtures at compile time.
+                    Where-Object { $_.Extension -in @('.rs', '.graphql', '.json') -or $_.Name -in @('Cargo.toml', 'config', 'config.toml') }
             }
         }
+        # Reapproval tests embed the shared policy outside the Cargo package tree.
+        $policy = Join-Path $RepositoryRoot 'skills/ss-autoreapprove/significance.md'
+        if (Test-Path -LiteralPath $policy -PathType Leaf) { Get-Item -LiteralPath $policy }
     )
     $entries = foreach ($file in ($files | Sort-Object FullName)) {
         [IO.Path]::GetRelativePath($RepositoryRoot, $file.FullName) + ':' +
