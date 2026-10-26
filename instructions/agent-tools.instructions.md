@@ -12,6 +12,16 @@ commands when you need shell behavior, native programs, or structured processing
 Keep each command focused; write substantial control flow as a formatted script
 in session state rather than a densely nested one-liner.
 
+# Initialize every PowerShell execution
+
+Applies to: agent workflows constructing or executing PowerShell commands and examples.
+
+Follow the execution discipline in [the PowerShell instructions](powershell.instructions.md#use-strict-language-mode-with-error-handling-enabled):
+require PowerShell 7.6 or later, enable strict mode, and stop on PowerShell and
+native command failures. Include the initialization in every independent
+snippet and child PowerShell script, not just the outer process. The examples
+below repeat it so copying one preserves the required settings.
+
 # Establish prerequisites in each execution environment
 
 Applies to: agent workflows invoking commands or scripts through tools.
@@ -26,11 +36,14 @@ environment that will execute it. Do not repeat the same unresolved invocation.
 For example, discover Cargo instead of assuming its installation directory:
 
 ```powershell
+#Requires -Version 7.6
+
+Set-StrictMode -Version Latest
+$ErrorActionPreference = 'Stop'
+$PSNativeCommandUseErrorActionPreference = $true
+
 $cargo = Get-Command cargo -CommandType Application -ErrorAction Stop
 & $cargo.Source --version
-if ($LASTEXITCODE -ne 0) {
-    throw 'Cargo version check failed.'
-}
 ```
 
 If discovery fails, use an available equivalent, an explicitly verified executable
@@ -44,6 +57,12 @@ appropriate. If help shows `-MapPath`, do not substitute `-Path`. When using
 Pester's configuration type, import the module in the same invocation first:
 
 ```powershell
+#Requires -Version 7.6
+
+Set-StrictMode -Version Latest
+$ErrorActionPreference = 'Stop'
+$PSNativeCommandUseErrorActionPreference = $true
+
 Import-Module Pester -ErrorAction Stop
 $configuration = [PesterConfiguration]::Default
 ```
@@ -68,18 +87,26 @@ to the target process. If inline PowerShell is necessary across WSL, use a
 single-quoted here-string and `-EncodedCommand` to preserve the script literally:
 
 ```powershell
+#Requires -Version 7.6
+
+Set-StrictMode -Version Latest
+$ErrorActionPreference = 'Stop'
+$PSNativeCommandUseErrorActionPreference = $true
+
 $linuxPowerShell = '/usr/bin/pwsh' # Example only; verify this path in the target distribution.
 $scriptText = @'
+#Requires -Version 7.6
+
+Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
+$PSNativeCommandUseErrorActionPreference = $true
+
 Get-Module -ListAvailable Pester | Select-Object Name, Version
 '@
 $encoded = [Convert]::ToBase64String(
     [Text.Encoding]::Unicode.GetBytes($scriptText)
 )
 wsl.exe --distribution Ubuntu --exec $linuxPowerShell -NoProfile -NonInteractive -EncodedCommand $encoded
-if ($LASTEXITCODE -ne 0) {
-    throw 'Linux PowerShell command failed.'
-}
 ```
 
 `-EncodedCommand` expects Base64 of UTF-16LE text. Encoding preserves syntax;
@@ -94,6 +121,12 @@ claiming query keys such as `refName` or `api-version` are executable names
 identify this situation. Prefer a native HTTP request over another shell layer:
 
 ```powershell
+#Requires -Version 7.6
+
+Set-StrictMode -Version Latest
+$ErrorActionPreference = 'Stop'
+$PSNativeCommandUseErrorActionPreference = $true
+
 # The caller supplies the endpoint and provider-appropriate OAuth headers.
 $response = Invoke-RestMethod -Uri $uri -Headers $headers -ErrorAction Stop
 ```
@@ -109,6 +142,12 @@ An "empty pipe element" after `foreach (...) { ... }` means a language statement
 was used where a pipeline expression is required. Collect its output, then pipe:
 
 ```powershell
+#Requires -Version 7.6
+
+Set-StrictMode -Version Latest
+$ErrorActionPreference = 'Stop'
+$PSNativeCommandUseErrorActionPreference = $true
+
 $records = foreach ($item in $items) {
     [pscustomobject]@{ Name = $item.Name }
 }
@@ -120,6 +159,12 @@ usually means an operator was placed inside command argument parsing. Complete
 the pipeline in parentheses before applying the operator:
 
 ```powershell
+#Requires -Version 7.6
+
+Set-StrictMode -Version Latest
+$ErrorActionPreference = 'Stop'
+$PSNativeCommandUseErrorActionPreference = $true
+
 $names = ($items | ForEach-Object { $_.Name }) -join '; '
 $uniqueCount = @($items | Select-Object -ExpandProperty Name -Unique).Count
 if ($uniqueCount -ne $items.Count) {
@@ -131,6 +176,12 @@ PowerShell does not implement Bash filename brace expansion. Instead of
 `Get-Item .\src\{first,second}.rs`, pass an explicit path array:
 
 ```powershell
+#Requires -Version 7.6
+
+Set-StrictMode -Version Latest
+$ErrorActionPreference = 'Stop'
+$PSNativeCommandUseErrorActionPreference = $true
+
 Get-Item -LiteralPath @('.\src\first.rs', '.\src\second.rs')
 ```
 
@@ -139,6 +190,12 @@ running it. This catches mismatched braces and parentheses, and typos such as
 `$_..Name`, without starting the intended operations:
 
 ```powershell
+#Requires -Version 7.6
+
+Set-StrictMode -Version Latest
+$ErrorActionPreference = 'Stop'
+$PSNativeCommandUseErrorActionPreference = $true
+
 $tokens = $null
 $parseErrors = $null
 [void][System.Management.Automation.Language.Parser]::ParseInput(
@@ -158,23 +215,26 @@ A final exit code of zero may belong to a later successful command, not the
 operation you needed. A still-running response is not a successful completion;
 retrieve the final result using the tool's returned execution identifier.
 
-Use terminating error handling for PowerShell commands. For native programs,
-check `$LASTEXITCODE` immediately, before another native command can replace it,
-or enable `$PSNativeCommandUseErrorActionPreference` with terminating errors.
-Do not rely on `$ErrorActionPreference = 'Stop'` alone to handle native failures.
-Interpret exit codes according to the program's contract: a search reporting no
-matches is not necessarily a broken invocation.
+Keep `$ErrorActionPreference = 'Stop'` and
+`$PSNativeCommandUseErrorActionPreference = $true` enabled. Do not rely on
+`$ErrorActionPreference` alone to handle native failures. If a native program
+uses nonzero exit codes for expected results, apply the narrowly scoped exception
+in the PowerShell instructions and check `$LASTEXITCODE` immediately, before
+another native command can replace it. A search reporting no matches is not
+necessarily a broken invocation.
 
 Do not parse failed command output as data or continue dependent work. For
-example, check a GitHub API call before converting its response from JSON:
+example, native failure handling stops a failed GitHub API call before its
+response reaches JSON conversion:
 
 ```powershell
+#Requires -Version 7.6
+
+Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
+$PSNativeCommandUseErrorActionPreference = $true
+
 $raw = gh api repos/octocat/Hello-World
-$apiExitCode = $LASTEXITCODE
-if ($apiExitCode -ne 0) {
-    throw "GitHub API request failed with exit code $apiExitCode."
-}
 $repository = $raw | ConvertFrom-Json
 ```
 
