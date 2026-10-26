@@ -896,6 +896,7 @@ Describe 'Rendering executable' {
         $output = & $script:PowerShellPath -NoProfile -NonInteractive -File $recipePath
         $LASTEXITCODE | Should -Be 0
         $result = ($output -join "`n") | ConvertFrom-Json
+        $result.destination | Should -BeExactly 'tracker'
         $result.combinedPath | Should -BeExactly (Join-Path $script:WorkRoot 'self-review-findings.md')
         Test-Path -LiteralPath $result.combinedPath -PathType Leaf | Should -BeTrue
         $result.findings.Count | Should -Be $(if ($Empty) { 0 } else { 2 })
@@ -903,7 +904,15 @@ Describe 'Rendering executable' {
             [IO.Path]::IsPathFullyQualified($finding.path) | Should -BeTrue
             $text = Get-Content -LiteralPath $finding.path -Raw
             $text | Should -Not -BeNullOrEmpty
-            (Get-Content -LiteralPath $result.combinedPath -Raw) | Should -Match ([regex]::Escape($text.Replace('[Copilot speaking]', '').Trim()))
+            # These findings carry only their primary anchor, so an optional impacted-location
+            # list cannot accidentally satisfy the standalone location contract.
+            $text | Should -Match ([regex]::Escape('**Location**: `src/retry.rs:42`'))
+            $text | Should -Match '^Title: (Reviewer|Synthesis) finding'
+            (Get-Content -LiteralPath $result.combinedPath -Raw) | Should -Match ([regex]::Escape($text.Trim()))
+        }
+        if (-not $Empty) {
+            $combined = Get-Content -LiteralPath $result.combinedPath -Raw
+            $combined.IndexOf('Title: Synthesis finding') | Should -BeLessThan $combined.IndexOf('Title: Reviewer finding')
         }
         Test-Path -LiteralPath (Join-Path $script:WorkRoot 'audit-decisions.json') | Should -BeFalse
     }
