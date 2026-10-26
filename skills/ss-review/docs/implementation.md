@@ -1208,6 +1208,35 @@ exclude an entire thread.
 
 ## Report tools
 
+Renderer dependencies use shared user-local storage rather than skill checkouts,
+so relinking skills or starting from another worktree does not lose installed tools.
+The root is `LOCALAPPDATA/ss-review/tools` when that variable is set, otherwise
+`~/.local/share/ss-review/tools`. Portable Pandoc uses its pinned version directory;
+Mermaid uses a directory keyed by the SHA-256 hash of `tools/package-lock.json`.
+This keeps different dependency sets separate while sharing identical sets across
+skill copies. Discovery and rendering resolve that directory directly, without
+depending on npm's global prefix or exposing renderer commands on `PATH`.
+
+The installer copies the package manifests into a unique sibling staging directory,
+checks the copied lockfile against the selected directory key, and runs the locked
+npm installation there. A checkout update during the manifest copy produces an
+explicit failure rather than publishing dependencies under the wrong key.
+Only npm uses the staging working directory; browser setup uses the caller's
+working directory so its Puppeteer configuration matches discovery and rendering.
+
+A retained user-wide installation lock excludes checks and rendering during setup;
+rendering and discovery retain shared ownership. Reuse requires Mermaid's CLI,
+Puppeteer's installer and manifest, and the runtime entry point named by that
+manifest. Missing package files, malformed manifest JSON, and invalid manifest
+shapes cause setup to rebuild through staging; file-read errors remain explicit
+failures rather than triggering repair. Once npm and browser setup succeed, the
+installer publishes the complete tree by directory rename. Replacement retains
+the old tree until staging is ready and restores it
+if publication fails. Failed staging trees are removed without deleting existing
+installations. A complete dependency tree is reused while browser setup can still
+repair a missing browser download. Checkout-local dependencies are neither used
+nor deleted, and the skill directory requires no write access.
+
 The PowerShell tool check reports missing Pandoc, Node.js, Mermaid CLI, and
 Mermaid's browser explicitly, retaining browser-discovery diagnostics. Its JSON
 record always contains `pandoc` and `mermaid` paths, nullable `node` and `browser`
