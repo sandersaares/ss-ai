@@ -54,6 +54,9 @@ function Get-RustTestIdentity {
     if ($LASTEXITCODE -ne 0) { throw 'Reading the Rust toolchain identity failed.' }
     $cargo = (& cargo --version) -join "`n"
     if ($LASTEXITCODE -ne 0) { throw 'Reading the Cargo identity failed.' }
+    # Native release installation requires the preparing host's CPU capabilities, not only its triple.
+    $nativeCpu = (& rustc --print cfg -C target-cpu=native) -join "`n"
+    if ($LASTEXITCODE -ne 0) { throw 'Reading the native CPU compilation identity failed.' }
     $environment = @{}
     # Preserve null versus empty because both toolchain wrappers and flags affect compatibility.
     foreach ($name in @(
@@ -71,6 +74,7 @@ function Get-RustTestIdentity {
         sourceSha256 = $source
         rustc = $rustc
         cargo = $cargo
+        nativeCpu = $nativeCpu
         environment = $environment
         profile = 'test'
         features = 'all'
@@ -185,7 +189,14 @@ function New-RustTestPreparation {
         [IO.File]::WriteAllText($temporary, ($record | ConvertTo-Json -Depth 20))
         # Validate the same consumer boundary before publishing a successful prerequisite.
         $null = Read-RustTestPreparation -RepositoryRoot $RepositoryRoot -PrerequisitePath $temporary -TestTarget $TestTarget -AllowProviderFailure
-        [IO.File]::Move($temporary, $PrerequisitePath, $false)
+        # Serialize the existence check and atomic publication; competing producers fail explicitly.
+        # Retain the sibling inode so another producer cannot lock a different replacement file.
+        $publicationLock = [IO.File]::Open("$PrerequisitePath.lock", [IO.FileMode]::OpenOrCreate,
+            [IO.FileAccess]::ReadWrite, [IO.FileShare]::None)
+        try {
+            if (Test-Path -LiteralPath $PrerequisitePath) { throw "Prerequisite record already exists: $PrerequisitePath" }
+            [IO.File]::Move($temporary, $PrerequisitePath, $false)
+        } finally { $publicationLock.Dispose() }
         return $record
     } catch {
         Remove-Item -LiteralPath $owned -Recurse -Force
@@ -244,7 +255,7 @@ function Read-RustTestPreparation {
     }
     $identity = Get-RustTestIdentity -RepositoryRoot $RepositoryRoot
     Assert-RustRecordFields -Record $record.identity -Fields @($identity.Keys)
-    foreach ($key in @('repositoryRoot', 'sourceSha256', 'rustc', 'cargo', 'profile', 'features')) {
+    foreach ($key in @('repositoryRoot', 'sourceSha256', 'rustc', 'cargo', 'nativeCpu', 'profile', 'features')) {
         if ($record.identity[$key] -isnot [string] -or $record.identity[$key] -cne $identity[$key]) {
             throw "Stale or incompatible Rust prerequisites: $key"
         }

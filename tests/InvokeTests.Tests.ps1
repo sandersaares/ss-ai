@@ -47,6 +47,7 @@ function cargo {
 function rustc {
     $global:LASTEXITCODE = 0
     if ($args[0] -eq '-vV') { return 'rustc fixture' }
+    if ($args[0] -eq '--print') { return 'target_feature=fixture' }
     $executable = $args[[array]::IndexOf($args, '-o') + 1]
     [IO.File]::WriteAllText($executable, 'provider')
 }

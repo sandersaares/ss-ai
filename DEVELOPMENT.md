@@ -94,6 +94,9 @@ modified, stale-source, mismatched-selection, and incompatible-toolchain or
 flag records instead of building a missing helper. Cargo still checks freshness;
 ordinary execution uses its prepared target directory and preserves
 `CARGO_BIN_EXE` and doctest behavior.
+Publication holds a retained `<record>.lock` sibling across the final
+existence check and atomic move. Competing publishers fail explicitly rather
+than overwrite a run. Leave the lock file in place during overlapping use.
 
 For a direct Cargo invocation, first prepare the matching selection, set
 `SS_AI_RUST_TEST_PREREQUISITES` to the absolute record path, and pass the

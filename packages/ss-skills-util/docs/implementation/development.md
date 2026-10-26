@@ -39,7 +39,8 @@ The schema-1 successful record contains `status: complete`, null
 `ownedDirectory`, `targetDirectory`, `provider`, `executables`, and `installation`.
 Identity binds the checkout root, Rust source/manifests/lockfile/configuration
 digest (including root `Install.ps1` and installer PowerShell libraries),
-verbose Rust compiler identity, Cargo version, all-feature test profile,
+verbose Rust compiler identity, Cargo version, native CPU compilation
+capabilities reported by `rustc --print cfg -C target-cpu=native`, all-feature test profile,
 and compiler/build/target/profile environment. Provider source and executable
 records, and Cargo-discovered executable records, contain exact absolute paths
 and SHA-256 digests. The producer rechecks source identity and validates the
@@ -59,6 +60,10 @@ failed targets, preserves unit tests and doctests in a full selection, and
 still fails the overall run. Native consumers accept installation-only failure
 when their own provider is intact. General test compilation failure remains
 an invocation-wide blocker because its executable set is incomplete.
+Publication opens a retained `<record>.lock` sibling exclusively and holds it
+across the final nonexistence check and atomic move. Competing writers fail
+explicitly; readers need no publication lock. The producer never deletes a
+retained lock file or replaces an existing record.
 
 Every preparation creates a unique owned directory beside the record. Cargo
 uses its private `target` child, so another preparation cannot replace final
@@ -110,7 +115,9 @@ binary has an independent owned path, so rebuilding cannot replace it.
 Unsuccessful installation preparation publishes no successful evidence. Its
 explicit failed outer record retains independent executables and diagnostics.
 
-The ordinary, prominently named installation test revalidates source and
+The canonical reader checks toolchain and CPU compatibility before running
+tests; these compiler identity queries do not generate code. The ordinary,
+prominently named installation test revalidates source and
 lockfile bytes, ownership, hashes, expected command outcomes and freshness,
 then compares version/help from the exact retained executables. It launches
 no compiler, Cargo, or installer and never builds absent evidence. Preparation

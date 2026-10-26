@@ -7,6 +7,7 @@ BeforeAll {
     function rustc {
         $global:LASTEXITCODE = 0
         if ($args[0] -eq '-vV') { return 'rustc fixture host' }
+        if ($args[0] -eq '--print') { return 'target_feature=fixture' }
         $script:ProviderBuilds++
         if ($script:FailProvider) { $global:LASTEXITCODE = 13; return }
         [IO.File]::WriteAllText($args[[array]::IndexOf($args, '-o') + 1], 'provider')
@@ -197,6 +198,7 @@ Describe 'Rust preparation boundary' {
             { param($record) $record.executables = @() }
             { param($record) $record.unrecognized = 'field' }
             { param($record) $record.provider.executable.sha256 = 123 }
+            { param($record) $record.identity.nativeCpu = 'different native CPU capabilities' }
             { param($record) $record.Remove('status') }
         )) {
             $invalid = $original | ConvertFrom-Json -AsHashtable
@@ -227,6 +229,20 @@ Describe 'Rust preparation boundary' {
         $script:ProviderBuilds | Should -Be 2
     }
 
+    It 'fails publication under controlled sibling-lock contention without deleting the retained lock or publishing success' {
+        $lockPath = "$($fixture.record).lock"
+        $held = [IO.File]::Open($lockPath, [IO.FileMode]::OpenOrCreate, [IO.FileAccess]::ReadWrite, [IO.FileShare]::None)
+        try {
+            { New-RustTestPreparation -RepositoryRoot $fixture.root -PrerequisitePath $fixture.record -TestTarget native } | Should -Throw
+            Test-Path -LiteralPath $fixture.record | Should -BeFalse
+            Test-Path -LiteralPath $lockPath | Should -BeTrue
+            @(Get-ChildItem -LiteralPath $fixture.root -Directory -Filter 'rust-tests-*') | Should -BeNullOrEmpty
+        } finally { $held.Dispose() }
+        $null = New-RustTestPreparation -RepositoryRoot $fixture.root -PrerequisitePath $fixture.record -TestTarget native
+        Test-Path -LiteralPath $lockPath | Should -BeTrue
+        $null = Read-RustTestPreparation -RepositoryRoot $fixture.root -PrerequisitePath $fixture.record -TestTarget native
+    }
+
     It 'prepares concurrently with shared record = <SharedRecord> without replacing active outputs' -ForEach @(
         @{ SharedRecord = $false }, @{ SharedRecord = $true }
     ) {
@@ -241,6 +257,7 @@ Describe 'Rust preparation boundary' {
             function rustc {
                 $global:LASTEXITCODE = 0
                 if ($args[0] -eq '-vV') { return 'rustc fixture host' }
+                if ($args[0] -eq '--print') { return 'target_feature=fixture' }
                 [IO.File]::WriteAllText($args[[array]::IndexOf($args, '-o') + 1], 'provider')
             }
             function cargo {
