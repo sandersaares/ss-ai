@@ -26,6 +26,12 @@ across sessions and checkouts for the same user and environment; it does not req
 checkout-local `node_modules` or changes to `PATH`. Existing checkout-local packages are
 not used or deleted.
 
+Setup reuses complete shared packages and rebuilds missing package files through staging.
+A failed rebuild preserves the existing tree. If setup reports that the skill lockfile
+changed during its manifest copy, keep the checkout stable and rerun the approved setup.
+Browser setup runs from the caller's working directory so checkout-local Puppeteer
+configuration also applies to the download.
+
 Puppeteer normally caches browsers under the user's `~/.cache/puppeteer`, including on Windows;
 `PUPPETEER_CACHE_DIR` can override it. Check `PUPPETEER_EXECUTABLE_PATH`, download-skip variables,
 and Puppeteer configuration if the selected browser is unexpected. Do not clear deliberate

@@ -28,6 +28,24 @@ function Get-ReportMermaidDirectory {
     Join-Path (Get-ReportToolsDirectory) "mermaid-$hash"
 }
 
+# Reuse requires the renderer and browser setup entry points, not just a surviving directory.
+# Puppeteer's manifest selects its runtime entry point so this check follows the pinned package.
+function Test-ReportMermaidInstallation {
+    param([Parameter(Mandatory)][string] $Directory)
+
+    foreach ($relativePath in @(
+        'node_modules\@mermaid-js\mermaid-cli\src\cli.js',
+        'node_modules\puppeteer\install.mjs',
+        'node_modules\puppeteer\package.json'
+    )) {
+        if (-not [IO.File]::Exists((Join-Path $Directory $relativePath))) { return $false }
+    }
+    $puppeteer = Join-Path $Directory 'node_modules\puppeteer'
+    $manifest = Get-Content -LiteralPath (Join-Path $puppeteer 'package.json') -Raw | ConvertFrom-Json -AsHashtable
+    if (-not $manifest.Contains('main') -or [string]::IsNullOrWhiteSpace($manifest['main'])) { return $false }
+    [IO.File]::Exists((Join-Path $puppeteer $manifest['main']))
+}
+
 # Pandoc and Puppeteer's browser cache are shared by skill copies as well as sessions.
 function Get-ReportToolsLockPath {
     Join-Path (Get-ReportToolsDirectory) 'installation'
@@ -88,13 +106,14 @@ function Get-ReviewReportTools {
         $nodePath = Get-ReportNodePath
         $mermaidDirectory = Get-ReportMermaidDirectory -SkillRoot $SkillRoot
         $mermaid = Join-Path $mermaidDirectory 'node_modules\@mermaid-js\mermaid-cli\src\cli.js'
+        $packagesReady = Test-ReportMermaidInstallation -Directory $mermaidDirectory
         $missing = [Collections.Generic.List[string]]::new()
         if (-not [IO.File]::Exists($pandocPath)) { $missing.Add('pandoc') }
         if (-not $nodePath) { $missing.Add('node') }
-        if (-not [IO.File]::Exists($mermaid)) { $missing.Add('mermaid-cli') }
+        if (-not $packagesReady) { $missing.Add('mermaid-cli') }
         $diagnostics = [Collections.Generic.List[string]]::new()
         $browserPath = $null
-        if ($nodePath -and [IO.File]::Exists($mermaid)) {
+        if ($nodePath -and $packagesReady) {
             # Puppeteer owns the browser version and cache layout; ask it rather than guessing a path.
             $browserResult = & (Get-ReportProcessInvoker) -FilePath $nodePath -ArgumentList @(
                 '-e', 'require(process.argv[1]).executablePath().then(p => process.stdout.write(p))',
@@ -136,7 +155,7 @@ function Install-ReviewMermaidTools {
     $toolsDirectory = Get-ReportMermaidDirectory -SkillRoot $SkillRoot
     $staging = $null
     $installationDirectory = $toolsDirectory
-    if (-not [IO.Directory]::Exists($toolsDirectory)) {
+    if (-not (Test-ReportMermaidInstallation -Directory $toolsDirectory)) {
         # Publish a complete dependency tree only after setup succeeds. The caller holds
         # the user-wide installation lock, so no reader can observe an unfinished tree.
         $staging = Join-Path (Get-ReportToolsDirectory) ".mermaid-$([guid]::NewGuid().ToString('N'))"
@@ -149,26 +168,50 @@ function Install-ReviewMermaidTools {
             foreach ($name in @('package.json', 'package-lock.json')) {
                 Copy-Item -LiteralPath (Join-Path $SkillRoot "tools\$name") -Destination (Join-Path $staging $name)
             }
+            # The tools lock does not protect a checkout update or a relinked skill source.
+            $copiedHash = (Get-FileHash -LiteralPath (Join-Path $staging 'package-lock.json') -Algorithm SHA256).Hash.ToLowerInvariant()
+            if ((Split-Path -Leaf $toolsDirectory) -cne "mermaid-$copiedHash") {
+                throw 'The skill dependency lockfile changed during setup. Rerun setup against a stable skill checkout.'
+            }
         }
-        Push-Location -LiteralPath $installationDirectory
-        try {
-            $env:PATH = (Split-Path -Parent $NodePath) + [IO.Path]::PathSeparator + $originalPath
-            if ($staging) {
+        $env:PATH = (Split-Path -Parent $NodePath) + [IO.Path]::PathSeparator + $originalPath
+        if ($staging) {
+            Push-Location -LiteralPath $installationDirectory
+            try {
                 & npm ci --ignore-scripts --engine-strict --no-audit --no-fund | ForEach-Object { [Console]::Error.WriteLine([string] $_) }
                 if ($LASTEXITCODE -ne 0) { throw "Installing Mermaid CLI failed with exit code $LASTEXITCODE." }
+            } finally {
+                Pop-Location
             }
-            # Only the browser installer is needed; do not enable arbitrary dependency lifecycle scripts.
-            & $NodePath (Join-Path $installationDirectory 'node_modules\puppeteer\install.mjs') |
-                ForEach-Object { [Console]::Error.WriteLine([string] $_) }
-            if ($LASTEXITCODE -ne 0) {
-                throw "Installing Mermaid's browser failed with exit code $LASTEXITCODE. Preserve Puppeteer's diagnostic. For IncompleteInstallationError, follow report-tool-setup.md, 'Incomplete browser cache recovery'; cache deletion requires separate approval."
+            if (-not (Test-ReportMermaidInstallation -Directory $installationDirectory)) {
+                throw 'The npm installation did not provide the required Mermaid and Puppeteer package files.'
             }
-        } finally {
-            $env:PATH = $originalPath
-            Pop-Location
         }
-        if ($staging) { [IO.Directory]::Move($staging, $toolsDirectory) }
+        # Browser configuration must resolve from the caller's rendering directory, not
+        # shared storage. Only npm needs the staging working directory.
+        & $NodePath (Join-Path $installationDirectory 'node_modules\puppeteer\install.mjs') |
+            ForEach-Object { [Console]::Error.WriteLine([string] $_) }
+        if ($LASTEXITCODE -ne 0) {
+            throw "Installing Mermaid's browser failed with exit code $LASTEXITCODE. Preserve Puppeteer's diagnostic. For IncompleteInstallationError, follow report-tool-setup.md, 'Incomplete browser cache recovery'; cache deletion requires separate approval."
+        }
+        if ($staging) {
+            # Keep the old tree until its replacement is ready, and restore it if publication
+            # fails. The retained installation lock excludes readers throughout these renames.
+            $previous = $null
+            if ([IO.Directory]::Exists($toolsDirectory)) {
+                $previous = Join-Path (Get-ReportToolsDirectory) ".mermaid-previous-$([guid]::NewGuid().ToString('N'))"
+                [IO.Directory]::Move($toolsDirectory, $previous)
+            }
+            try {
+                [IO.Directory]::Move($staging, $toolsDirectory)
+            } catch {
+                if ($previous) { [IO.Directory]::Move($previous, $toolsDirectory) }
+                throw
+            }
+            if ($previous) { Remove-Item -LiteralPath $previous -Recurse -Force }
+        }
     } finally {
+        $env:PATH = $originalPath
         if ($staging -and [IO.Directory]::Exists($staging)) {
             Remove-Item -LiteralPath $staging -Recurse -Force
         }

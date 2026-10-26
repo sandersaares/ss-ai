@@ -1191,11 +1191,20 @@ skill copies. Discovery and rendering resolve that directory directly, without
 depending on npm's global prefix or exposing renderer commands on `PATH`.
 
 The installer copies the package manifests into a unique sibling staging directory,
-runs the locked npm installation and browser setup there, then atomically renames
-the complete directory into place. A retained user-wide installation lock excludes
-checks and rendering during setup; rendering and discovery retain shared ownership.
-Failed staging trees are removed without publishing them or deleting existing
-installations. An existing dependency tree is reused; browser setup can still
+checks the copied lockfile against the selected directory key, and runs the locked
+npm installation there. A checkout update during the manifest copy produces an
+explicit failure rather than publishing dependencies under the wrong key.
+Only npm uses the staging working directory; browser setup uses the caller's
+working directory so its Puppeteer configuration matches discovery and rendering.
+
+A retained user-wide installation lock excludes checks and rendering during setup;
+rendering and discovery retain shared ownership. Reuse requires Mermaid's CLI,
+Puppeteer's installer and manifest, and the runtime entry point named by that
+manifest. Missing package files cause setup to rebuild through staging. Once npm
+and browser setup succeed, the installer publishes the complete tree by directory
+rename. Replacement retains the old tree until staging is ready and restores it
+if publication fails. Failed staging trees are removed without deleting existing
+installations. A complete dependency tree is reused while browser setup can still
 repair a missing browser download. Checkout-local dependencies are neither used
 nor deleted, and the skill directory requires no write access.
 
