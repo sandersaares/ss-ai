@@ -57,7 +57,9 @@ Describe 'Automatic reapproval repository scope instructions' {
     }
 
     It 'reports every in-range result with linked identity and service approval time' {
-        $script:Prompt | Should -Match 'one summary row for every in-range candidate from all final `results`'
+        $script:Prompt | Should -Match 'final report MUST include a Markdown table with one row for every in-range\s+candidate returned across all final `results` pages'
+        $script:Prompt | Should -Match 'retained decisions,\s+already-valid approvals, no-prior-approval and ineligible outcomes, and failures'
+        $script:Prompt | Should -Match 'table must have `PR`, `Decision`, and `Required detail` columns'
         $script:Prompt | Should -Match '\[PR number \+ title\]\(PR URL\)'
         $script:Prompt | Should -Match 'retained from `reviewNotice.createdAt`'
         $script:Prompt | Should -Match 'service `approvedAt` timestamp, even when issued in a previous invocation'
