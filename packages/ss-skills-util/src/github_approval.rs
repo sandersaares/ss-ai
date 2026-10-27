@@ -222,6 +222,7 @@ pub(crate) fn project_comments(comments: &[Value]) -> Vec<Value> {
                     "user",
                     "in_reply_to_id",
                     "path",
+                    "diff_hunk",
                     "line",
                     "side",
                     "start_line",
@@ -760,6 +761,8 @@ mod tests {
         baseline["reviewComments"] = json!([{
             "id": 10, "body": "Inline discussion", "path": "src/lib.rs", "line": 1,
             "side": "RIGHT", "commit_id": "b".repeat(40), "user": {"id": 99},
+            // An intermediate commit's excerpt need not exist in either assessed tree.
+            "diff_hunk": "@@ -1 +1 @@\n-old\n+intermediate",
             "created_at": "2026-01-08T21:00:00Z", "updated_at": "2026-01-08T21:00:00Z"
         }]);
         rich["reviewComments"] = baseline["reviewComments"].clone();
@@ -767,6 +770,10 @@ mod tests {
         let baseline: Evidence = serde_json::from_value(baseline).unwrap();
         let rich: Evidence = serde_json::from_value(rich).unwrap();
         let lean = super::compact(&rich).unwrap();
+        assert_eq!(
+            serde_json::to_value(&lean).unwrap()["reviewComments"][0]["diff_hunk"],
+            serde_json::to_value(&rich).unwrap()["reviewComments"][0]["diff_hunk"]
+        );
         assert!(super::equivalent(&baseline, &rich).unwrap());
         assert!(super::equivalent(&rich, &lean).unwrap());
         assert_eq!(super::compact(&lean).unwrap(), lean);
@@ -785,6 +792,10 @@ mod tests {
             ("/comments/0/updated_at", json!("2026-01-09T00:00:00Z")),
             ("/reviewComments/0/path", json!("src/other.rs")),
             ("/reviewComments/0/line", json!(2)),
+            (
+                "/reviewComments/0/diff_hunk",
+                json!("@@ -1 +1 @@\n-old\n+other"),
+            ),
             (
                 "/timeline/2/pullRequestCommit/commit/oid",
                 json!("e".repeat(40)),

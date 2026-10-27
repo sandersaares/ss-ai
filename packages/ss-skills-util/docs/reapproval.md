@@ -80,6 +80,8 @@ The retained evidence includes stable repository and account identities, source
 commits and refs, PR content and state, individual decisions and pending review,
 human discussion and its source context, and applicable reviewer-policy settings.
 Comment bodies, authors, deletion, and content edit times remain material.
+GitHub inline comments retain their `diff_hunk` excerpts so objections about
+intermediate or outdated code remain understandable alongside source locations.
 Profile names, avatars, links, reactions, repository statistics, project revision
 counters, and merge jobs or queue progress do not affect freshness.
 
