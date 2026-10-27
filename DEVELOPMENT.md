@@ -52,6 +52,11 @@ Some skills ship with executable helper scripts that have their own unit tests. 
 
 Run from the active checkout root. `just --list` lists shortcuts.
 The runner supports `-Suite All|Pester|Rust`, `-Path`, and `-FullNameFilter`.
+Just test recipes accept array options (`-Path`, `-FullNameFilter`, `-RustTest`)
+as consecutive arguments, for example `just test-rust -RustTest native git`.
+`-RustTest native,git` also selects both targets. Quote each path or filter that
+contains spaces; commas in paths and filters remain literal. Direct PowerShell
+runner calls use PowerShell arrays, for example `-RustTest native,git`.
 An explicit Pester path does not run Rust checks, but builds the local
 native utility when selected review suites need it. The runner never uses
 the user's installed utility as the test prerequisite. It propagates
@@ -94,11 +99,15 @@ modified, stale-source, mismatched-selection, and incompatible-toolchain or
 flag records instead of building a missing helper. Cargo still checks freshness;
 ordinary execution uses its prepared target directory and preserves
 `CARGO_BIN_EXE` and doctest behavior.
-Prerequisite schema version 2 binds source content and last-write timestamps,
+Prerequisite schema version 3 binds source content and last-write timestamps,
 including manifests, Cargo configuration, and embedded inputs. A touch or
 byte-identical save requires preparation again, because Cargo can rebuild from
 timestamps alone. Execution rejects older records explicitly. Keep these inputs
 unchanged throughout preparation and execution.
+The identity also binds Cargo home selection and effective Cargo configuration
+from the workspace root, its ancestors, and Cargo home, including absent files.
+It follows Cargo's preference for `config` over `config.toml` in each directory.
+Records retain only a configuration identity hash, never configuration contents.
 Publication holds a retained `<record>.lock` sibling across the final
 existence check and atomic move. Competing publishers fail explicitly rather
 than overwrite a run. Leave the lock file in place during overlapping use.

@@ -37,6 +37,58 @@ function Get-RustTestFileHash {
     }
 }
 
+# Bind Cargo's root-to-ancestor configuration search and Cargo home without recording
+# configuration text (which can contain credentials). Cargo prefers config over
+# config.toml in each directory; workspace member directories are not searched.
+function Get-RustCargoConfigurationHash {
+    param([string] $RepositoryRoot)
+
+    $homeSelection = [Environment]::GetEnvironmentVariable('CARGO_HOME')
+    $cargoHome = if ([string]::IsNullOrEmpty($homeSelection)) {
+        # Cargo's default follows the platform home environment, not PowerShell's
+        # startup snapshot in $HOME, which can differ after an environment update.
+        $userHome = [Environment]::GetEnvironmentVariable($(if ($IsWindows) { 'USERPROFILE' } else { 'HOME' }))
+        if ([string]::IsNullOrEmpty($userHome)) { $userHome = $HOME }
+        Join-Path $userHome '.cargo'
+    } else {
+        [IO.Path]::GetFullPath($homeSelection, $RepositoryRoot)
+    }
+    $directories = [Collections.Generic.List[string]]::new()
+    $directory = [IO.DirectoryInfo]::new($RepositoryRoot)
+    while ($null -ne $directory) {
+        $directories.Add((Join-Path $directory.FullName '.cargo'))
+        $directory = $directory.Parent
+    }
+    $directories.Add($cargoHome)
+    $entries = @(
+        # Preserve Cargo home selection even if both homes have identical configuration.
+        @{ home = $cargoHome; selection = $homeSelection }
+        foreach ($path in $directories) {
+            $legacy = Join-Path $path 'config'
+            $modern = Join-Path $path 'config.toml'
+            $selected = if (Test-Path -LiteralPath $legacy -PathType Leaf) { $legacy } else { $modern }
+            if (Test-Path -LiteralPath $selected -PathType Leaf) {
+                $file = Get-Item -LiteralPath $selected
+                @{
+                    path = $selected
+                    sha256 = Get-RustTestFileHash -Path $selected
+                    ticks = $file.LastWriteTimeUtc.Ticks
+                }
+            } else {
+                @{ path = $path; absent = $true }
+            }
+        }
+    )
+    # Ordered serialization keeps the aggregate deterministic across independent processes.
+    $lines = foreach ($entry in $entries) {
+        foreach ($key in @($entry.Keys | Sort-Object)) {
+            @($key, $entry[$key]) | ConvertTo-Json -Compress
+        }
+    }
+    [Convert]::ToHexString([Security.Cryptography.SHA256]::HashData(
+        [Text.Encoding]::UTF8.GetBytes(($lines -join "`n"))))
+}
+
 # Bind reusable prerequisites to source bytes and Cargo freshness inputs, including embedded files.
 function Get-RustTestIdentity {
     param([string] $RepositoryRoot)
@@ -107,6 +159,7 @@ function Get-RustTestIdentity {
         repositoryRoot = $RepositoryRoot
         sourceSha256 = $source
         sourceFreshnessSha256 = $freshness
+        cargoConfigurationSha256 = Get-RustCargoConfigurationHash -RepositoryRoot $RepositoryRoot
         rustc = $rustc
         cargo = $cargo
         environment = $environment
@@ -224,13 +277,14 @@ function New-RustTestPreparation {
         # A build must not publish artifacts against the identity of an earlier source tree.
         $after = Get-RustTestIdentity -RepositoryRoot $RepositoryRoot
         if ($after.sourceSha256 -ne $identity.sourceSha256 -or
-            $after.sourceFreshnessSha256 -ne $identity.sourceFreshnessSha256) {
+            $after.sourceFreshnessSha256 -ne $identity.sourceFreshnessSha256 -or
+            $after.cargoConfigurationSha256 -ne $identity.cargoConfigurationSha256) {
             throw 'Rust sources changed during preparation.'
         }
 
         $record = @{
-            # The consumer requires both content and freshness identity (DEVELOPMENT.md).
-            schemaVersion = 2
+            # The consumer requires source and effective external configuration identity (DEVELOPMENT.md).
+            schemaVersion = 3
             status = $(if ($providerFailure) { 'providerFailed' } else { 'complete' })
             providerFailure = $providerFailure
             identity = $identity
@@ -301,7 +355,7 @@ function Read-RustTestPreparation {
         'ownedDirectory', 'targetDirectory', 'provider', 'executables'
     )
     if ($record -isnot [System.Collections.IDictionary] -or
-        $record.schemaVersion -isnot [long] -or $record.schemaVersion -ne 2 -or
+        $record.schemaVersion -isnot [long] -or $record.schemaVersion -ne 3 -or
         $record.status -isnot [string] -or
         ($record.status -cne 'complete' -and -not ($AllowProviderFailure -and $record.status -ceq 'providerFailed'))) {
         throw 'Incomplete or unsupported Rust prerequisites.'
@@ -329,7 +383,7 @@ function Read-RustTestPreparation {
     # Compare identity before trusting owned artifacts or launching Cargo.
     $identity = Get-RustTestIdentity -RepositoryRoot $RepositoryRoot
     Assert-RustRecordFields -Record $record.identity -Fields @($identity.Keys)
-    foreach ($key in @('repositoryRoot', 'sourceSha256', 'sourceFreshnessSha256', 'rustc', 'cargo', 'profile', 'features')) {
+    foreach ($key in @('repositoryRoot', 'sourceSha256', 'sourceFreshnessSha256', 'cargoConfigurationSha256', 'rustc', 'cargo', 'profile', 'features')) {
         if ($record.identity[$key] -isnot [string] -or $record.identity[$key] -cne $identity[$key]) {
             throw "Stale or incompatible Rust prerequisites: $key"
         }

@@ -24,35 +24,48 @@ Describe 'Just test argument forwarding' {
         }
 
         $root = Join-Path $TestDrive ([guid]::NewGuid().ToString('N') + ' with spaces')
-        New-Item -ItemType Directory -Path (Join-Path $root 'scripts') -Force | Out-Null
+        New-Item -ItemType Directory -Path (Join-Path $root 'scripts/lib') -Force | Out-Null
         Copy-Item -LiteralPath (Join-Path $script:RepositoryRoot 'justfile') -Destination $root
-        # Capture the actual native argv boundary without compiling Rust or starting nested Pester.
-        [IO.File]::WriteAllText((Join-Path $root 'scripts/Invoke-Tests.ps1'), @'
+        Copy-Item -LiteralPath (Join-Path $script:RepositoryRoot 'scripts/lib/TestRecipeArguments.ps1') -Destination (Join-Path $root 'scripts/lib')
+        # Use the canonical runner's actual parameter binder, replacing only its execution
+        # body so boundary coverage never builds Rust or recursively launches Pester.
+        $runner = Join-Path $script:RepositoryRoot 'scripts/Invoke-Tests.ps1'
+        $ast = [Management.Automation.Language.Parser]::ParseFile($runner, [ref]$null, [ref]$null)
+        $body = @'
 #Requires -Version 7.6
+__PARAMETERS__
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 $PSNativeCommandUseErrorActionPreference = $true
-ConvertTo-Json -InputObject @($args) -Compress
+ConvertTo-Json -InputObject $PSBoundParameters -Compress
 exit __EXIT_CODE__
-'@.Replace('__EXIT_CODE__', [string]$ExitCode))
+'@
+        [IO.File]::WriteAllText((Join-Path $root 'scripts/Invoke-Tests.ps1'),
+            $body.Replace('__PARAMETERS__', $ast.ParamBlock.Extent.Text).Replace('__EXIT_CODE__', [string]$ExitCode))
         $supplied = @()
         $expected = switch ($Recipe) {
-            'test' { @('-Suite', 'Pester') }
+            'test' { @{ Suite = 'Pester' } }
             'test-skill' {
                 $supplied += 'skill with spaces'
-                @('-Path', './tests/skill with spaces/')
+                @{ Path = @('./tests/skill with spaces/') }
             }
-            'test-rust' { @('-Suite', 'Rust') }
-            'test-rust-prepare' { @('-Suite', 'Rust', '-Phase', 'Prepare') }
-            'test-rust-execute' { @('-Suite', 'Rust', '-Phase', 'Execute') }
-            'test-all' { @('-Suite', 'All') }
+            'test-rust' { @{ Suite = 'Rust' } }
+            'test-rust-prepare' { @{ Suite = 'Rust'; Phase = 'Prepare' } }
+            'test-rust-execute' { @{ Suite = 'Rust'; Phase = 'Execute' } }
+            'test-all' { @{ Suite = 'All' } }
         }
         if ($Extra) {
             # Shell syntax must remain literal data, including quoted paths and runtime filters.
             $extraArguments = @('-PrerequisitePath', (Join-Path $root 'record''s $name; "世界".json'),
                 '-RustFilter', 'name with spaces * & $value')
             $supplied += $extraArguments
-            $expected += $extraArguments
+            $expected.PrerequisitePath = $extraArguments[1]
+            $expected.RustFilter = $extraArguments[3]
+            $supplied += @('-RustTest', 'native,git', 'other', '-FullNameFilter',
+                'first''s "quoted", $value; & *', 'second filter', '-Path', 'first path', 'second''s "quoted", $value; &')
+            $expected.RustTest = @('native', 'git', 'other')
+            $expected.FullNameFilter = @('first''s "quoted", $value; & *', 'second filter')
+            $expected.Path = @('first path', 'second''s "quoted", $value; &')
         }
 
         $start = [Diagnostics.ProcessStartInfo]::new($script:Just.Source)
@@ -69,7 +82,14 @@ exit __EXIT_CODE__
             $output = $process.StandardOutput.ReadToEnd()
             $process.WaitForExit()
             $process.ExitCode | Should -Be $ExitCode -Because $errorTask.GetAwaiter().GetResult()
-            @($output | ConvertFrom-Json) | Should -Be $expected
+            $actual = $output | ConvertFrom-Json -AsHashtable
+            $actual.Count | Should -Be $expected.Count
+            foreach ($key in $expected.Keys) {
+                $actual[$key] | Should -Be $expected[$key]
+                if ($key -in @('Path', 'FullNameFilter', 'RustTest')) {
+                    ,$actual[$key] | Should -BeOfType [array]
+                }
+            }
         } finally {
             $process.Dispose()
         }

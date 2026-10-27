@@ -77,6 +77,132 @@ Describe 'Rust preparation boundary' {
         $fixture = New-PreparationFixture
     }
 
+    It 'rejects external <Location> <ConfigName> configuration after <Change>' -ForEach @(
+        foreach ($location in @('ancestor', 'home')) {
+            foreach ($configName in @('config', 'config.toml')) {
+                foreach ($change in @('content', 'timestamp', 'added', 'removed', 'home selection')) {
+                    @{ Location = $location; ConfigName = $configName; Change = $change }
+                }
+            }
+        }
+    ) {
+        $originalHome = $env:CARGO_HOME
+        $isolated = Join-Path $fixture.root 'external'
+        $cargoHome = Join-Path $isolated 'cargo-home'
+        $ancestor = Join-Path $isolated 'ancestor'
+        $workspace = Join-Path $ancestor 'workspace'
+        New-Item -ItemType Directory -Path $cargoHome, $workspace -Force | Out-Null
+        $configDirectory = if ($Location -eq 'home') { $cargoHome } else { Join-Path $ancestor '.cargo' }
+        New-Item -ItemType Directory -Path $configDirectory -Force | Out-Null
+        $config = Join-Path $configDirectory $ConfigName
+        [IO.File]::WriteAllText((Join-Path $workspace 'Cargo.lock'), 'lock')
+        try {
+            $env:CARGO_HOME = $cargoHome
+            if ($Change -ne 'added') { [IO.File]::WriteAllText($config, '[build] rustflags = ["--cfg=first"]') }
+            $null = New-RustTestPreparation -RepositoryRoot $workspace -PrerequisitePath $fixture.record -TestTarget git
+            $null = Read-RustTestPreparation -RepositoryRoot $workspace -PrerequisitePath $fixture.record -TestTarget git
+            switch ($Change) {
+                'content' {
+                    $stamp = [IO.File]::GetLastWriteTimeUtc($config)
+                    [IO.File]::WriteAllText($config, '[build] rustflags = ["--cfg=second"]')
+                    [IO.File]::SetLastWriteTimeUtc($config, $stamp)
+                }
+                'timestamp' {
+                    # A full day is distinct even on coarse timestamp filesystems.
+                    [IO.File]::SetLastWriteTimeUtc($config, [IO.File]::GetLastWriteTimeUtc($config).AddDays(1))
+                }
+                'added' { [IO.File]::WriteAllText($config, '[build] rustflags = []') }
+                'removed' { Remove-Item -LiteralPath $config }
+                'home selection' {
+                    $env:CARGO_HOME = Join-Path $isolated 'another-home'
+                    New-Item -ItemType Directory -Path $env:CARGO_HOME -Force | Out-Null
+                    Copy-Item -LiteralPath $config -Destination $env:CARGO_HOME
+                }
+            }
+            { Read-RustTestPreparation -RepositoryRoot $workspace -PrerequisitePath $fixture.record -TestTarget git } |
+                Should -Throw '*cargoConfigurationSha256*'
+            $script:CargoCalls.Count | Should -Be 1
+            Get-Content -LiteralPath $fixture.record -Raw | Should -Not -Match '\[build\]|--cfg=first'
+        } finally {
+            $env:CARGO_HOME = $originalHome
+        }
+    }
+
+    It 'resolves relative Cargo home against the workspace rather than the caller directory' {
+        $originalHome = $env:CARGO_HOME
+        try {
+            $env:CARGO_HOME = 'relative-home'
+            $before = Get-RustCargoConfigurationHash -RepositoryRoot $fixture.root
+            Push-Location -LiteralPath $fixture.root
+            try {
+                Get-RustCargoConfigurationHash -RepositoryRoot $fixture.root | Should -Be $before
+            } finally {
+                Pop-Location
+            }
+        } finally {
+            $env:CARGO_HOME = $originalHome
+        }
+    }
+
+    It 'binds the default Cargo home when CARGO_HOME is unset' {
+        $originalCargoHome = $env:CARGO_HOME
+        $homeVariable = if ($IsWindows) { 'USERPROFILE' } else { 'HOME' }
+        $originalUserHome = [Environment]::GetEnvironmentVariable($homeVariable)
+        $userHome = Join-Path $fixture.root 'user-home'
+        $configDirectory = Join-Path $userHome '.cargo'
+        New-Item -ItemType Directory -Path $configDirectory -Force | Out-Null
+        try {
+            $env:CARGO_HOME = $null
+            [Environment]::SetEnvironmentVariable($homeVariable, $userHome)
+            $before = Get-RustCargoConfigurationHash -RepositoryRoot $fixture.root
+            [IO.File]::WriteAllText((Join-Path $configDirectory 'config.toml'), 'configuration')
+            Get-RustCargoConfigurationHash -RepositoryRoot $fixture.root | Should -Not -Be $before
+        } finally {
+            $env:CARGO_HOME = $originalCargoHome
+            [Environment]::SetEnvironmentVariable($homeVariable, $originalUserHome)
+        }
+    }
+
+    It 'rejects configuration freshness changes during preparation without publishing' {
+        $originalHome = $env:CARGO_HOME
+        $cargoHome = Join-Path $fixture.root 'cargo-home'
+        New-Item -ItemType Directory -Path $cargoHome -Force | Out-Null
+        $config = Join-Path $cargoHome 'config'
+        [IO.File]::WriteAllText($config, 'configuration')
+        try {
+            $env:CARGO_HOME = $cargoHome
+            $script:TouchDuringBuild = $config
+            { New-RustTestPreparation -RepositoryRoot $fixture.root -PrerequisitePath $fixture.record -TestTarget git } |
+                Should -Throw '*sources changed during preparation*'
+            Test-Path -LiteralPath $fixture.record | Should -BeFalse
+        } finally {
+            $env:CARGO_HOME = $originalHome
+        }
+    }
+
+    It 'follows Cargo legacy precedence and ignores workspace member configuration' {
+        $originalHome = $env:CARGO_HOME
+        $cargoHome = Join-Path $fixture.root 'cargo-home'
+        New-Item -ItemType Directory -Path $cargoHome -Force | Out-Null
+        $legacy = Join-Path $cargoHome 'config'
+        $modern = Join-Path $cargoHome 'config.toml'
+        [IO.File]::WriteAllText($legacy, 'legacy')
+        [IO.File]::WriteAllText($modern, 'modern')
+        try {
+            $env:CARGO_HOME = $cargoHome
+            $before = Get-RustCargoConfigurationHash -RepositoryRoot $fixture.root
+            [IO.File]::WriteAllText($modern, 'ignored')
+            $member = Join-Path $fixture.root 'packages/member/.cargo'
+            New-Item -ItemType Directory -Path $member -Force | Out-Null
+            [IO.File]::WriteAllText((Join-Path $member 'config'), 'ignored')
+            Get-RustCargoConfigurationHash -RepositoryRoot $fixture.root | Should -Be $before
+            Remove-Item -LiteralPath $legacy
+            Get-RustCargoConfigurationHash -RepositoryRoot $fixture.root | Should -Not -Be $before
+        } finally {
+            $env:CARGO_HOME = $originalHome
+        }
+    }
+
     It 'builds the provider once and discovers exact selected executable paths through Cargo JSON' {
         $prepared = New-RustTestPreparation -RepositoryRoot $fixture.root -PrerequisitePath $fixture.record -TestTarget native
 

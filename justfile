@@ -11,11 +11,14 @@ _default:
 # Run every Pester test through the canonical runner.
 #   just test
 #   just test -FullNameFilter '*Get-SectionInfo*'
-# Forward through -File so named options bind at the native command boundary.
+# Reconstruct named options and arrays from argv before invoking the runner.
 [positional-arguments]
 test *ARGS:
+    Set-StrictMode -Version Latest; $ErrorActionPreference = 'Stop'; $PSNativeCommandUseErrorActionPreference = $true; \
     $forwarded = @($args | Select-Object -Skip 1); \
-    & pwsh -NoLogo -NoProfile -NonInteractive -File ./scripts/Invoke-Tests.ps1 -Suite Pester @forwarded; \
+    . ./scripts/lib/TestRecipeArguments.ps1; \
+    $parameters = ConvertFrom-TestRecipeArguments -ArgumentList (@('-Suite', 'Pester') + $forwarded); \
+    & ./scripts/Invoke-Tests.ps1 @parameters; \
     exit $LASTEXITCODE
 
 # Run Pester tests for one skill.
@@ -23,36 +26,51 @@ test *ARGS:
 #   just test-skill ss-cargo-deps-tidy -FullNameFilter '*Get-SectionInfo*'
 [positional-arguments]
 test-skill SKILL *ARGS:
+    Set-StrictMode -Version Latest; $ErrorActionPreference = 'Stop'; $PSNativeCommandUseErrorActionPreference = $true; \
     $forwarded = @($args | Select-Object -Skip 2); \
-    & pwsh -NoLogo -NoProfile -NonInteractive -File ./scripts/Invoke-Tests.ps1 -Path "./tests/$($args[1])/" @forwarded; \
+    . ./scripts/lib/TestRecipeArguments.ps1; \
+    $parameters = ConvertFrom-TestRecipeArguments -ArgumentList (@('-Path', "./tests/$($args[1])/") + $forwarded); \
+    & ./scripts/Invoke-Tests.ps1 @parameters; \
     exit $LASTEXITCODE
 
 # Run native Clippy and Cargo tests without Pester.
 [positional-arguments]
 test-rust *ARGS:
+    Set-StrictMode -Version Latest; $ErrorActionPreference = 'Stop'; $PSNativeCommandUseErrorActionPreference = $true; \
     $forwarded = @($args | Select-Object -Skip 1); \
-    & pwsh -NoLogo -NoProfile -NonInteractive -File ./scripts/Invoke-Tests.ps1 -Suite Rust @forwarded; \
+    . ./scripts/lib/TestRecipeArguments.ps1; \
+    $parameters = ConvertFrom-TestRecipeArguments -ArgumentList (@('-Suite', 'Rust') + $forwarded); \
+    & ./scripts/Invoke-Tests.ps1 @parameters; \
     exit $LASTEXITCODE
 
 # Prepare owned Rust artifacts; pass an absolute record path via -PrerequisitePath.
 [positional-arguments]
 test-rust-prepare *ARGS:
+    Set-StrictMode -Version Latest; $ErrorActionPreference = 'Stop'; $PSNativeCommandUseErrorActionPreference = $true; \
     $forwarded = @($args | Select-Object -Skip 1); \
-    & pwsh -NoLogo -NoProfile -NonInteractive -File ./scripts/Invoke-Tests.ps1 -Suite Rust -Phase Prepare @forwarded; \
+    . ./scripts/lib/TestRecipeArguments.ps1; \
+    $parameters = ConvertFrom-TestRecipeArguments -ArgumentList (@('-Suite', 'Rust', '-Phase', 'Prepare') + $forwarded); \
+    & ./scripts/Invoke-Tests.ps1 @parameters; \
     exit $LASTEXITCODE
 
 # Execute a matching prepared selection, including doctests when unfiltered.
 [positional-arguments]
 test-rust-execute *ARGS:
+    Set-StrictMode -Version Latest; $ErrorActionPreference = 'Stop'; $PSNativeCommandUseErrorActionPreference = $true; \
     $forwarded = @($args | Select-Object -Skip 1); \
-    & pwsh -NoLogo -NoProfile -NonInteractive -File ./scripts/Invoke-Tests.ps1 -Suite Rust -Phase Execute @forwarded; \
+    . ./scripts/lib/TestRecipeArguments.ps1; \
+    $parameters = ConvertFrom-TestRecipeArguments -ArgumentList (@('-Suite', 'Rust', '-Phase', 'Execute') + $forwarded); \
+    & ./scripts/Invoke-Tests.ps1 @parameters; \
     exit $LASTEXITCODE
 
 # Run all Pester and native checks.
 [positional-arguments]
 test-all *ARGS:
+    Set-StrictMode -Version Latest; $ErrorActionPreference = 'Stop'; $PSNativeCommandUseErrorActionPreference = $true; \
     $forwarded = @($args | Select-Object -Skip 1); \
-    & pwsh -NoLogo -NoProfile -NonInteractive -File ./scripts/Invoke-Tests.ps1 -Suite All @forwarded; \
+    . ./scripts/lib/TestRecipeArguments.ps1; \
+    $parameters = ConvertFrom-TestRecipeArguments -ArgumentList (@('-Suite', 'All') + $forwarded); \
+    & ./scripts/Invoke-Tests.ps1 @parameters; \
     exit $LASTEXITCODE
 
 # Run a single eval spec. Extra args are forwarded to `waza run`.
