@@ -186,10 +186,12 @@ the invocation checkout, PR links and outcomes, actionable significance/uncertai
 partial or failed scope, aggregate recency exclusions, and the absolute run
 path. Highlight any accepted-but-stale or unknown publication and its retained
 host journal. Include the policy digest and whether this was a dry run.
-Emit one summary row for every in-range candidate from all final `results`
-pages, including retained decisions, already-valid approvals, and failures.
-Never reduce the summary to counts or only this invocation's writes.
-Use `[PR number + title](PR URL)` for each row (use `PR 123`, not `#123`,
+The final report MUST include a Markdown table with one row for every in-range
+candidate returned across all final `results` pages. Include retained decisions,
+already-valid approvals, no-prior-approval and ineligible outcomes, and failures;
+do not limit the table to PRs assessed or changed during this invocation. The
+table must have `PR`, `Decision`, and `Required detail` columns. Use
+`[PR number + title](PR URL)` in the `PR` column (use `PR 123`, not `#123`,
 for Azure DevOps) and an explicit decision:
 
 | Decision | Required detail |

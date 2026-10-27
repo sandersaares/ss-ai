@@ -49,6 +49,14 @@ particular publication service.
 A **destination** is where the approved review is delivered: a pull request, a
 work tracker, or a Markdown document.
 
+## Self-review for local development
+
+Explicit `self-review` mode provides non-interactive review during a local development iteration. It retains ordinary analysis quality and policy classification, but performs no human audit and no remote writes. It does not register reviewers, publish overviews, post findings, vote, file tracker items, or create learning pull requests. A local review does not require a pull request; an explicitly requested PR scope may use read-only provider evidence.
+
+The caller receives absolute filesystem paths to rendered Markdown findings in the invoking session. Delivery distinguishes policy-approved findings from findings whose required audit was skipped, and includes both in the complete report. Skipped findings remain unaudited, not approved or rejected. No findings and no policy-approved findings are distinct outcomes.
+
+Self-review asks no questions and requires no HTML rendering tools. Missing information that prevents a reliable review produces an explicit blocker rather than an assumed human decision. The mode does not relax primary-session ownership or change the gates of ordinary review.
+
 ## Interaction ownership
 
 The central accountability tenet is that analysis may be delegated, but user

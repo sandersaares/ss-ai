@@ -1,6 +1,6 @@
 ---
 name: ss-review
-description: Code review orchestrator for performing thorough high-quality code reviews. MUST run directly in the primary user-facing session and never as a subagent. Use only when explicitly invoked by name by the user or handed off by a user-authorized ss-review-proactor invocation.
+description: Code review orchestrator for performing thorough high-quality code reviews, including non-interactive self-review with local Markdown findings and no remote writes. MUST run directly in the primary user-facing session and never as a subagent. Use only when explicitly invoked by name by the user or handed off by a user-authorized ss-review-proactor invocation.
 ---
 
 Your task is to orchestrate a swarm of subagents in performing a code review of the scope requested by the user. Follow the steps in the Workflow chapter below.
@@ -11,6 +11,20 @@ This skill may be invoked with special clauses to override some default behavior
 - By default, pre-existing issues are ignored in the review phase. In specific cases, this may be overridden at skill invocation time.
 
 Do not ask the user about the overrides - if no overrides are specified, use default behavior.
+
+# Self-review mode
+
+Select this mode only when the invocation explicitly requests `self-review`, for example: `ss-review self-review the current working-tree changes`. It supports non-interactive local development iterations. Keep the selected mode in the session checkpoint across resumptions. Ordinary review and proactor handoffs retain their existing behavior; an unattended caller does not implicitly select self-review.
+
+Self-review follows phases 1 through 6 with the exceptions below, then executes [self-review delivery](self-review.md) and finishes. It does not execute phases 7 through 10. These mode rules take precedence over the ordinary workflow's interaction and publication steps:
+
+- Do not perform any remote writes, including reviewer registration, overview uploads or posts, PR comments or reviews, votes, tracker items, or learning PRs. PR evidence capture and freshness reads remain allowed when the requested scope is a PR. Do not discover or associate a PR merely because the local branch has one.
+- Skip phase 1 step 1 and step 7 entirely. Retain the local content overview. In step 4, skip only report-tool checks and setup; still prepare the complete file inventory. Markdown delivery requires no HTML, Mermaid browser probe, installation, or presentation-choice prompt.
+- Preserve all review coverage, deduplication, refinement, synthesis, and phase 5 pre-audit refresh requirements. For local content, verify that the reviewed diff/content remains unchanged before classification; if it changed, stop with an explicit stale-review diagnostic rather than delivering findings as current.
+- Run phase 6 under the unchanged auto-approval policy. Leave `needs-audit` findings undecided: skip their audit, not their rendering. Never convert them to approvals, rejections, or dropped findings to make the workflow complete.
+- Ask no questions, including audit, merge approval, destination, installation, or learning questions. If required information or a worker's unresolved question prevents completion, report the blocker and stop without inventing an answer or claiming completion.
+
+The primary-session ownership rule still applies. Self-review does not authorize delegated invocation of the whole skill or autonomous decisions at a paused ordinary review's human gates.
 
 # Execution ownership and user decisions
 
@@ -85,7 +99,7 @@ The workflow is split into multiple phases:
 9. Publication - approved findings are published to the author of the code under review.
 10. Learning - applying audit feedback to improve future iterations of the review process.
 
-Execute all phases in sequence.
+Execute all phases in sequence for ordinary review. Self-review takes the explicit route above.
 
 Invoke every skill script through `pwsh` with `-NonInteractive`, so that a missing required parameter fails immediately instead of waiting for input that will never arrive.
 
@@ -107,7 +121,7 @@ Prepare every phase-1 step-5/step-6 preparation assignment and phase-2 reviewer 
 
 # Phase 1: preparation
 
-1. If the content is associated with a pull request in GitHub or Azure DevOps, register yourself as a reviewer to signal that the review is under way. Execute the command in `tool-calls/register-reviewer.md`, replacing its placeholders.
+1. Unless this is self-review, if the content is associated with a pull request in GitHub or Azure DevOps, register yourself as a reviewer to signal that the review is under way. Execute the command in `tool-calls/register-reviewer.md`, replacing its placeholders.
 
    The command emits a single JSON object on standard output. If it reports a 404 error, ignore the error and continue - the current user probably lacks edit permissions in the specific repo. For other errors, apply `error-recovery.md`, including its protection against replaying an ambiguously successful registration. Otherwise continue.
 
@@ -125,7 +139,7 @@ Prepare every phase-1 step-5/step-6 preparation assignment and phase-2 reviewer 
 
    Classification stdout contains only `contextPath`, `applied`, `unchanged`, `indeterminate`, and `isComplete`. If incomplete, query the remaining indeterminate comments afresh and classify those too. For query or classification errors, apply `error-recovery.md` and the query recipe's correction/restart rules; never recover with a raw capture read.
 
-4. Check report-rendering prerequisites using `pwsh-calls/check-report-tools.md`. Readiness requires its real HTML/Mermaid probe, not merely installed executables or a completed browser download. Missing or unusable prerequisites require the platform setup guidance and an installation prompt, not an implicit fallback or automatic installation. Apply the user-decision rules; if installation is declined or fails, explicitly retain Markdown presentation and continue the review. Remember that choice for this run rather than asking again at every rendering step.
+4. Unless this is self-review, check report-rendering prerequisites using `pwsh-calls/check-report-tools.md`. Readiness requires its real HTML/Mermaid probe, not merely installed executables or a completed browser download. Missing or unusable prerequisites require the platform setup guidance and an installation prompt, not an implicit fallback or automatic installation. Apply the user-decision rules; if installation is declined or fails, explicitly retain Markdown presentation and continue the review. Remember that choice for this run rather than asking again at every rendering step.
 
    Prepare a file-inventory draft in session state as an array of `{ "path": "absolute path", "sizeBytes": 123, "change": "modified" }` records covering every file under review. Use `new`, `modified`, or `deleted` for `change`; use the pre-change size for deleted files. For whole-directory review, mark existing files `modified`. Preserve deleted files even though their paths no longer exist; workers inspect their pre-change content and removal diff. Represent a rename with both its deleted old path and new path so neither side is omitted. Publish the draft as `file-inventory.json` using `pwsh-calls/write-review-input.md`, with `-Replace` only for explicit freshness regeneration. Keep it flat and complete; the next step derives groups without relevance filtering.
 5. Dispatch the following concurrently and wait for all of them to complete:
@@ -144,7 +158,7 @@ Prepare every phase-1 step-5/step-6 preparation assignment and phase-2 reviewer 
    The overview includes a preliminary completeness assessment that identifies possible gaps and concrete questions for the review phase without deciding whether the change is complete.
    After the subagent completes, run `pwsh-calls/validate-content-overview.md` for title, ordered nonempty sections, and the captured PR link. Assess the applicable design references and the caveat when Significant changes lists entries semantically. Change sections with no applicable entries must say so. Re-execute if validation fails; do not write an ad hoc structural validator.
 
-7. If this is a pull request review, immediately publish the initial overview using `pwsh-calls/publish-content-overview.md`, before dispatching review workers. This automatic preparation post is separate from the later audit and findings publication. The script publishes an unlisted Markdown/Mermaid Gist on GitHub, or a ZIP attachment containing self-contained HTML and a resolved informational thread on ADO. GitHub reports are readable by anyone with the link; ADO retains existing PR-reader access. ADO readers extract `report.html` and open it in a browser.
+7. Unless this is self-review, if this is a pull request review, immediately publish the initial overview using `pwsh-calls/publish-content-overview.md`, before dispatching review workers. This automatic preparation post is separate from the later audit and findings publication. The script publishes an unlisted Markdown/Mermaid Gist on GitHub, or a ZIP attachment containing self-contained HTML and a resolved informational thread on ADO. GitHub reports are readable by anyone with the link; ADO retains existing PR-reader access. ADO readers extract `report.html` and open it in a browser.
 
    Publication is best-effort. The transport waits and retries explicit rate-limit refusals until success; these are definite rejections, not ambiguous writes. Notify the user of other failures and saved diagnostics, then continue the review without waiting for repair. Missing tools still require the installation decision above, not silent suppression. Never replay ambiguous writes or treat an uploaded-but-unlinked report as fully published.
 
@@ -243,6 +257,8 @@ Keep `findings.json` unchanged while this phase runs and give the worker exclusi
 After the worker stops, execute `pwsh-calls/get-next-auto-approval-finding.md` yourself. Require `isComplete: true` before advancing. If findings remain, resume the bounded worker; on command errors, apply `error-recovery.md`. Retain `auditFindingIds` for the human audit. A `needs-audit` record completes classification, not approval, and cannot enter the approved set without the user's decision.
 
 # Phase 7: audit
+
+For self-review, execute [self-review delivery](self-review.md) instead and finish without entering this phase or any later phase.
 
 For every PR metadata read in this phase, use `pwsh-calls/query-pr-context.md` against the last checked capture. Retain that capture's absolute path as the audited snapshot before rendering. Select `isAuthoredBySelf` for merge choices, `id`, `title`, and `pullRequestUrl` for presentation, and `reviewedSourceCommit` for approval binding; do not open the capture to obtain them. These selected fields correspond to the canonical properties referenced below.
 
