@@ -168,6 +168,8 @@ focused Ubuntu coverage, Windows/Ubuntu native Clippy and Cargo tests, and
 macOS PowerShell-only Cargo-helper/linking coverage. Pull requests have no
 narrow path filter that could skip installer-only changes. CI does not run
 paid model evaluations; the documented Waza recipes are explicit local entry points.
+CI retries Pester package download failures with bounded delays; other
+installation errors and persistent download failures fail the job.
 
 The Rust and Pester CI jobs disable Cargo incremental compilation and use
 line-table-only debug information for dev and test builds. These job-level
