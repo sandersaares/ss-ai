@@ -52,10 +52,28 @@ Some skills ship with executable helper scripts that have their own unit tests. 
 
 Run from the active checkout root. `just --list` lists shortcuts.
 The runner supports `-Suite All|Pester|Rust`, `-Path`, and `-FullNameFilter`.
+Just test recipes accept array options (`-Path`, `-FullNameFilter`, `-RustTest`)
+as consecutive arguments, for example `just test-rust -RustTest native git`.
+`-RustTest native,git` also selects both targets. Quote each path or filter that
+contains spaces; commas in paths and filters remain literal. Direct PowerShell
+runner calls use PowerShell arrays, for example `-RustTest native,git`.
 An explicit Pester path does not run Rust checks, but builds the local
 native utility when selected review suites need it. The runner never uses
 the user's installed utility as the test prerequisite. It propagates
 failure status; `All` retains Rust failures after Pester completes.
+
+Rust checks report separate Clippy, preparation, and execution elapsed times.
+Preparation compiles the shared provider once and discovers selected test
+executables from Cargo artifact JSON. Every run owns its build directory; no
+mutable fixture state or final binaries are shared between invocations.
+Cargo receives the prerequisite record through its child environment; overlapping
+executions do not change the parent process environment.
+An unfiltered run retains all integration tests and doctests. Installer coverage
+lives in `tests/NativeInstallation.Tests.ps1`: simulated Cargo responses exercise
+our arguments, errors and artifact parsing, while isolated fixture launchers
+exercise PATH discovery and executable identity. These tests use the existing
+PowerShell executable; they never compile or install a utility. Cargo owns
+compilation, replacement and source-rebuild behavior.
 
 Run every test in the repo:
 
@@ -64,6 +82,56 @@ just test
 just test-all
 just test-rust
 ```
+
+Prepare once for repeated native execution, using an existing directory outside
+the checkout for the invocation's record:
+
+```powershell
+$record = Join-Path ([IO.Path]::GetTempPath()) ('rust-prerequisites-' + [guid]::NewGuid() + '.json')
+just test-rust-prepare -PrerequisitePath $record -RustTest native
+just test-rust-execute -PrerequisitePath $record -RustTest native
+just test-rust-execute -PrerequisitePath $record -RustTest native -RustFilter provider
+```
+
+The PowerShell equivalents use `scripts/Invoke-Tests.ps1 -Suite Rust` with
+`-Phase Prepare` or `-Phase Execute`. Omit `-RustTest` from both phases for the
+full Rust suite. `-RustFilter` selects runtime test names without rebuilding.
+Preparation refuses an existing record. Execution rejects missing, incomplete,
+modified, stale-source, mismatched-selection, and incompatible-toolchain or
+flag records instead of building a missing helper. Cargo still checks freshness;
+ordinary execution uses its prepared target directory and preserves
+`CARGO_BIN_EXE` and doctest behavior.
+Prerequisite schema version 3 binds source content and last-write timestamps,
+including manifests, Cargo configuration, and embedded inputs. A touch or
+byte-identical save requires preparation again, because Cargo can rebuild from
+timestamps alone. Execution rejects older records explicitly. Keep these inputs
+unchanged throughout preparation and execution.
+The identity also binds Cargo home selection and effective Cargo configuration
+from the workspace root, its ancestors, and Cargo home, including absent files.
+It follows Cargo's preference for `config` over `config.toml` in each directory.
+Records retain only a configuration identity hash, never configuration contents.
+Publication holds a retained `<record>.lock` sibling across the final
+existence check and atomic move. Competing publishers fail explicitly rather
+than overwrite a run. Leave the lock file in place during overlapping use.
+
+For a direct Cargo invocation, first prepare the matching selection, set
+`SS_AI_RUST_TEST_PREREQUISITES` to the absolute record path, and pass the
+record's `targetDirectory` as `--target-dir`. Prefer the canonical execution
+phase, which also validates the complete source/toolchain/flag identity.
+Native fixtures validate the record's provider source and executable bytes
+and never compile a missing prerequisite. They copy the immutable helper
+into private directories with spaces, keeping response files and PATH private.
+
+The canonical runner retains an explicit failed prerequisite record when
+provider preparation fails. It blocks native tests, runs already-built
+independent targets and doctests, and still exits unsuccessfully. Missing test
+executables remain an invocation-wide blocker.
+
+Without an explicit record, the runner cleans up its private artifacts after
+tests exit. With an explicit record, retain the record and its `ownedDirectory`
+until every consumer finishes, then remove those exact owned paths. A new
+preparation uses new owned outputs and cannot invalidate an active consumer.
+No cross-run build cache or runner-specific process isolation is required.
 
 Run tests for a single skill:
 
@@ -177,8 +245,8 @@ environment settings keep backtrace source locations while avoiding unused
 incremental state and full debug information on disposable runners.
 Local developer builds retain Cargo's default settings.
 
-Installation tests use test-owned homes, source copies, and Cargo install
-roots. Never run the real installer against the developer's profile as a test.
+Installation tests use test-owned homes and isolated fixture launchers with
+simulated Cargo results. Never run the real installer against the developer's profile as a test.
 Provider fixtures are sanitized; tests must not contact live review services.
 Report dependency setup is opt-in and documented in the skill's platform guide.
 

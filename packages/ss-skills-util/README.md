@@ -480,11 +480,15 @@ installer integration test.
 Run from the repository root:
 
 ```powershell
-cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
-cargo test --workspace --all-features --locked
+pwsh -NoProfile -File ./scripts/Invoke-Tests.ps1 -Suite Rust
 ```
 
-Neither command has placeholders; a nonzero exit is a failed check.
-Use `scripts\Invoke-Tests.ps1` for combined repository testing.
+The runner prepares immutable provider and Cargo test artifacts before execution.
+A nonzero exit is a failed check. Use `-RustTest native` for native integration
+coverage and `-RustFilter` for a runtime name filter. See
+[development testing](../../DEVELOPMENT.md#running-tests) for split preparation,
+direct Cargo prerequisites, ownership, and cleanup. A direct Cargo test without
+the provider prerequisite fails explicitly; fixtures never build missing helpers.
+Use `scripts\Invoke-Tests.ps1 -Suite All` for combined repository testing.
 Clippy and rustfmt are rustup components; no separate Cargo development-tool
 installer is required.

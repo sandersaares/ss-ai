@@ -354,3 +354,38 @@ They compare exact immutable endpoints, decode quoted paths, and reject truncate
 hunks while disabling replacement objects, external diffs, and text conversion.
 The PowerShell adapter retains finding lookup and hunk membership; it does not
 maintain another parser or change full-review publication decisions.
+
+## Integration coverage and resource ownership
+
+`tests/reapproval.rs` exercises command dispatch, durable journals, assessment
+authority, publication, and recovery without contacting live review services.
+Common assessment setup uses the command's default read size and follows exact
+continuation offsets. It derives page-count bounds from captured content, so a
+nonterminating or truncated response fails deterministically. Shared paging checks
+the total character count; only exact-content comparisons collect the complete
+text in a caller-owned buffer. Explicit helper page limits are nonzero. Focused
+pagination coverage checks small Unicode pages, replay, overlap, gaps, incomplete evidence,
+stale snapshots, and the hard response cap through the same persisted commands.
+
+Publication-only matrices share an immutable editorial source repository and
+its captured commit IDs. Their journals, host stores, and provider state remain
+private. Preparation records successful real Git responses separately for GitHub
+and ADO; publication matrices replay only those exact ordered commands. Unknown
+commands or changed source IDs fail explicitly without falling back to native
+Git. These responses replace repeated source transport, not assessment reads,
+judgments, authority checks, or journal persistence.
+
+Complete representative GitHub and ADO publication/recovery lifecycles retain
+real Git. ADO cumulative-anchor scenarios also retain the real failed fetch of a
+later unavailable source. Notice-expiry scenarios that reverse source endpoints,
+force-push/path/mode/opaque-content cases, equal-tree cases, and Unicode paging
+use real Git. Scenarios that mutate repositories own independent temporary
+repositories. The suite checks the shared source's status and tip after use;
+configuration and OAuth isolation retain their native transport coverage.
+
+The binary has one serialized test entry point because process creation can
+inherit another thread's retained file locks. Test correctness does not depend
+on runner-specific isolation or scheduling. Run with `--nocapture` to see counts
+of source-setup Git commands, native assessment Git commands, recorded replies,
+and attempted assessment reads. These counts include fixture preparation and
+negative cases; elapsed time remains an observation rather than an assertion.
