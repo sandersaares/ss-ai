@@ -72,6 +72,18 @@ Describe 'Automatic reapproval repository scope instructions' {
         $script:Prompt | Should -Match 'Dry runs report the decision without posting a marker'
         $script:Recipes | Should -Match 'Repeating the original command reconciles the same intent without\s+posting again'
     }
+
+    It 'recovers stale evidence with fresh assessments and a retained bounded budget' {
+        $script:Prompt | Should -Match '`staleEvidence` and `staleDuringExecution` are transient evidence conditions'
+        $script:Prompt | Should -Match 'two recovery attempts per PR after\s+the initial attempt'
+        $script:Prompt | Should -Match 'call `refresh` to persist and report explicit\s+`retryExhausted`'
+        $script:Prompt | Should -Match 'Never reuse old judgments or the old assessment digest'
+        $script:Prompt | Should -Match 'Stop any previous worker'
+        $script:Prompt | Should -Not -Match 'ends this PR''s attempt rather than chasing'
+        $script:Recipes | Should -Match 'stale refresh request records `retryExhausted`'
+        $script:Recipes | Should -Match 'An attempted or unknown effect blocks refresh, including accepted-but-stale'
+        $script:Recipes | Should -Match 'original `publish` or\s+`notify` command'
+    }
 }
 
 Describe 'Automatic reapproval provider fixtures' {
@@ -90,7 +102,7 @@ Describe 'Automatic reapproval provider fixtures' {
         $recipes = Get-Content -LiteralPath (Join-Path $skill 'commands.md') -Raw
         $help = & ss-skills-util autoreapprove --help | Out-String
         $LASTEXITCODE | Should -Be 0
-        foreach ($command in @('discover', 'results', 'inspect', 'prepare', 'assessment', 'read', 'judge', 'complete', 'publish', 'notify')) {
+        foreach ($command in @('discover', 'results', 'inspect', 'refresh', 'prepare', 'assessment', 'read', 'judge', 'complete', 'publish', 'notify')) {
             $recipes | Should -Match "(?m)^ss-skills-util autoreapprove $command "
             $help | Should -Match "(?m)^\s+$command\s"
         }

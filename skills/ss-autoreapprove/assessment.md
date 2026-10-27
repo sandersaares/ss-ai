@@ -5,6 +5,9 @@ orchestrator. Use GPT 6.1 Sol with `model: "gpt-6.1-sol"`,
 `reasoning_effort: "medium"`, and `context_tier: "default"`. Do not invoke the
 skill, delegate, publish remotely, run builds or tests, or ask the user questions.
 Report missing evidence or tooling failures to the orchestrator.
+Report `staleEvidence` explicitly rather than treating it as a semantic
+uncertainty or final PR outcome. The orchestrator owns bounded native refresh;
+never refresh or retry publication from this worker.
 
 The orchestrator supplies the absolute installed skill root, absolute run path,
 PR identifier, and inspection snapshot digest. Use the native recipes in
@@ -37,3 +40,5 @@ Complete through the utility, which enforces exact coverage, evidence reads,
 and policy/snapshot bindings. Return only the PR ID, snapshot digest, completion
 status, assessment digest, concise cumulative rationale, and any diagnostic.
 Do not return source text, discussion transcripts, or an approval instruction.
+If the orchestrator replaces this snapshot after staleness, stop; its fresh
+worker must reacquire and assess the new snapshot without reusing your judgments.

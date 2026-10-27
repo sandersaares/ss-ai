@@ -81,7 +81,7 @@ approval history or the cumulative comparison.
 
 Page through discovery results and inspect only `assessmentRequired` entries
 without an inspection snapshot. Already-valid, no-prior-approval, and ineligible
-entries need no content work. An unresolved inspection is a tooling failure,
+entries need no content work. An unresolved inspection needs recovery or an explicit tooling failure,
 not an acceptable terminal result. Do not interpret failed or partial discovery
 as no work.
 
@@ -166,8 +166,40 @@ are not semantic refusals and do not create needs-review markers.
 Never manually assemble or post a marker.
 Report these outcomes without triggering another review workflow or a question
 for every PR.
-Changed source or decision evidence ends this PR's attempt rather than chasing
-updates in the same run.
+
+## Recover stale evidence
+
+`staleEvidence` and `staleDuringExecution` are transient evidence conditions,
+not terminal decisions. After inspection, preparation, assessment, notification,
+or publication reports staleness, read native `results` and recover through
+native `refresh` in the same run. Stop any previous worker for that PR before
+refreshing; do not overlap assessments. The utility checks the retained host
+journals before allowing refresh and permits two recovery attempts per PR after
+the initial attempt. Follow repeated stale results through that budget; do not
+stop at the first stale rejection or create new runs to reset the budget.
+After another stale result, call `refresh` to persist and report explicit
+`retryExhausted`. Other eligible PRs can continue.
+
+Refresh reacquires complete current source, discussion, policies, and approval
+authority. Read its returned decision: an active notice, current approval,
+withdrawal, or other ineligibility may end the work without assessment.
+For `assessmentRequired`, dispatch a fresh worker on the new snapshot and
+repeat stages 3 and 4. Never reuse old judgments or the old assessment digest,
+even when the changed-path list looks unchanged. Refresh discards the obsolete
+assessment and isolates the next publication intent from the previous one.
+Dry-run inspection failures use the same bounded recovery without remote writes.
+
+Distinguish a clean stale preflight rejection from an accepted-but-stale or
+unknown effect. A receipt without a review ID does not prove that no write was
+attempted. If `refresh` reports an attempted or unresolved remote effect, retain
+the original snapshot and reconcile only through the original `publish` or
+`notify` command. Do not refresh it in a new run, reassess to authorize another
+write, or retry a provider command. A verified accepted-but-stale effect remains
+an explicit remote-effect warning, not retry exhaustion or a successful renewal.
+Authentication, scope, policy-file changes, malformed evidence, and unrelated
+tooling failures are not stale-retry permission. A changed installed policy
+requires a fresh run and fresh assessments under that policy; it must not be
+used to bypass an exhausted stale-recovery budget.
 
 An accepted write can race with a push, a human decision, or existing auto-merge.
 Postflight detection is not atomic prevention. Never clear or dismiss a vote
@@ -185,7 +217,8 @@ Report the resolved repository and whether it was explicit or defaulted from
 the invocation checkout, PR links and outcomes, actionable significance/uncertainty reasons,
 partial or failed scope, aggregate recency exclusions, and the absolute run
 path. Highlight any accepted-but-stale or unknown publication and its retained
-host journal. Include the policy digest and whether this was a dry run.
+host journal. Include stale-recovery attempts and explicit retry exhaustion
+where applicable, the policy digest, and whether this was a dry run.
 The final report MUST include a Markdown table with one row for every in-range
 candidate returned across all final `results` pages. Include retained decisions,
 already-valid approvals, no-prior-approval and ineligible outcomes, and failures;

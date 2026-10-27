@@ -37,7 +37,7 @@ Assessment and publication must establish their own complete, fresh evidence.
 Inspection consumes only recent, nondraft discovery entries. It binds
 immutable provider observations to the run's account, repository, and policy.
 Two complete observations fence revision, decision, discussion, iteration,
-and policy evidence; observed movement is an explicit failure.
+and policy evidence; observed movement is an explicit recoverable stale condition.
 
 Structured vote events, current reviewer state, source iterations, and applicable
 reviewer policies establish approval standing. Ordinary build, status, required
@@ -62,9 +62,9 @@ records in its snapshot. If no applicable approval survives, inspection reports
 `ineligible` with reason `approvalEvidenceDeleted`. Neither outcome permits renewal.
 Surviving explicit decisions and pending reviews still prevent automatic renewal.
 
-Inspection does not create or renew approvals. It emits bounded terminal
-outcomes and leaves failed evidence explicit. A new run obtains
-new evidence rather than replacing an existing immutable observation.
+Inspection does not create or renew approvals. It reports authority outcomes
+and leaves failed evidence explicit. Stale evidence permits bounded refresh
+within the run rather than terminating the PR's work.
 
 ## GitHub approval inspection
 
@@ -124,6 +124,14 @@ blindly replayed; they block later runs. A concurrent push or human decision
 can make an accepted effect stale. The utility reports it without rollback
 and does not claim that detection prevents existing auto-merge.
 Needs-review notice readback remains available after PR closure or draft conversion.
+
+Staleness before any attempted remote effect permits two recovery attempts per
+PR after the initial attempt. Native refresh reacquires complete current evidence
+and authority, discards obsolete judgments, and requires a fresh isolated
+assessment when eligible. Repeated movement produces explicit retry exhaustion.
+The budget survives interruption and applies to inspection, assessment, approval,
+and notice preflight failures. Accepted-but-stale and uncertain effects retain
+their original assessments for reconciliation; they never authorize another write.
 
 ## Git comparisons
 

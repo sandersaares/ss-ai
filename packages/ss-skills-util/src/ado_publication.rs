@@ -318,6 +318,13 @@ impl<'a> Store<'a> {
             .any(|item| item.run_id == run && item.vote_state != EffectState::Prepared)
     }
 
+    /// Missing host history is not proof that a retained stale receipt preceded every effect.
+    pub(crate) fn preflight_only(&self, run: &str) -> bool {
+        self.record.operations.iter().any(|operation| {
+            operation.run_id == run && operation.vote_state == EffectState::Prepared
+        })
+    }
+
     /// A vote without verified audit remains unresolved even when readback is positive.
     pub(crate) fn unresolved(&self) -> bool {
         self.record.operations.iter().any(Operation::unresolved)
