@@ -7,7 +7,7 @@
 
 use std::cell::RefCell;
 use std::ffi::OsString;
-use std::fs::{self, OpenOptions};
+use std::fs::{self, File, OpenOptions};
 use std::io::{Read, Write};
 use std::net::{TcpListener, TcpStream};
 #[cfg(unix)]
@@ -140,25 +140,43 @@ impl Fixture {
             "Provider executable must be absolute"
         );
 
-        for (artifact, bytes) in [
-            (&provider["source"], source_bytes),
+        for (artifact, digest) in [
             (
-                &provider["executable"],
-                fs::read(executable).expect("Missing prepared provider executable"),
+                &provider["source"],
+                format!("{:X}", Sha256::digest(source_bytes)),
             ),
+            (&provider["executable"], Self::executable_digest(executable)),
         ] {
             assert!(
                 Path::new(artifact["path"].as_str().unwrap()).is_absolute(),
                 "Prepared provider paths must be absolute"
             );
             assert_eq!(
-                format!("{:X}", Sha256::digest(bytes)),
+                digest,
                 artifact["sha256"].as_str().unwrap(),
                 "Modified provider prerequisite; prepare again"
             );
         }
 
         PathBuf::from(provider["executable"]["path"].as_str().unwrap())
+    }
+
+    /// Validates executable integrity without retaining an executable-sized allocation.
+    fn executable_digest(path: &Path) -> String {
+        let mut file = File::open(path).expect("Missing prepared provider executable");
+        let mut digest = Sha256::new();
+        // An arbitrary small chunk amortizes file reads while keeping stack use bounded.
+        let mut buffer = [0; 8192];
+        loop {
+            let length = file
+                .read(&mut buffer)
+                .expect("Cannot read prepared provider executable");
+            if length == 0 {
+                break;
+            }
+            digest.update(&buffer[..length]);
+        }
+        format!("{:X}", digest.finalize())
     }
 
     /// Keeps launcher state and working-directory effects private to this fixture.

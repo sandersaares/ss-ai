@@ -326,8 +326,10 @@ maintain another parser or change full-review publication decisions.
 authority, publication, and recovery without contacting live review services.
 Common assessment setup uses the command's default read size and follows exact
 continuation offsets. It derives page-count bounds from captured content, so a
-nonterminating or truncated response fails deterministically. Focused pagination
-coverage checks small Unicode pages, replay, overlap, gaps, incomplete evidence,
+nonterminating or truncated response fails deterministically. Shared paging checks
+the total character count; only exact-content comparisons collect the complete
+text in a caller-owned buffer. Explicit helper page limits are nonzero. Focused
+pagination coverage checks small Unicode pages, replay, overlap, gaps, incomplete evidence,
 stale snapshots, and the hard response cap through the same persisted commands.
 
 Publication-only matrices share an immutable editorial source repository and

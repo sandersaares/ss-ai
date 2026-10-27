@@ -10,6 +10,7 @@ use std::collections::BTreeMap;
 use std::ffi::OsString;
 use std::fs;
 use std::io;
+use std::num::NonZeroUsize;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::rc::Rc;
@@ -21,15 +22,6 @@ use serde_json::{Value, json};
 use ss_skills_util::{Clock, Http, HttpResponse, NativeProcess, Process, ProcessOutput, run_in};
 use tempfile::TempDir;
 use url::Url;
-
-/// Counts actual integration work, independently of machine-dependent elapsed time.
-#[derive(Clone, Copy, Debug, Default)]
-struct WorkCounts {
-    source_git: usize,
-    assessment_git: usize,
-    recorded_git: usize,
-    reads: usize,
-}
 
 /// Owns immutable editorial source data shared by scenarios with private writable state.
 struct Sources {
@@ -94,11 +86,6 @@ impl Sources {
 struct GitReply {
     arguments: Vec<String>,
     output: ProcessOutput,
-}
-
-thread_local! {
-    // The single entry point keeps fork away from other scenarios' retained locks.
-    static WORK_COUNTS: Cell<WorkCounts> = Cell::default();
 }
 
 /// Keeps approval recency deterministic and rejects unexpected retry paths.
@@ -780,6 +767,20 @@ impl Provider {
     }
 }
 
+/// Counts actual integration work, independently of machine-dependent elapsed time.
+#[derive(Clone, Copy, Debug, Default)]
+struct WorkCounts {
+    source_git: usize,
+    assessment_git: usize,
+    recorded_git: usize,
+    reads: usize,
+}
+
+thread_local! {
+    // The single entry point keeps fork away from other scenarios' retained locks.
+    static WORK_COUNTS: Cell<WorkCounts> = Cell::default();
+}
+
 /// Builds deterministic local Git history while counting actual source-fixture work.
 fn git(root: &Path, arguments: &[&str]) -> String {
     WORK_COUNTS.set({
@@ -967,7 +968,7 @@ fn assess_as(
         }
     }
     for reference in references {
-        read_evidence(root, provider, snapshot, &reference, None);
+        read_evidence(root, provider, snapshot, &reference, None, None);
     }
 
     for change in prepared["changes"].as_array().unwrap() {
@@ -1025,15 +1026,16 @@ fn read_evidence(
     provider: &Provider,
     snapshot: &str,
     reference: &str,
-    limit: Option<usize>,
-) -> String {
+    limit: Option<NonZeroUsize>,
+    mut text: Option<&mut String>,
+) {
     // Match Command::Read's ordinary default and Assessment::read's response cap.
-    let page_limit = limit.unwrap_or(4096).min(16_384);
+    let page_limit = limit.map_or(4096, NonZeroUsize::get).min(16_384);
     let length = evidence_length(root, provider.number, reference);
     let expected_pages = length.div_ceil(page_limit).max(1);
     let mut offset = 0;
     let mut pages = 0;
-    let mut text = String::new();
+    let mut total_chars = 0;
 
     loop {
         assert!(
@@ -1057,7 +1059,11 @@ fn read_evidence(
         let page = read["text"].as_str().unwrap();
         let length = page.chars().count();
         assert!(length <= page_limit);
-        text.push_str(page);
+        total_chars += length;
+        // Only exact-content scenarios need another copy of the complete document.
+        if let Some(text) = &mut text {
+            text.push_str(page);
+        }
         pages += 1;
 
         if read["complete"] == true {
@@ -1074,8 +1080,7 @@ fn read_evidence(
     }
 
     assert_eq!(pages, expected_pages);
-    assert_eq!(text.chars().count(), length);
-    text
+    assert_eq!(total_chars, length);
 }
 
 /// Bounds command paging from captured input, without fabricating any read receipts.
@@ -2055,20 +2060,20 @@ fn pagination_requires_complete_contiguous_snapshot_bound_unicode_evidence() {
     read(&snapshot, page_limit + 1, page_limit).unwrap_err();
     assert_eq!(fs::read(&path).unwrap(), before);
     for reference in ["policy", "discussion"] {
-        read_evidence(&root, &provider, &snapshot, reference, None);
+        read_evidence(&root, &provider, &snapshot, reference, None, None);
     }
 
     // Oversized requests must still follow the production response cap.
-    assert_eq!(
-        read_evidence(
-            &root,
-            &provider,
-            &snapshot,
-            &format!("{id}:old"),
-            Some(2 * 16_384)
-        ),
-        old_text
+    let mut text = String::new();
+    read_evidence(
+        &root,
+        &provider,
+        &snapshot,
+        &format!("{id}:old"),
+        Some(NonZeroUsize::new(2 * 16_384).unwrap()),
+        Some(&mut text),
     );
+    assert_eq!(text, old_text);
 
     for change in [id, "cumulative"] {
         let references = if change == "cumulative" {
@@ -2097,10 +2102,16 @@ fn pagination_requires_complete_contiguous_snapshot_bound_unicode_evidence() {
             .contains("complete policy, discussion, and changed-source reads")
     );
     publish(&root, &provider, &snapshot).unwrap_err();
-    assert_eq!(
-        read_evidence(&root, &provider, &snapshot, &reference, Some(page_limit)),
-        new_text
+    text.clear();
+    read_evidence(
+        &root,
+        &provider,
+        &snapshot,
+        &reference,
+        Some(NonZeroUsize::new(page_limit).unwrap()),
+        Some(&mut text),
     );
+    assert_eq!(text, new_text);
     assert_eq!(
         work(&root, &provider, "complete", &snapshot, &[]).unwrap()["status"],
         "wouldReapprove"

@@ -62,6 +62,9 @@ their owner removes them after consumers exit; the combined runner removes
 implicitly allocated outputs. Independent runs never clean another run's
 directory. Native fixtures copy the provider into private launcher directories
 and retain `CARGO_BIN_EXE_ss-skills-util` for the ordinary executable.
+Each fixture validates provider source identity and artifact digests. Executable
+hashing streams through a fixed-size stack buffer rather than retaining the
+complete executable in memory.
 
 These choices adopt [Folo's helper preparation and Cargo artifact discovery](https://github.com/folo-rs/folo/blob/eba896a8e20465b4efe0e041c34aabb92a466aaf/justfiles/just_testing.just#L153-L227),
 [owned final artifacts](https://github.com/folo-rs/folo/blob/eba896a8e20465b4efe0e041c34aabb92a466aaf/packages/cargo-bench-history-faker/docs/implementation.md#L8-L47),
