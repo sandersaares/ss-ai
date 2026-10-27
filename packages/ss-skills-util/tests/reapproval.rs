@@ -1114,6 +1114,73 @@ fn stale_notification_recovery_exhausts_without_remote_writes() {
     }
 }
 
+/// A recapture must reject old workers even if evidence and clock time return to their prior values.
+fn repeated_observation_has_a_distinct_snapshot() {
+    let repository = TempDir::new().unwrap();
+    let (old, new) = sources(repository.path());
+
+    for ado in [false, true] {
+        let scope = TempDir::new().unwrap();
+        let root = scope.path().join("run");
+        let provider = if ado {
+            Provider::ado(repository.path(), &old, &new)
+        } else {
+            Provider::new(repository.path(), &old, &new)
+        };
+        let (original, prepared) = prepare(&root, &provider, false);
+        let initial: Value =
+            serde_json::from_slice(&fs::read(root.join("run.json")).unwrap()).unwrap();
+        assess_with_limit(&root, &provider, &original, &prepared, "significant", 4096);
+
+        let key = if ado { "description" } else { "body" };
+        let original_description = provider.evidence.borrow()["pullRequest"].get(key).cloned();
+        provider.evidence.borrow_mut()["pullRequest"][key] = json!("Temporary discussion change");
+        assert_eq!(
+            ss_skills_util::classification(&notify(&root, &provider, &original).unwrap_err()),
+            "staleEvidence"
+        );
+        let mut evidence = provider.evidence.borrow_mut();
+        let pull_request = evidence["pullRequest"].as_object_mut().unwrap();
+        if let Some(description) = original_description {
+            pull_request.insert(key.to_owned(), description);
+        } else {
+            pull_request.remove(key);
+        }
+        drop(evidence);
+
+        let refreshed = refresh(&root, &provider).unwrap();
+        let snapshot = refreshed["items"][0]["snapshotDigest"].as_str().unwrap();
+        assert_ne!(snapshot, original);
+        assert_eq!(refreshed["items"][0]["staleRecovery"]["attempts"], 1);
+        assert_eq!(provider.writes.get(), 0);
+
+        // Earlier schema-8 records used the observation-only digest.
+        let path = root.join("run.json");
+        let current = fs::read(&path).unwrap();
+        let mut legacy: Value = serde_json::from_slice(&current).unwrap();
+        assert_eq!(
+            legacy["inventory"][0]["inspection"]["evidence"],
+            initial["inventory"][0]["inspection"]["evidence"]
+        );
+        legacy["inventory"][0]["inspection"]["snapshotDigest"] = json!(original);
+        fs::write(&path, serde_json::to_vec(&legacy).unwrap()).unwrap();
+        assert_eq!(
+            invoke(&root, &provider, "results", &[]).unwrap()["items"][0]["snapshotDigest"],
+            original
+        );
+        fs::write(&path, current).unwrap();
+
+        let prepared = work(&root, &provider, "prepare", snapshot, &[]).unwrap();
+        assess_with_limit(&root, &provider, snapshot, &prepared, "significant", 4096);
+        assert_eq!(
+            ss_skills_util::classification(&notify(&root, &provider, &original).unwrap_err()),
+            "invalidState"
+        );
+        notify(&root, &provider, snapshot).unwrap();
+        assert_eq!(provider.writes.get(), 1);
+    }
+}
+
 /// Capture races recover in live and dry-run modes without bypassing authority.
 fn stale_inspection_recovery_is_bounded_and_rechecks_authority() {
     let repository = TempDir::new().unwrap();
@@ -2090,6 +2157,7 @@ fn native_stale_evidence_recovery_preserves_assessment_and_effect_boundaries() {
         .unwrap_or_else(PoisonError::into_inner);
     stale_preflight_recovery_reassesses_source_before_any_effect();
     stale_notification_recovery_exhausts_without_remote_writes();
+    repeated_observation_has_a_distinct_snapshot();
     stale_inspection_recovery_is_bounded_and_rechecks_authority();
     stale_refresh_preserves_accepted_and_unknown_effects();
 }

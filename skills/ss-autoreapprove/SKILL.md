@@ -166,6 +166,7 @@ are not semantic refusals and do not create needs-review markers.
 Never manually assemble or post a marker.
 Report these outcomes without triggering another review workflow or a question
 for every PR.
+
 ## Recover stale evidence
 
 `staleEvidence` and `staleDuringExecution` are transient evidence conditions,

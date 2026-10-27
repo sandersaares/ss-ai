@@ -206,7 +206,10 @@ Successful recency requires a check time, complete evidence, no error, and
 a latest non-future time consistent with the shared cutoff, or null when
 all timestamps are future-dated. Failed recency has a check time and error,
 without a latest timestamp or complete evidence.
-An inspection's digest covers its capture time and complete evidence.
+An inspection's digest covers its capture time and complete evidence. Fresh
+recovery captures also bind the recovery attempt ID, so a repeated observation
+cannot reuse an earlier snapshot digest. Existing schema-8 captures without
+that binding remain readable.
 Consumers recompute its conclusion and validate its run identity.
 Schema-7 records load with empty recovery state; their original journal identities,
 assessment contracts, and uncertain effects remain unchanged. Other older run

@@ -298,6 +298,7 @@ impl DiscoveryRecord {
                     &self.account_id,
                     &self.repository_id,
                     entry.pull_request_id.get(),
+                    entry.recovery.attempt_ids.last().map(String::as_str),
                 )?;
                 if entry.publication.is_none()
                     && entry.automatic_approval
@@ -692,6 +693,7 @@ impl Inspection {
         account: &str,
         repository: &str,
         number: u32,
+        attempt_id: Option<&str>,
     ) -> Result<(), AppError> {
         let observed = timestamp(&self.captured_at)?;
         match (
@@ -701,8 +703,11 @@ impl Inspection {
             &self.error,
         ) {
             (Some(evidence), Some(decision), Some(hash), None) => {
+                let current = snapshot_digest(evidence, &self.captured_at, attempt_id)?;
+                // Existing schema-8 assessments can retain their pre-attempt digest.
+                let legacy = snapshot_digest(evidence, &self.captured_at, None)?;
                 if evidence.decide(platform, account, repository, number, observed)? != *decision
-                    || snapshot_digest(evidence, &self.captured_at)? != *hash
+                    || *hash != current && *hash != legacy
                 {
                     return Err(fail(
                         "invalidState",
@@ -1121,7 +1126,11 @@ pub(crate) fn inspect(
                 number.get(),
                 timestamp(&captured_at)?,
             )?;
-            let snapshot_digest = snapshot_digest(&evidence, &captured_at)?;
+            let snapshot_digest = snapshot_digest(
+                &evidence,
+                &captured_at,
+                entry.recovery.attempt_ids.last().map(String::as_str),
+            )?;
             Ok((evidence, decision, snapshot_digest))
         });
         let mut scope_error = None;
@@ -1178,11 +1187,18 @@ pub(crate) fn inspect(
     Ok(run.summary(number.get().saturating_sub(1), NonZeroUsize::MIN))
 }
 
-/// The timestamp and complete evidence identify the immutable captured observation.
-fn snapshot_digest(evidence: &Evidence, captured_at: &str) -> Result<String, AppError> {
-    Ok(digest(&serde_json::to_vec(
-        &json!({ "capturedAt": captured_at, "evidence": evidence }),
-    )?))
+/// Attempt identity separates recaptures even when evidence and timestamps match.
+fn snapshot_digest(
+    evidence: &Evidence,
+    captured_at: &str,
+    attempt_id: Option<&str>,
+) -> Result<String, AppError> {
+    let document = if let Some(attempt_id) = attempt_id {
+        json!({ "capturedAt": captured_at, "evidence": evidence, "attemptId": attempt_id })
+    } else {
+        json!({ "capturedAt": captured_at, "evidence": evidence })
+    };
+    Ok(digest(&serde_json::to_vec(&document)?))
 }
 
 /// Reads bounded persisted results without credentials or provider requests.

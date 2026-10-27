@@ -97,8 +97,10 @@ preflight-only operation; missing host history is not proof that no write occurr
 `discovery.rs` owns the schema-8 recovery record and result metadata. Schema-7
 runs migrate with no consumed attempts and unchanged initial host identities.
 Each fresh attempt adds a UUID used as that PR's host-journal run identity;
-the enclosing run ID stays fixed. This preserves canceled preflight records and
-prevents a new assessment from colliding with an old immutable journal operation.
+the enclosing run ID stays fixed. The snapshot digest also binds this UUID,
+so equal evidence and timestamps cannot reuse an earlier snapshot. This preserves
+canceled preflight records and prevents a new assessment from colliding with an
+old immutable journal operation. Existing schema-8 snapshots remain readable.
 Notification staleness is recorded separately from an uncertain assessment's
 diagnostic, so neither condition conceals the other.
 
