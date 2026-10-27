@@ -28,6 +28,18 @@ check shapes at the provider boundary so missing or malformed data cannot
 become an empty successful search. Commit recency consumes every commit page
 before ranking a candidate.
 
+Automatic reapproval separates enumeration completeness from retained material
+evidence. Provider-specific projections in `ado_approval.rs` and
+`github_approval.rs` select authority and discussion fields; `json::project`
+preserves malformed values rather than converting them into empty objects.
+`approval::Evidence::equivalent` dispatches the same projections for capture and
+publication, including richer immutable snapshots. Notice-only readback reuses
+the discussion projections without requiring current vote eligibility.
+ADO validates raw event structure and all policy semantics before excluding
+routine notifications or known merge-only policies. These boundaries prevent
+irrelevant service activity from causing staleness without concealing unknown
+authority semantics. See [material evidence](../reapproval.md#material-evidence).
+
 ## Account identity and registration
 
 Azure DevOps connection data identifies the authenticated user, not a different

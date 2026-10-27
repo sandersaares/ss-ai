@@ -21,6 +21,17 @@ pub(crate) enum Evidence {
 }
 
 impl Evidence {
+    /// Provider projections fence potentially material inputs, not response decoration.
+    pub(crate) fn equivalent(&self, other: &Self) -> Result<bool, AppError> {
+        match (self, other) {
+            (Self::AzureDevOps(left), Self::AzureDevOps(right)) => {
+                ado_approval::equivalent(left, right)
+            }
+            (Self::GitHub(left), Self::GitHub(right)) => github_approval::equivalent(left, right),
+            _ => Ok(false),
+        }
+    }
+
     /// Recovery needs authenticated PR identity even when vote history is no longer eligible.
     pub(crate) fn validate_scope(&self, repository: &str, number: u32) -> Result<(), AppError> {
         match self {

@@ -16,6 +16,7 @@ use crate::api::Api;
 use crate::approval::{Decision, Evidence};
 use crate::clock::timestamp;
 use crate::error::{classification, fail};
+use crate::github_approval;
 use crate::github_approval::Evidence as GitHubEvidence;
 use crate::journal::FileJournal;
 use crate::json::{array, field, identifier, text};
@@ -343,7 +344,10 @@ fn observe_comments(
     }
     // Service list ordering does not change the captured discussion.
     comments.sort_by_key(|comment| comment.get("id").map(Value::to_string));
-    Ok(comments)
+    match target.platform {
+        Platform::AzureDevOps => ado_approval::project_threads(&comments),
+        Platform::GitHub => Ok(github_approval::project_comments(&comments)),
+    }
 }
 
 /// A later external approval resets every older notice, but a renewal never does.
@@ -541,13 +545,7 @@ impl<'a> Store<'a> {
         if let Decision::NeedsReview { notice } = decision {
             return Ok(notice);
         }
-        let unchanged = match (input.evidence, &fresh) {
-            (Evidence::AzureDevOps(left), Evidence::AzureDevOps(right)) => {
-                ado_approval::equivalent(left, right)?
-            }
-            _ => input.evidence == &fresh,
-        };
-        if !unchanged {
+        if !input.evidence.equivalent(&fresh)? {
             return Err(fail(
                 "staleEvidence",
                 "Source or decision evidence changed before needs-review publication",

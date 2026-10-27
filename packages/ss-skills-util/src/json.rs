@@ -9,6 +9,20 @@ use serde_json::Value;
 
 use crate::error::fail;
 
+/// Keeps decision-relevant fields without concealing malformed service values.
+pub(crate) fn project(value: &Value, names: &[&str]) -> Value {
+    let Value::Object(object) = value else {
+        return value.clone();
+    };
+    Value::Object(
+        object
+            .iter()
+            .filter(|(name, _)| names.contains(&name.as_str()))
+            .map(|(name, value)| (name.clone(), value.clone()))
+            .collect(),
+    )
+}
+
 /// Requires nullable record fields to be present rather than silently defaulting.
 ///
 /// Use as a Serde field deserializer where schema 2 requires a named field even

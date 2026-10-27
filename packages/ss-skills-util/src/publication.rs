@@ -652,7 +652,7 @@ impl<'a> Store<'a> {
             target.pull_request_id,
             clock.now(),
         )?;
-        if fresh != operation.snapshot {
+        if !fresh.equivalent(&operation.snapshot)? {
             let outcome = match decision {
                 Decision::AlreadyValid { .. } => Outcome::AlreadyValid,
                 Decision::Ineligible { .. } => Outcome::Ineligible,
@@ -925,7 +925,7 @@ fn verify(
         scope.pull_request_id,
         now,
     )?;
-    if stripped != operation.snapshot
+    if !stripped.equivalent(&operation.snapshot)?
         || !matches!(decision, Decision::AlreadyValid { approval_event_id } if approval_event_id == id)
     {
         return Err(fail(

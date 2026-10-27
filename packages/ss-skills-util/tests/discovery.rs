@@ -1098,13 +1098,15 @@ fn ado_inspection_ignores_deleted_history_and_persists_deterministic_results() {
             let captured_threads = inspection["evidence"]["observation"]["threads"]
                 .as_array()
                 .unwrap();
-            let returned_threads = provider.fixture["stages"][2]["threads"].as_array().unwrap();
-            assert_eq!(captured_threads.len(), returned_threads.len());
+            // Routine source-update notifications are redundant with exact source iterations.
             assert!(
-                returned_threads
+                captured_threads
                     .iter()
-                    .all(|thread| captured_threads.contains(thread))
+                    .any(|thread| thread["id"] == "deleted-discussion"
+                        && thread["isDeleted"] == true)
             );
+            assert!(captured_threads.iter().any(|thread| thread["id"] == 2));
+            assert!(!captured_threads.iter().any(|thread| thread["id"] == 3));
             let results: Value = serde_json::from_str(
                 &run(
                     &result_arguments(root.path()),
@@ -1131,7 +1133,7 @@ fn ado_inspection_ignores_deleted_history_and_persists_deterministic_results() {
 }
 
 #[test]
-fn ado_inspection_persists_untyped_notifications_without_losing_approval_authority() {
+fn ado_inspection_omits_untyped_notifications_without_losing_approval_authority() {
     for properties in [Some(Value::Null), None] {
         let root = fixture();
         // A retained vote after a push exercises both typed votes and routine notices.
@@ -1170,7 +1172,7 @@ fn ado_inspection_persists_untyped_notifications_without_losing_approval_authori
         assert!(inspection["error"].is_null());
         assert!(inspection["snapshotDigest"].is_string());
         assert!(
-            inspection["evidence"]["observation"]["threads"]
+            !inspection["evidence"]["observation"]["threads"]
                 .as_array()
                 .unwrap()
                 .contains(&notification)
@@ -1183,6 +1185,36 @@ fn ado_inspection_persists_untyped_notifications_without_losing_approval_authori
             &FixedClock,
         )
         .unwrap();
+    }
+}
+
+#[test]
+fn ado_inspection_validates_routine_events_before_omitting_them() {
+    for malformed in [false, true] {
+        let root = fixture();
+        let mut provider = AzureApproval::new(2);
+        provider.fixture["stages"][2]["threads"].as_array_mut().unwrap().push(json!({
+            "id": "invalid-notification", "status": "closed",
+            "publishedDate": if malformed { "2026-01-01T00:00:00Z" } else { "2999-01-01T00:00:00Z" },
+            "properties": {"CodeReviewThreadType": {
+                "$type": if malformed { "System.Int32" } else { "System.String" },
+                "$value": "PolicyStatusUpdate"
+            }},
+            "comments": [{"commentType": "system", "content": "Routine notification"}]
+        }));
+        discover_azure_approval(root.path(), &provider, true);
+        let output: Value = serde_json::from_str(
+            &run(
+                &inspect_arguments(root.path(), 1),
+                &AzureToken,
+                &provider,
+                &FixedClock,
+            )
+            .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(output["counts"]["failed"], 1, "{output}");
+        assert_eq!(output["items"][0]["error"]["kind"], "service", "{output}");
     }
 }
 
@@ -1243,7 +1275,7 @@ fn ado_inspection_reads_all_evaluations_without_count_based_offsets() {
                 .as_array()
                 .unwrap()
                 .len(),
-            count
+            usize::from(count > 0)
         );
         let calls = provider.calls.borrow();
         let evaluations: Vec<_> = calls

@@ -36,10 +36,14 @@ Assessment and publication must establish their own complete, fresh evidence.
 
 Inspection consumes only recent, nondraft discovery entries. It binds
 immutable provider observations to the run's account, repository, and policy.
-Two complete observations fence revision, decision, discussion, iteration,
-and policy evidence; observed movement is an explicit recoverable stale condition.
-Project-wide revision and update timestamps do not affect freshness; project
-identity and substantive PR evidence remain guarded.
+Two complete service observations fence potentially material source, decision,
+discussion, iteration, and reviewer-policy evidence. Material movement is an
+explicit recoverable stale condition. Captures retain focused evidence rather
+than provider presentation or bookkeeping. Stable scope, account attribution,
+human discussion, and effective approval authority remain guarded; project
+revision counters, profile changes, reactions, and merge-job progress do not
+cause staleness. The same rules govern approval and needs-review publication,
+including discussion-only reconciliation.
 
 Structured vote events, current reviewer state, source iterations, and applicable
 reviewer policies establish approval standing. Ordinary build, status, required
