@@ -323,14 +323,26 @@ fn observe(api: &mut Api<'_>, target: &Target) -> Result<Evidence, AppError> {
     })
 }
 
-/// Evaluation progress is not individual authority; configurations and applicability are.
+/// Shared freshness checks distinguish authority from provider bookkeeping.
 pub(crate) fn equivalent(left: &Evidence, right: &Evidence) -> Result<bool, AppError> {
     Ok(comparison(left)? == comparison(right)?)
 }
 
-/// Projects only non-authoritative evaluation bookkeeping, never source or discussion.
+/// Projects bookkeeping in memory while preserving complete captured evidence.
 fn comparison(evidence: &Evidence) -> Result<Evidence, AppError> {
     let mut evidence = evidence.clone();
+    let pull_request = match &mut evidence {
+        Evidence::State { pull_request } | Evidence::History { pull_request, .. } => pull_request,
+    };
+    if let Some(project) = pull_request
+        .pointer_mut("/repository/project")
+        .and_then(Value::as_object_mut)
+    {
+        // Project-wide updates do not change PR authority. Keep scope and all other
+        // fields fenced rather than broadly ignoring metadata (docs/reapproval.md).
+        project.remove("revision");
+        project.remove("lastUpdateTime");
+    }
     if let Evidence::History { evaluations, .. } = &mut evidence {
         for evaluation in evaluations {
             let configuration = field(evaluation, "configuration")?;
@@ -1543,6 +1555,112 @@ mod tests {
         thread["id"] = json!(31);
         duplicated["threads"].as_array_mut().unwrap().push(thread);
         decide(duplicated).unwrap_err();
+    }
+
+    #[test]
+    fn project_bookkeeping_is_ignored_without_mutating_captured_evidence() {
+        let mut original = evidence(&fixture()["stages"][2]);
+        // Arbitrary project-wide versions differ without changing this PR's authority.
+        original["pullRequest"]["repository"]["project"]["revision"] = json!(7);
+        original["pullRequest"]["repository"]["project"]["lastUpdateTime"] =
+            json!("2026-01-01T00:00:00Z");
+        for scope in ["history", "state"] {
+            let mut original = original.clone();
+            if scope == "state" {
+                original = json!({"scope": scope, "pullRequest": original["pullRequest"]});
+            }
+            let captured: Evidence = serde_json::from_value(original.clone()).unwrap();
+            for key in ["revision", "lastUpdateTime"] {
+                for replacement in [Some(json!("changed")), None] {
+                    let mut changed = original.clone();
+                    let project = changed["pullRequest"]["repository"]["project"]
+                        .as_object_mut()
+                        .unwrap();
+                    if let Some(replacement) = replacement {
+                        project.insert(key.to_owned(), replacement);
+                    } else {
+                        project.remove(key);
+                    }
+                    let changed: Evidence = serde_json::from_value(changed).unwrap();
+                    assert!(
+                        super::equivalent(&captured, &changed).unwrap(),
+                        "{scope}: {key}"
+                    );
+                    assert!(
+                        super::equivalent(&changed, &captured).unwrap(),
+                        "{scope}: {key}"
+                    );
+                    assert_eq!(serde_json::to_value(&captured).unwrap(), original);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn project_bookkeeping_exclusion_preserves_substantive_evidence_guards() {
+        let mut original = renewed();
+        // These ordinary synthetic metadata values make scope and unknown-field guards explicit.
+        original["pullRequest"]["repository"]["project"]["revision"] = json!(7);
+        original["pullRequest"]["repository"]["project"]["lastUpdateTime"] =
+            json!("2026-01-01T00:00:00Z");
+        original["pullRequest"]["repository"]["project"]["name"] = json!("fixture-project");
+        original["pullRequest"]["repository"]["project"]["state"] = json!("wellFormed");
+        original["pullRequest"]["repository"]["revision"] = json!(7);
+        original["pullRequest"]["revision"] = json!(7);
+        original["pullRequest"]["title"] = json!("Fixture PR");
+        original["pullRequest"]["description"] = json!("Fixture discussion");
+        original["evaluations"][0]["configuration"]["revision"] = json!(1);
+        original["threads"][1]["comments"][0]["content"] = json!("Fixture discussion");
+        for (path, replacement) in [
+            (
+                "/pullRequest/repository/project/id",
+                json!("another-project"),
+            ),
+            (
+                "/pullRequest/repository/project/name",
+                json!("another-name"),
+            ),
+            ("/pullRequest/repository/project/state", json!("deleting")),
+            ("/pullRequest/repository/id", json!("another-repository")),
+            ("/pullRequest/repository/revision", json!(8)),
+            ("/pullRequest/revision", json!(8)),
+            ("/pullRequest/pullRequestId", json!(2)),
+            (
+                "/pullRequest/sourceRefName",
+                json!("refs/heads/another-source"),
+            ),
+            (
+                "/pullRequest/targetRefName",
+                json!("refs/heads/another-target"),
+            ),
+            ("/pullRequest/status", json!("completed")),
+            ("/pullRequest/isDraft", json!(true)),
+            ("/pullRequest/title", json!("Changed title")),
+            ("/pullRequest/description", json!("New human objection")),
+            ("/sourceCommit", json!("e".repeat(40))),
+            (
+                "/iterations/0/sourceRefCommit/commitId",
+                json!("e".repeat(40)),
+            ),
+            ("/reviewers/0/vote", json!(0)),
+            ("/reviewers/0/isFlagged", json!(true)),
+            ("/reviewers/0/hasDeclined", json!(true)),
+            ("/threads/1/comments/0/content", json!("Changed discussion")),
+            ("/policies/0/revision", json!(99)),
+            ("/evaluations/0/configuration/revision", json!(99)),
+            ("/evaluations/0/status", json!("notApplicable")),
+        ] {
+            let mut changed = original.clone();
+            changed["pullRequest"]["repository"]["project"]["revision"] = json!(8);
+            changed["pullRequest"]["repository"]["project"]["lastUpdateTime"] =
+                json!("2026-01-01T01:00:00Z");
+            *changed
+                .pointer_mut(path)
+                .unwrap_or_else(|| panic!("Missing test field {path}")) = replacement;
+            let captured: Evidence = serde_json::from_value(original.clone()).unwrap();
+            let changed: Evidence = serde_json::from_value(changed).unwrap();
+            assert!(!super::equivalent(&captured, &changed).unwrap(), "{path}");
+        }
     }
 
     #[test]

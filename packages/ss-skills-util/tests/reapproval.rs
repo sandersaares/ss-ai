@@ -172,6 +172,17 @@ impl Provider {
     /// Reporting faults begin only after the provider's terminal receipt is durable.
     fn observation_override(&self) -> Option<Value> {
         let fault = self.fault.get();
+        if self.ado && fault == "projectBookkeeping" {
+            // Every observation differs, including capture pairs and publication postflight.
+            let mut evidence = self.evidence.borrow_mut();
+            let project = &mut evidence["pullRequest"]["repository"]["project"];
+            project["revision"] = json!(self.target_reads.get());
+            project["lastUpdateTime"] = json!(if self.target_reads.get().is_multiple_of(2) {
+                "2026-09-28T09:00:00Z"
+            } else {
+                "2026-09-28T09:01:00Z"
+            });
+        }
         if fault == "movingCapture" {
             self.target_reads.set(self.target_reads.get() + 1);
             let key = if self.ado { "description" } else { "body" };
@@ -2160,6 +2171,56 @@ fn native_stale_evidence_recovery_preserves_assessment_and_effect_boundaries() {
     repeated_observation_has_a_distinct_snapshot();
     stale_inspection_recovery_is_bounded_and_rechecks_authority();
     stale_refresh_preserves_accepted_and_unknown_effects();
+}
+
+/// Project-wide updates cannot invalidate capture, approval, or needs-review preflight.
+#[test]
+fn ado_project_bookkeeping_does_not_stale_capture_publication_or_notice() {
+    let _guard = PROCESS_TEST_LOCK
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner);
+    let repository = TempDir::new().unwrap();
+    let (old, new) = sources(repository.path());
+    for disposition in ["insignificant", "significant"] {
+        let scope = TempDir::new().unwrap();
+        let root = scope.path().join("run");
+        let provider = Provider::ado(repository.path(), &old, &new);
+        provider.fault.set("projectBookkeeping");
+        let (snapshot, prepared) = prepare(&root, &provider, false);
+        let captured: Value =
+            serde_json::from_slice(&fs::read(root.join("run.json")).unwrap()).unwrap();
+        let inspection = &captured["inventory"][0]["inspection"];
+        let project =
+            &inspection["evidence"]["observation"]["pullRequest"]["repository"]["project"];
+        assert!(project["revision"].is_number());
+        assert!(project["lastUpdateTime"].is_string());
+        assess_as(&root, &provider, &snapshot, &prepared, disposition);
+        let result = if disposition == "insignificant" {
+            publish(&root, &provider, &snapshot).unwrap()
+        } else {
+            notify(&root, &provider, &snapshot).unwrap()
+        };
+        assert_eq!(
+            result["items"][0]["status"],
+            if disposition == "insignificant" {
+                "reapproved"
+            } else {
+                "needsReview"
+            },
+            "{result}"
+        );
+        assert_eq!(
+            provider.writes.get(),
+            if disposition == "insignificant" { 2 } else { 1 }
+        );
+        assert_ne!(
+            project["revision"],
+            provider.evidence.borrow()["pullRequest"]["repository"]["project"]["revision"]
+        );
+        let saved: Value =
+            serde_json::from_slice(&fs::read(root.join("run.json")).unwrap()).unwrap();
+        assert_eq!(&saved["inventory"][0]["inspection"], inspection);
+    }
 }
 
 /// Exercises real command dispatch and records while ADO effects remain entirely in memory.

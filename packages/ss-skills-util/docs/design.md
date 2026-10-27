@@ -38,6 +38,8 @@ Inspection consumes only recent, nondraft discovery entries. It binds
 immutable provider observations to the run's account, repository, and policy.
 Two complete observations fence revision, decision, discussion, iteration,
 and policy evidence; observed movement is an explicit recoverable stale condition.
+Project-wide revision and update timestamps do not affect freshness; project
+identity and substantive PR evidence remain guarded.
 
 Structured vote events, current reviewer state, source iterations, and applicable
 reviewer policies establish approval standing. Ordinary build, status, required

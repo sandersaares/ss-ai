@@ -273,6 +273,15 @@ checks detect that race rather than prevent it.
 Freshness comparisons ignore evaluation progress and context, which can change
 as the renewed vote satisfies aggregate policy. They retain complete captured
 evaluations and compare their configuration and reviewer-policy applicability.
+The shared comparison for capture, approval publication, and needs-review
+publication also ignores `pullRequest.repository.project.revision` and
+`pullRequest.repository.project.lastUpdateTime`. These fields describe
+project-wide bookkeeping, not changes to this PR. Comparison projects them
+out in memory; snapshots and their digests retain the captured values.
+Project identity, repository identity, ref names, PR state and discussion,
+reviewer decisions, policy configurations and applicability remain guarded.
+The exclusion applies only at that embedded project path, not to policy
+revisions or similarly named fields elsewhere.
 The complete reviewer endpoint owns reviewer evidence rather than the PR's
 duplicated reviewer summary; the request-only `isReapprove` flag does not
 represent standing authority. Source, discussion, attention and decision
