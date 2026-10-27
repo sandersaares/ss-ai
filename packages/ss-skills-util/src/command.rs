@@ -163,6 +163,17 @@ enum Autoreapprove {
         #[arg(long)]
         tenant: Option<String>,
     },
+    /// Reacquire stale evidence before any remote effect, within the retained retry budget.
+    Refresh {
+        #[arg(long)]
+        repository_url: String,
+        #[arg(long)]
+        state_path: PathBuf,
+        #[arg(long)]
+        pull_request_id: NonZeroU32,
+        #[arg(long)]
+        tenant: Option<String>,
+    },
     /// Read a bounded page of discovery results without provider access.
     Results {
         #[arg(long)]
@@ -479,12 +490,31 @@ fn execute(
                     },
                 )?
             }
-            Autoreapprove::Inspect {
-                repository_url,
-                state_path,
-                pull_request_id,
-                tenant,
-            } => {
+            action @ (Autoreapprove::Inspect { .. } | Autoreapprove::Refresh { .. }) => {
+                let refresh = matches!(&action, Autoreapprove::Refresh { .. });
+                let (Autoreapprove::Inspect {
+                    repository_url,
+                    state_path,
+                    pull_request_id,
+                    tenant,
+                }
+                | Autoreapprove::Refresh {
+                    repository_url,
+                    state_path,
+                    pull_request_id,
+                    tenant,
+                }) = action
+                else {
+                    return Err(fail("invalidInput", "Not an inspection operation"));
+                };
+                let directory = if refresh {
+                    Some(
+                        directory
+                            .map_or_else(publication::data_directory, |path| Ok(path.to_owned()))?,
+                    )
+                } else {
+                    None
+                };
                 let repository = Target::repository(&repository_url)?;
                 let mut api = Api {
                     transport: Transport::new(&repository, tenant.as_deref(), process, http, clock),
@@ -496,6 +526,7 @@ fn execute(
                     &state_path,
                     tenant.as_deref(),
                     pull_request_id,
+                    directory.as_deref(),
                 )?
             }
             Autoreapprove::Results {

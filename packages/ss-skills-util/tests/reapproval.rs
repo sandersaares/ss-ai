@@ -12,6 +12,7 @@ use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::sync::{Mutex, PoisonError};
 use std::time::Duration;
 
 use jiff::Timestamp;
@@ -20,6 +21,9 @@ use serde_json::{Value, json};
 use ss_skills_util::{Clock, Http, HttpResponse, NativeProcess, Process, ProcessOutput, run_in};
 use tempfile::TempDir;
 use url::Url;
+
+/// Process launches must not inherit another test's temporarily retained file locks.
+static PROCESS_TEST_LOCK: Mutex<()> = Mutex::new(());
 
 struct FixedClock;
 impl Clock for FixedClock {
@@ -168,6 +172,14 @@ impl Provider {
     /// Reporting faults begin only after the provider's terminal receipt is durable.
     fn observation_override(&self) -> Option<Value> {
         let fault = self.fault.get();
+        if fault == "movingCapture" {
+            self.target_reads.set(self.target_reads.get() + 1);
+            let key = if self.ado { "description" } else { "body" };
+            self.evidence.borrow_mut()["pullRequest"][key] = json!(format!(
+                "Changed during capture {}",
+                self.target_reads.get()
+            ));
+        }
         if fault == "preflightReadFailure" {
             return Some(Value::Null);
         }
@@ -794,6 +806,19 @@ fn assess_as(
     prepared: &Value,
     disposition: &str,
 ) {
+    // Small pages exercise contiguous evidence reads in the original lifecycle scenarios.
+    assess_with_limit(root, provider, snapshot, prepared, disposition, 113);
+}
+
+/// Shares semantic coverage while allowing recovery tests to use native-sized pages.
+fn assess_with_limit(
+    root: &Path,
+    provider: &Provider,
+    snapshot: &str,
+    prepared: &Value,
+    disposition: &str,
+    read_limit: usize,
+) {
     let mut references = vec!["policy".to_owned(), "discussion".to_owned()];
     for change in prepared["changes"].as_array().unwrap() {
         let id = change["id"].as_str().unwrap();
@@ -817,7 +842,7 @@ fn assess_as(
                     "--offset".into(),
                     offset.to_string(),
                     "--limit".into(),
-                    "113".into(),
+                    read_limit.to_string(),
                 ],
             )
             .unwrap();
@@ -882,6 +907,332 @@ fn notify(root: &Path, provider: &Provider, snapshot: &str) -> Result<Value, App
             "[Copilot speaking]".into(),
         ],
     )
+}
+
+/// Refresh remains an orchestrator operation and cannot manufacture semantic judgments.
+fn refresh(root: &Path, provider: &Provider) -> Result<Value, AppError> {
+    invoke(
+        root,
+        provider,
+        "refresh",
+        &[
+            "--repository-url".into(),
+            provider.url().into(),
+            "--pull-request-id".into(),
+            provider.number.to_string(),
+        ],
+    )
+}
+
+/// Source movement forces a new exact-source assessment on both publication paths.
+#[expect(
+    clippy::cognitive_complexity,
+    reason = "The bounded provider/disposition table checks the same fresh-assessment boundary"
+)]
+fn stale_preflight_recovery_reassesses_source_before_any_effect() {
+    let repository = TempDir::new().unwrap();
+    let (old, new) = sources(repository.path());
+    fs::write(
+        repository.path().join("notes.txt"),
+        "A further source change.\n",
+    )
+    .unwrap();
+    git(repository.path(), &["add", "--", "notes.txt"]);
+    git(
+        repository.path(),
+        &["commit", "--quiet", "-m", "Further source"],
+    );
+    let changed = git(repository.path(), &["rev-parse", "HEAD"]);
+    for ado in [false, true] {
+        for disposition in ["insignificant", "significant", "uncertain"] {
+            let scope = TempDir::new().unwrap();
+            let root = scope.path().join("run");
+            let provider = if ado {
+                Provider::ado(repository.path(), &old, &new)
+            } else {
+                Provider::new(repository.path(), &old, &new)
+            };
+            let (snapshot, prepared) = prepare(&root, &provider, false);
+            // Recovery tests target freshness, so use the native default evidence page size.
+            assess_with_limit(&root, &provider, &snapshot, &prepared, disposition, 4096);
+            let unchanged = fs::read(root.join("run.json")).unwrap();
+            assert_eq!(
+                ss_skills_util::classification(&refresh(&root, &provider).unwrap_err()),
+                "invalidState"
+            );
+            assert_eq!(fs::read(root.join("run.json")).unwrap(), unchanged);
+            if ado {
+                provider.ado_push();
+                let mut evidence = provider.evidence.borrow_mut();
+                evidence["sourceCommit"] = json!(changed);
+                evidence["iterations"][2]["sourceRefCommit"]["commitId"] = json!(changed);
+                // The new iteration must precede the fixture's later renewal vote.
+                evidence["iterations"][2]["createdDate"] = json!("2026-09-28T08:59:00Z");
+            } else {
+                provider.evidence.borrow_mut()["pullRequest"]["head"]["sha"] = json!(changed);
+            }
+            if disposition == "insignificant" {
+                assert_eq!(
+                    publish(&root, &provider, &snapshot).unwrap()["items"][0]["status"],
+                    "staleDuringExecution"
+                );
+            } else {
+                assert_eq!(
+                    ss_skills_util::classification(
+                        &notify(&root, &provider, &snapshot).unwrap_err()
+                    ),
+                    "staleEvidence"
+                );
+            }
+            assert_eq!(provider.writes.get(), 0);
+            let stale = invoke(&root, &provider, "results", &[]).unwrap();
+            assert_eq!(stale["items"][0]["status"], "staleDuringExecution");
+            if disposition == "uncertain" {
+                let record: Value =
+                    serde_json::from_slice(&fs::read(root.join("run.json")).unwrap()).unwrap();
+                assert_eq!(record["inventory"][0]["executionError"]["kind"], "service");
+            }
+            if disposition == "insignificant" {
+                let path = host_journal(&scope.path().join("host-store").join("publications"));
+                let retained = path.with_extension("retained");
+                fs::rename(&path, &retained).unwrap();
+                // A missing publishing-host journal cannot prove that the receipt preceded a write.
+                assert_eq!(
+                    ss_skills_util::classification(&refresh(&root, &provider).unwrap_err()),
+                    "ambiguousWrite"
+                );
+                fs::rename(&retained, &path).unwrap();
+            }
+            let refreshed = refresh(&root, &provider).unwrap();
+            assert_eq!(refreshed["items"][0]["status"], "assessmentRequired");
+            assert_eq!(refreshed["items"][0]["staleRecovery"]["attempts"], 1);
+            assert!(refreshed["items"][0]["assessmentDigest"].is_null());
+            assert!(refreshed["items"][0]["publication"].is_null());
+            let current = refreshed["items"][0]["snapshotDigest"].as_str().unwrap();
+            assert_ne!(current, snapshot);
+            for operation in ["prepare", "complete"] {
+                work(&root, &provider, operation, &snapshot, &[]).unwrap_err();
+            }
+            let prepared = work(&root, &provider, "prepare", current, &[]).unwrap();
+            assert_eq!(prepared["oldCommit"], old);
+            assert_eq!(prepared["newCommit"], changed);
+            work(&root, &provider, "complete", current, &[]).unwrap_err();
+            assess_with_limit(&root, &provider, current, &prepared, disposition, 4096);
+            publish(&root, &provider, &snapshot).unwrap_err();
+            notify(&root, &provider, &snapshot).unwrap_err();
+            assert_eq!(provider.writes.get(), 0);
+            let result = if disposition == "insignificant" {
+                publish(&root, &provider, current).unwrap()
+            } else {
+                notify(&root, &provider, current).unwrap()
+            };
+            let writes = provider.writes.get();
+            assert_eq!(
+                writes,
+                if ado && disposition == "insignificant" {
+                    2
+                } else {
+                    1
+                }
+            );
+            if disposition == "insignificant" {
+                assert_eq!(
+                    result["items"][0]["status"], "reapproved",
+                    "{ado}: {result}"
+                );
+                assert_ne!(result["items"][0]["publication"]["runId"], result["runId"]);
+                publish(&root, &provider, current).unwrap();
+            } else {
+                assert_eq!(
+                    result["items"][0]["status"],
+                    if disposition == "uncertain" {
+                        "failed"
+                    } else {
+                        "needsReview"
+                    }
+                );
+                notify(&root, &provider, current).unwrap();
+            }
+            assert_eq!(provider.writes.get(), writes);
+            refresh(&root, &provider).unwrap_err();
+        }
+    }
+}
+
+/// Continuous discussion movement consumes the persisted budget, including uncertainty.
+fn stale_notification_recovery_exhausts_without_remote_writes() {
+    let repository = TempDir::new().unwrap();
+    let (old, new) = sources(repository.path());
+    for ado in [false, true] {
+        for disposition in ["significant", "uncertain"] {
+            let scope = TempDir::new().unwrap();
+            let root = scope.path().join("run");
+            let provider = if ado {
+                Provider::ado(repository.path(), &old, &new)
+            } else {
+                Provider::new(repository.path(), &old, &new)
+            };
+            let (mut snapshot, mut prepared) = prepare(&root, &provider, false);
+            for attempt in 0..=2 {
+                // Native-sized pages keep repeated assessment focused on freshness rather than paging.
+                assess_with_limit(&root, &provider, &snapshot, &prepared, disposition, 4096);
+                let key = if ado { "description" } else { "body" };
+                provider.evidence.borrow_mut()["pullRequest"][key] =
+                    json!(format!("Changed discussion {attempt}"));
+                notify(&root, &provider, &snapshot).unwrap_err();
+                if attempt == 2 {
+                    assert_eq!(
+                        ss_skills_util::classification(&refresh(&root, &provider).unwrap_err()),
+                        "retryExhausted"
+                    );
+                    break;
+                }
+                let refreshed = refresh(&root, &provider).unwrap();
+                assert_eq!(
+                    refreshed["items"][0]["staleRecovery"]["attempts"],
+                    attempt + 1
+                );
+                refreshed["items"][0]["snapshotDigest"]
+                    .as_str()
+                    .unwrap()
+                    .clone_into(&mut snapshot);
+                prepared = work(&root, &provider, "prepare", &snapshot, &[]).unwrap();
+            }
+            let result = invoke(&root, &provider, "results", &[]).unwrap();
+            assert_eq!(result["state"], "partial");
+            assert_eq!(result["items"][0]["status"], "failed");
+            assert_eq!(result["items"][0]["error"]["kind"], "retryExhausted");
+            assert_eq!(
+                result["items"][0]["staleRecovery"],
+                json!({"attempts":2, "limit":2, "exhausted":true})
+            );
+            assert_eq!(provider.writes.get(), 0);
+            refresh(&root, &provider).unwrap_err();
+            notify(&root, &provider, &snapshot).unwrap_err();
+            assert_eq!(provider.writes.get(), 0);
+        }
+    }
+}
+
+/// Capture races recover in live and dry-run modes without bypassing authority.
+fn stale_inspection_recovery_is_bounded_and_rechecks_authority() {
+    let repository = TempDir::new().unwrap();
+    let (old, new) = sources(repository.path());
+    for ado in [false, true] {
+        for dry_run in [false, true] {
+            for settle in [false, true] {
+                let scope = TempDir::new().unwrap();
+                let root = scope.path().join("run");
+                let provider = if ado {
+                    Provider::ado(repository.path(), &old, &new)
+                } else {
+                    Provider::new(repository.path(), &old, &new)
+                };
+                provider.fault.set("movingCapture");
+                let initial = discover_inspect(&root, &provider, dry_run);
+                assert_eq!(initial["items"][0]["status"], "staleDuringExecution");
+                if settle {
+                    provider.fault.set("");
+                    if ado {
+                        provider.ado_vote(-10, 41, "2026-09-28T09:07:00Z");
+                    } else {
+                        provider.later("CHANGES_REQUESTED");
+                    }
+                    let result = refresh(&root, &provider).unwrap();
+                    assert_eq!(result["items"][0]["status"], "ineligible");
+                    assert_eq!(result["state"], "complete");
+                } else {
+                    for attempt in 1..=2 {
+                        let result = refresh(&root, &provider).unwrap();
+                        assert_eq!(result["items"][0]["status"], "staleDuringExecution");
+                        assert_eq!(result["items"][0]["staleRecovery"]["attempts"], attempt);
+                    }
+                    assert_eq!(
+                        ss_skills_util::classification(&refresh(&root, &provider).unwrap_err()),
+                        "retryExhausted"
+                    );
+                    let reads = provider.target_reads.get();
+                    refresh(&root, &provider).unwrap_err();
+                    assert_eq!(provider.target_reads.get(), reads);
+                }
+                assert_eq!(provider.writes.get(), 0);
+                assert_eq!(provider.fetches.get(), 0);
+            }
+        }
+    }
+}
+
+/// Staleness after an attempted effect is never permission to authorize another write.
+fn stale_refresh_preserves_accepted_and_unknown_effects() {
+    let repository = TempDir::new().unwrap();
+    let (old, new) = sources(repository.path());
+    for ado in [false, true] {
+        for fault in ["postPush", "unknown", "noticeUnknown"] {
+            let scope = TempDir::new().unwrap();
+            let root = scope.path().join("run");
+            let provider = if ado {
+                Provider::ado(repository.path(), &old, &new)
+            } else {
+                Provider::new(repository.path(), &old, &new)
+            };
+            let (snapshot, prepared) = prepare(&root, &provider, false);
+            let disposition = if fault == "noticeUnknown" {
+                "significant"
+            } else {
+                "insignificant"
+            };
+            // Page size matches native reads; this scenario targets remote-effect safety.
+            assess_with_limit(&root, &provider, &snapshot, &prepared, disposition, 4096);
+            let key = if ado { "description" } else { "body" };
+            provider.evidence.borrow_mut()["pullRequest"][key] =
+                json!("Changed before the first effect.");
+            if fault == "noticeUnknown" {
+                notify(&root, &provider, &snapshot).unwrap_err();
+            } else {
+                assert_eq!(
+                    publish(&root, &provider, &snapshot).unwrap()["items"][0]["status"],
+                    "staleDuringExecution"
+                );
+            }
+            let refreshed = refresh(&root, &provider).unwrap();
+            let snapshot = refreshed["items"][0]["snapshotDigest"].as_str().unwrap();
+            let prepared = work(&root, &provider, "prepare", snapshot, &[]).unwrap();
+            assess_with_limit(&root, &provider, snapshot, &prepared, disposition, 4096);
+            provider.fault.set(fault);
+            if fault == "noticeUnknown" {
+                notify(&root, &provider, snapshot).unwrap_err();
+            } else if fault == "postPush" {
+                assert_eq!(
+                    publish(&root, &provider, snapshot).unwrap()["items"][0]["status"],
+                    "staleDuringExecution"
+                );
+            } else {
+                assert_eq!(
+                    publish(&root, &provider, snapshot).unwrap()["error"]["kind"],
+                    "ambiguousWrite"
+                );
+            }
+            let before = fs::read(root.join("run.json")).unwrap();
+            let writes = provider.writes.get();
+            assert!(writes > 0);
+            assert_eq!(
+                ss_skills_util::classification(&refresh(&root, &provider).unwrap_err()),
+                "ambiguousWrite"
+            );
+            assert_eq!(fs::read(root.join("run.json")).unwrap(), before);
+            assert_eq!(provider.writes.get(), writes);
+            if fault == "postPush" {
+                let path = host_journal(&scope.path().join("host-store").join("publications"));
+                fs::rename(&path, path.with_extension("retained")).unwrap();
+                assert_eq!(
+                    ss_skills_util::classification(&refresh(&root, &provider).unwrap_err()),
+                    "ambiguousWrite"
+                );
+                assert_eq!(fs::read(root.join("run.json")).unwrap(), before);
+                assert_eq!(provider.writes.get(), writes);
+            }
+        }
+    }
 }
 
 /// Exercises both providers' persistent refusal and independent-approval reset.
@@ -1613,6 +1964,9 @@ fn publish(root: &Path, provider: &Provider, snapshot: &str) -> Result<Value, Ap
 
 #[test]
 fn native_git_assessment_and_guarded_publication_have_exact_effect_boundaries() {
+    let _guard = PROCESS_TEST_LOCK
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner);
     let repository = TempDir::new().unwrap();
     let (old, new) = sources(repository.path());
     let baseline = git(repository.path(), &["status", "--porcelain=v1"]);
@@ -1708,14 +2062,13 @@ fn native_git_assessment_and_guarded_publication_have_exact_effect_boundaries() 
         baseline
     );
     assert_eq!(git(repository.path(), &["rev-parse", "HEAD"]), new);
-    // Keep process launches in one test: fork must not inherit another test's retained file lock.
+    // Keep process launches under the guard so fork cannot inherit another test's file locks.
     force_push_inventory_preserves_every_path_kind_and_rejects_missing_objects();
     empty_source_diff_and_corrupted_assessments_never_bypass_discussion_or_coverage();
     risk_judgments_and_uncertainty_prevent_publication();
     prepared_run_cannot_bypass_another_runs_unknown_effect();
     ado_publication_preserves_authority_and_never_replays_unknown_effects();
-    // Keep subprocess scenarios in this binary's single test entry point:
-    // concurrent process creation can briefly inherit another thread's held file lock.
+    // Related subprocess scenarios share the guard against inherited file locks.
     needs_review_notices_short_circuit_and_expire_only_after_external_approval();
     notice_dry_runs_refusals_and_uncertain_effects_do_not_duplicate_writes();
     valid_automatic_approval_timestamps_survive_later_invocations();
@@ -1727,6 +2080,18 @@ fn native_git_assessment_and_guarded_publication_have_exact_effect_boundaries() 
     ado_notice_recovery_does_not_require_current_approval_eligibility();
     notice_readback_survives_closure_and_draft_conversion();
     expired_edited_notices_do_not_block_new_notice_readback();
+}
+
+#[test]
+fn native_stale_evidence_recovery_preserves_assessment_and_effect_boundaries() {
+    // Unwinding drops test-owned journals before this guard, so poison cannot retain file locks.
+    let _guard = PROCESS_TEST_LOCK
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner);
+    stale_preflight_recovery_reassesses_source_before_any_effect();
+    stale_notification_recovery_exhausts_without_remote_writes();
+    stale_inspection_recovery_is_bounded_and_rechecks_authority();
+    stale_refresh_preserves_accepted_and_unknown_effects();
 }
 
 /// Exercises real command dispatch and records while ADO effects remain entirely in memory.

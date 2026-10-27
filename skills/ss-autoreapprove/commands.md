@@ -3,7 +3,8 @@
 Run commands directly through the installed executable. Expand named
 placeholders rather than assembling JSON or writing state-management scripts.
 All commands return JSON; nonzero exits and stderr diagnostics are explicit
-failures. Let an in-flight command finish rather than starting a duplicate.
+failures, not permission to stop at recoverable staleness. Let an in-flight
+command finish rather than starting a duplicate.
 
 | Placeholder | Value |
 | --- | --- |
@@ -75,17 +76,44 @@ partial; it is not a completed no-work result.
 # Stage 4: publication and recovery
 
 ```powershell
+ss-skills-util autoreapprove refresh --repository-url "{{REPOSITORY}}" --state-path "{{RUN}}" --pull-request-id "{{PR}}" --tenant "{{TENANT}}"
 ss-skills-util autoreapprove publish --repository-url "{{REPOSITORY}}" --state-path "{{RUN}}" --pull-request-id "{{PR}}" --snapshot-digest "{{SNAPSHOT}}" --attribution "{{ATTRIBUTION}}" --tenant "{{TENANT}}"
 ss-skills-util autoreapprove notify --repository-url "{{REPOSITORY}}" --state-path "{{RUN}}" --pull-request-id "{{PR}}" --snapshot-digest "{{SNAPSHOT}}" --attribution "{{ATTRIBUTION}}" --tenant "{{TENANT}}"
 ss-skills-util autoreapprove results --state-path "{{RUN}}"
 ```
+
+For `staleEvidence` or `staleDuringExecution` from any stage, stop the old PR
+worker, read `results`, and call `refresh`. It accepts only stale PRs without an
+attempted approval or notice effect and performs no remote writes. It consumes
+one of two persisted recovery attempts before reacquiring evidence; interrupted
+capture resumes with ordinary `inspect` rather than consuming another attempt.
+Follow stale refresh results with another `refresh`. Once the budget is used,
+the next stale refresh request records `retryExhausted`, leaves the run partial,
+and does not capture or write again. `staleRecovery` in each result item reports
+`attempts`, `limit`, and `exhausted`. Never start another run to reset this budget.
+
+Use the refreshed `snapshotDigest` and decision, not the original assessment.
+If assessment is still required, dispatch a fresh worker to prepare, read, judge,
+and complete from the new snapshot, then publish or notify that new assessment.
+Old snapshot commands are rejected. Current approval standing, active notices,
+and lost authority instead follow their returned nonassessment outcomes.
+An uncertain assessment's stale notification remains recoverable and does not
+erase its uncertainty diagnostic.
+
+An attempted or unknown effect blocks refresh, including accepted-but-stale
+publication. Reconcile only through the original `publish` or `notify` command.
+Keep the original run and snapshot for the reconciliation below;
+do not treat a null publication or review ID alone as proof of no remote effect.
+Only stale evidence qualifies for this retry path; unrelated failures do not.
 
 GitHub publication creates a source-bound submitted approval and audit body.
 ADO publication preserves the account's positive vote strength using
 `isReapprove`, verifies a unique new structured vote on the assessed iteration,
 then creates a separate authenticated audit carrying the original anchor.
 ADO has no atomic source-SHA vote precondition; changed evidence produces an
-explicit stale result rather than rollback. Never substitute a direct vote write.
+explicit stale result rather than rollback. Clean preflight staleness uses
+bounded refresh; accepted-but-stale results retain their original effects.
+Never substitute a direct vote write.
 Read the outcome and any publication error, including accepted-but-stale
 effects. Do not interpret a `failed` run as no remote change.
 
