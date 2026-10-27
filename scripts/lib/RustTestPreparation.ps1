@@ -37,7 +37,7 @@ function Get-RustTestFileHash {
     }
 }
 
-# Bind reusable prerequisites to source bytes, including untracked and embedded inputs.
+# Bind reusable prerequisites to source bytes and Cargo freshness inputs, including embedded files.
 function Get-RustTestIdentity {
     param([string] $RepositoryRoot)
 
@@ -63,12 +63,22 @@ function Get-RustTestIdentity {
         }
     )
 
-    $entries = foreach ($file in ($files | Sort-Object FullName)) {
+    $files = @($files | Sort-Object FullName)
+    $entries = foreach ($file in $files) {
         [IO.Path]::GetRelativePath($RepositoryRoot, $file.FullName) + ':' +
             (Get-RustTestFileHash -Path $file.FullName)
     }
     $source = [Convert]::ToHexString([Security.Cryptography.SHA256]::HashData(
         [Text.Encoding]::UTF8.GetBytes(($entries -join "`n"))))
+
+    # Cargo can rebuild byte-identical saves based on mtime; keep that identity separate
+    # from content so validation explains why an otherwise unchanged source tree is stale.
+    $freshnessEntries = foreach ($file in $files) {
+        [IO.Path]::GetRelativePath($RepositoryRoot, $file.FullName) + ':' +
+            $file.LastWriteTimeUtc.Ticks.ToString([Globalization.CultureInfo]::InvariantCulture)
+    }
+    $freshness = [Convert]::ToHexString([Security.Cryptography.SHA256]::HashData(
+        [Text.Encoding]::UTF8.GetBytes(($freshnessEntries -join "`n"))))
 
     $rustc = (& rustc -vV) -join "`n"
     if ($LASTEXITCODE -ne 0) {
@@ -96,6 +106,7 @@ function Get-RustTestIdentity {
     @{
         repositoryRoot = $RepositoryRoot
         sourceSha256 = $source
+        sourceFreshnessSha256 = $freshness
         rustc = $rustc
         cargo = $cargo
         environment = $environment
@@ -212,12 +223,14 @@ function New-RustTestPreparation {
 
         # A build must not publish artifacts against the identity of an earlier source tree.
         $after = Get-RustTestIdentity -RepositoryRoot $RepositoryRoot
-        if ($after.sourceSha256 -ne $identity.sourceSha256) {
+        if ($after.sourceSha256 -ne $identity.sourceSha256 -or
+            $after.sourceFreshnessSha256 -ne $identity.sourceFreshnessSha256) {
             throw 'Rust sources changed during preparation.'
         }
 
         $record = @{
-            schemaVersion = 1
+            # The consumer requires both content and freshness identity (DEVELOPMENT.md).
+            schemaVersion = 2
             status = $(if ($providerFailure) { 'providerFailed' } else { 'complete' })
             providerFailure = $providerFailure
             identity = $identity
@@ -288,7 +301,8 @@ function Read-RustTestPreparation {
         'ownedDirectory', 'targetDirectory', 'provider', 'executables'
     )
     if ($record -isnot [System.Collections.IDictionary] -or
-        $record.schemaVersion -isnot [long] -or $record.schemaVersion -ne 1 -or
+        $record.schemaVersion -isnot [long] -or $record.schemaVersion -ne 2 -or
+        $record.status -isnot [string] -or
         ($record.status -cne 'complete' -and -not ($AllowProviderFailure -and $record.status -ceq 'providerFailed'))) {
         throw 'Incomplete or unsupported Rust prerequisites.'
     }
@@ -315,7 +329,7 @@ function Read-RustTestPreparation {
     # Compare identity before trusting owned artifacts or launching Cargo.
     $identity = Get-RustTestIdentity -RepositoryRoot $RepositoryRoot
     Assert-RustRecordFields -Record $record.identity -Fields @($identity.Keys)
-    foreach ($key in @('repositoryRoot', 'sourceSha256', 'rustc', 'cargo', 'profile', 'features')) {
+    foreach ($key in @('repositoryRoot', 'sourceSha256', 'sourceFreshnessSha256', 'rustc', 'cargo', 'profile', 'features')) {
         if ($record.identity[$key] -isnot [string] -or $record.identity[$key] -cne $identity[$key]) {
             throw "Stale or incompatible Rust prerequisites: $key"
         }

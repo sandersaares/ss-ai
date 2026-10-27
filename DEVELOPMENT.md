@@ -94,6 +94,11 @@ modified, stale-source, mismatched-selection, and incompatible-toolchain or
 flag records instead of building a missing helper. Cargo still checks freshness;
 ordinary execution uses its prepared target directory and preserves
 `CARGO_BIN_EXE` and doctest behavior.
+Prerequisite schema version 2 binds source content and last-write timestamps,
+including manifests, Cargo configuration, and embedded inputs. A touch or
+byte-identical save requires preparation again, because Cargo can rebuild from
+timestamps alone. Execution rejects older records explicitly. Keep these inputs
+unchanged throughout preparation and execution.
 Publication holds a retained `<record>.lock` sibling across the final
 existence check and atomic move. Competing publishers fail explicitly rather
 than overwrite a run. Leave the lock file in place during overlapping use.

@@ -39,6 +39,11 @@ BeforeAll {
         [IO.Directory]::CreateDirectory($target) | Out-Null
         $executable = Join-Path $target 'test with spaces'
         [IO.File]::WriteAllText($executable, 'test')
+        if ($script:TouchDuringBuild) {
+            # Move by a full day to remain distinct on coarse timestamp filesystems.
+            $stamp = [IO.File]::GetLastWriteTimeUtc($script:TouchDuringBuild)
+            [IO.File]::SetLastWriteTimeUtc($script:TouchDuringBuild, $stamp.AddDays(1))
+        }
         @{
             reason = 'compiler-artifact'
             target = @{ name = 'fixture' }
@@ -68,6 +73,7 @@ Describe 'Rust preparation boundary' {
         $script:CargoCalls = [Collections.Generic.List[object]]::new()
         $script:FailProvider = $false
         $script:FailCargo = $false
+        $script:TouchDuringBuild = $null
         $fixture = New-PreparationFixture
     }
 
@@ -86,6 +92,15 @@ Describe 'Rust preparation boundary' {
     It 'never publishes a record after Cargo compilation fails' {
         $script:FailCargo = $true
         { New-RustTestPreparation -RepositoryRoot $fixture.root -PrerequisitePath $fixture.record } | Should -Throw
+
+        Test-Path -LiteralPath $fixture.record | Should -BeFalse
+        @(Get-ChildItem -LiteralPath $fixture.root -Directory -Filter 'rust-tests-*') | Should -BeNullOrEmpty
+    }
+
+    It 'never publishes a record after source freshness changes during compilation' {
+        $script:TouchDuringBuild = Join-Path $fixture.root 'packages/ss-skills-util/tests/support/provider.rs'
+        { New-RustTestPreparation -RepositoryRoot $fixture.root -PrerequisitePath $fixture.record } |
+            Should -Throw '*sources changed during preparation*'
 
         Test-Path -LiteralPath $fixture.record | Should -BeFalse
         @(Get-ChildItem -LiteralPath $fixture.root -Directory -Filter 'rust-tests-*') | Should -BeNullOrEmpty
@@ -128,6 +143,62 @@ Describe 'Rust preparation boundary' {
         Add-Content -LiteralPath (Join-Path $fixture.root 'packages/ss-skills-util/tests/support/provider.rs') -Value 'changed'
 
         { Read-RustTestPreparation -RepositoryRoot $fixture.root -PrerequisitePath $fixture.record } | Should -Throw '*sourceSha256*'
+    }
+
+    It 'rejects malformed status <Label> before execution' -ForEach @(
+        @{ Label = 'complete array'; Status = @('complete') }
+        @{ Label = 'empty array'; Status = @() }
+        @{ Label = 'null'; Status = $null }
+        @{ Label = 'number'; Status = 1 }
+        @{ Label = 'boolean'; Status = $true }
+        @{ Label = 'object'; Status = @{ value = 'complete' } }
+    ) {
+        $prepared = New-RustTestPreparation -RepositoryRoot $fixture.root -PrerequisitePath $fixture.record
+        $prepared.status = $Status
+        [IO.File]::WriteAllText($fixture.record, ($prepared | ConvertTo-Json -Depth 20))
+
+        {
+            $validated = Read-RustTestPreparation -RepositoryRoot $fixture.root -PrerequisitePath $fixture.record -AllowProviderFailure
+            Invoke-PreparedRustTests -Preparation $validated -PrerequisitePath $fixture.record
+        } | Should -Throw '*Incomplete or unsupported*'
+        $script:CargoCalls.Count | Should -Be 1
+        $script:ProviderBuilds | Should -Be 1
+    }
+
+    It 'rejects source freshness changes for <Asset> with rewrite = <Rewrite> before execution' -ForEach @(
+        # All identity inputs need mtime coverage, not only Rust modules.
+        foreach ($asset in @(
+            'packages/ss-skills-util/tests/support/provider.rs',
+            'packages/ss-skills-util/src/commits.graphql',
+            'packages/ss-skills-util/tests/fixtures/github-approval.json',
+            'skills/ss-autoreapprove/significance.md',
+            'Cargo.toml', 'Cargo.lock', 'rust-toolchain.toml', '.cargo/config.toml'
+        )) {
+            foreach ($rewrite in @($false, $true)) {
+                @{ Asset = $asset; Rewrite = $rewrite }
+            }
+        }
+    ) {
+        $assetPath = Join-Path $fixture.root $Asset
+        New-Item -ItemType Directory -Path (Split-Path -Parent $assetPath) -Force | Out-Null
+        [IO.File]::WriteAllText($assetPath, 'unchanged input')
+        # Fixed, widely separated timestamps avoid sleeps and filesystem resolution assumptions.
+        $before = [datetime]::new(2020, 1, 1, 0, 0, 0, [DateTimeKind]::Utc)
+        $after = $before.AddDays(1)
+        [IO.File]::SetLastWriteTimeUtc($assetPath, $before)
+        $prepared = New-RustTestPreparation -RepositoryRoot $fixture.root -PrerequisitePath $fixture.record
+        if ($Rewrite) {
+            [IO.File]::WriteAllBytes($assetPath, [IO.File]::ReadAllBytes($assetPath))
+        }
+        [IO.File]::SetLastWriteTimeUtc($assetPath, $after)
+        (Get-RustTestIdentity -RepositoryRoot $fixture.root).sourceSha256 | Should -Be $prepared.identity.sourceSha256
+
+        {
+            $validated = Read-RustTestPreparation -RepositoryRoot $fixture.root -PrerequisitePath $fixture.record
+            Invoke-PreparedRustTests -Preparation $validated -PrerequisitePath $fixture.record
+        } | Should -Throw '*sourceFreshnessSha256*'
+        $script:CargoCalls.Count | Should -Be 1
+        $script:ProviderBuilds | Should -Be 1
     }
 
     It 'rejects changed embedded input <Asset> before Cargo execution' -ForEach @(
@@ -179,6 +250,9 @@ Describe 'Rust preparation boundary' {
         $original = $prepared | ConvertTo-Json -Depth 20
         foreach ($change in @(
             { param($record) $record.schemaVersion = '1' }
+            { param($record) $record.schemaVersion = 1 }
+            { param($record) $record.identity.Remove('sourceFreshnessSha256') }
+            { param($record) $record.identity.sourceFreshnessSha256 = @($record.identity.sourceFreshnessSha256) }
             { param($record) $record.testTargets = 'native' }
             { param($record) $record.executables = @() }
             { param($record) $record.unrecognized = 'field' }

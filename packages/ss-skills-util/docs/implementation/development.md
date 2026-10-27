@@ -25,19 +25,26 @@ sleeps. Tests preserve valid schema-2 journals and ambiguous-write states.
 ## Shared test preparation
 
 `scripts/Invoke-Tests.ps1` owns the `Prepare` and `Execute` phases; `just`
-recipes only forward arguments. The dot-sourced
+test recipes forward positional arguments through PowerShell's `-CommandWithArgs`
+and a native `-File` invocation so paths and filters remain data and named
+options bind correctly. The dot-sourced
 `scripts/lib/RustTestPreparation.ps1` supplies the reusable boundary.
 `New-RustTestPreparation` takes an absolute repository root, an absolute
 previously unused prerequisite record path, and optional integration target
 names. `Read-RustTestPreparation` validates the same selection and identity.
 `Invoke-PreparedRustTests` runs Cargo against the owned target directory.
-The schema-1 successful record contains `status: complete`, null
+The schema-2 successful record contains a string `status: complete`, null
 `providerFailure`, `identity`, `testTargets`,
 `ownedDirectory`, `targetDirectory`, `provider`, and `executables`.
 Identity binds the checkout root, Rust source/manifests/lockfile/configuration
 digest, verbose Rust compiler identity, Cargo version, all-feature test profile,
 and compiler/build/target/profile environment. The source digest includes embedded
 GraphQL queries, JSON fixtures, and the shared reapproval significance policy.
+`sourceSha256` hashes relative paths and content; `sourceFreshnessSha256` hashes
+the same paths and UTC last-write ticks. Cargo uses source timestamps for
+freshness, so a byte-identical save also invalidates preparation. Both identities
+must remain unchanged through preparation and execution. Readers reject older
+schemas instead of accepting records without timestamp evidence.
 Provider source and executable
 records, and Cargo-discovered executable records, contain exact absolute paths
 and SHA-256 digests. The producer rechecks source identity and validates the
