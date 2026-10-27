@@ -69,6 +69,41 @@ with explicit medium reasoning and regular context. That worker owns preparation
 bounded evidence reads, judgments, and completion. It returns scalar results and
 a concise reason, not source or discussion text, and cannot publish.
 
+## Bounded stale-evidence recovery
+
+Source or decision evidence can change during inspection or between assessment
+and publication. `staleEvidence` and `staleDuringExecution` report that movement,
+not a terminal semantic refusal. The orchestrator stops the old worker and calls
+native `refresh` in the same run, then follows the returned current authority
+decision. An eligible refreshed snapshot requires a new worker's complete
+assessment; prior judgments never authorize the new snapshot.
+
+Each PR has a persisted budget of two recovery attempts after the initial
+attempt. Refresh consumes an attempt before capturing current evidence. A failed
+stale capture can consume the next attempt; another stale refresh request at the
+limit records `retryExhausted` and leaves explicit partial work. An interrupted
+capture resumes through `inspect`. Independent PRs keep their own budgets and
+publication identities.
+
+Refresh takes the provider publication lock, notice lock, and run lock in that
+order. It permits replacement only for stale evidence without an attempted remote
+effect. Host journals, not a null receipt or review identifier, establish that
+boundary. Accepted-but-stale and unknown writes retain the original snapshot
+and use only original-command reconciliation. Refresh never rolls back, repeats,
+or forgets such effects.
+An existing publication receipt also requires retained host evidence of a
+preflight-only operation; missing host history is not proof that no write occurred.
+
+`discovery.rs` owns the schema-8 recovery record and result metadata. Schema-7
+runs migrate with no consumed attempts and unchanged initial host identities.
+Each fresh attempt adds a UUID used as that PR's host-journal run identity;
+the enclosing run ID stays fixed. The snapshot digest also binds this UUID,
+so equal evidence and timestamps cannot reuse an earlier snapshot. This preserves
+canceled preflight records and prevents a new assessment from colliding with an
+old immutable journal operation. Existing schema-8 snapshots remain readable.
+Notification staleness is recorded separately from an uncertain assessment's
+diagnostic, so neither condition conceals the other.
+
 ## Persistent needs-review decisions
 
 A completed significant or uncertain assessment produces a standalone attributed comment

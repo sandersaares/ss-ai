@@ -1,3 +1,4 @@
+use std::collections::HashSet;
 use std::num::{NonZeroU32, NonZeroUsize};
 use std::path::Path;
 
@@ -78,7 +79,22 @@ struct Entry {
     review_notice: Option<Notice>,
     #[serde(deserialize_with = "required_optional")]
     automatic_approval: Option<AutomaticApproval>,
+    recovery: Recovery,
 }
+
+/// Fresh attempts have distinct host-journal identities; old effects remain reconcilable.
+#[derive(Debug, Default, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct Recovery {
+    attempt_ids: Vec<String>,
+    #[serde(deserialize_with = "required_optional")]
+    stale: Option<Diagnostic>,
+    #[serde(deserialize_with = "required_optional")]
+    error: Option<Diagnostic>,
+}
+
+/// Permit repeated movement to settle without allowing a continuously changing PR to loop.
+const STALE_RECOVERY_LIMIT: usize = 2;
 
 /// Inspection is either a complete immutable observation or an explicit failure.
 #[derive(Debug, Deserialize, Serialize)]
@@ -139,6 +155,15 @@ enum RecencyState {
 }
 
 impl DiscoveryRecord {
+    /// Each refreshed PR selects its own intent without changing other PRs' recovery.
+    fn operation_run_id(&self, number: NonZeroU32) -> Result<&str, AppError> {
+        self.inventory
+            .iter()
+            .find(|entry| entry.pull_request_id == number)
+            .map(|entry| entry.operation_run_id(&self.run_id))
+            .ok_or_else(|| fail("invalidInput", "Unknown PR"))
+    }
+
     fn publication_scope(&self, number: NonZeroU32) -> Scope {
         Scope {
             repository_id: self.repository_id.clone(),
@@ -148,7 +173,7 @@ impl DiscoveryRecord {
     }
 
     fn validate(&self) -> Result<(), AppError> {
-        if self.schema_version != 7
+        if self.schema_version != 8
             || Uuid::parse_str(&self.run_id).is_err()
             || self.repository_id.trim().is_empty()
             || self.account_id.trim().is_empty()
@@ -171,6 +196,7 @@ impl DiscoveryRecord {
         }
         let mut previous = None;
         for entry in &self.inventory {
+            entry.recovery.validate(&self.run_id)?;
             // Numeric pagination requires a strictly ordered, duplicate-free inventory.
             if previous.is_some_and(|id| id >= entry.pull_request_id)
                 || entry.url != target.candidate(entry.pull_request_id).web_url
@@ -220,7 +246,7 @@ impl DiscoveryRecord {
                 if let Some(receipt) = &entry.publication {
                     receipt.validate()?;
                     if self.dry_run
-                        || receipt.run_id != self.run_id
+                        || receipt.run_id != entry.operation_run_id(&self.run_id)
                         || receipt.scope != self.publication_scope(entry.pull_request_id)
                         || entry.execution_error.is_some()
                         || entry
@@ -272,6 +298,7 @@ impl DiscoveryRecord {
                     &self.account_id,
                     &self.repository_id,
                     entry.pull_request_id.get(),
+                    entry.recovery.attempt_ids.last().map(String::as_str),
                 )?;
                 if entry.publication.is_none()
                     && entry.automatic_approval
@@ -368,7 +395,39 @@ impl DiscoveryRecord {
         let Some(bytes) = journal.read_bytes()? else {
             return Ok(None);
         };
-        let run: Self = serde_json::from_slice(&bytes).map_err(|error| {
+        let mut document: Value = serde_json::from_slice(&bytes).map_err(|error| {
+            Failure::caused_by(
+                "invalidState",
+                "Malformed discovery record".to_owned(),
+                error,
+            )
+        })?;
+        // Schema-7 runs predate bounded refresh and have no consumed recovery attempts.
+        if document.get("schemaVersion") == Some(&json!(7)) {
+            *document
+                .get_mut("schemaVersion")
+                .ok_or_else(|| fail("invalidState", "Missing schema version"))? = json!(8);
+            let entries = document
+                .get_mut("inventory")
+                .and_then(Value::as_array_mut)
+                .ok_or_else(|| fail("invalidState", "Malformed schema-7 inventory"))?;
+            for entry in entries {
+                let entry = entry
+                    .as_object_mut()
+                    .ok_or_else(|| fail("invalidState", "Malformed schema-7 entry"))?;
+                if entry.contains_key("recovery") {
+                    return Err(fail(
+                        "invalidState",
+                        "Schema-7 entry cannot contain recovery state",
+                    ));
+                }
+                entry.insert(
+                    "recovery".to_owned(),
+                    serde_json::to_value(Recovery::default())?,
+                );
+            }
+        }
+        let run: Self = serde_json::from_value(document).map_err(|error| {
             Failure::caused_by(
                 "invalidState",
                 "Malformed discovery record".to_owned(),
@@ -418,7 +477,12 @@ impl DiscoveryRecord {
                         _ => None,
                     }),
                     "automaticApproval": entry.automatic_approval,
-                    "error": entry.execution_error.as_ref().or_else(|| entry.inspection.as_ref()?.error.as_ref()).or(entry.recency.error.as_ref())
+                    "staleRecovery": {
+                        "attempts": entry.recovery.attempt_ids.len(),
+                        "limit": STALE_RECOVERY_LIMIT,
+                        "exhausted": entry.recovery.error.is_some()
+                    },
+                    "error": entry.recovery.error.as_ref().or(entry.recovery.stale.as_ref()).or(entry.execution_error.as_ref()).or_else(|| entry.inspection.as_ref()?.error.as_ref()).or(entry.recency.error.as_ref())
                 })
             })
             .collect::<Vec<_>>();
@@ -457,6 +521,14 @@ impl DiscoveryRecord {
 }
 
 impl Entry {
+    /// The initial attempt keeps its existing journal identity for schema-7 recovery.
+    fn operation_run_id<'a>(&'a self, run_id: &'a str) -> &'a str {
+        self.recovery
+            .attempt_ids
+            .last()
+            .map_or(run_id, String::as_str)
+    }
+
     fn candidate(&self, dry_run: bool) -> bool {
         self.publication.is_none()
             && !self.failed()
@@ -479,6 +551,9 @@ impl Entry {
             RecencyState::Pending => return "pending",
             RecencyState::NoRecentCommit => return "noRecentCommit",
             _ => {}
+        }
+        if self.recovery.error.is_some() {
+            return "failed";
         }
         if let Some(receipt) = &self.publication {
             return receipt.outcome.as_str();
@@ -551,7 +626,9 @@ impl Entry {
                 receipt.outcome,
                 Outcome::Failed | Outcome::StaleDuringExecution
             )
-        }) || self.execution_error.is_some()
+        }) || self.recovery.error.is_some()
+            || self.recovery.stale.is_some()
+            || self.execution_error.is_some()
             || self.recency.state == RecencyState::Failed
             || self
                 .inspection
@@ -560,6 +637,12 @@ impl Entry {
     }
 
     fn stale(&self) -> bool {
+        if self.recovery.error.is_some() {
+            return false;
+        }
+        if self.recovery.stale.is_some() {
+            return true;
+        }
         if self
             .publication
             .as_ref()
@@ -574,6 +657,35 @@ impl Entry {
     }
 }
 
+impl Recovery {
+    /// Reject malformed retry state before it can select another publication intent.
+    fn validate(&self, run_id: &str) -> Result<(), AppError> {
+        let mut ids = HashSet::new();
+        if self.attempt_ids.len() > STALE_RECOVERY_LIMIT
+            || self
+                .attempt_ids
+                .iter()
+                .any(|id| id == run_id || Uuid::parse_str(id).is_err() || !ids.insert(id))
+            || self
+                .stale
+                .as_ref()
+                .is_some_and(|error| error.kind != "staleEvidence")
+            || self.error.as_ref().is_some_and(|error| {
+                error.kind != "retryExhausted" || self.attempt_ids.len() != STALE_RECOVERY_LIMIT
+            })
+        {
+            return Err(fail(
+                "invalidState",
+                "Invalid stale-evidence recovery state",
+            ));
+        }
+        for error in self.stale.iter().chain(self.error.iter()) {
+            error.validate()?;
+        }
+        Ok(())
+    }
+}
+
 impl Inspection {
     fn validate(
         &self,
@@ -581,6 +693,7 @@ impl Inspection {
         account: &str,
         repository: &str,
         number: u32,
+        attempt_id: Option<&str>,
     ) -> Result<(), AppError> {
         let observed = timestamp(&self.captured_at)?;
         match (
@@ -590,8 +703,11 @@ impl Inspection {
             &self.error,
         ) {
             (Some(evidence), Some(decision), Some(hash), None) => {
+                let current = snapshot_digest(evidence, &self.captured_at, attempt_id)?;
+                // Existing schema-8 assessments can retain their pre-attempt digest.
+                let legacy = snapshot_digest(evidence, &self.captured_at, None)?;
                 if evidence.decide(platform, account, repository, number, observed)? != *decision
-                    || snapshot_digest(evidence, &self.captured_at)? != *hash
+                    || *hash != current && *hash != legacy
                 {
                     return Err(fail(
                         "invalidState",
@@ -675,6 +791,7 @@ impl Diagnostic {
                 | "service"
                 | "ambiguousWrite"
                 | "staleEvidence"
+                | "retryExhausted"
                 | "scopeChanged"
                 | "rateLimited"
                 | "contention"
@@ -757,7 +874,7 @@ pub(crate) fn discover(
         run
     } else {
         DiscoveryRecord {
-            schema_version: 7,
+            schema_version: 8,
             run_id: Uuid::new_v4().to_string(),
             repository_url: input.repository.web_url.clone(),
             repository_id,
@@ -853,7 +970,7 @@ pub(crate) fn discover(
     Ok(run.summary(0, input.limit))
 }
 
-/// Captures only a discovered recent candidate; all persisted decisions remain read-only.
+/// Captures candidates, or refreshes clean stale attempts under the publication locks.
 pub(crate) fn inspect(
     api: &mut Api<'_>,
     clock: &dyn Clock,
@@ -861,6 +978,7 @@ pub(crate) fn inspect(
     path: &Path,
     tenant: Option<&str>,
     number: NonZeroU32,
+    recovery_directory: Option<&Path>,
 ) -> Result<Value, AppError> {
     if !path.is_absolute() {
         return Err(fail(
@@ -868,6 +986,26 @@ pub(crate) fn inspect(
             "Inspection requires an absolute state path",
         ));
     }
+    // Publication always locks host before run; refreshing must use the same order.
+    let scope = if recovery_directory.is_some() {
+        let journal = FileJournal::open(path, clock)?;
+        let run = DiscoveryRecord::load(&journal)?
+            .ok_or_else(|| fail("invalidState", "Discovery record is missing"))?;
+        Some(run.publication_scope(number))
+    } else {
+        None
+    };
+    let stores = recovery_directory
+        .zip(scope.as_ref())
+        .map(|(directory, scope)| {
+            let publication =
+                publication::ProviderStore::open(repository.platform, directory, scope, clock)?;
+            let notices = review_notice::Store::open(repository.platform, directory, scope, clock)?;
+            publication.ensure_resolved()?;
+            notices.ensure_resolved()?;
+            Ok::<_, AppError>((publication, notices))
+        })
+        .transpose()?;
     let journal = FileJournal::open(path, clock)?;
     let mut run = DiscoveryRecord::load(&journal)?
         .ok_or_else(|| fail("invalidState", "Discovery record is missing"))?;
@@ -921,6 +1059,56 @@ pub(crate) fn inspect(
             "Inspection identity or repository changed",
         ));
     }
+    if let Some((publication, notices)) = &stores {
+        if scope.as_ref() != Some(&run.publication_scope(number)) {
+            return Err(fail("invalidState", "Refresh scope changed"));
+        }
+        let operation_run_id = entry.operation_run_id(&run.run_id);
+        // Even accepted-but-stale effects keep their original assessment and journal.
+        if publication.has_effect(operation_run_id)
+            || notices.has_attempt(operation_run_id)
+            || entry.publication.is_some() && !publication.preflight_only(operation_run_id)
+        {
+            return Err(fail(
+                "ambiguousWrite",
+                "An attempted remote effect cannot refresh evidence; reconcile the original publication or notify command",
+            ));
+        }
+        if !entry.stale() && entry.recovery.error.is_none() {
+            return Err(fail("invalidState", "Only stale evidence permits refresh"));
+        }
+        let entry = run
+            .inventory
+            .get_mut(index)
+            .ok_or_else(|| fail("invalidState", "Inventory changed"))?;
+        if entry.recovery.attempt_ids.len() == STALE_RECOVERY_LIMIT {
+            entry.recovery.error = Some(Diagnostic {
+                kind: "retryExhausted".to_owned(),
+                message: "Stale-evidence recovery exhausted; evidence kept changing after the permitted fresh attempts".to_owned(),
+            });
+            finish_state(&mut run);
+            run.save(&journal)?;
+            return Err(fail(
+                "retryExhausted",
+                "Stale-evidence recovery exhausted; no remote effect was retried",
+            ));
+        }
+        entry.recovery.attempt_ids.push(Uuid::new_v4().to_string());
+        entry.recovery.stale = None;
+        entry.inspection = None;
+        entry.assessment = None;
+        entry.execution_error = None;
+        entry.publication = None;
+        entry.review_notice = None;
+        entry.automatic_approval = None;
+        // Persist the consumed budget before reacquisition, including interrupted captures.
+        finish_state(&mut run);
+        run.save(&journal)?;
+    }
+    let entry = run
+        .inventory
+        .get(index)
+        .ok_or_else(|| fail("invalidState", "Inventory changed"))?;
     if entry.inspection.is_none() {
         let observation = Evidence::capture(api, &repository.candidate(number));
         let captured_at = utc(clock.now());
@@ -938,7 +1126,11 @@ pub(crate) fn inspect(
                 number.get(),
                 timestamp(&captured_at)?,
             )?;
-            let snapshot_digest = snapshot_digest(&evidence, &captured_at)?;
+            let snapshot_digest = snapshot_digest(
+                &evidence,
+                &captured_at,
+                entry.recovery.attempt_ids.last().map(String::as_str),
+            )?;
             Ok((evidence, decision, snapshot_digest))
         });
         let mut scope_error = None;
@@ -995,11 +1187,18 @@ pub(crate) fn inspect(
     Ok(run.summary(number.get().saturating_sub(1), NonZeroUsize::MIN))
 }
 
-/// The timestamp and complete evidence identify the immutable captured observation.
-fn snapshot_digest(evidence: &Evidence, captured_at: &str) -> Result<String, AppError> {
-    Ok(digest(&serde_json::to_vec(
-        &json!({ "capturedAt": captured_at, "evidence": evidence }),
-    )?))
+/// Attempt identity separates recaptures even when evidence and timestamps match.
+fn snapshot_digest(
+    evidence: &Evidence,
+    captured_at: &str,
+    attempt_id: Option<&str>,
+) -> Result<String, AppError> {
+    let document = if let Some(attempt_id) = attempt_id {
+        json!({ "capturedAt": captured_at, "evidence": evidence, "attemptId": attempt_id })
+    } else {
+        json!({ "capturedAt": captured_at, "evidence": evidence })
+    };
+    Ok(digest(&serde_json::to_vec(&document)?))
 }
 
 /// Reads bounded persisted results without credentials or provider requests.
@@ -1100,6 +1299,7 @@ pub(crate) fn publish(
     let journal = FileJournal::open(input.path, clock)?;
     let mut run =
         DiscoveryRecord::load(&journal)?.ok_or_else(|| fail("invalidState", "Missing run"))?;
+    let operation_run_id = run.operation_run_id(input.number)?.to_owned();
     if run.run_id != run_id
         || run.publication_scope(input.number) != scope
         || run.repository_url != input.repository.web_url
@@ -1111,14 +1311,14 @@ pub(crate) fn publish(
                     .error
                     .as_ref()
                     .is_none_or(|error| error.kind != "ambiguousWrite")
-                || !store.has_effect(&run.run_id)))
+                || !store.has_effect(&operation_run_id)))
     {
         return Err(fail(
             "invalidState",
             "Publication scope changed or this run cannot publish",
         ));
     }
-    if store.may_write(&run.run_id) {
+    if store.may_write(&operation_run_id) {
         let policy = read_bytes(Path::new(&run.policy.source_path), clock)?
             .ok_or_else(|| fail("invalidState", "Captured significance policy is missing"))?;
         if digest(&policy) != run.policy.sha256 {
@@ -1141,6 +1341,7 @@ pub(crate) fn publish(
     if snapshot != input.snapshot
         || assessment.status(false) != "readyToReapprove"
         || entry.execution_error.is_some()
+        || entry.recovery.error.is_some()
     {
         return Err(fail(
             "invalidState",
@@ -1156,7 +1357,7 @@ pub(crate) fn publish(
         &target,
         clock,
         &publication::Input {
-            run_id: &run.run_id,
+            run_id: &operation_run_id,
             assessment_digest: assessment
                 .digest
                 .as_deref()
@@ -1182,7 +1383,7 @@ pub(crate) fn publish(
         }
         let mut automatic_approval =
             if matches!(receipt.outcome, Outcome::Reapproved | Outcome::AlreadyValid) {
-                store.automatic_approval(&run.run_id)?
+                store.automatic_approval(&operation_run_id)?
             } else {
                 None
             };
@@ -1235,7 +1436,7 @@ pub(crate) fn publish(
             }
         }
         Err(error) => {
-            let error = if store.has_effect(&run.run_id) {
+            let error = if store.has_effect(&operation_run_id) {
                 Failure::caused_by("ambiguousWrite",
                     "Publication may have completed; retaining the original intent for reconciliation".to_owned(),
                     error.into_std_error()).into()
@@ -1299,6 +1500,7 @@ pub(crate) fn notify(
     let journal = FileJournal::open(input.path, clock)?;
     let mut run =
         DiscoveryRecord::load(&journal)?.ok_or_else(|| fail("invalidState", "Missing run"))?;
+    let operation_run_id = run.operation_run_id(input.number)?.to_owned();
     if run.run_id != run_id
         || run.dry_run
         || run.publication_scope(input.number) != scope
@@ -1307,7 +1509,7 @@ pub(crate) fn notify(
         || run.state == RunState::Failed
             && (run.error_pull_request_id != Some(input.number)
                 || run.error.as_ref().is_none_or(|error| {
-                    error.kind != "ambiguousWrite" || !notices.has_attempt(&run.run_id)
+                    error.kind != "ambiguousWrite" || !notices.has_attempt(&operation_run_id)
                 }))
     {
         return Err(fail(
@@ -1315,7 +1517,7 @@ pub(crate) fn notify(
             "Needs-review publication scope changed",
         ));
     }
-    if !notices.has_attempt(&run.run_id) {
+    if !notices.has_attempt(&operation_run_id) {
         let policy = read_bytes(Path::new(&run.policy.source_path), clock)?
             .ok_or_else(|| fail("invalidState", "Captured significance policy is missing"))?;
         if digest(&policy) != run.policy.sha256 {
@@ -1338,6 +1540,8 @@ pub(crate) fn notify(
     let uncertain = assessment.status(false) == "failed";
     if snapshot != input.snapshot
         || !assessment.needs_review()
+        || entry.recovery.stale.is_some()
+        || entry.recovery.error.is_some()
         || entry.execution_error.is_some() && !uncertain
     {
         return Err(fail(
@@ -1353,7 +1557,7 @@ pub(crate) fn notify(
         &input.repository.candidate(input.number),
         clock,
         &publication::Input {
-            run_id: &run.run_id,
+            run_id: &operation_run_id,
             assessment_digest: assessment
                 .digest
                 .as_deref()
@@ -1379,7 +1583,9 @@ pub(crate) fn notify(
             finish_state(&mut run);
         }
         Err(error) => {
-            let error = if notices.has_unresolved(&run.run_id) || run.state == RunState::Failed {
+            let error = if notices.has_unresolved(&operation_run_id)
+                || run.state == RunState::Failed
+            {
                 Failure::caused_by(
                     "ambiguousWrite",
                     "Needs-review comment may exist; retain the original notify invocation for reconciliation".to_owned(),
@@ -1397,6 +1603,10 @@ pub(crate) fn notify(
                 run.error_pull_request_id = Some(input.number);
                 run.state = RunState::Failed;
             } else {
+                if diagnostic.kind == "staleEvidence" {
+                    // Preserve uncertainty separately so stale notification evidence remains actionable.
+                    entry.recovery.stale = Some(Diagnostic::from_error(&error));
+                }
                 // Notification errors cannot replace a completed assessment's uncertainty.
                 if !uncertain {
                     entry.execution_error = Some(diagnostic);
@@ -1440,7 +1650,11 @@ pub(crate) fn work(
         .find(|entry| entry.pull_request_id == number)
         .ok_or_else(|| fail("invalidInput", "Unknown assessment PR"))?;
     let (expected, evidence) = entry.assessment_inputs()?;
-    if expected != snapshot || entry.execution_error.is_some() {
+    if expected != snapshot
+        || entry.execution_error.is_some()
+        || entry.recovery.stale.is_some()
+        || entry.recovery.error.is_some()
+    {
         return Err(fail(
             "invalidState",
             "Snapshot changed or assessment preparation failed",
@@ -1541,6 +1755,7 @@ fn metadata(api: &mut Api<'_>, repository: &Target) -> Result<Vec<Entry>, AppErr
             publication: None,
             review_notice: None,
             automatic_approval: None,
+            recovery: Recovery::default(),
         });
     }
     entries.sort_by_key(|entry| entry.pull_request_id);

@@ -110,7 +110,7 @@ impl Fixture {
     /// Enforces the standalone helper prerequisite even when Cargo bypasses the repository runner.
     fn prepared_provider() -> PathBuf {
         let record = std::env::var_os("SS_AI_RUST_TEST_PREREQUISITES")
-            .expect("Run scripts/Invoke-Tests.ps1 -Suite Rust -Phase Prepare and set SS_AI_RUST_TEST_PREREQUISITES to its absolute record path");
+            .expect("Follow DEVELOPMENT.md's Rust preparation instructions: run scripts/Invoke-Tests.ps1 -Suite Rust -Phase Prepare -PrerequisitePath '<absolute record path>' (quote paths containing spaces), then set SS_AI_RUST_TEST_PREREQUISITES to that same absolute record path");
         Self::prepared_provider_from(Path::new(&record))
     }
 

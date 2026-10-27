@@ -101,6 +101,18 @@ impl<'a> ProviderStore<'a> {
         }
     }
 
+    /// A retained receipt is refreshable only with positive host evidence of no write intent.
+    pub(crate) fn preflight_only(&self, run_id: &str) -> bool {
+        match self {
+            Self::GitHub(store) => store
+                .record
+                .operations
+                .iter()
+                .any(|operation| operation.run_id == run_id && operation.effect.is_none()),
+            Self::AzureDevOps(store) => store.preflight_only(run_id),
+        }
+    }
+
     pub(crate) fn may_write(&self, run_id: &str) -> bool {
         match self {
             Self::GitHub(store) => store.may_write(run_id),
