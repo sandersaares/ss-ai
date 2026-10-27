@@ -69,6 +69,9 @@ BeforeAll {
 
 Describe 'Rust preparation boundary' {
     BeforeEach {
+        Mock Invoke-RustTestCargo {
+            cargo @ArgumentList
+        }
         $script:ProviderBuilds = 0
         $script:CargoCalls = [Collections.Generic.List[object]]::new()
         $script:FailProvider = $false
@@ -254,6 +257,37 @@ Describe 'Rust preparation boundary' {
         $prepared.status | Should -Be 'complete'
         $prepared.provider | Should -BeNullOrEmpty
         $script:ProviderBuilds | Should -Be 0
+    }
+
+    It 'preserves selected targets and filters as separate Cargo arguments' {
+        $prepared = @{ status = 'complete'; targetDirectory = 'target with spaces' }
+        Mock Invoke-RustTestCargo {
+            $script:CargoCalls.Add(@($ArgumentList))
+            $PrerequisitePath | Should -Be $fixture.record
+            $global:LASTEXITCODE = 0
+        }
+
+        Invoke-PreparedRustTests -Preparation $prepared -PrerequisitePath $fixture.record -TestTarget native,git -TestFilter 'filter with spaces'
+        $script:CargoCalls[0] | Should -Be @(
+            'test', '--workspace', '--all-features', '--locked', '--no-fail-fast',
+            '--target-dir', 'target with spaces', '--test', 'native', '--test', 'git', 'filter with spaces'
+        )
+    }
+
+    It 'still executes doctests after a provider-independent test failure' {
+        Mock Invoke-RustTestCargo {
+            $script:CargoCalls.Add(@($ArgumentList))
+            # Only the ordinary tests fail; the subsequent doctest success must not erase that failure.
+            $global:LASTEXITCODE = if ($ArgumentList -contains '--doc') { 0 } else { 17 }
+        }
+        $prepared = @{ status = 'providerFailed'; providerFailure = 'fixture'; targetDirectory = 'unused' }
+
+        { Invoke-PreparedRustTests -Preparation $prepared -PrerequisitePath $fixture.record -TestFilter 'filter' } |
+            Should -Throw '*Rust test execution failed*'
+        $script:CargoCalls.Count | Should -Be 3
+        $script:CargoCalls[1] | Should -Contain '--no-fail-fast'
+        $script:CargoCalls[2] | Should -Contain '--doc'
+        $script:CargoCalls[2][-1] | Should -Be 'filter'
     }
 
     It 'rejects missing records and mismatched selection instead of building on demand' {
@@ -527,7 +561,7 @@ Describe 'Rust preparation boundary' {
         }
     }
 
-    It 'keeps unfiltered Cargo execution for doctests and restores the prerequisite environment on failure' {
+    It 'keeps unfiltered Cargo execution for doctests and preserves the prerequisite environment on failure' {
         $prepared = New-RustTestPreparation -RepositoryRoot $fixture.root -PrerequisitePath $fixture.record
         $previous = $env:SS_AI_RUST_TEST_PREREQUISITES
         $script:FailCargo = $true
@@ -538,6 +572,138 @@ Describe 'Rust preparation boundary' {
             $script:CargoCalls[1] | Should -Not -Contain '--no-run'
             $env:SS_AI_RUST_TEST_PREREQUISITES | Should -Be $previous
         } finally {
+            $env:SS_AI_RUST_TEST_PREREQUISITES = $previous
+        }
+    }
+}
+
+Describe 'Cargo child environment' {
+    It 'forwards child output, diagnostics and exit code <ExitCode>' -ForEach @(
+        @{ ExitCode = 0 }, @{ ExitCode = 17 }
+    ) {
+        Mock New-RustTestCargoStartInfo {
+            $start = [Diagnostics.ProcessStartInfo]::new((Get-Process -Id $PID).Path)
+            $start.UseShellExecute = $false
+            $start.RedirectStandardOutput = $true
+            $start.RedirectStandardError = $true
+            $code = @"
+#Requires -Version 7.6
+Set-StrictMode -Version Latest
+`$ErrorActionPreference = 'Stop'
+`$PSNativeCommandUseErrorActionPreference = `$true
+[Console]::Out.WriteLine('first')
+[Console]::Out.WriteLine()
+[Console]::Out.Write('last')
+[Console]::Error.Write('diagnostic')
+exit $ExitCode
+"@
+            foreach ($argument in @('-NoProfile', '-NonInteractive', '-EncodedCommand',
+                [Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($code)))) {
+                $start.ArgumentList.Add($argument)
+            }
+            return $start
+        }
+
+        # Capture the console sink used for native diagnostics without mixing it with pipeline output.
+        $originalError = [Console]::Error
+        $diagnostics = [IO.StringWriter]::new()
+        try {
+            [Console]::SetError($diagnostics)
+            $output = @(Invoke-RustTestCargo -ArgumentList @('test') -PrerequisitePath 'unused')
+            $LASTEXITCODE | Should -Be $ExitCode
+            $output | Should -Be @('first', '', 'last')
+            $diagnostics.ToString() | Should -Be 'diagnostic'
+        } finally {
+            [Console]::SetError($originalError)
+            $diagnostics.Dispose()
+        }
+    }
+
+    It 'preserves exact arguments and the caller working directory' {
+        Mock Get-Command { [pscustomobject]@{ Source = 'fixture-cargo' } } -ParameterFilter { $Name -eq 'cargo' }
+        $arguments = @('test', '--target-dir', 'directory with spaces', '--test', 'git', 'filter "quoted"')
+        $start = New-RustTestCargoStartInfo -ArgumentList $arguments -PrerequisitePath 'record with spaces.json'
+        @($start.ArgumentList) | Should -Be $arguments
+        $start.WorkingDirectory | Should -Be (Get-Location).Path
+        $start.Environment['SS_AI_RUST_TEST_PREREQUISITES'] | Should -Be 'record with spaces.json'
+    }
+
+    It 'isolates overlapping executions and preserves parent value <ParentValue>' -ForEach @(
+        @{ ParentValue = $null }, @{ ParentValue = 'parent-only.json' }
+    ) {
+        $library = Join-Path (Split-Path -Parent $PSScriptRoot) 'scripts/lib/RustTestPreparation.ps1'
+        $previous = $env:SS_AI_RUST_TEST_PREREQUISITES
+        # The coordinator joins both workers before launch and after completion. Neither
+        # worker can finish its invocation while the other is still constructing its child.
+        $barrier = [Threading.Barrier]::new(3)
+        $worker = {
+            param($Library, $Record, $Barrier, $Executable)
+            Set-StrictMode -Version Latest
+            $ErrorActionPreference = 'Stop'
+            $PSNativeCommandUseErrorActionPreference = $true
+            . $Library
+            $builder = ${function:New-RustTestCargoStartInfo}
+
+            # Cargo discovery is independent of the installed toolchain for this child fixture.
+            function Get-Command { [pscustomobject]@{ Source = $Executable } }
+
+            # Retain production environment construction but substitute a real PowerShell child
+            # for Cargo, so this test observes inherited environment without invoking a compiler.
+            function New-RustTestCargoStartInfo {
+                param($ArgumentList, $PrerequisitePath)
+                $start = & $builder -ArgumentList $ArgumentList -PrerequisitePath $PrerequisitePath
+                $start.ArgumentList.Clear()
+                $code = {
+                    #Requires -Version 7.6
+                    Set-StrictMode -Version Latest
+                    $ErrorActionPreference = 'Stop'
+                    $PSNativeCommandUseErrorActionPreference = $true
+                    $env:SS_AI_RUST_TEST_PREREQUISITES
+                }.ToString()
+                foreach ($argument in @('-NoProfile', '-NonInteractive', '-EncodedCommand',
+                    [Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($code)))) {
+                    $start.ArgumentList.Add($argument)
+                }
+                $Barrier.SignalAndWait() | Out-Null
+                $Barrier.SignalAndWait() | Out-Null
+                return $start
+            }
+
+            try {
+                Invoke-PreparedRustTests -Preparation @{ status = 'complete'; targetDirectory = 'unused' } -PrerequisitePath $Record
+            } finally {
+                $Barrier.SignalAndWait() | Out-Null
+            }
+        }
+
+        $first = [PowerShell]::Create()
+        $second = [PowerShell]::Create()
+        try {
+            # Set the baseline before starting any worker, covering both absent and existing values.
+            $env:SS_AI_RUST_TEST_PREREQUISITES = $ParentValue
+            $executable = (Get-Process -Id $PID).Path
+            $records = @((Join-Path $TestDrive 'first record.json'), (Join-Path $TestDrive 'second record.json'))
+            $null = $first.AddScript($worker).AddArgument($library).AddArgument($records[0]).AddArgument($barrier).AddArgument($executable)
+            $null = $second.AddScript($worker).AddArgument($library).AddArgument($records[1]).AddArgument($barrier).AddArgument($executable)
+            $firstPending = $first.BeginInvoke()
+            $secondPending = $second.BeginInvoke()
+            $barrier.SignalAndWait() | Out-Null
+            $during = $env:SS_AI_RUST_TEST_PREREQUISITES
+            $barrier.SignalAndWait() | Out-Null
+            $barrier.SignalAndWait() | Out-Null
+            $firstResult = @($first.EndInvoke($firstPending))
+            $secondResult = @($second.EndInvoke($secondPending))
+
+            $first.Streams.Error | Should -BeNullOrEmpty
+            $second.Streams.Error | Should -BeNullOrEmpty
+            $firstResult | Should -Be @($records[0])
+            $secondResult | Should -Be @($records[1])
+            $during | Should -Be $ParentValue
+            $env:SS_AI_RUST_TEST_PREREQUISITES | Should -Be $ParentValue
+        } finally {
+            $first.Dispose()
+            $second.Dispose()
+            $barrier.Dispose()
             $env:SS_AI_RUST_TEST_PREREQUISITES = $previous
         }
     }

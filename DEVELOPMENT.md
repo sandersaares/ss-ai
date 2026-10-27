@@ -66,6 +66,8 @@ Rust checks report separate Clippy, preparation, and execution elapsed times.
 Preparation compiles the shared provider once and discovers selected test
 executables from Cargo artifact JSON. Every run owns its build directory; no
 mutable fixture state or final binaries are shared between invocations.
+Cargo receives the prerequisite record through its child environment; overlapping
+executions do not change the parent process environment.
 An unfiltered run retains all integration tests and doctests. Installer coverage
 lives in `tests/NativeInstallation.Tests.ps1`: simulated Cargo responses exercise
 our arguments, errors and artifact parsing, while isolated fixture launchers

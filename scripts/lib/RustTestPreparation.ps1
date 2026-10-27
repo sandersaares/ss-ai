@@ -444,6 +444,47 @@ function Read-RustTestPreparation {
     return $record
 }
 
+# Give each Cargo child its own prerequisite record without changing other runspaces' environment.
+function New-RustTestCargoStartInfo {
+    param([string[]] $ArgumentList, [string] $PrerequisitePath)
+
+    $cargo = Get-Command cargo -CommandType Application | Select-Object -First 1
+    $start = [Diagnostics.ProcessStartInfo]::new($cargo.Source)
+    $start.UseShellExecute = $false
+    $start.WorkingDirectory = (Get-Location).Path
+    $start.RedirectStandardOutput = $true
+    $start.RedirectStandardError = $true
+    $start.Environment['SS_AI_RUST_TEST_PREREQUISITES'] = $PrerequisitePath
+    foreach ($argument in $ArgumentList) {
+        $start.ArgumentList.Add($argument)
+    }
+    return $start
+}
+
+# Keep native output and exit status separate so execution can aggregate test and doctest failures.
+function Invoke-RustTestCargo {
+    param([string[]] $ArgumentList, [string] $PrerequisitePath)
+
+    $process = [Diagnostics.Process]::new()
+    $process.StartInfo = New-RustTestCargoStartInfo -ArgumentList $ArgumentList -PrerequisitePath $PrerequisitePath
+    try {
+        if (-not $process.Start()) { throw 'Could not start Cargo tests.' }
+        # Drain both pipes concurrently: either stream can exceed the operating system pipe buffer.
+        $stdout = $process.StandardOutput.ReadToEndAsync()
+        $stderr = $process.StandardError.ReadToEndAsync()
+        $process.WaitForExit()
+        [Console]::Error.Write($stderr.GetAwaiter().GetResult())
+        $output = $stdout.GetAwaiter().GetResult()
+        if ($output.Length -gt 0) {
+            # Native pipeline output contains lines, not a trailing synthetic empty record.
+            ($output -replace '\r?\n$', '') -split '\r?\n'
+        }
+        $global:LASTEXITCODE = $process.ExitCode
+    } finally {
+        $process.Dispose()
+    }
+}
+
 # Cargo retains CARGO_BIN_EXE and doctest semantics; its freshness check must not generate new code.
 function Invoke-PreparedRustTests {
     param(
@@ -453,59 +494,57 @@ function Invoke-PreparedRustTests {
         [string] $TestFilter
     )
 
-    $previous = $env:SS_AI_RUST_TEST_PREREQUISITES
-    try {
-        $env:SS_AI_RUST_TEST_PREREQUISITES = $PrerequisitePath
-        $selection = @()
-        $includeDoctests = $false
+    $selection = @()
+    $includeDoctests = $false
 
-        if ($Preparation.status -ceq 'providerFailed') {
-            Write-Host "Blocked native tests: $($Preparation.providerFailure)"
-            if (-not $TestTarget) {
-                $metadata = & cargo metadata --no-deps --format-version 1 --locked | ConvertFrom-Json
-                if ($LASTEXITCODE -ne 0) {
-                    throw 'Locating provider-independent Rust tests failed.'
-                }
-
-                $TestTarget = @($metadata.packages |
-                    Where-Object id -In $metadata.workspace_members |
-                    ForEach-Object targets | Where-Object { $_.kind -contains 'test' -and $_.name -ne 'native' } |
-                    Select-Object -ExpandProperty name -Unique)
-                $selection += @('--lib', '--bins')
-                # Explicit target selectors omit doctests, so run those separately below.
-                $includeDoctests = $true
-            } else {
-                $TestTarget = @($TestTarget | Where-Object { $_ -ne 'native' })
-                if (-not $TestTarget) {
-                    throw 'All selected Rust tests are blocked by provider preparation failure.'
-                }
-            }
-        }
-
-        foreach ($name in $TestTarget) {
-            $selection += @('--test', $name)
-        }
-        if ($TestFilter) {
-            $selection += $TestFilter
-        }
-
-        & cargo test --workspace --all-features --locked --no-fail-fast --target-dir $Preparation.targetDirectory @selection
-        $executionFailed = $LASTEXITCODE -ne 0
-        if ($includeDoctests) {
-            $filter = @()
-            if ($TestFilter) {
-                $filter += $TestFilter
-            }
-            & cargo test --workspace --all-features --locked --doc --target-dir $Preparation.targetDirectory @filter
+    if ($Preparation.status -ceq 'providerFailed') {
+        Write-Host "Blocked native tests: $($Preparation.providerFailure)"
+        if (-not $TestTarget) {
+            $metadata = & cargo metadata --no-deps --format-version 1 --locked | ConvertFrom-Json
             if ($LASTEXITCODE -ne 0) {
-                $executionFailed = $true
+                throw 'Locating provider-independent Rust tests failed.'
+            }
+
+            $TestTarget = @($metadata.packages |
+                Where-Object id -In $metadata.workspace_members |
+                ForEach-Object targets | Where-Object { $_.kind -contains 'test' -and $_.name -ne 'native' } |
+                Select-Object -ExpandProperty name -Unique)
+            $selection += @('--lib', '--bins')
+            # Explicit target selectors omit doctests, so run those separately below.
+            $includeDoctests = $true
+        } else {
+            $TestTarget = @($TestTarget | Where-Object { $_ -ne 'native' })
+            if (-not $TestTarget) {
+                throw 'All selected Rust tests are blocked by provider preparation failure.'
             }
         }
+    }
 
-        if ($executionFailed -or $Preparation.status -ceq 'providerFailed') {
-            throw 'Rust test execution failed.'
+    foreach ($name in $TestTarget) {
+        $selection += @('--test', $name)
+    }
+    if ($TestFilter) {
+        $selection += $TestFilter
+    }
+
+    Invoke-RustTestCargo -PrerequisitePath $PrerequisitePath -ArgumentList (@(
+        'test', '--workspace', '--all-features', '--locked', '--no-fail-fast', '--target-dir', $Preparation.targetDirectory
+    ) + $selection)
+    $executionFailed = $LASTEXITCODE -ne 0
+    if ($includeDoctests) {
+        $filter = @()
+        if ($TestFilter) {
+            $filter += $TestFilter
         }
-    } finally {
-        $env:SS_AI_RUST_TEST_PREREQUISITES = $previous
+        Invoke-RustTestCargo -PrerequisitePath $PrerequisitePath -ArgumentList (@(
+            'test', '--workspace', '--all-features', '--locked', '--doc', '--target-dir', $Preparation.targetDirectory
+        ) + $filter)
+        if ($LASTEXITCODE -ne 0) {
+            $executionFailed = $true
+        }
+    }
+
+    if ($executionFailed -or $Preparation.status -ceq 'providerFailed') {
+        throw 'Rust test execution failed.'
     }
 }
