@@ -56,7 +56,7 @@ Describe 'Native Cargo inventory CLI contract' {
         }
     }
 
-    It 'centralizes ordinary and target-specific build dependencies' {
+    It 'centralizes build and regular dependencies without skipping workspace members' {
         $workspace = Join-Path $TestDrive 'build-workspace'
         [IO.Directory]::CreateDirectory($workspace) | Out-Null
         $manifest = Join-Path $workspace 'Cargo.toml'
@@ -64,12 +64,22 @@ Describe 'Native Cargo inventory CLI contract' {
             '[package]'
             'name = "build-consumer"'
             'version = "0.1.0"'
+            '[workspace]'
+            'members = ["helper"]'
+            '[dependencies]'
+            'helper = { path = "helper", version = "0.1.0" }'
             '[build-dependencies]'
             'build-helper = "1.0.0"'
+            'helper = { path = "helper", version = "0.1.0" }'
+            '[dev-dependencies]'
+            'helper = { path = "helper", version = "0.1.0" }'
             '[target.''cfg(unix)''.build-dependencies]'
             'conditional-helper = "1.0.0"'
         ) -join "`n"
         [IO.File]::WriteAllText($manifest, $manifestText)
+        $helper = Join-Path $workspace 'helper'
+        [IO.Directory]::CreateDirectory($helper) | Out-Null
+        [IO.File]::WriteAllText((Join-Path $helper 'Cargo.toml'), "[package]`nname = 'helper'`n")
         $output = Join-Path $TestDrive 'build-inventory.json'
         & $script:UtilityPath cargo inventory --workspace-manifest $manifest --output-path $output | Out-Null
         $skillPath = Join-Path $script:Repository 'skills/ss-cargo-deps-tidy/SKILL.md'
@@ -78,9 +88,14 @@ Describe 'Native Cargo inventory CLI contract' {
         $query | Should -Not -BeNullOrEmpty
         $query = $query.Replace('<inventory-path-from-stage-1>', $output.Replace("'", "''"))
         $dependencies = @(& ([scriptblock]::Create($query)))
-        $dependencies.Count | Should -Be 2
+        $dependencies.Count | Should -Be 4
         $dependencies.name | Should -Contain 'build-helper'
         $dependencies.name | Should -Contain 'conditional-helper'
+        $local = @($dependencies | Where-Object name -EQ helper)
+        $local.Count | Should -Be 2
+        $local.section | Should -Contain 'dependencies'
+        $local.section | Should -Contain 'build-dependencies'
+        $local.section | Should -Not -Contain 'dev-dependencies'
     }
 
     It 'returns failure and writes diagnostics to stderr for a missing manifest' {

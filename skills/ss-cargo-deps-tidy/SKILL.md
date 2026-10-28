@@ -262,7 +262,8 @@ List package-level declarations, including build dependencies and target-specifi
 ```powershell
 $inv = Get-Content -LiteralPath '<inventory-path-from-stage-1>' -Raw | ConvertFrom-Json
 $inv.dependencies | Where-Object {
-    $_.section -in 'dependencies','dev-dependencies','build-dependencies' -and $_.version -and -not $_.sameWorkspace
+    $_.section -in 'dependencies','dev-dependencies','build-dependencies' -and $_.version -and
+        -not ($_.section -eq 'dev-dependencies' -and $_.sameWorkspace)
 } | Select-Object manifest, line, section, name, version, raw
 ```
 

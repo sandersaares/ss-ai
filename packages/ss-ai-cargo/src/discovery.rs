@@ -5,6 +5,8 @@ use std::path::{Path, PathBuf};
 
 use glob::Pattern;
 use same_file::Handle;
+#[cfg(windows)]
+use winapi_util::file::information;
 
 use crate::error::{
     InvalidPattern, MemberManifestMissing, MemberManifestNotFile, MissingMemberManifest,
@@ -12,11 +14,39 @@ use crate::error::{
 };
 use crate::manifest::Manifest;
 
-/// Caps retained traversal state to limit memory and open filesystem handles.
+/// Caps retained traversal state to limit memory.
 ///
 /// The threshold is an arbitrary safety ceiling large enough for ordinary
 /// workspaces; scans exceeding it fail rather than returning partial results.
 const MAX_STATES: usize = 100_000;
+
+/// Identifies filesystem objects without retaining an open handle per entry.
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub(crate) struct FileIdentity {
+    volume: u64,
+    index: u64,
+}
+
+impl FileIdentity {
+    /// Copies native identity values while the temporary filesystem handle is open.
+    pub(crate) fn from_path(path: &Path) -> io::Result<Self> {
+        let handle = Handle::from_path(path)?;
+        #[cfg(unix)]
+        let identity = Self {
+            volume: handle.dev(),
+            index: handle.ino(),
+        };
+        #[cfg(windows)]
+        let identity = {
+            let information = information(handle.as_file())?;
+            Self {
+                volume: information.volume_serial_number(),
+                index: information.file_index(),
+            }
+        };
+        Ok(identity)
+    }
+}
 
 /// Expands root member and exclude declarations into unique manifest paths.
 pub(crate) fn discover_members(
@@ -42,7 +72,8 @@ pub(crate) fn discover_members(
     for pattern in &manifest.members {
         let dirs = expand(root, pattern)?;
         require_pattern_matches(pattern, !dirs.is_empty())?;
-        let wildcard = pattern.contains(['*', '?', '[']);
+        // A terminal recursive glob includes intermediate directories, not just packages.
+        let recursive = pattern.rsplit(is_separator).find(|part| !part.is_empty()) == Some("**");
         let mut found = false;
         for dir in dirs {
             let dir_id = identity(&dir)?;
@@ -56,8 +87,7 @@ pub(crate) fn discover_members(
                     members.entry(dir_id).or_insert(canonical(&path)?);
                     found = true;
                 }
-                Err(error) if error.kind() == ErrorKind::NotFound && wildcard => {}
-                Ok(_) if wildcard => {}
+                Err(error) if error.kind() == ErrorKind::NotFound && recursive => {}
                 Err(error) if error.kind() == ErrorKind::NotFound => {
                     return Err(missing_member_manifest(path, error));
                 }
@@ -136,9 +166,9 @@ fn is_separator(character: char) -> bool {
     std::path::is_separator(character)
 }
 
-/// Retains an open handle so identity is not inferred from path spelling.
-pub(crate) fn identity(path: &Path) -> Result<Handle, ScanError> {
-    Handle::from_path(path).map_err(|error| filesystem_failure("identify", path, error))
+/// Uses filesystem identity rather than path spelling with a bounded handle lifetime.
+pub(crate) fn identity(path: &Path) -> Result<FileIdentity, ScanError> {
+    FileIdentity::from_path(path).map_err(|error| filesystem_failure("identify", path, error))
 }
 
 /// Rejects missing member matches separately from manifest and I/O failures.
@@ -218,11 +248,16 @@ mod tests {
     use std::path::PathBuf;
 
     use ohno::ErrorExt;
+    use static_assertions::assert_impl_all;
 
     use super::{
-        MAX_STATES, check_traversal_limit, missing_member_manifest, require_pattern_matches,
+        FileIdentity, MAX_STATES, check_traversal_limit, missing_member_manifest,
+        require_pattern_matches,
     };
     use crate::error::{MemberManifestMissing, MissingMemberPattern, TraversalLimit};
+
+    // Traversal indexes retain values, never filesystem handles.
+    assert_impl_all!(FileIdentity: Copy);
 
     #[test]
     fn reports_missing_member_pattern_with_its_identity() {

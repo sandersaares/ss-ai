@@ -296,6 +296,21 @@ fn invalid_input_and_missing_members_fail_instead_of_skipping() {
 }
 
 #[test]
+fn ordinary_member_globs_reject_unusable_manifests() {
+    let workspace = Workspace::new();
+    workspace.write("Cargo.toml", "[workspace]\nmembers = ['crates/*']\n");
+    workspace.write("crates/valid/Cargo.toml", "[package]\nname = 'valid'\n");
+    let missing = workspace.0.join("crates/missing");
+    fs::create_dir_all(&missing).unwrap();
+    let error = workspace.scan().unwrap_err();
+    assert!(error.to_string().contains("missing"));
+
+    fs::create_dir_all(missing.join("Cargo.toml")).unwrap();
+    let error = workspace.scan().unwrap_err();
+    assert!(error.to_string().contains("Not a manifest file"));
+}
+
+#[test]
 fn case_identity_follows_the_actual_filesystem() {
     let workspace = Workspace::new();
     workspace.write("Upper/Cargo.toml", "[package]\nname = 'actual'\n");

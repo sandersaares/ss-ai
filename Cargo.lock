@@ -1492,6 +1492,7 @@ dependencies = [
  "serde_json",
  "static_assertions",
  "toml_edit",
+ "winapi-util",
 ]
 
 [[package]]

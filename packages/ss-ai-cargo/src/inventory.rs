@@ -4,11 +4,10 @@ use std::num::NonZeroUsize;
 use std::path::{Path, PathBuf};
 
 use jiff::Timestamp;
-use same_file::Handle;
 use serde::Serialize;
 
 use crate::InventoryError;
-use crate::discovery::{discover_members, identity};
+use crate::discovery::{FileIdentity, discover_members, identity};
 use crate::error::{
     DependencyPathFailure, DifferentFilesystemRoot, DuplicatePackage, MissingParent,
     NonUnicodePath, RelativePathFailure, ScanError, filesystem_failure,
@@ -103,7 +102,7 @@ struct MemberScans {
 
 /// Supports the tidy heuristic without retaining duplicate manifest data.
 struct MemberIndex {
-    directories: HashMap<Handle, String>,
+    directories: HashMap<FileIdentity, String>,
     packages: BTreeMap<String, String>,
 }
 
@@ -229,7 +228,7 @@ fn classify_dependencies(
         let directory = parent(&path)?;
         for mut dependency in scan.dependencies {
             if let Some(path) = &dependency.path {
-                match Handle::from_path(directory.join(path)) {
+                match FileIdentity::from_path(&directory.join(path)) {
                     Ok(resolved) => {
                         dependency.resolved_manifest = index.directories.get(&resolved).cloned();
                     }
@@ -296,7 +295,7 @@ pub(crate) fn relative_path(path: &Path, root: &Path) -> Result<String, ScanErro
     if let Ok(relative) = path.strip_prefix(root) {
         return path_string(relative);
     }
-    // Ancestor handles distinguish filesystem identity from case spelling.
+    // Ancestor identity values distinguish filesystem identity from case spelling.
     let mut root_ancestors = Vec::new();
     for ancestor in root.ancestors() {
         root_ancestors.push(identity(ancestor)?);

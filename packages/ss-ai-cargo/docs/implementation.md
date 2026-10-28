@@ -5,14 +5,20 @@ The parser uses `toml_edit`'s immutable document and source spans. Its TOML
 locations need no separate TOML scanner. Dotted keys are grouped using the
 parser's table representation rather than adjacency in the file.
 
-Member patterns are traversed by directory and pattern position. Open
-filesystem identity handles identify visited directories and members,
-avoiding both platform-based case assumptions and recursive symlink cycles.
+Member patterns are traversed by directory and pattern position. Filesystem
+identity values identify visited directories and members, avoiding both
+platform-based case assumptions and recursive symlink cycles. Each lookup
+closes its temporary handle before traversal continues, so handle use does not
+grow with the member or directory count.
 Canonical paths are used for presentation, not as identity keys. Traversal
 limits bound retained state and pending work; exceeding a limit or encountering
 a directory or manifest error fails the inventory rather than returning an
 incomplete result. Results are ordered deterministically by relative manifest
 path and source position.
+
+Ordinary member patterns require a manifest in every matched directory.
+A terminal recursive glob can pass through intermediate directories without
+manifests, but a manifest path that exists and is not a file is always an error.
 
 The caller supplies the scan time and handles output publication. No global
 clock, process, network, or file-writing facility is needed by this library.

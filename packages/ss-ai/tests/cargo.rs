@@ -188,6 +188,47 @@ fn invalid_input_fails_without_success_json() {
     assert!(!output.stderr.is_empty());
 }
 
+#[cfg(target_os = "linux")]
+#[test]
+fn recursive_inventory_does_not_retain_a_descriptor_per_directory() {
+    let root = TempDir::new().unwrap();
+    fs::write(
+        root.path().join("Cargo.toml"),
+        "[workspace]\nmembers = ['crates/**']\n",
+    )
+    .unwrap();
+    // More members than the child descriptor budget expose retained identity handles.
+    let member_count = 192;
+    for member in 0..member_count {
+        let directory = root.path().join("crates").join(format!("member-{member}"));
+        fs::create_dir_all(&directory).unwrap();
+        fs::write(
+            directory.join("Cargo.toml"),
+            format!("[package]\nname = 'member-{member}'\n"),
+        )
+        .unwrap();
+    }
+
+    // Limit only the child: its budget permits normal startup but not one handle per member.
+    let output = Command::new("/bin/sh")
+        .args(["-c", "ulimit -n 64 && exec \"$@\"", "inventory-test"])
+        .arg(env!("CARGO_BIN_EXE_ss-ai"))
+        .args(["cargo", "inventory"])
+        .current_dir(root.path())
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let inventory: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(
+        inventory["memberManifests"].as_array().unwrap().len(),
+        member_count
+    );
+}
+
 mod timestamp {
     use std::ffi::OsString;
     use std::fs;
