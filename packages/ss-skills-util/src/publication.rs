@@ -655,6 +655,10 @@ impl<'a> Store<'a> {
         if !fresh.equivalent(&operation.snapshot)? {
             let outcome = match decision {
                 Decision::AlreadyValid { .. } => Outcome::AlreadyValid,
+                // Refresh removes draft PRs from the run without authorizing a write.
+                Decision::Ineligible { ref reason } if reason == "draft" => {
+                    Outcome::StaleDuringExecution
+                }
                 Decision::Ineligible { .. } => Outcome::Ineligible,
                 _ => Outcome::StaleDuringExecution,
             };

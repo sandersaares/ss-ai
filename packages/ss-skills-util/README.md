@@ -133,6 +133,10 @@ Use a new run path for a fresh scan. A discovery candidate still requires
 approval assessment and freshness checks; discovery is not authorization to
 publish.
 
+Discovery excludes drafts before checking commit recency. Drafts do not appear
+in the inventory, counts, or results. Inspection or refresh removes a PR that
+has become a draft and returns no item for it.
+
 `inspect` accepts a positive `PR_NUMBER` from the run's recent, nondraft
 inventory. It collects an immutable approval observation and returns that PR's
 summary. It preserves the run's repository, account, tenant, and policy binding.
@@ -189,7 +193,7 @@ The producer and consumer validate the full record, including excluded PRs.
 | --- | --- |
 | Run | `schemaVersion: 8`; UUID `runId`; canonical `repositoryUrl`; nonempty string `repositoryId`, `accountId`, `utilityVersion`; `platform` (`gitHub` or `azureDevOps`); nullable string `tenant`; `policy`; Boolean `dryRun`, `enumerationComplete`; `state`; `inventory`; nullable `error` and positive integer `errorPullRequestId`. A PR-bound publication failure records its originating PR; only that PR's owned operation can recover the failed run. |
 | Policy | Absolute UTF-8 `sourcePath`; nonempty UTF-8 `content`; lowercase hexadecimal `sha256` of the captured content bytes. |
-| Inventory entry | Unique positive integer `pullRequestId`; canonical `url`; nonempty `title`; Boolean `draft`; `recency`; `recovery`; nullable `inspection`, `assessment`, `executionError`, `publication`, `reviewNotice`, and `automaticApproval`. Entries are in ascending PR order. |
+| Inventory entry | Unique positive integer `pullRequestId`; canonical `url`; nonempty `title`; `draft: false`; `recency`; `recovery`; nullable `inspection`, `assessment`, `executionError`, `publication`, `reviewNotice`, and `automaticApproval`. Entries are in ascending PR order. |
 | Recovery | `attemptIds`: ordered distinct UUIDs, at most the recovery limit, excluding the run ID; nullable `stale` (`staleEvidence`) and `error` (`retryExhausted`, only at the limit). The last attempt ID selects the current PR's host-journal `runId`; the initial attempt uses the enclosing run ID. |
 | Recency | `state` (`pending`, `recent`, `noRecentCommit`, `failed`); nullable UTC `checkedAt`, `latestNonfutureCommit`; Boolean `evidenceComplete`; nullable `error`. |
 | Inspection | UTC `capturedAt`; nullable `snapshotDigest`, `evidence`, `decision`, and `error`. Successful inspections have evidence, decision, and digest without an error; failed inspections have only an error. |
@@ -216,7 +220,8 @@ their digests are not rewritten; immutable assessment and journal bindings remai
 Consumers recompute its conclusion and validate its run identity.
 Schema-7 records load with empty recovery state; their original journal identities,
 assessment contracts, and uncertain effects remain unchanged. Other older run
-schemas require a fresh run.
+schemas require a fresh run. Valid retained draft entries from older runs are
+removed on access.
 
 ADO inspections ignore deleted threads and comments as authority while retaining
 their tombstones and audit evidence in snapshots. They report `noPriorApproval` when no
@@ -233,16 +238,15 @@ produce `partial` after all other recency checks finish. Scope failures produce
 Results contain `schemaVersion`, `runId`, `repositoryUrl`, `state`,
 `enumerationComplete`, `dryRun`, `policyDigest`, `counts`, `items`, nullable
 `nextAfter`, and nullable `error`. Counts contain `open`, `noRecentCommit`,
-`assessmentRequired`, `failed`, `draft`, `pending`, `alreadyValid`,
+`assessmentRequired`, `failed`, `pending`, `alreadyValid`,
 `noPriorApproval`, `ineligible`, `indeterminate` (reserved, always zero), `needsReview`, `wouldReapprove`,
 `readyToReapprove`, `reapproved`, and `staleDuringExecution`. Outcome counts
-partition the open inventory; `draft` is a diagnostic subset of `ineligible`.
-Draft counts include only proven recent drafts.
+partition the nondraft open inventory.
 
 Each result item contains `pullRequestId`, `url`, `title`, `status`
 (`assessmentRequired`, `alreadyValid`, `noPriorApproval`, `ineligible`,
 `needsReview`, `wouldReapprove`, `readyToReapprove`, `reapproved`,
-`staleDuringExecution`, or `failed`), nullable `reason` (`draft` when applicable),
+`staleDuringExecution`, or `failed`), nullable `reason`,
 nullable `approvalEventId`, `capturedAt`, `snapshotDigest`, `assessmentDigest`,
 `assessmentReason`, `reviewNotice`, `automaticApproval`, `publication`, and `error`,
 plus `staleRecovery` (`attempts`, `limit`, Boolean `exhausted`). Only recent PRs and explicit

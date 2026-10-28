@@ -58,7 +58,7 @@ struct Policy {
     content: String,
 }
 
-/// Every enumerated PR has one recency record, even if it never becomes a candidate.
+/// Each nondraft PR has a recency record, even if it never becomes a candidate.
 #[derive(Debug, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct Entry {
@@ -427,7 +427,7 @@ impl DiscoveryRecord {
                 );
             }
         }
-        let run: Self = serde_json::from_value(document).map_err(|error| {
+        let mut run: Self = serde_json::from_value(document).map_err(|error| {
             Failure::caused_by(
                 "invalidState",
                 "Malformed discovery record".to_owned(),
@@ -441,6 +441,19 @@ impl DiscoveryRecord {
                 error.into_std_error(),
             )
         })?;
+        // Older runs can contain drafts from discovery or an inspection; neither
+        // can have a publication attempt, so they can be removed safely.
+        let previous_len = run.inventory.len();
+        run.inventory.retain(|entry| {
+            !entry.draft
+                && !matches!(entry.decision(), Some(Decision::Ineligible { reason }) if reason == "draft")
+        });
+        if run.inventory.len() != previous_len {
+            if run.state != RunState::Failed {
+                finish_state(&mut run);
+            }
+            run.save(journal)?;
+        }
         Ok(Some(run))
     }
 
@@ -465,7 +478,7 @@ impl DiscoveryRecord {
                     "pullRequestId": entry.pull_request_id, "url": entry.url,
                     "title": entry.title,
                     "status": entry.status(self.dry_run),
-                    "reason": if entry.draft { Some("draft") } else { decision.and_then(Decision::reason) },
+                    "reason": decision.and_then(Decision::reason),
                     "assessmentReason": entry.assessment.as_ref().and_then(Assessment::rationale),
                     "approvalEventId": decision.and_then(Decision::approval_event_id),
                     "capturedAt": entry.inspection.as_ref().map(|inspection| &inspection.captured_at),
@@ -508,7 +521,6 @@ impl DiscoveryRecord {
                 "reapproved": self.inventory.iter().filter(|entry| entry.status(self.dry_run) == "reapproved").count(),
                 "failed": self.inventory.iter().filter(|entry| entry.failed() && !entry.stale()).count(),
                 "staleDuringExecution": self.inventory.iter().filter(|entry| entry.stale()).count(),
-                "draft": self.inventory.iter().filter(|entry| entry.draft && entry.recency.state == RecencyState::Recent).count(),
                 "pending": self.inventory.iter().filter(|entry| entry.recency.state == RecencyState::Pending).count(),
                 "alreadyValid": self.inventory.iter().filter(|entry| entry.status(self.dry_run) == "alreadyValid").count(),
                 "noPriorApproval": self.inventory.iter().filter(|entry| matches!(entry.decision(), Some(Decision::NoPriorApproval))).count(),
@@ -1133,6 +1145,21 @@ pub(crate) fn inspect(
             )?;
             Ok((evidence, decision, snapshot_digest))
         });
+        if matches!(&observation, Ok((_, Decision::Ineligible { reason }, _)) if reason == "draft")
+        {
+            // A PR can become a draft after enumeration; do not retain its captured evidence.
+            run.inventory.remove(index);
+            finish_state(&mut run);
+            run.save(&journal)?;
+            let mut summary = run.summary(0, NonZeroUsize::MIN);
+            *summary
+                .get_mut("items")
+                .ok_or_else(|| fail("invalidState", "Summary lacks items"))? = json!([]);
+            *summary
+                .get_mut("nextAfter")
+                .ok_or_else(|| fail("invalidState", "Summary lacks pagination"))? = Value::Null;
+            return Ok(summary);
+        }
         let mut scope_error = None;
         let inspection = match observation {
             Ok((evidence, decision, snapshot_digest)) => {
@@ -1729,6 +1756,9 @@ fn metadata(api: &mut Api<'_>, repository: &Target) -> Result<Vec<Entry>, AppErr
     let mut entries = Vec::new();
     for (id, value) in api.open_pull_requests(repository)? {
         let github = repository.platform == Platform::GitHub;
+        if boolean(field(&value, if github { "draft" } else { "isDraft" })?)? {
+            continue;
+        }
         let state = text(field(&value, if github { "state" } else { "status" })?)?;
         if state != if github { "open" } else { "active" } {
             return Err(fail(
@@ -1747,7 +1777,7 @@ fn metadata(api: &mut Api<'_>, repository: &Target) -> Result<Vec<Entry>, AppErr
             pull_request_id: id,
             url: repository.candidate(id).web_url,
             title: title.to_owned(),
-            draft: boolean(field(&value, if github { "draft" } else { "isDraft" })?)?,
+            draft: false,
             recency: Recency::pending(),
             inspection: None,
             assessment: None,

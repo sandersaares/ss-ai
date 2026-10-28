@@ -38,6 +38,8 @@ when not supplied. The mode and policy are immutable for this run. Read
 Inspect only recent nondraft entries requiring assessment. Retain each
 inspection's `snapshotDigest`. Scope failures stop the run; independent PR
 failures remain visible while other eligible PRs can proceed.
+Inspection or refresh can return no item when a PR has become a draft; do not
+assess or report that PR.
 
 # Stage 2: preparation and evidence
 

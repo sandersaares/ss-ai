@@ -1238,6 +1238,49 @@ fn refresh(root: &Path, provider: &Provider) -> Result<Value, AppError> {
     )
 }
 
+/// Draft conversion after assessment cannot authorize a write or survive refresh.
+fn draft_conversion_during_publication_is_removed_on_refresh() {
+    let repository = TempDir::new().unwrap();
+    let (old, new) = sources(repository.path());
+    for ado in [false, true] {
+        for disposition in ["insignificant", "significant"] {
+            let scope = TempDir::new().unwrap();
+            let root = scope.path().join("run");
+            let provider = if ado {
+                Provider::ado(repository.path(), &old, &new)
+            } else {
+                Provider::new(repository.path(), &old, &new)
+            };
+            let (snapshot, prepared) = prepare(&root, &provider, false);
+            assess_as(&root, &provider, &snapshot, &prepared, disposition);
+            provider.evidence.borrow_mut()["pullRequest"][if ado { "isDraft" } else { "draft" }] =
+                json!(true);
+            if disposition == "insignificant" {
+                assert_eq!(
+                    publish(&root, &provider, &snapshot).unwrap()["items"][0]["status"],
+                    "staleDuringExecution"
+                );
+            } else {
+                assert_eq!(
+                    ss_skills_util::classification(
+                        &notify(&root, &provider, &snapshot).unwrap_err()
+                    ),
+                    "staleEvidence"
+                );
+            }
+            assert_eq!(provider.writes.get(), 0);
+            let refreshed = refresh(&root, &provider).unwrap();
+            assert_eq!(refreshed["state"], "complete");
+            assert_eq!(refreshed["items"], json!([]));
+            assert_eq!(refreshed["counts"]["open"], 1);
+            let record: Value =
+                serde_json::from_slice(&fs::read(root.join("run.json")).unwrap()).unwrap();
+            assert_eq!(record["inventory"].as_array().unwrap().len(), 1);
+            assert_eq!(record["inventory"][0]["pullRequestId"], 2);
+        }
+    }
+}
+
 /// Source movement forces a new exact-source assessment on both publication paths.
 #[expect(
     clippy::cognitive_complexity,
@@ -2608,6 +2651,7 @@ fn native_stale_evidence_recovery_preserves_assessment_and_effect_boundaries() {
         .lock()
         .unwrap_or_else(PoisonError::into_inner);
     stale_preflight_recovery_reassesses_source_before_any_effect();
+    draft_conversion_during_publication_is_removed_on_refresh();
     stale_notification_recovery_exhausts_without_remote_writes();
     repeated_observation_has_a_distinct_snapshot();
     stale_inspection_recovery_is_bounded_and_rechecks_authority();
