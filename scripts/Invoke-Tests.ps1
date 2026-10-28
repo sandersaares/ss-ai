@@ -40,6 +40,7 @@ if ($Suite -in @('All', 'Pester')) {
     # Build only when those suites are selected, never use a developer's installed
     # executable or run unrelated Rust tests for a focused Pester invocation.
     $nativeConsumers = @(
+        'Generate-Inventory.Tests.ps1', 'Graders.Tests.ps1',
         'SsAutoreapprove.Tests.ps1',
         'SsReviewFindingDecisions.Tests.ps1', 'SsReviewFindingMarkdown.Tests.ps1',
         'SsReviewGitDiff.Tests.ps1', 'SsReviewPublicationAzureDevOps.Tests.ps1',

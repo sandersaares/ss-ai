@@ -124,8 +124,10 @@ struct Provider {
 impl Provider {
     /// Starts each scenario with independent evidence and effect counters.
     fn new(repository: &Path, old: &str, new: &str) -> Self {
-        let fixture: Value =
-            serde_json::from_str(include_str!("fixtures/github-approval.json")).unwrap();
+        let fixture: Value = serde_json::from_str(include_str!(
+            "../../ss-skills-review/tests/fixtures/github-approval.json"
+        ))
+        .unwrap();
         let mut evidence = fixture["evidence"].clone();
         evidence["pullRequest"]["head"]["sha"] = json!(new);
         for review in evidence["reviews"].as_array_mut().unwrap() {
@@ -162,8 +164,10 @@ impl Provider {
     fn ado(repository: &Path, old: &str, new: &str) -> Self {
         let mut provider = Self::new(repository, old, new);
         provider.ado = true;
-        let fixture: Value =
-            serde_json::from_str(include_str!("fixtures/ado-no-approval-policy.json")).unwrap();
+        let fixture: Value = serde_json::from_str(include_str!(
+            "../../ss-skills-review/tests/fixtures/ado-no-approval-policy.json"
+        ))
+        .unwrap();
         let mut evidence = fixture["stages"][2].clone();
         evidence["sourceCommit"] = json!(new);
         evidence["iterations"] = json!([

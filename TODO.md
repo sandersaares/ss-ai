@@ -26,11 +26,8 @@ Improvement ideas to revisit when the repo matures.
   [`skills/ss-cargo-deps-tidy/SKILL.md`](skills/ss-cargo-deps-tidy/SKILL.md)
   - once as prose under "Workspace-level feature flags" and once as
   inline PowerShell arrays in stage 6. A single source of truth (e.g.
-  emitted by `Generate-Inventory.ps1`) would avoid drift, but
+  emitted by `ss-skills-util cargo inventory`) would avoid drift, but
   representing both the data and the rationale concisely is non-trivial.
   Needs more design thought.
-- **Cargo inventory/expectation records.** Formalize producer/consumer
-  schemas and maintained reading commands for
-  `skills/ss-cargo-deps-tidy/scripts/Generate-Inventory.ps1` and its graders.
-- **Cargo inventory path identity.** Replace OS-based case-folding in
-  `Generate-Inventory.ps1` with filesystem-aware behavior and focused tests.
+- **Cargo inventory/expectation readers.** Add schema-checked reading commands
+  for the native Cargo inventory and its graders' expectation records.

@@ -48,6 +48,22 @@ Required for eval tooling that reads/writes YAML (e.g. the
 
 Some skills ship with executable helper scripts that have their own unit tests. Tests live under `tests/<skill-name>/` (parallel to `skills/`) and use [Pester](https://pester.dev/) 5.x.
 
+## Native component boundaries
+
+The installed `ss-skills-util` executable composes focused workspace packages.
+The [implementation ownership map](packages/ss-skills-util/docs/implementation.md)
+defines their dependency direction. Keep new domain logic in its owning
+component rather than adding it to the executable or a general-purpose helper
+crate.
+
+Cargo inventory parsing and workspace discovery live in `ss-skills-cargo`,
+independently of review services and authentication. Its unit tests cover
+in-process parsing; integration tests cover filesystem behavior. The executable
+package owns command-line tests, and Pester covers the skill and grader callers.
+Targeted component builds need only that component's dependency graph. Building
+the complete executable still builds all of its components; crate separation
+does not eliminate cold-build or final-link costs.
+
 ## Running tests
 
 Run from the active checkout root. `just --list` lists shortcuts.

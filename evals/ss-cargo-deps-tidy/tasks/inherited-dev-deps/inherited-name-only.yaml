@@ -1,8 +1,8 @@
 id: inherited-dev-dep-name-only
 name: Inherited dev-dep - workspace entry has version only, no path
 description: >
-  Smallest reproduction of bug #2 in Generate-Inventory.ps1's same-workspace
-  resolution. A workspace.dependencies entry references a same-workspace
+  Smallest reproduction of a workspace name-only classification case.
+  A workspace.dependencies entry references a same-workspace
   member purely by name + version with no `path` attribute; a sibling member
   inherits it via `workspace = true` in dev-dependencies. The tidy skill
   must (Stage 2) add the missing path to the workspace-level entry and

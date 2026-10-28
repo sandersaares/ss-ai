@@ -88,7 +88,7 @@ Describe 'Automatic reapproval repository scope instructions' {
 
 Describe 'Automatic reapproval provider fixtures' {
     It 'validates the GitHub contract projection and its explicit provenance' {
-        $fixture = Join-Path $PSScriptRoot '..\packages\ss-skills-util\tests\fixtures\github-approval.json'
+        $fixture = Join-Path $PSScriptRoot '..\packages\ss-skills-review\tests\fixtures\github-approval.json'
         $schema = Join-Path $PSScriptRoot '..\dev\ss-autoreapprove\github-approval-fixture.schema.json'
         Test-Json -LiteralPath $fixture -SchemaFile $schema | Should -BeTrue
     }

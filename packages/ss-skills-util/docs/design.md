@@ -156,7 +156,10 @@ of deciding whether a finding falls within those ranges.
 
 Skills invoke named commands and consume complete JSON results. The command
 and record contracts live in the [package reference](../README.md).
-The library target connects the executable and tests; it is not a supported SDK.
+The Cargo inventory reads local workspace manifests without provider
+authentication. It reports dependency declarations and can atomically publish
+the complete inventory for later skill processing. Internal libraries are not
+a supported SDK.
 
 - [Review selection and confirmation](design/review-selection.md) reserves
   eligible work and verifies ownership before the calling skill proceeds.

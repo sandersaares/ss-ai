@@ -1,5 +1,5 @@
 [workspace]
-members = ["packages/ss-skills-util"]
+members = ["packages/ss-skills-assessment", "packages/ss-skills-cargo", "packages/ss-skills-cargo/fuzz", "packages/ss-skills-git", "packages/ss-skills-review", "packages/ss-skills-runtime", "packages/ss-skills-util"]
 resolver = "3"
 
 [workspace.package]
@@ -12,17 +12,26 @@ include = ["src/**/*"]
 
 [workspace.dependencies]
 clap = { version = "4.6.1", default-features = false, features = ["default"] }
+glob = { version = "0.3.3", default-features = false }
 jiff = { version = "0.2.38", default-features = false, features = ["std"] }
+libfuzzer-sys = { version = "0.4.10", default-features = false }
 mimalloc = { version = "0.1.52", default-features = false }
 ohno = { version = "0.5.0", default-features = false }
 regex = { version = "1.12.2", default-features = false, features = ["std"] }
 reqwest = { version = "0.13.4", default-features = false }
+same-file = { version = "1.0.6", default-features = false }
 serde = { version = "1.0.228", default-features = false, features = ["std"] }
 serde_json = { version = "1.0.150", default-features = false, features = ["std"] }
 sha2 = { version = "0.10.9", default-features = false, features = ["std"] }
+ss-skills-assessment = { path = "packages/ss-skills-assessment", default-features = false }
+ss-skills-cargo = { path = "packages/ss-skills-cargo", default-features = false }
+ss-skills-git = { path = "packages/ss-skills-git", default-features = false }
+ss-skills-review = { path = "packages/ss-skills-review", default-features = false }
+ss-skills-runtime = { path = "packages/ss-skills-runtime", default-features = false }
 static_assertions = { version = "1.1.0", default-features = false }
 tempfile = { version = "3.20.0", default-features = false }
 tick = { version = "0.7.1", default-features = false }
+toml_edit = { version = "0.25.17", default-features = false }
 tokio = { version = "1.53.3", default-features = false }
 url = { version = "2.5.7", default-features = false, features = ["std"] }
 uuid = { version = "1.18.1", default-features = false, features = ["std"] }

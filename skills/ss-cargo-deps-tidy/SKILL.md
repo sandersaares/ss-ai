@@ -80,19 +80,33 @@ Execute all stages in sequence to complete the workflow.
 
 Generate the inventory once at the start of the workflow and write it to a temporary file. All subsequent stages run filter queries against the loaded object - they never load the raw file contents into the conversation.
 
-**Critical:** Always invoke the script with `-OutputPath`. The JSON body can easily exceed 100 KB on real workspaces and is not suitable for direct inclusion in the agent context window. Do not `Get-Content` the inventory file without an immediate `| ConvertFrom-Json` and a follow-up filter; do not paste, summarize, or quote its raw contents.
+**Critical:** Always invoke the native command with `--output-path`. The JSON body can easily exceed 100 KB on real workspaces and is not suitable for direct inclusion in the agent context window. Do not `Get-Content` the inventory file without an immediate `| ConvertFrom-Json` and a follow-up filter; do not paste, summarize, or quote its raw contents. Inventory `sameWorkspace` is a tidy name/path classification, not a claim about Cargo registry resolution.
 
 ```powershell
+#Requires -Version 7.6
+
+Set-StrictMode -Version Latest
+$ErrorActionPreference = 'Stop'
+$PSNativeCommandUseErrorActionPreference = $true
+
 $inventoryPath = Join-Path ([IO.Path]::GetTempPath()) "cargo-deps-inventory-$([guid]::NewGuid()).json"
-& '{{SKILL_ROOT}}/scripts/Generate-Inventory.ps1' `
-    -WorkspaceManifest '{{WORKSPACE_MANIFEST}}' `
-    -OutputPath $inventoryPath
+$previousNativeErrorPreference = $PSNativeCommandUseErrorActionPreference
+$PSNativeCommandUseErrorActionPreference = $false
+try {
+    & ss-skills-util cargo inventory `
+        --workspace-manifest '{{WORKSPACE_MANIFEST}}' `
+        --output-path $inventoryPath
+} finally {
+    $PSNativeCommandUseErrorActionPreference = $previousNativeErrorPreference
+}
+if ($LASTEXITCODE -ne 0) {
+    throw 'Cargo inventory generation failed.'
+}
 Write-Host "Inventory written to: $inventoryPath"
 ```
 
 | Placeholder | Description |
 | --- | --- |
-| `SKILL_ROOT` | Absolute directory containing this skill's `SKILL.md`. |
 | `WORKSPACE_MANIFEST` | Absolute path to the workspace-level `Cargo.toml`. |
 
 If the command fails, stop and report its diagnostic; do not proceed with a partial inventory. On success, use the printed output path for the following queries.

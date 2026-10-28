@@ -15,25 +15,21 @@ all-features = true
 
 [dependencies]
 clap = { workspace = true, features = ["derive"] }
-jiff = { workspace = true }
 mimalloc = { workspace = true }
 ohno = { workspace = true, features = ["app-err"] }
-regex = { workspace = true }
-reqwest = { workspace = true, features = ["blocking", "rustls", "system-proxy"] }
-serde = { workspace = true, features = ["derive"] }
+same-file = { workspace = true }
 serde_json = { workspace = true }
-sha2 = { workspace = true }
-tempfile = { workspace = true }
-tick = { workspace = true, features = ["tokio"] }
-tokio = { workspace = true, features = ["rt", "time"] }
-url = { workspace = true }
-uuid = { workspace = true, features = ["v4"] }
+ss-skills-cargo = { workspace = true }
+ss-skills-git = { workspace = true }
+ss-skills-review = { workspace = true }
+ss-skills-runtime = { workspace = true }
 
 [dev-dependencies]
-static_assertions = { workspace = true }
-
-[target.'cfg(windows)'.dependencies]
-windows-sys = { workspace = true, features = ["Win32_Foundation", "Win32_Storage_FileSystem"] }
+jiff = { workspace = true }
+sha2 = { workspace = true }
+tempfile = { workspace = true }
+url = { workspace = true }
+uuid = { workspace = true, features = ["v4"] }
 
 [lints]
 workspace = true

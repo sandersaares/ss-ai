@@ -69,6 +69,21 @@ Status is `added`, `alreadyRegistered`, or `selfIsAuthor` (GitHub only).
 It does not cast an approval. Preserve the calling review workflow's handling
 of registration permission failures.
 
+## Cargo inventory
+
+```powershell
+ss-skills-util cargo inventory --workspace-manifest "{{WORKSPACE_MANIFEST}}" `
+  --output-path "{{OUTPUT_PATH}}"
+```
+
+`--workspace-manifest` selects a Cargo workspace manifest or its directory and
+defaults to `./Cargo.toml`. Without `--output-path`, the command emits the
+complete versioned inventory on stdout. With an output path, it atomically
+publishes the inventory and emits a summary with absolute `outputPath`,
+`memberCount`, and `dependencyCount`. The destination must not alias a scanned
+manifest. Readers can retain an opened complete version during replacement.
+The inventory is local and does not initialize provider authentication.
+
 ## Git commands
 
 ```powershell

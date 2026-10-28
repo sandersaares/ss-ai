@@ -808,8 +808,10 @@ struct AzureApproval {
 impl AzureApproval {
     fn new(stage: usize) -> Self {
         Self {
-            fixture: serde_json::from_str(include_str!("fixtures/ado-no-approval-policy.json"))
-                .unwrap(),
+            fixture: serde_json::from_str(include_str!(
+                "../../ss-skills-review/tests/fixtures/ado-no-approval-policy.json"
+            ))
+            .unwrap(),
             stage,
             calls: RefCell::default(),
             source_reads: Cell::new(0),
@@ -1662,8 +1664,10 @@ struct GitHubApproval {
 
 impl GitHubApproval {
     fn new() -> Self {
-        let fixture: Value =
-            serde_json::from_str(include_str!("fixtures/github-approval.json")).unwrap();
+        let fixture: Value = serde_json::from_str(include_str!(
+            "../../ss-skills-review/tests/fixtures/github-approval.json"
+        ))
+        .unwrap();
         Self {
             calls: RefCell::default(),
             evidence: fixture["evidence"].clone(),

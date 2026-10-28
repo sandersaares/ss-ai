@@ -24,6 +24,7 @@ param()
 
 $ErrorActionPreference = 'Stop'
 Set-StrictMode -Version Latest
+$PSNativeCommandUseErrorActionPreference = $true
 
 $pinnedSha    = '3e1f241ddfb6de7ab0ecca1a54ca923807135d83'
 $shortSha     = '3e1f241'
@@ -147,7 +148,6 @@ modified; source files must be byte-identical to upstream.
                     '-NoProfile', '-File',
                     "$graderDir/Test-CargoTidied.ps1",
                     '-ExpectationsPath', "$evalDir/fixtures/folo-3e1f241-expectations.json",
-                    '-InventoryScript', 'skills/ss-cargo-deps-tidy/scripts/Generate-Inventory.ps1',
                     '-RequireBumps'
                 )
                 timeout = 60

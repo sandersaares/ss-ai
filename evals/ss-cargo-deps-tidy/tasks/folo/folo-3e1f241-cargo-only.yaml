@@ -94,7 +94,7 @@ graders:
   - name: cargo-tidiness-checks
     type: program
     config:
-      # Semantic validation via Generate-Inventory: enforces Stage 2/4/5/6
+      # Native cargo inventory validation: enforces Stage 2/4/5/6
       # universally across every workspace dep, plus the fixture-specific
       # centralizations and feature edits encoded in the expectations JSON.
       # Stage 7 bumps are intentionally NOT required here - the cargo-only
@@ -107,6 +107,4 @@ graders:
         - dev/ss-cargo-deps-tidy/evals/Test-CargoTidied.ps1
         - -ExpectationsPath
         - evals/ss-cargo-deps-tidy/fixtures/folo-3e1f241-expectations.json
-        - -InventoryScript
-        - skills/ss-cargo-deps-tidy/scripts/Generate-Inventory.ps1
       timeout: 60

@@ -5,7 +5,9 @@ use std::io::{self, Write};
 use std::process::ExitCode;
 
 use ohno::AppError;
-use ss_skills_util::{NativeHttp, NativeProcess, SystemClock, classification, run};
+use ss_skills_util::{
+    NativeHttp, NativeProcess, SystemClock, classification, run, run_cargo, run_git,
+};
 
 /// Gives the installed executable the same allocator policy on both platforms.
 ///
@@ -27,14 +29,29 @@ fn main() -> ExitCode {
 
 /// Keeps environment discovery and output handling outside the testable operations.
 fn execute() -> Result<(), AppError> {
-    let process = NativeProcess::new(&env::current_dir()?);
-    let http = NativeHttp::new()?;
-    let output = run(
-        &env::args_os().collect::<Vec<_>>(),
-        &process,
-        &http,
-        &SystemClock::default(),
-    )?;
+    let arguments = env::args_os().collect::<Vec<_>>();
+    let output = if arguments.get(1).is_some_and(|argument| argument == "cargo") {
+        let cargo_arguments = arguments
+            .first()
+            .into_iter()
+            .chain(arguments.iter().skip(2))
+            .cloned()
+            .collect::<Vec<_>>();
+        run_cargo(&cargo_arguments, &SystemClock::default())?
+    } else if arguments.get(1).is_some_and(|argument| argument == "git") {
+        let git_arguments = arguments
+            .first()
+            .into_iter()
+            .chain(arguments.iter().skip(2))
+            .cloned()
+            .collect::<Vec<_>>();
+        let process = NativeProcess::new(&env::current_dir()?);
+        run_git(&git_arguments, &process)?
+    } else {
+        let process = NativeProcess::new(&env::current_dir()?);
+        let http = NativeHttp::new()?;
+        run(&arguments, &process, &http, &SystemClock::default())?
+    };
     let mut stdout = io::stdout().lock();
     stdout.write_all(output.as_bytes())?;
     stdout.write_all(b"\n")?;

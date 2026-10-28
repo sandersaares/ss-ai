@@ -250,7 +250,7 @@ authoritative reset-cause evidence. Current `resetOnSourcePush` and
 causality; missing evidence is an actionable failure. Neither generated English
 nor `isReapprove` proves automatic invalidation.
 
-The [controlled-experiment fixture](../tests/fixtures/ado-no-approval-policy.json)
+The [controlled-experiment fixture](../../ss-skills-review/tests/fixtures/ado-no-approval-policy.json)
 establishes retained approval and reviewer removal without approval policies.
 Synthetic regression cases cover policy combinations and iteration freshness
 without claiming a live reset experiment.
@@ -323,7 +323,7 @@ Cleanup refuses intervening source, reviewer or policy changes.
 Exports accept only completed verified experiments, replace private identities
 consistently, shift timestamps together, omit private prose/content, and reject
 unfamiliar properties. Raw captures remain outside the repository. The
-[GitHub contract fixture](../tests/fixtures/github-approval.json) records verified
+[GitHub contract fixture](../../ss-skills-review/tests/fixtures/github-approval.json) records verified
 read-only provider shapes; null-cause dismissal cases are conservative synthetic
 counterexamples, not claims of a live manual-dismissal experiment.
 
