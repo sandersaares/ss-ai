@@ -1,14 +1,13 @@
+use crate::error::{self, AssessmentError};
 use std::collections::{BTreeMap, HashSet};
 
 use clap::ValueEnum;
-use ohno::AppError;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 
-use crate::objects::{Content, Inventory};
 use crate::required_optional;
-use ss_skills_runtime::fail;
+use crate::{Content, Inventory};
 
 /// Native selection keeps unrelated full-review guides and repository instructions out of assignments.
 const DOCUMENTS: [&str; 3] = [
@@ -85,15 +84,19 @@ impl Assessment {
     }
 
     /// Supplies the cumulative explanation for publication.
-    pub fn explanation(&self) -> Result<&str, AppError> {
+    pub fn explanation(&self) -> Result<&str, AssessmentError> {
         self.cumulative
             .as_ref()
             .map(|judgment| judgment.rationale.as_str())
-            .ok_or_else(|| fail("invalidState", "Missing cumulative rationale"))
+            .ok_or_else(error::MissingCumulativeRationale::classified)
     }
 
     /// Binds a new assessment to an inventory and immutable inputs.
-    pub fn new(inventory: Inventory, snapshot: &str, policy: &str) -> Result<Self, AppError> {
+    pub fn new(
+        inventory: Inventory,
+        snapshot: &str,
+        policy: &str,
+    ) -> Result<Self, AssessmentError> {
         inventory.validate()?;
         Ok(Self {
             snapshot_digest: snapshot.to_owned(),
@@ -116,7 +119,7 @@ impl Assessment {
         policy: &str,
         policy_content: &str,
         discussion: &str,
-    ) -> Result<(), AppError> {
+    ) -> Result<(), AssessmentError> {
         self.inventory.validate()?;
         if self.snapshot_digest != snapshot
             || self.policy_digest != policy
@@ -124,10 +127,7 @@ impl Assessment {
             || self.documents != DOCUMENTS
             || self.complete != self.digest.is_some()
         {
-            return Err(fail(
-                "invalidState",
-                "Assessment binding, context selection, or completion is invalid",
-            ));
+            return Err(error::InvalidAssessmentBinding::classified());
         }
         for (id, decision) in &self.decisions {
             self.validate_judgment(id, decision)?;
@@ -143,24 +143,21 @@ impl Assessment {
                     .chars()
                     .count()
             {
-                return Err(fail(
-                    "invalidState",
-                    "Evidence read exceeds captured content",
-                ));
+                return Err(error::ReadBeyondEvidence::classified());
             }
         }
         if self.complete {
             self.coverage()?;
             self.complete_reads(policy_content, discussion)?;
             if self.digest.as_deref() != Some(&self.decision_digest()?) {
-                return Err(fail("invalidState", "Completed assessment digest changed"));
+                return Err(error::ChangedAssessmentDigest::classified());
             }
         }
         Ok(())
     }
 
     /// Exposes a bounded page of source changes for assessment.
-    pub fn summary(&self, after: usize, limit: usize) -> Result<Value, AppError> {
+    pub fn summary(&self, after: usize, limit: usize) -> Result<Value, AssessmentError> {
         Ok(json!({
             "snapshotDigest": self.snapshot_digest, "inventoryDigest": self.inventory_digest,
             "policyDigest": self.policy_digest, "state": if self.complete { "complete" } else { "in-progress" },
@@ -168,7 +165,7 @@ impl Assessment {
             "oldCommit": self.inventory.old_commit, "newCommit": self.inventory.new_commit,
             "changeCount": self.inventory.changes.len(),
             "nextOffset": after.checked_add(limit).filter(|next| *next < self.inventory.changes.len()),
-            "changes": self.inventory.changes.iter().skip(after).take(limit).map(|change| -> Result<Value, AppError> { Ok(json!({
+            "changes": self.inventory.changes.iter().skip(after).take(limit).map(|change| -> Result<Value, AssessmentError> { Ok(json!({
                 "id": change.id, "kind": change.kind,
                 "old": change.old.as_ref().map(|side| json!({"path": side.path, "object": side.object, "mode": side.mode})),
                 "new": change.new.as_ref().map(|side| json!({"path": side.path, "object": side.object, "mode": side.mode})),
@@ -189,16 +186,13 @@ impl Assessment {
         limit: usize,
         policy: &str,
         discussion: &str,
-    ) -> Result<Value, AppError> {
+    ) -> Result<Value, AssessmentError> {
         self.validate_reference(reference)?;
         let content = self.content(reference, policy, discussion)?;
         let total = content.chars().count();
         let previous = self.reads.get(reference).copied().unwrap_or(0);
         if offset > previous || offset > total {
-            return Err(fail(
-                "invalidInput",
-                "Evidence reads require contiguous snapshot-bound offsets",
-            ));
+            return Err(error::NoncontiguousRead::classified());
         }
         // A hard per-response bound prevents callers accidentally returning a whole source tree.
         let text = content
@@ -208,7 +202,7 @@ impl Assessment {
             .collect::<String>();
         let end = offset
             .checked_add(text.chars().count())
-            .ok_or_else(|| fail("invalidInput", "Evidence offset overflow"))?;
+            .ok_or_else(error::ReadOffsetOverflow::classified)?;
         self.reads.insert(reference.to_owned(), previous.max(end));
         Ok(
             json!({"snapshotDigest": self.snapshot_digest, "reference": reference, "offset": offset,
@@ -222,9 +216,9 @@ impl Assessment {
         id: &str,
         judgment: Judgment,
         previous_digest: Option<&str>,
-    ) -> Result<String, AppError> {
+    ) -> Result<String, AssessmentError> {
         if self.complete {
-            return Err(fail("invalidState", "Completed assessments are immutable"));
+            return Err(error::ImmutableAssessment::classified());
         }
         self.validate_judgment(id, &judgment)?;
         let previous = if id == "cumulative" {
@@ -238,10 +232,7 @@ impl Assessment {
         }
         // Replacement is explicit and conditional so concurrent judgments cannot erase each other.
         if previous.map(hash).transpose()?.as_deref() != previous_digest {
-            return Err(fail(
-                "invalidState",
-                "Judgment changed; refresh its previous digest before replacing it",
-            ));
+            return Err(error::StaleJudgment::classified());
         }
         if id == "cumulative" {
             self.cumulative = Some(judgment);
@@ -252,7 +243,7 @@ impl Assessment {
     }
 
     /// Finalizes only a complete assessment with exact evidence coverage.
-    pub fn finish(&mut self, policy: &str, discussion: &str) -> Result<(), AppError> {
+    pub fn finish(&mut self, policy: &str, discussion: &str) -> Result<(), AssessmentError> {
         self.coverage()?;
         self.complete_reads(policy, discussion)?;
         self.digest = Some(self.decision_digest()?);
@@ -260,7 +251,7 @@ impl Assessment {
         Ok(())
     }
 
-    fn complete_reads(&self, policy: &str, discussion: &str) -> Result<(), AppError> {
+    fn complete_reads(&self, policy: &str, discussion: &str) -> Result<(), AssessmentError> {
         if self.disposition() == Some(Disposition::Insignificant) {
             let mut references = vec!["policy".to_owned(), "discussion".to_owned()];
             for change in &self.inventory.changes {
@@ -278,10 +269,7 @@ impl Assessment {
                             .count(),
                     )
                 {
-                    return Err(fail(
-                        "invalidState",
-                        "Insignificant assessment requires complete policy, discussion, and changed-source reads",
-                    ));
+                    return Err(error::IncompleteEvidenceReads::classified());
                 }
             }
         }
@@ -319,28 +307,22 @@ impl Assessment {
         }
     }
 
-    fn validate_judgment(&self, id: &str, judgment: &Judgment) -> Result<(), AppError> {
+    fn validate_judgment(&self, id: &str, judgment: &Judgment) -> Result<(), AssessmentError> {
         if judgment.rationale.trim().is_empty() || judgment.evidence.is_empty() {
-            return Err(fail(
-                "invalidState",
-                "Judgment requires a rationale and evidence",
-            ));
+            return Err(error::MissingJudgmentEvidence::classified());
         }
         let mut references = HashSet::new();
         for reference in &judgment.evidence {
             self.validate_reference(reference)?;
             if !references.insert(reference) {
-                return Err(fail("invalidState", "Repeated judgment evidence"));
+                return Err(error::RepeatedJudgmentEvidence::classified());
             }
         }
         if id == "cumulative" {
             if !references.contains(&"policy".to_owned())
                 || !references.contains(&"discussion".to_owned())
             {
-                return Err(fail(
-                    "invalidState",
-                    "Cumulative judgment requires policy and discussion evidence",
-                ));
+                return Err(error::MissingCumulativeEvidence::classified());
             }
         } else {
             let change = self
@@ -348,28 +330,22 @@ impl Assessment {
                 .changes
                 .iter()
                 .find(|change| change.id == id)
-                .ok_or_else(|| fail("invalidInput", "Unknown change identifier"))?;
+                .ok_or_else(error::UnknownChange::classified)?;
             if !judgment
                 .evidence
                 .iter()
                 .any(|reference| reference.starts_with(&format!("{id}:")))
             {
-                return Err(fail(
-                    "invalidState",
-                    "Change judgment must cite that change",
-                ));
+                return Err(error::UncitedChange::classified());
             }
             if judgment.disposition == Disposition::Insignificant && !change.content_available() {
-                return Err(fail(
-                    "invalidState",
-                    "Unavailable source content cannot support reapproval",
-                ));
+                return Err(error::UnavailableSource::classified());
             }
         }
         Ok(())
     }
 
-    fn coverage(&self) -> Result<(), AppError> {
+    fn coverage(&self) -> Result<(), AssessmentError> {
         if self.cumulative.is_none()
             || self.decisions.len() != self.inventory.changes.len()
             || self
@@ -378,15 +354,12 @@ impl Assessment {
                 .iter()
                 .any(|change| !self.decisions.contains_key(&change.id))
         {
-            return Err(fail(
-                "invalidState",
-                "Assessment lacks exact change and cumulative coverage",
-            ));
+            return Err(error::IncompleteCoverage::classified());
         }
         Ok(())
     }
 
-    fn decision_digest(&self) -> Result<String, AppError> {
+    fn decision_digest(&self) -> Result<String, AssessmentError> {
         hash(&(
             &self.snapshot_digest,
             &self.inventory_digest,
@@ -398,19 +371,19 @@ impl Assessment {
         ))
     }
 
-    fn validate_reference(&self, reference: &str) -> Result<(), AppError> {
+    fn validate_reference(&self, reference: &str) -> Result<(), AssessmentError> {
         if matches!(reference, "policy" | "discussion") {
             return Ok(());
         }
         let (id, side) = reference
             .split_once(':')
-            .ok_or_else(|| fail("invalidInput", "Invalid evidence reference"))?;
+            .ok_or_else(error::InvalidReference::classified)?;
         let change = self
             .inventory
             .changes
             .iter()
             .find(|change| change.id == id)
-            .ok_or_else(|| fail("invalidInput", "Unknown evidence change"))?;
+            .ok_or_else(error::UnknownEvidenceChange::classified)?;
         if match side {
             "old" => change.old.is_some(),
             "new" => change.new.is_some(),
@@ -418,7 +391,7 @@ impl Assessment {
         } {
             Ok(())
         } else {
-            Err(fail("invalidInput", "Unknown evidence side"))
+            Err(error::UnknownEvidenceSide::classified())
         }
     }
 
@@ -427,7 +400,7 @@ impl Assessment {
         reference: &str,
         policy: &'a str,
         discussion: &'a str,
-    ) -> Result<&'a str, AppError> {
+    ) -> Result<&'a str, AssessmentError> {
         if reference == "policy" {
             return Ok(policy);
         }
@@ -436,28 +409,25 @@ impl Assessment {
         }
         let (id, side) = reference
             .split_once(':')
-            .ok_or_else(|| fail("invalidInput", "Invalid evidence reference"))?;
+            .ok_or_else(error::InvalidReference::classified)?;
         let change = self
             .inventory
             .changes
             .iter()
             .find(|change| change.id == id)
-            .ok_or_else(|| fail("invalidInput", "Unknown evidence change"))?;
+            .ok_or_else(error::UnknownEvidenceChange::classified)?;
         let side = match side {
             "old" => &change.old,
             "new" => &change.new,
-            _ => return Err(fail("invalidInput", "Unknown evidence side")),
+            _ => return Err(error::UnknownEvidenceSide::classified()),
         };
         match side.as_ref().map(|side| &side.content) {
             Some(Content::Text { text }) => Ok(text),
-            _ => Err(fail(
-                "invalidInput",
-                "This evidence side has no readable text; record a non-insignificant judgment",
-            )),
+            _ => Err(error::UnreadableEvidence::classified()),
         }
     }
 }
 
-fn hash(value: &impl Serialize) -> Result<String, AppError> {
+fn hash(value: &impl Serialize) -> Result<String, AssessmentError> {
     Ok(format!("{:x}", Sha256::digest(serde_json::to_vec(value)?)))
 }

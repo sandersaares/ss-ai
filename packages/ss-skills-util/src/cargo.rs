@@ -31,7 +31,11 @@ enum CargoCommand {
 }
 
 /// Runs the local command without constructing a provider or network client.
-pub fn run(arguments: &[OsString], clock: &dyn Clock) -> Result<String, AppError> {
+pub fn run<I, T>(arguments: I, clock: &dyn Clock) -> Result<String, AppError>
+where
+    I: IntoIterator<Item = T>,
+    T: Into<OsString> + Clone,
+{
     let cli = match CargoCli::try_parse_from(arguments) {
         Ok(cli) => cli,
         Err(error)
@@ -108,51 +112,4 @@ fn reject_manifest_alias(inventory: &Inventory, output: &Path) -> Result<(), App
         }
     }
     Ok(())
-}
-
-#[cfg(test)]
-mod tests {
-    use std::ffi::OsString;
-    use std::fs;
-    use std::time::Duration;
-
-    use jiff::Timestamp;
-    use ohno::AppError;
-    use ss_skills_runtime::Clock;
-    use tempfile::TempDir;
-
-    /// Supplies a deterministic scan time without provider or wall-clock access.
-    struct FixedClock;
-
-    impl Clock for FixedClock {
-        fn now(&self) -> Timestamp {
-            "2026-10-28T07:28:14Z".parse().unwrap()
-        }
-
-        fn wait(&self, _: Duration) -> Result<(), AppError> {
-            panic!("A local scan must not wait")
-        }
-    }
-
-    #[test]
-    fn scan_timestamp_comes_from_the_injected_clock() {
-        let directory = TempDir::new().unwrap();
-        let manifest = directory.path().join("Cargo.toml");
-        fs::write(&manifest, "[workspace]\nmembers = []\n").unwrap();
-        let output = super::run(
-            &[
-                OsString::from("cargo"),
-                OsString::from("inventory"),
-                OsString::from("--workspace-manifest"),
-                manifest.into_os_string(),
-            ],
-            &FixedClock,
-        )
-        .unwrap();
-        let result: serde_json::Value = serde_json::from_str(&output).unwrap();
-        assert_eq!(
-            result.get("scannedAt").and_then(serde_json::Value::as_str),
-            Some("2026-10-28T07:28:14Z")
-        );
-    }
 }

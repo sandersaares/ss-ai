@@ -40,6 +40,11 @@ the machine-readable recovery category independently of its human explanation.
 The CLI exposes only classifications useful to callers; diagnostics and
 backtraces are not structured handoff data.
 
+The assessment package uses distinct internal error types for rejected source
+and judgment invariants. Its aggregate preserves classified causes when review
+operations convert failures to application errors. Focused tests can identify
+the rejected invariant without turning error kinds into a supported SDK.
+
 The command dispatcher returns the entire result only after its operation
 completes. The executable writes that result to stdout, while failures go to
 stderr with a failing exit status. Help and version output bypass JSON

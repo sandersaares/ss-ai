@@ -34,19 +34,15 @@ fn execute() -> Result<(), AppError> {
         let cargo_arguments = arguments
             .first()
             .into_iter()
-            .chain(arguments.iter().skip(2))
-            .cloned()
-            .collect::<Vec<_>>();
-        run_cargo(&cargo_arguments, &SystemClock::default())?
+            .chain(arguments.iter().skip(2));
+        run_cargo(cargo_arguments, &SystemClock::default())?
     } else if arguments.get(1).is_some_and(|argument| argument == "git") {
         let git_arguments = arguments
             .first()
             .into_iter()
-            .chain(arguments.iter().skip(2))
-            .cloned()
-            .collect::<Vec<_>>();
+            .chain(arguments.iter().skip(2));
         let process = NativeProcess::new(&env::current_dir()?);
-        run_git(&git_arguments, &process)?
+        run_git(git_arguments, &process)?
     } else {
         let process = NativeProcess::new(&env::current_dir()?);
         let http = NativeHttp::new()?;

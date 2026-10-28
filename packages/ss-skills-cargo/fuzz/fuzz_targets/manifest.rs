@@ -12,19 +12,19 @@ fuzz_target!(|input: &[u8]| {
     if input.len() > MAX_INPUT_BYTES {
         return;
     }
-    let Ok(source) = std::str::from_utf8(input) else {
+    let Ok(input) = std::str::from_utf8(input) else {
         return;
     };
-    let Ok(dependencies) = parse_fuzz_manifest(source) else {
+    let Ok(dependencies) = parse_fuzz_manifest(input) else {
         return;
     };
     for dependency in dependencies {
-        let line_start: usize = source
+        let line_start: usize = input
             .split_inclusive('\n')
-            .take(dependency.line.saturating_sub(1))
+            .take(dependency.line.get().saturating_sub(1))
             .map(str::len)
             .sum();
-        let remaining = source.get(line_start..).expect("line is in the input");
+        let remaining = input.get(line_start..).expect("line is in the input");
         let first_line_end = remaining.find('\n').unwrap_or(remaining.len());
         let position = remaining.find(&dependency.raw).expect("raw is from source");
         assert!(position <= first_line_end);

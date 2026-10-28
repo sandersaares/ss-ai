@@ -1,20 +1,27 @@
 use std::fs;
+use std::num::NonZeroUsize;
 use std::ops::Range;
 use std::path::Path;
 
 use toml_edit::{Document, Item, TableLike, Value};
 
-use crate::inventory::{Dependency, ScanFailure, failure, relative_path};
+use crate::Dependency;
+use crate::error::{
+    InvalidArray, InvalidArrayElement, InvalidBoolean, InvalidDependency, InvalidSourceOffset,
+    InvalidSourceSpan, InvalidString, InvalidTable, InvalidToml, ManifestParse, MissingSourceSpan,
+    ScanError, filesystem_failure,
+};
+use crate::inventory::relative_path;
 
 /// Exposes the actual in-memory parser to the nonpublished fuzz harness.
-#[cfg(feature = "fuzzing")]
+#[cfg(any(test, feature = "fuzzing"))]
 #[doc(hidden)]
 pub fn parse_fuzz_manifest(source: &str) -> Result<Vec<Dependency>, crate::InventoryError> {
     Ok(parse_manifest(source, "Cargo.toml".into())?.dependencies)
 }
 
 /// Parsed manifest information needed by discovery and classification.
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 pub(crate) struct Manifest {
     pub(crate) relative_path: String,
     pub(crate) package: Option<String>,
@@ -26,18 +33,17 @@ pub(crate) struct Manifest {
 }
 
 /// Reads and parses a manifest without changing it.
-pub(crate) fn read_manifest(path: &Path, root: &Path) -> Result<Manifest, ScanFailure> {
+pub(crate) fn read_manifest(path: &Path, root: &Path) -> Result<Manifest, ScanError> {
     let text = fs::read_to_string(path)
-        .map_err(|error| failure(format!("Cannot read manifest {}: {error}", path.display())))?;
+        .map_err(|error| filesystem_failure("read manifest", path, error))?;
     let relative = relative_path(path, root)?;
     parse_manifest(&text, relative)
-        .map_err(|error| failure(format!("Cannot parse manifest {}: {error}", path.display())))
+        .map_err(|error| ManifestParse::caused_by(path.to_path_buf(), error).into())
 }
 
 /// Interprets an immutable TOML document while retaining source spans.
-fn parse_manifest(text: &str, relative_path: String) -> Result<Manifest, ScanFailure> {
-    let document =
-        Document::parse(text).map_err(|error| failure(format!("Invalid TOML: {error}")))?;
+fn parse_manifest(text: &str, relative_path: String) -> Result<Manifest, ScanError> {
+    let document = Document::parse(text).map_err(InvalidToml::caused_by)?;
     let table = document.as_table();
     let package_table = optional_table(table.get("package"), "package")?;
     let workspace_table = optional_table(table.get("workspace"), "workspace")?;
@@ -81,7 +87,7 @@ fn parse_manifest(text: &str, relative_path: String) -> Result<Manifest, ScanFai
     if let Some(targets) = optional_table(table.get("target"), "target")? {
         for (target, item) in targets.iter() {
             let target_table = optional_table(Some(item), "target entry")?
-                .ok_or_else(|| failure(format!("Invalid target {target}")))?;
+                .ok_or_else(|| InvalidTable::new(format!("target.{target}")))?;
             for (key, section) in dependency_sections() {
                 collect_section(
                     target_table.get(key),
@@ -127,7 +133,7 @@ fn collect_section(
     manifest: &str,
     package: Option<&str>,
     output: &mut Vec<Dependency>,
-) -> Result<(), ScanFailure> {
+) -> Result<(), ScanError> {
     let Some(table) = optional_table(item, section)? else {
         return Ok(());
     };
@@ -135,18 +141,18 @@ fn collect_section(
         let key = table
             .key(name)
             .and_then(toml_edit::Key::span)
-            .ok_or_else(|| failure(format!("Missing source location for {name}")))?;
+            .ok_or_else(|| MissingSourceSpan::new(name.to_owned()))?;
         let (style, attrs, span) = match value {
             Item::Value(Value::String(_)) => {
                 let span = value
                     .span()
-                    .ok_or_else(|| failure(format!("Missing value span for {name}")))?;
+                    .ok_or_else(|| MissingSourceSpan::new(name.to_owned()))?;
                 ("bare-string", None, key.start..span.end)
             }
             Item::Value(Value::InlineTable(inline)) => {
                 let span = value
                     .span()
-                    .ok_or_else(|| failure(format!("Missing value span for {name}")))?;
+                    .ok_or_else(|| MissingSourceSpan::new(name.to_owned()))?;
                 let attrs: &dyn TableLike = inline;
                 ("inline-table", Some(attrs), key.start..span.end)
             }
@@ -160,19 +166,20 @@ fn collect_section(
                 };
                 (style, Some(attrs), span)
             }
-            _ => return Err(failure(format!("Invalid dependency declaration {name}"))),
+            _ => return Err(InvalidDependency::new(name.to_owned()).into()),
         };
         let raw = source
             .get(span.clone())
-            .ok_or_else(|| failure(format!("Invalid source span for {name}")))?
+            .ok_or_else(|| InvalidSourceSpan::new(name.to_owned()))?
             .to_owned();
         let line = source
             .get(..span.start)
-            .ok_or_else(|| failure(format!("Invalid source offset for {name}")))?
+            .ok_or_else(InvalidSourceOffset::new)?
             .bytes()
             .filter(|byte| *byte == b'\n')
             .count()
             .saturating_add(1);
+        let line = NonZeroUsize::new(line).ok_or_else(InvalidSourceOffset::new)?;
         let version = if let Some(attrs) = attrs {
             optional_string(attrs.get("version"), "version")?
         } else {
@@ -220,7 +227,7 @@ fn table_source_span(
     source: &str,
     table: &toml_edit::Table,
     key: Range<usize>,
-) -> Result<Range<usize>, ScanFailure> {
+) -> Result<Range<usize>, ScanError> {
     let header = table.span();
     let mut start = if table.is_dotted() {
         line_start(source, key.start)?
@@ -231,7 +238,7 @@ fn table_source_span(
     for (_, value) in table {
         let span = value
             .span()
-            .ok_or_else(|| failure("Missing dependency attribute span".into()))?;
+            .ok_or_else(|| MissingSourceSpan::new("dependency attribute"))?;
         if table.is_dotted() {
             start = start.min(line_start(source, span.start)?);
         }
@@ -241,10 +248,8 @@ fn table_source_span(
 }
 
 /// Finds the start of the source line containing an offset.
-fn line_start(source: &str, offset: usize) -> Result<usize, ScanFailure> {
-    let prefix = source
-        .get(..offset)
-        .ok_or_else(|| failure("Invalid source offset".into()))?;
+fn line_start(source: &str, offset: usize) -> Result<usize, ScanError> {
+    let prefix = source.get(..offset).ok_or_else(InvalidSourceOffset::new)?;
     Ok(prefix
         .rfind('\n')
         .map_or(0, |index| index.saturating_add(1)))
@@ -254,46 +259,46 @@ fn line_start(source: &str, offset: usize) -> Result<usize, ScanFailure> {
 fn optional_table<'a>(
     item: Option<&'a Item>,
     name: &str,
-) -> Result<Option<&'a dyn TableLike>, ScanFailure> {
+) -> Result<Option<&'a dyn TableLike>, ScanError> {
     item.map(|item| {
         item.as_table_like()
-            .ok_or_else(|| failure(format!("{name} must be a table")))
+            .ok_or_else(|| InvalidTable::new(name.to_owned()).into())
     })
     .transpose()
 }
 
 /// Reads an optional TOML string with strict type checking.
-fn optional_string(item: Option<&Item>, name: &str) -> Result<Option<String>, ScanFailure> {
+fn optional_string(item: Option<&Item>, name: &str) -> Result<Option<String>, ScanError> {
     item.map(|item| {
         item.as_str()
             .map(str::to_owned)
-            .ok_or_else(|| failure(format!("{name} must be a string")))
+            .ok_or_else(|| InvalidString::new(name.to_owned()).into())
     })
     .transpose()
 }
 
 /// Reads an optional TOML boolean with strict type checking.
-fn optional_bool(item: Option<&Item>, name: &str) -> Result<Option<bool>, ScanFailure> {
+fn optional_bool(item: Option<&Item>, name: &str) -> Result<Option<bool>, ScanError> {
     item.map(|item| {
         item.as_bool()
-            .ok_or_else(|| failure(format!("{name} must be a boolean")))
+            .ok_or_else(|| InvalidBoolean::new(name.to_owned()).into())
     })
     .transpose()
 }
 
 /// Reads an optional array of strings without coercing malformed elements.
-fn string_array(item: Option<&Item>, name: &str) -> Result<Option<Vec<String>>, ScanFailure> {
+fn string_array(item: Option<&Item>, name: &str) -> Result<Option<Vec<String>>, ScanError> {
     item.map(|item| {
         let array = item
             .as_array()
-            .ok_or_else(|| failure(format!("{name} must be an array")))?;
+            .ok_or_else(|| InvalidArray::new(name.to_owned()))?;
         array
             .iter()
             .map(|value| {
                 value
                     .as_str()
                     .map(str::to_owned)
-                    .ok_or_else(|| failure(format!("{name} must contain strings")))
+                    .ok_or_else(|| InvalidArrayElement::new(name.to_owned()).into())
             })
             .collect()
     })
@@ -307,7 +312,10 @@ fn string_array(item: Option<&Item>, name: &str) -> Result<Option<Vec<String>>, 
     reason = "The tests use fixed, asserted record layouts."
 )]
 mod tests {
+    use ohno::ErrorExt;
+
     use super::parse_manifest;
+    use crate::error::{InvalidArrayElement, InvalidToml};
 
     #[test]
     fn groups_interleaved_dotted_keys_and_preserves_source() {
@@ -317,7 +325,7 @@ mod tests {
         assert_eq!(parsed.dependencies.len(), 2);
         let a = &parsed.dependencies[0];
         assert_eq!(a.style, "dotted-key");
-        assert_eq!(a.line, 2);
+        assert_eq!(a.line.get(), 2);
         assert_eq!(a.features.as_deref(), Some(&["x".into()][..]));
         assert!(a.raw.contains("b = \"2\""));
         assert!(a.raw.contains("# kept"));
@@ -338,11 +346,20 @@ mod tests {
 
     #[test]
     fn rejects_invalid_attribute_types() {
-        parse_manifest(
+        let error = parse_manifest(
             "[dependencies]\na = { features = [1] }",
             "Cargo.toml".into(),
         )
         .unwrap_err();
+        let leaf = error.find_source::<InvalidArrayElement>().unwrap();
+        assert_eq!(leaf.name, "features");
+    }
+
+    #[test]
+    fn retains_the_toml_parser_error() {
+        let error = parse_manifest("[package", "Cargo.toml".into()).unwrap_err();
+        assert!(error.find_source::<InvalidToml>().is_some());
+        assert!(error.find_source::<toml_edit::TomlError>().is_some());
     }
 
     #[test]
@@ -357,7 +374,6 @@ mod tests {
         assert_eq!(parsed.dependencies[1].target.as_deref(), Some("cfg(unix)"));
     }
 
-    #[cfg(feature = "fuzzing")]
     #[test]
     fn fuzz_adapter_uses_the_same_parser_and_preserves_spans() {
         let input = include_str!("../fuzz/seeds/dependencies.toml");
@@ -366,7 +382,7 @@ mod tests {
         for dependency in dependencies {
             let line_start: usize = input
                 .split_inclusive('\n')
-                .take(dependency.line.saturating_sub(1))
+                .take(dependency.line.get().saturating_sub(1))
                 .map(str::len)
                 .sum();
             let tail = input.get(line_start..).unwrap();
@@ -377,8 +393,9 @@ mod tests {
 
     #[test]
     fn bounded_parser_inputs_make_progress() {
-        // Bound both generated input length and operations. Each generated
-        // input uses a different deterministic state, with no external clock.
+        // The multiplier is the 64-bit LCG multiplier used by PCG; selecting
+        // upper bits avoids its weaker low bits. The seed and input counts are
+        // arbitrary small regression-sampling limits, not parser constraints.
         let alphabet = b"abc.[]=,{}\"' \n#01\\";
         for seed in 0_u64..512 {
             let mut state = seed + 1;

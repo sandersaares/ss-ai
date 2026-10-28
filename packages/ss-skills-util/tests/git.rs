@@ -4,12 +4,14 @@
     reason = "Assertions access explicit JSON fixture fields"
 )]
 
+use std::ffi::OsString;
 use std::fs;
 use std::io::Write;
 use std::path::Path;
 use std::process::{Command, Output, Stdio};
 
 use serde_json::Value;
+use ss_skills_util::{NativeProcess, run_git};
 use tempfile::TempDir;
 
 /// A private repository with deterministic identity and no developer Git hooks.
@@ -82,6 +84,22 @@ fn successful(output: &Output) {
 fn value(output: &Output) -> Value {
     successful(output);
     serde_json::from_slice(&output.stdout).unwrap()
+}
+
+#[test]
+fn borrowed_arguments_keep_the_original_executable_name_in_help() {
+    let arguments = [
+        OsString::from("custom-executable"),
+        OsString::from("git"),
+        OsString::from("diff"),
+        OsString::from("--help"),
+    ];
+    let local = arguments
+        .first()
+        .into_iter()
+        .chain(arguments.iter().skip(2));
+    let output = run_git(local, &NativeProcess::new(Path::new("."))).unwrap();
+    assert!(output.contains("custom-executable diff"));
 }
 
 #[test]

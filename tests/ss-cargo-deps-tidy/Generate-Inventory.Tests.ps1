@@ -3,7 +3,7 @@
 
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
-$PSNativeCommandUseErrorActionPreference = $false
+$PSNativeCommandUseErrorActionPreference = $true
 
 BeforeAll {
     $script:Repository = Split-Path -Parent (Split-Path -Parent $PSScriptRoot)
@@ -57,8 +57,14 @@ Describe 'Native Cargo inventory CLI contract' {
     It 'returns failure and writes diagnostics to stderr for a missing manifest' {
         $missing = Join-Path $TestDrive 'missing\Cargo.toml'
         $stderrPath = Join-Path $TestDrive 'inventory.stderr.txt'
-        $stdout = & $script:UtilityPath cargo inventory --workspace-manifest $missing 2>$stderrPath
-        $exitCode = $LASTEXITCODE
+        $previousNativeErrorPreference = $PSNativeCommandUseErrorActionPreference
+        try {
+            $PSNativeCommandUseErrorActionPreference = $false
+            $stdout = & $script:UtilityPath cargo inventory --workspace-manifest $missing 2>$stderrPath
+            $exitCode = $LASTEXITCODE
+        } finally {
+            $PSNativeCommandUseErrorActionPreference = $previousNativeErrorPreference
+        }
         $exitCode | Should -Not -Be 0
         $stderr = Get-Content -LiteralPath $stderrPath -Raw
         $stderr.Length | Should -BeGreaterThan 0

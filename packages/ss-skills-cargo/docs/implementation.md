@@ -16,6 +16,8 @@ path and source position.
 
 The caller supplies the scan time and handles output publication. No global
 clock, process, network, or file-writing facility is needed by this library.
+The inventory error retains typed rejection causes and the underlying TOML or
+filesystem error. Manifest and operation context identifies the failed input.
 
 ## Parser fuzzing
 

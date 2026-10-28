@@ -4,7 +4,7 @@ use ohno::{AppError, EnrichableExt};
 use serde::Serialize;
 
 use crate::Process;
-use crate::git_diff::{FileDiff, parse};
+use crate::{FileDiff, parse};
 use ss_skills_runtime::fail;
 
 /// Exact endpoint comparison shared by review anchoring and change assessment.

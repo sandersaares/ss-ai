@@ -166,3 +166,108 @@ fn invalid_input_fails_without_success_json() {
     assert!(output.stdout.is_empty());
     assert!(!output.stderr.is_empty());
 }
+
+mod timestamp {
+    use std::ffi::OsString;
+    use std::fs;
+    use std::io;
+    use std::path::Path;
+    use std::time::Duration;
+
+    use jiff::Timestamp;
+    use ohno::AppError;
+    use ss_skills_runtime::Clock;
+    use ss_skills_util::{Http, HttpResponse, Process, ProcessOutput};
+    use tempfile::TempDir;
+
+    /// Supplies a deterministic scan time without provider or wall-clock access.
+    struct FixedClock;
+
+    impl Clock for FixedClock {
+        fn now(&self) -> Timestamp {
+            "2026-10-28T07:28:14Z".parse().unwrap()
+        }
+
+        fn wait(&self, _: Duration) -> Result<(), AppError> {
+            panic!("A local scan must not wait")
+        }
+    }
+
+    /// Rejects provider operations during local command routing.
+    struct NoProvider;
+
+    impl Process for NoProvider {
+        fn execute(&self, _: &str, _: &[String], _: &[u8]) -> io::Result<ProcessOutput> {
+            panic!("Local command help must not launch a provider")
+        }
+    }
+
+    impl Http for NoProvider {
+        fn send(
+            &self,
+            _: &str,
+            _: &str,
+            _: &str,
+            _: Option<&[u8]>,
+        ) -> Result<HttpResponse, AppError> {
+            panic!("Local command help must not contact a provider")
+        }
+    }
+
+    #[test]
+    fn scan_timestamp_comes_from_the_injected_clock() {
+        let directory = TempDir::new().unwrap();
+        let manifest = directory.path().join("Cargo.toml");
+        fs::write(&manifest, "[workspace]\nmembers = []\n").unwrap();
+        let output = ss_skills_util::run_cargo(
+            &[
+                OsString::from("cargo"),
+                OsString::from("inventory"),
+                OsString::from("--workspace-manifest"),
+                manifest.into_os_string(),
+            ],
+            &FixedClock,
+        )
+        .unwrap();
+        let result: serde_json::Value = serde_json::from_str(&output).unwrap();
+        assert_eq!(
+            result.get("scannedAt").and_then(serde_json::Value::as_str),
+            Some("2026-10-28T07:28:14Z")
+        );
+    }
+
+    #[test]
+    fn borrowed_arguments_keep_the_original_executable_name_in_help() {
+        let arguments = [
+            OsString::from("custom-executable"),
+            OsString::from("cargo"),
+            OsString::from("inventory"),
+            OsString::from("--help"),
+        ];
+        let local = arguments
+            .first()
+            .into_iter()
+            .chain(arguments.iter().skip(2));
+        let output = ss_skills_util::run_cargo(local, &FixedClock).unwrap();
+        assert!(output.contains("custom-executable inventory"));
+    }
+
+    #[test]
+    fn both_dispatch_entry_points_preserve_the_executable_name() {
+        for (namespace, command) in [("cargo", "inventory"), ("git", "diff")] {
+            let arguments = ["custom-executable", namespace, command, "--help"].map(OsString::from);
+            let ordinary =
+                ss_skills_util::run(&arguments, &NoProvider, &NoProvider, &FixedClock).unwrap();
+            let with_directory = ss_skills_util::run_in(
+                &arguments,
+                &NoProvider,
+                &NoProvider,
+                &FixedClock,
+                Path::new("unused"),
+            )
+            .unwrap();
+            assert!(ordinary.contains(&format!("custom-executable {command}")));
+            assert_eq!(ordinary, with_directory);
+        }
+    }
+}

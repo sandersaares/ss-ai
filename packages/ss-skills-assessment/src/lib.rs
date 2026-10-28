@@ -7,10 +7,8 @@
     reason = "Internal record types define closed, validated workflow schemas"
 )]
 
-mod assessment;
-mod objects;
-
 pub use assessment::{Assessment, Disposition, Judgment};
+pub use error::AssessmentError;
 pub use objects::{Change, Content, Inventory, Side, change_id, commit};
 
 use serde::{Deserialize, Deserializer};
@@ -23,3 +21,7 @@ where
 {
     Option::<T>::deserialize(deserializer)
 }
+
+mod assessment;
+mod error;
+mod objects;

@@ -5,10 +5,13 @@
 )]
 
 use std::fs;
+#[cfg(unix)]
+use std::os::unix::fs::symlink;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 use jiff::Timestamp;
+use ohno::ErrorExt;
 use ss_skills_cargo::{
     Dependency, Inventory, InventoryError, MemberManifest, WorkspaceManifest, generate_inventory,
 };
@@ -155,7 +158,7 @@ fn supports_build_dependencies_and_original_spans() {
     let inventory = workspace.scan().unwrap();
     let foo = &inventory.dependencies[0];
     assert_eq!(foo.section, "build-dependencies");
-    assert_eq!(foo.line, 4);
+    assert_eq!(foo.line.get(), 4);
     assert!(foo.raw.starts_with("foo = {"));
     assert!(foo.raw.contains("# comment"));
     assert_eq!(foo.features, Some(vec![]));
@@ -167,6 +170,42 @@ fn supports_build_dependencies_and_original_spans() {
     assert_eq!(json["schemaVersion"], 1);
     assert_eq!(json["scannedAt"], "2020-01-02T03:04:05Z");
     assert!(json["dependencies"][0]["defaultFeatures"].is_null());
+    assert_eq!(json["dependencies"][0]["line"], 4);
+}
+
+#[test]
+fn path_precedes_name_and_workspace_inheritance_preserves_resolution() {
+    let workspace = Workspace::new();
+    workspace.write(
+        "Cargo.toml",
+        "[package]\nname = 'root'\n[workspace]\nmembers = ['a', 'b']\n[workspace.dependencies]\nalpha = { path = 'b' }\nalias = { path = 'a' }\n[dependencies]\nexternal = '1'\n",
+    );
+    workspace.write(
+        "a/Cargo.toml",
+        "[package]\nname = 'alpha'\n[dependencies]\nalias.workspace = true\n",
+    );
+    workspace.write("b/Cargo.toml", "[package]\nname = 'beta'\n");
+    let inventory = workspace.scan().unwrap();
+    let alpha = inventory
+        .dependencies
+        .iter()
+        .find(|item| item.name == "alpha")
+        .unwrap();
+    assert_eq!(alpha.resolved_manifest.as_deref(), Some("b/Cargo.toml"));
+    let alias = inventory
+        .dependencies
+        .iter()
+        .find(|item| item.workspace == Some(true))
+        .unwrap();
+    assert_eq!(alias.resolved_manifest.as_deref(), Some("a/Cargo.toml"));
+    assert_eq!(
+        inventory
+            .dependencies
+            .iter()
+            .filter(|item| item.name == "external")
+            .count(),
+        1
+    );
 }
 
 #[test]
@@ -195,15 +234,23 @@ fn aliases_inherit_path_resolution_and_exclusions_are_patterns() {
 fn invalid_input_and_missing_members_fail_instead_of_skipping() {
     let workspace = Workspace::new();
     workspace.write("Cargo.toml", "[workspace]\nmembers = ['missing']\n");
-    workspace.scan().unwrap_err();
+    let error = workspace.scan().unwrap_err();
+    assert!(error.to_string().contains("missing"));
     workspace.write("Cargo.toml", "[workspace]\nmembers = ['bad']\n");
     workspace.write("bad/Cargo.toml", "[package\n");
-    workspace.scan().unwrap_err();
+    let error = workspace.scan().unwrap_err();
+    assert!(error.find_source::<toml_edit::TomlError>().is_some());
+    assert!(error.to_string().contains("Cargo.toml"));
+    assert!(error.to_string().contains("bad"));
     workspace.write(
         "bad/Cargo.toml",
         "[dependencies]\na = { workspace = 'true' }\n",
     );
-    workspace.scan().unwrap_err();
+    let error = workspace.scan().unwrap_err();
+    let diagnostic = error.to_string();
+    assert!(diagnostic.contains("Cargo.toml"));
+    assert!(diagnostic.contains("bad"));
+    assert!(diagnostic.contains("workspace must be a boolean"));
 }
 
 #[test]
@@ -273,8 +320,6 @@ fn unix_backslashes_remain_literal_in_paths_and_patterns() {
 #[cfg(unix)]
 #[test]
 fn symbolic_aliases_share_membership_and_exclusion_identity() {
-    use std::os::unix::fs::symlink;
-
     let workspace = Workspace::new();
     workspace.write("real/Cargo.toml", "[package]\nname = 'actual'\n");
     symlink("real", workspace.0.join("alias")).unwrap();
@@ -298,8 +343,6 @@ fn symbolic_aliases_share_membership_and_exclusion_identity() {
 #[cfg(unix)]
 #[test]
 fn recursive_globs_terminate_on_symlink_cycles() {
-    use std::os::unix::fs::symlink;
-
     let workspace = Workspace::new();
     workspace.write("Cargo.toml", "[workspace]\nmembers = ['crates/**']\n");
     workspace.write("crates/one/Cargo.toml", "[package]\nname = 'one'\n");
@@ -311,11 +354,14 @@ fn recursive_globs_terminate_on_symlink_cycles() {
 #[cfg(unix)]
 #[test]
 fn enumeration_errors_do_not_return_partial_results() {
-    use std::os::unix::fs::symlink;
-
     let workspace = Workspace::new();
     workspace.write("Cargo.toml", "[workspace]\nmembers = ['crates/*']\n");
     workspace.write("crates/one/Cargo.toml", "[package]\nname = 'one'\n");
     symlink("missing", workspace.0.join("crates/broken")).unwrap();
-    workspace.scan().unwrap_err();
+    let error = workspace.scan().unwrap_err();
+    assert_eq!(
+        error.find_source::<std::io::Error>().unwrap().kind(),
+        std::io::ErrorKind::NotFound
+    );
+    assert!(error.to_string().contains("broken"));
 }

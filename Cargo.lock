@@ -1457,6 +1457,7 @@ dependencies = [
  "serde_json",
  "sha2",
  "ss-skills-runtime",
+ "static_assertions",
 ]
 
 [[package]]
@@ -1489,6 +1490,7 @@ dependencies = [
  "regex",
  "serde",
  "ss-skills-runtime",
+ "static_assertions",
 ]
 
 [[package]]
@@ -1517,6 +1519,7 @@ version = "0.1.0"
 dependencies = [
  "jiff",
  "ohno",
+ "static_assertions",
  "tempfile",
  "tick",
  "tokio",

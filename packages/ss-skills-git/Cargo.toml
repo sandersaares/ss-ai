@@ -10,11 +10,17 @@ repository.workspace = true
 rust-version.workspace = true
 include.workspace = true
 
+[package.metadata.docs.rs]
+all-features = true
+
 [dependencies]
 ohno = { workspace = true, features = ["app-err"] }
 regex = { workspace = true }
 serde = { workspace = true, features = ["derive"] }
 ss-skills-runtime = { workspace = true }
+
+[dev-dependencies]
+static_assertions = { workspace = true }
 
 [lints]
 workspace = true

@@ -72,6 +72,12 @@ of registration permission failures.
 ## Cargo inventory
 
 ```powershell
+#Requires -Version 7.6
+
+Set-StrictMode -Version Latest
+$ErrorActionPreference = 'Stop'
+$PSNativeCommandUseErrorActionPreference = $true
+
 ss-skills-util cargo inventory --workspace-manifest "{{WORKSPACE_MANIFEST}}" `
   --output-path "{{OUTPUT_PATH}}"
 ```

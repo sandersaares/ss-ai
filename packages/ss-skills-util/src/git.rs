@@ -41,7 +41,11 @@ enum GitCommand {
 }
 
 /// Produces the same JSON record without constructing provider state.
-pub fn run(arguments: &[OsString], process: &dyn Process) -> Result<String, AppError> {
+pub fn run<I, T>(arguments: I, process: &dyn Process) -> Result<String, AppError>
+where
+    I: IntoIterator<Item = T>,
+    T: Into<OsString> + Clone,
+{
     let cli = match GitCli::try_parse_from(arguments) {
         Ok(cli) => cli,
         Err(error)

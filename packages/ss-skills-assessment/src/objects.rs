@@ -1,10 +1,9 @@
 //! Validated source inventory for approval assessment.
 
+use crate::error::{self, AssessmentError};
 use crate::required_optional;
-use ohno::AppError;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
-use ss_skills_runtime::fail;
 use std::collections::HashSet;
 
 /// Complete exact source-tree changes, including path, object, and mode differences.
@@ -80,7 +79,7 @@ pub enum Content {
 
 impl Inventory {
     /// Checks the completeness and identity of source evidence.
-    pub fn validate(&self) -> Result<(), AppError> {
+    pub fn validate(&self) -> Result<(), AssessmentError> {
         for id in [
             &self.old_commit,
             &self.new_commit,
@@ -90,10 +89,7 @@ impl Inventory {
             commit(id)?;
         }
         if !self.complete || (self.old_tree == self.new_tree) != self.changes.is_empty() {
-            return Err(fail(
-                "invalidState",
-                "Incomplete or contradictory source inventory",
-            ));
+            return Err(error::IncompleteInventory::classified());
         }
         let mut ids = HashSet::new();
         let mut old_paths = HashSet::new();
@@ -102,7 +98,7 @@ impl Inventory {
             if change.id != change_id(&change.kind, change.old.as_ref(), change.new.as_ref())?
                 || !ids.insert(&change.id)
             {
-                return Err(fail("invalidState", "Invalid or repeated change ID"));
+                return Err(error::InvalidChangeId::classified());
             }
             let valid = match change.kind.as_str() {
                 "A" => change.old.is_none() && change.new.is_some(),
@@ -111,13 +107,13 @@ impl Inventory {
                 _ => false,
             };
             if !valid {
-                return Err(fail("invalidState", "Invalid changed-path shape"));
+                return Err(error::InvalidChangeShape::classified());
             }
             if let (Some(old), Some(new)) = (&change.old, &change.new)
                 && ((change.kind == "R") == (old.path == new.path)
                     || (old.path == new.path && old.object == new.object && old.mode == new.mode))
             {
-                return Err(fail("invalidState", "Contradictory source change"));
+                return Err(error::ContradictoryChange::classified());
             }
             for (side, paths) in [(&change.old, &mut old_paths), (&change.new, &mut new_paths)] {
                 if let Some(side) = side {
@@ -134,7 +130,7 @@ impl Inventory {
                         )
                         || (side.mode == "160000") != matches!(side.content, Content::Submodule)
                     {
-                        return Err(fail("invalidState", "Invalid inventory side"));
+                        return Err(error::InvalidInventorySide::classified());
                     }
                 }
             }
@@ -155,7 +151,11 @@ impl Change {
 }
 
 /// Computes the stable identity of an assessed source change.
-pub fn change_id(kind: &str, old: Option<&Side>, new: Option<&Side>) -> Result<String, AppError> {
+pub fn change_id(
+    kind: &str,
+    old: Option<&Side>,
+    new: Option<&Side>,
+) -> Result<String, AssessmentError> {
     Ok(format!(
         "{:x}",
         Sha256::digest(serde_json::to_vec(&(kind, old, new))?)
@@ -163,13 +163,13 @@ pub fn change_id(kind: &str, old: Option<&Side>, new: Option<&Side>) -> Result<S
 }
 
 /// Validates the full source identifier used by approval evidence.
-pub fn commit(value: &str) -> Result<(), AppError> {
+pub fn commit(value: &str) -> Result<(), AssessmentError> {
     if value.len() != 40
         || !value
             .bytes()
             .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
     {
-        return Err(fail("service", "Invalid GitHub commit identifier"));
+        return Err(error::InvalidCommit::classified());
     }
     Ok(())
 }

@@ -17,21 +17,20 @@ use std::ptr::null;
 #[cfg(windows)]
 use windows_sys::Win32::Storage::FileSystem::{FILE_SHARE_DELETE, FILE_SHARE_READ, ReplaceFileW};
 
-use crate::Clock;
-use crate::error::{Failure, fail};
+use crate::{Clock, Failure, fail};
 
 /// Bounds contention for a transaction that may wait behind provider work.
 ///
 /// Approximately five minutes permits parallel inspections to queue without
-/// treating a held journal as a permanent conflict. Lock holders cannot extend this budget.
+/// treating a held file lock as a permanent conflict. Lock holders cannot extend this budget.
 const CONTENTION_ATTEMPTS: u32 = 6_000;
-/// Avoids busy polling while siblings wait for the same retained journal lock.
+/// Avoids busy polling while concurrent operations wait for the same lock.
 const CONTENTION_INTERVAL: Duration = Duration::from_millis(50);
 
 /// Holds a file transaction across an operation's complete read-modify-write.
 ///
-/// Construct before loading state and retain through remote effects and waits.
-/// Dropping the journal releases exclusion without deleting the sibling lock.
+/// Retain the transaction across its reads, effects, and writes.
+/// Dropping the transaction releases exclusion without deleting the sibling lock.
 #[allow(
     missing_debug_implementations,
     reason = "The injected clock need not implement Debug"
@@ -49,11 +48,11 @@ impl<'a> FileTransaction<'a> {
     /// Acquires the transaction before testing for an existing file.
     pub fn open(path: &Path, clock: &'a dyn Clock) -> Result<Self, AppError> {
         if !path.is_absolute() {
-            return Err(fail("invalidInput", "State path must be absolute"));
+            return Err(fail("invalidInput", "File path must be absolute"));
         }
         let parent = path
             .parent()
-            .ok_or_else(|| fail("invalidInput", "State path requires a parent directory"))?;
+            .ok_or_else(|| fail("invalidInput", "File path requires a parent directory"))?;
         fs::create_dir_all(parent).map_err(|error| {
             Failure::caused_by("io", format!("Cannot create {}", parent.display()), error)
         })?;
@@ -89,15 +88,15 @@ impl<'a> FileTransaction<'a> {
         let parent = self
             .path
             .parent()
-            .ok_or_else(|| fail("invalidInput", "Journal path requires a parent"))?;
+            .ok_or_else(|| fail("invalidInput", "File path requires a parent"))?;
         let mut temporary = NamedTempFile::new_in(parent).map_err(|error| {
-            Failure::caused_by("io", "Cannot create journal staging file".to_owned(), error)
+            Failure::caused_by("io", "Cannot create staging file".to_owned(), error)
         })?;
         temporary.write_all(bytes).map_err(|error| {
-            Failure::caused_by("io", "Cannot write journal staging file".to_owned(), error)
+            Failure::caused_by("io", "Cannot write staging file".to_owned(), error)
         })?;
         temporary.as_file().sync_all().map_err(|error| {
-            Failure::caused_by("io", "Cannot flush journal staging file".to_owned(), error)
+            Failure::caused_by("io", "Cannot flush staging file".to_owned(), error)
         })?;
         // ReplaceFile opens the replacement without write sharing. Close the staging
         // handle before publication while retaining automatic cleanup of its path.
@@ -141,7 +140,7 @@ fn retry<T>(
                 if attempt == CONTENTION_ATTEMPTS - 1 {
                     return Err(Failure::caused_by(
                         "contention",
-                        "Shared journal remains busy after bounded contention retries".to_owned(),
+                        "Shared file remains busy after bounded contention retries".to_owned(),
                         error,
                     )
                     .into());
@@ -149,12 +148,9 @@ fn retry<T>(
                 clock.wait(CONTENTION_INTERVAL)?;
             }
             Err(error) => {
-                return Err(Failure::caused_by(
-                    "io",
-                    "Journal file operation failed".to_owned(),
-                    error,
-                )
-                .into());
+                return Err(
+                    Failure::caused_by("io", "File operation failed".to_owned(), error).into(),
+                );
             }
         }
     }
@@ -224,6 +220,7 @@ fn replace(source: &Path, destination: &Path) -> io::Result<()> {
 mod tests {
     use std::cell::Cell;
     use std::io;
+    use std::path::Path;
     use std::time::Duration;
 
     use jiff::Timestamp;
@@ -231,7 +228,7 @@ mod tests {
 
     use crate::Clock;
 
-    use super::{CONTENTION_ATTEMPTS, CONTENTION_INTERVAL, retry};
+    use super::{CONTENTION_ATTEMPTS, CONTENTION_INTERVAL, FileTransaction, retry};
 
     /// Counts requested waits without sleeping or accessing the filesystem.
     #[derive(Default)]
@@ -314,7 +311,17 @@ mod tests {
         })
         .unwrap_err();
         assert_eq!(crate::classification(&error), "io");
+        assert!(error.to_string().contains("File operation failed"));
         assert_eq!(attempts, 1);
         assert_eq!(clock.waits.get(), 0);
+    }
+
+    #[test]
+    fn relative_destination_reports_file_input_error() {
+        let error = FileTransaction::open(Path::new("relative"), &RetryClock::default())
+            .err()
+            .unwrap();
+        assert_eq!(crate::classification(&error), "invalidInput");
+        assert!(error.to_string().contains("File path must be absolute"));
     }
 }

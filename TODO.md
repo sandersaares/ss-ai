@@ -15,6 +15,12 @@ Improvement ideas to revisit when the repo matures.
 - **Linux audit file URIs.** Use explicit file URI construction in
   `skills/ss-review/scripts/ConvertTo-FindingMarkdown.ps1` and cover it in
   `SsReviewFindingMarkdown.Tests.ps1`.
+- **Bash startup test output.** Isolate the interactive-shell assertion in
+  `tests/BashEnvironment.Tests.ps1` from distribution startup banners, which
+  can precede the environment value being checked.
+- **Portable schema-error assertions.** Make the diagnostic assertion in
+  `tests/SsReviewWorkflowData.Tests.ps1` independent of PowerShell's
+  console-width line wrapping.
 - **Evaluation cache/task publication.** Assess shared access to
   `dev/ss-cargo-deps-tidy/evals/Generate-FoloFullTask.ps1` and add transaction
   protection where needed; use disposable checkouts for standalone preparation.

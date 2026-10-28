@@ -10,6 +10,9 @@ repository.workspace = true
 rust-version.workspace = true
 include.workspace = true
 
+[package.metadata.docs.rs]
+all-features = true
+
 [dependencies]
 clap = { workspace = true, features = ["derive"] }
 ohno = { workspace = true, features = ["app-err"] }
@@ -17,6 +20,9 @@ serde = { workspace = true, features = ["derive"] }
 serde_json = { workspace = true }
 sha2 = { workspace = true }
 ss-skills-runtime = { workspace = true }
+
+[dev-dependencies]
+static_assertions = { workspace = true }
 
 [lints]
 workspace = true

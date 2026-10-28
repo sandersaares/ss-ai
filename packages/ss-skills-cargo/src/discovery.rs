@@ -1,12 +1,15 @@
 use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 use std::fs;
-use std::io::ErrorKind;
+use std::io::{self, ErrorKind};
 use std::path::{Path, PathBuf};
 
 use glob::Pattern;
 use same_file::Handle;
 
-use crate::inventory::{ScanFailure, failure};
+use crate::error::{
+    InvalidPattern, MemberManifestMissing, MemberManifestNotFile, MissingMemberManifest,
+    MissingMemberPattern, NonUnicodePath, ScanError, TraversalLimit, filesystem_failure,
+};
 use crate::manifest::Manifest;
 
 /// Caps retained traversal state to limit memory and open filesystem handles.
@@ -20,7 +23,7 @@ pub(crate) fn discover_members(
     root: &Path,
     root_manifest: &Path,
     manifest: &Manifest,
-) -> Result<Vec<PathBuf>, ScanFailure> {
+) -> Result<Vec<PathBuf>, ScanError> {
     let mut excluded = HashSet::new();
     for pattern in &manifest.exclude {
         for directory in expand(root, pattern)? {
@@ -38,11 +41,7 @@ pub(crate) fn discover_members(
     }
     for pattern in &manifest.members {
         let dirs = expand(root, pattern)?;
-        if dirs.is_empty() {
-            return Err(failure(format!(
-                "Workspace member pattern matched nothing: {pattern}"
-            )));
-        }
+        require_pattern_matches(pattern, !dirs.is_empty())?;
         let wildcard = pattern.contains(['*', '?', '[']);
         let mut found = false;
         for dir in dirs {
@@ -59,17 +58,17 @@ pub(crate) fn discover_members(
                 }
                 Err(error) if error.kind() == ErrorKind::NotFound && wildcard => {}
                 Ok(_) if wildcard => {}
-                Err(error) => {
-                    return Err(failure(format!(
-                        "Cannot access {}: {error}",
-                        path.display()
-                    )));
+                Err(error) if error.kind() == ErrorKind::NotFound => {
+                    return Err(missing_member_manifest(path, error));
                 }
-                Ok(_) => return Err(failure(format!("Not a manifest file: {}", path.display()))),
+                Err(error) => {
+                    return Err(filesystem_failure("access", &path, error));
+                }
+                Ok(_) => return Err(MemberManifestNotFile::new(path).into()),
             }
         }
         if !found {
-            return Err(failure(format!("No member manifest matched: {pattern}")));
+            return Err(MissingMemberManifest::new(pattern.clone()).into());
         }
     }
     let mut paths: Vec<_> = members.into_values().collect();
@@ -78,9 +77,9 @@ pub(crate) fn discover_members(
 }
 
 /// Traverses each pattern position at most once per filesystem directory.
-fn expand(root: &Path, pattern: &str) -> Result<Vec<PathBuf>, ScanFailure> {
+fn expand(root: &Path, pattern: &str) -> Result<Vec<PathBuf>, ScanError> {
     if pattern.is_empty() || Path::new(pattern).is_absolute() {
-        return Err(failure(format!("Invalid workspace pattern: {pattern}")));
+        return Err(InvalidPattern::new(pattern.to_owned()).into());
     }
     let segments: Vec<&str> = pattern
         .split(is_separator)
@@ -93,11 +92,7 @@ fn expand(root: &Path, pattern: &str) -> Result<Vec<PathBuf>, ScanFailure> {
         if !visited.insert((identity(&directory)?, index)) {
             continue;
         }
-        if visited.len() > MAX_STATES {
-            return Err(failure(format!(
-                "Workspace pattern exceeds traversal limit: {pattern}"
-            )));
-        }
+        check_traversal_limit(visited.len(), "visited state", pattern)?;
         let Some(segment) = segments.get(index) else {
             matches.insert(directory.clone(), directory);
             continue;
@@ -108,19 +103,13 @@ fn expand(root: &Path, pattern: &str) -> Result<Vec<PathBuf>, ScanFailure> {
                 enqueue(&mut queue, canonical(&child)?, index)?;
             }
         } else if segment.contains(['*', '?', '[']) {
-            let matcher = Pattern::new(segment).map_err(|error| {
-                failure(format!("Invalid workspace pattern {pattern}: {error}"))
-            })?;
+            let matcher = Pattern::new(segment)
+                .map_err(|error| InvalidPattern::caused_by(pattern.to_owned(), error))?;
             for child in children(&directory)? {
                 let name = child
                     .file_name()
                     .and_then(|name| name.to_str())
-                    .ok_or_else(|| {
-                        failure(format!(
-                            "Directory name is not Unicode: {}",
-                            child.display()
-                        ))
-                    })?;
+                    .ok_or_else(|| NonUnicodePath::new(child.clone()))?;
                 if matcher.matches(name) {
                     enqueue(&mut queue, canonical(&child)?, index.saturating_add(1))?;
                 }
@@ -134,10 +123,7 @@ fn expand(root: &Path, pattern: &str) -> Result<Vec<PathBuf>, ScanFailure> {
                 Ok(_) => {}
                 Err(error) if error.kind() == ErrorKind::NotFound => {}
                 Err(error) => {
-                    return Err(failure(format!(
-                        "Cannot access {}: {error}",
-                        next.display()
-                    )));
+                    return Err(filesystem_failure("access", &next, error));
                 }
             }
         }
@@ -151,9 +137,34 @@ fn is_separator(character: char) -> bool {
 }
 
 /// Retains an open handle so identity is not inferred from path spelling.
-pub(crate) fn identity(path: &Path) -> Result<Handle, ScanFailure> {
-    Handle::from_path(path)
-        .map_err(|error| failure(format!("Cannot identify {}: {error}", path.display())))
+pub(crate) fn identity(path: &Path) -> Result<Handle, ScanError> {
+    Handle::from_path(path).map_err(|error| filesystem_failure("identify", path, error))
+}
+
+/// Rejects missing member matches separately from manifest and I/O failures.
+fn require_pattern_matches(pattern: &str, matched: bool) -> Result<(), ScanError> {
+    if matched {
+        Ok(())
+    } else {
+        Err(MissingMemberPattern::new(pattern.to_owned()).into())
+    }
+}
+
+/// Preserves both the missing manifest path and the filesystem cause.
+fn missing_member_manifest(path: PathBuf, error: io::Error) -> ScanError {
+    MemberManifestMissing::caused_by(path, error).into()
+}
+
+/// Stops traversal before its retained state exceeds the configured bound.
+fn check_traversal_limit(
+    count: usize,
+    scope: &'static str,
+    subject: &str,
+) -> Result<(), ScanError> {
+    if count > MAX_STATES {
+        return Err(TraversalLimit::new(scope, subject.to_owned()).into());
+    }
+    Ok(())
 }
 
 /// Bounds pending work independently of the already visited state count.
@@ -161,35 +172,32 @@ fn enqueue(
     queue: &mut VecDeque<(PathBuf, usize)>,
     path: PathBuf,
     index: usize,
-) -> Result<(), ScanFailure> {
+) -> Result<(), ScanError> {
     if queue.len() >= MAX_STATES {
-        return Err(failure(
-            "Workspace traversal exceeds pending work limit".into(),
-        ));
+        return Err(TraversalLimit::new("pending work", path.display().to_string()).into());
     }
     queue.push_back((path, index));
     Ok(())
 }
 
 /// Enumerates children in stable order and reports incomplete reads.
-fn children(directory: &Path) -> Result<Vec<PathBuf>, ScanFailure> {
+fn children(directory: &Path) -> Result<Vec<PathBuf>, ScanError> {
     let entries = fs::read_dir(directory)
-        .map_err(|error| failure(format!("Cannot enumerate {}: {error}", directory.display())))?;
+        .map_err(|error| filesystem_failure("enumerate", directory, error))?;
     let mut children = Vec::new();
     for entry in entries {
-        let entry = entry.map_err(|error| {
-            failure(format!("Cannot enumerate {}: {error}", directory.display()))
-        })?;
+        let entry = entry.map_err(|error| filesystem_failure("enumerate", directory, error))?;
         let path = entry.path();
-        let metadata = fs::metadata(&path)
-            .map_err(|error| failure(format!("Cannot access {}: {error}", path.display())))?;
+        let metadata =
+            fs::metadata(&path).map_err(|error| filesystem_failure("access", &path, error))?;
         if metadata.is_dir() {
             // Match on the directory entry name, then canonicalize when enqueued.
             if children.len() >= MAX_STATES {
-                return Err(failure(format!(
-                    "Too many directories in {}",
-                    directory.display()
-                )));
+                return Err(TraversalLimit::new(
+                    "directory entries",
+                    directory.display().to_string(),
+                )
+                .into());
             }
             children.push(path);
         }
@@ -199,7 +207,50 @@ fn children(directory: &Path) -> Result<Vec<PathBuf>, ScanFailure> {
 }
 
 /// Resolves filesystem identity without guessing case behavior from the OS.
-fn canonical(path: &Path) -> Result<PathBuf, ScanFailure> {
-    fs::canonicalize(path)
-        .map_err(|error| failure(format!("Cannot resolve {}: {error}", path.display())))
+fn canonical(path: &Path) -> Result<PathBuf, ScanError> {
+    fs::canonicalize(path).map_err(|error| filesystem_failure("resolve", path, error))
+}
+
+#[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
+mod tests {
+    use std::io;
+    use std::path::PathBuf;
+
+    use ohno::ErrorExt;
+
+    use super::{
+        MAX_STATES, check_traversal_limit, missing_member_manifest, require_pattern_matches,
+    };
+    use crate::error::{MemberManifestMissing, MissingMemberPattern, TraversalLimit};
+
+    #[test]
+    fn reports_missing_member_pattern_with_its_identity() {
+        let error = require_pattern_matches("missing", false).unwrap_err();
+        let leaf = error.find_source::<MissingMemberPattern>().unwrap();
+        assert_eq!(leaf.pattern, "missing");
+    }
+
+    #[test]
+    fn reports_the_specific_exceeded_limit() {
+        let error =
+            check_traversal_limit(MAX_STATES + 1, "visited state", "crates/**").unwrap_err();
+        let leaf = error.find_source::<TraversalLimit>().unwrap();
+        assert_eq!(leaf.scope, "visited state");
+        assert_eq!(leaf.subject, "crates/**");
+    }
+
+    #[test]
+    fn preserves_missing_manifest_identity_and_io_source() {
+        let error = missing_member_manifest(
+            PathBuf::from("member/Cargo.toml"),
+            io::Error::from(io::ErrorKind::NotFound),
+        );
+        let leaf = error.find_source::<MemberManifestMissing>().unwrap();
+        assert_eq!(leaf.path, PathBuf::from("member/Cargo.toml"));
+        assert_eq!(
+            error.find_source::<io::Error>().unwrap().kind(),
+            io::ErrorKind::NotFound
+        );
+    }
 }
