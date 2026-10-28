@@ -2,8 +2,8 @@
 <#
 .SYNOPSIS
     Program-grader script. Verifies a Rust workspace has been correctly
-    tidied by the ss-cargo-deps-tidy skill, by running the skill's own
-    inventory script and asserting the resulting structure.
+    tidied by the ss-cargo-deps-tidy skill, by running the native
+    inventory command and asserting the resulting structure.
 
 .DESCRIPTION
     Invoked by waza's `program` grader. Reads `WAZA_WORKSPACE_DIR` from
