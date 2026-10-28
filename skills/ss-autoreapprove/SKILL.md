@@ -11,6 +11,8 @@ authorizes qualifying renewals without per-PR confirmation. A dry run never
 writes remotely. Do not create schedules, merge, change policies, resolve
 discussion, or automatically invoke `ss-review`.
 
+The skill ignores draft PRs. Do not list or count them in the report.
+
 Run the native `ss-skills-util` on PATH. Missing tooling requires the user's
 normal `Install.ps1` setup in `ss-ai`, not an installation during this skill.
 Use GitHub CLI authentication or Azure CLI OAuth, never a personal access
@@ -72,8 +74,8 @@ an example schedule prompt is:
 
 > Run ss-autoreapprove against https://github.com/example/project.
 
-The utility enumerates complete open-PR metadata and applies the proactor's
-inclusive 14-day committer-time window before any history or content work.
+The utility enumerates complete open-PR metadata, discards drafts, and applies
+the proactor's inclusive 14-day committer-time window before any history or content work.
 Excluded PRs produce counts, not per-PR assignments. The window never limits
 approval history or the cumulative comparison.
 
@@ -84,6 +86,8 @@ without an inspection snapshot. Already-valid, no-prior-approval, and ineligible
 entries need no content work. An unresolved inspection needs recovery or an explicit tooling failure,
 not an acceptable terminal result. Do not interpret failed or partial discovery
 as no work.
+If inspection, refresh, publication, or notification removes a PR that became
+a draft, skip it without further work or reporting.
 
 An account-owned needs-review comment short-circuits source assessment and
 returns `needsReview`, including when a previous invocation posted it. Only

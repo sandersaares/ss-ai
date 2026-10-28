@@ -66,6 +66,12 @@ Describe 'Automatic reapproval repository scope instructions' {
         $script:Prompt | Should -Match 'External approval valid'
     }
 
+    It 'excludes draft PRs from work and reports' {
+        $script:Prompt | Should -Match 'skill ignores draft PRs'
+        $script:Prompt | Should -Match 'Do not list or count them in the report'
+        $script:Recipes | Should -Match 'return no item when a PR has become a draft'
+    }
+
     It 'retains refusal markers until a strictly later external approval' {
         $script:Prompt | Should -Match 'Only\s+an external approval by the authenticated account strictly after'
         $script:Prompt | Should -Match 'Never reassess an active marker'

@@ -131,6 +131,11 @@ preflight-only operation; missing host history is not proof that no write occurr
 
 `discovery.rs` owns the schema-8 recovery record and result metadata. Schema-7
 runs migrate with no consumed attempts and unchanged initial host identities.
+Discovery discards draft PRs before recency checks. Valid older records drop
+draft entries when loaded, and inspection, refresh, or publication preflight removes
+a PR found to have become a draft without consuming the stale-recovery budget.
+An attempted remote effect still requires original-command
+reconciliation so that a potentially accepted write is not repeated.
 Each fresh attempt adds a UUID used as that PR's host-journal run identity;
 the enclosing run ID stays fixed. The snapshot digest also binds this UUID,
 so equal evidence and timestamps cannot reuse an earlier snapshot. This preserves
