@@ -108,6 +108,17 @@ function Get-RustTestIdentity {
             }
         }
 
+        # Manifest parser tests embed these seeds; generated fuzz corpora are not build inputs.
+        foreach ($seed in @(
+            'packages/ss-ai-cargo/fuzz/seeds/dependencies.toml',
+            'packages/ss-ai-cargo/fuzz/seeds/malformed.toml'
+        )) {
+            $path = Join-Path $RepositoryRoot $seed
+            if (Test-Path -LiteralPath $path -PathType Leaf) {
+                Get-Item -LiteralPath $path
+            }
+        }
+
         # Reapproval tests embed the shared policy outside the Cargo package tree.
         $policy = Join-Path $RepositoryRoot 'skills/ss-autoreapprove/significance.md'
         if (Test-Path -LiteralPath $policy -PathType Leaf) {
@@ -227,7 +238,7 @@ function New-RustTestPreparation {
     try {
         $identity = Get-RustTestIdentity -RepositoryRoot $RepositoryRoot
 
-        $providerSource = Join-Path $RepositoryRoot 'packages/ss-skills-util/tests/support/provider.rs'
+        $providerSource = Join-Path $RepositoryRoot 'packages/ss-ai/tests/support/provider.rs'
         $provider = Join-Path $owned $(if ($IsWindows) { 'provider.exe' } else { 'provider' })
         $providerFailure = $null
         $requiresProvider = -not $TestTarget -or $TestTarget -contains 'native'
@@ -412,7 +423,7 @@ function Read-RustTestPreparation {
     $artifacts = @($record.executables)
     if ($record.provider) {
         Assert-RustRecordFields -Record $record.provider -Fields @('source', 'executable')
-        if ($record.provider.source.path -cne (Join-Path $RepositoryRoot 'packages/ss-skills-util/tests/support/provider.rs') -or
+        if ($record.provider.source.path -cne (Join-Path $RepositoryRoot 'packages/ss-ai/tests/support/provider.rs') -or
             (Split-Path -Parent $record.provider.executable.path) -cne $record.ownedDirectory) {
             throw 'Provider prerequisite ownership paths do not match.'
         }

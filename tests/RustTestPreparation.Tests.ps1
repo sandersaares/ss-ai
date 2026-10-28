@@ -55,7 +55,7 @@ BeforeAll {
     # Each invocation gets a source tree and record parent independent of the real checkout.
     function New-PreparationFixture {
         $root = Join-Path $TestDrive ([guid]::NewGuid().ToString('N') + ' with spaces')
-        $support = Join-Path $root 'packages/ss-skills-util/tests/support'
+        $support = Join-Path $root 'packages/ss-ai/tests/support'
         New-Item -ItemType Directory -Path $support -Force | Out-Null
         [IO.File]::WriteAllText((Join-Path $support 'provider.rs'), 'source')
         [IO.File]::WriteAllText((Join-Path $root 'Cargo.lock'), 'lock')
@@ -227,7 +227,7 @@ Describe 'Rust preparation boundary' {
     }
 
     It 'never publishes a record after source freshness changes during compilation' {
-        $script:TouchDuringBuild = Join-Path $fixture.root 'packages/ss-skills-util/tests/support/provider.rs'
+        $script:TouchDuringBuild = Join-Path $fixture.root 'packages/ss-ai/tests/support/provider.rs'
         { New-RustTestPreparation -RepositoryRoot $fixture.root -PrerequisitePath $fixture.record } |
             Should -Throw '*sources changed during preparation*'
 
@@ -300,7 +300,7 @@ Describe 'Rust preparation boundary' {
 
     It 'invalidates a same-version source edit' {
         $null = New-RustTestPreparation -RepositoryRoot $fixture.root -PrerequisitePath $fixture.record
-        Add-Content -LiteralPath (Join-Path $fixture.root 'packages/ss-skills-util/tests/support/provider.rs') -Value 'changed'
+        Add-Content -LiteralPath (Join-Path $fixture.root 'packages/ss-ai/tests/support/provider.rs') -Value 'changed'
 
         { Read-RustTestPreparation -RepositoryRoot $fixture.root -PrerequisitePath $fixture.record } | Should -Throw '*sourceSha256*'
     }
@@ -328,9 +328,11 @@ Describe 'Rust preparation boundary' {
     It 'rejects source freshness changes for <Asset> with rewrite = <Rewrite> before execution' -ForEach @(
         # All identity inputs need mtime coverage, not only Rust modules.
         foreach ($asset in @(
-            'packages/ss-skills-util/tests/support/provider.rs',
-            'packages/ss-skills-util/src/commits.graphql',
-            'packages/ss-skills-util/tests/fixtures/github-approval.json',
+            'packages/ss-ai/tests/support/provider.rs',
+            'packages/ss-ai/src/commits.graphql',
+            'packages/ss-ai/tests/fixtures/github-approval.json',
+            'packages/ss-ai-cargo/fuzz/seeds/dependencies.toml',
+            'packages/ss-ai-cargo/fuzz/seeds/malformed.toml',
             'skills/ss-autoreapprove/significance.md',
             'Cargo.toml', 'Cargo.lock', 'rust-toolchain.toml', '.cargo/config.toml'
         )) {
@@ -363,8 +365,10 @@ Describe 'Rust preparation boundary' {
 
     It 'rejects changed embedded input <Asset> before Cargo execution' -ForEach @(
         # Cover each embedded input kind, including the policy outside the package tree.
-        @{ Asset = 'packages/ss-skills-util/src/commits.graphql' }
-        @{ Asset = 'packages/ss-skills-util/tests/fixtures/github-approval.json' }
+        @{ Asset = 'packages/ss-ai/src/commits.graphql' }
+        @{ Asset = 'packages/ss-ai/tests/fixtures/github-approval.json' }
+        @{ Asset = 'packages/ss-ai-cargo/fuzz/seeds/dependencies.toml' }
+        @{ Asset = 'packages/ss-ai-cargo/fuzz/seeds/malformed.toml' }
         @{ Asset = 'skills/ss-autoreapprove/significance.md' }
     ) {
         $assetPath = Join-Path $fixture.root $Asset
@@ -373,7 +377,11 @@ Describe 'Rust preparation boundary' {
         $prepared = New-RustTestPreparation -RepositoryRoot $fixture.root -PrerequisitePath $fixture.record
         $null = Read-RustTestPreparation -RepositoryRoot $fixture.root -PrerequisitePath $fixture.record
 
+        $stamp = [IO.File]::GetLastWriteTimeUtc($assetPath)
         [IO.File]::WriteAllText($assetPath, 'modified embedded input')
+        [IO.File]::SetLastWriteTimeUtc($assetPath, $stamp)
+        (Get-RustTestIdentity -RepositoryRoot $fixture.root).sourceFreshnessSha256 |
+            Should -Be $prepared.identity.sourceFreshnessSha256
         {
             $validated = Read-RustTestPreparation -RepositoryRoot $fixture.root -PrerequisitePath $fixture.record
             Invoke-PreparedRustTests -Preparation $validated -PrerequisitePath $fixture.record
@@ -383,6 +391,29 @@ Describe 'Rust preparation boundary' {
         foreach ($artifact in $prepared.executables) {
             (Get-TestArtifact -Path $artifact.path).sha256 | Should -Be $artifact.sha256
         }
+    }
+
+    It 'ignores unrelated TOML files and generated fuzz corpus inputs' {
+        $paths = @(
+            'packages/ss-ai-cargo/fuzz/corpus/manifest/dependencies.toml',
+            'packages/ss-ai-cargo/fuzz/seeds/unrelated.toml',
+            'packages/another/fuzz/seeds/malformed.toml'
+        )
+        foreach ($path in $paths) {
+            $assetPath = Join-Path $fixture.root $path
+            New-Item -ItemType Directory -Path (Split-Path -Parent $assetPath) -Force | Out-Null
+            [IO.File]::WriteAllText($assetPath, 'original')
+        }
+        $prepared = New-RustTestPreparation -RepositoryRoot $fixture.root -PrerequisitePath $fixture.record
+        foreach ($path in $paths) {
+            $assetPath = Join-Path $fixture.root $path
+            [IO.File]::WriteAllText($assetPath, 'modified')
+            [IO.File]::SetLastWriteTimeUtc($assetPath, [datetime]::new(2020, 1, 1, 0, 0, 0, [DateTimeKind]::Utc))
+        }
+        $identity = Get-RustTestIdentity -RepositoryRoot $fixture.root
+        $identity.sourceSha256 | Should -Be $prepared.identity.sourceSha256
+        $identity.sourceFreshnessSha256 | Should -Be $prepared.identity.sourceFreshnessSha256
+        $null = Read-RustTestPreparation -RepositoryRoot $fixture.root -PrerequisitePath $fixture.record
     }
 
     It 'rejects incomplete records, changed artifacts, and incompatible flags' {

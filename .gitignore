@@ -6,4 +6,4 @@ eval-results/
 evals/**/.eval-cache/
 /target/
 # Provider fixture writers retain transaction locks between invocations.
-/packages/ss-skills-util/tests/fixtures/*.json.lock
+/packages/ss-ai-review/tests/fixtures/*.json.lock

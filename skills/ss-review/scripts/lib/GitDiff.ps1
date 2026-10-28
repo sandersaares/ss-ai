@@ -1,7 +1,7 @@
 #Requires -Version 7.6
 
 # Review-specific anchor lookup over the shared native Git comparison.
-# Exact comparison, unified parsing and path decoding belong to ss-skills-util;
+# Exact comparison, unified parsing and path decoding belong to ss-ai;
 # finding membership remains part of the review workflow.
 
 Set-StrictMode -Version Latest
@@ -17,9 +17,9 @@ function Invoke-SkillsGit {
         [string] $StandardInput = ''
     )
 
-    $program = Get-Command ss-skills-util -CommandType Application -ErrorAction SilentlyContinue | Select-Object -First 1
+    $program = Get-Command ss-ai -CommandType Application -ErrorAction SilentlyContinue | Select-Object -First 1
     if (-not $program) {
-        throw 'ss-skills-util is required on PATH. Run Install.ps1 from ss-ai before reviewing.'
+        throw 'ss-ai is required on PATH. Run Install.ps1 from ss-ai before reviewing.'
     }
 
     $start = [Diagnostics.ProcessStartInfo]::new($program.Source)
@@ -44,7 +44,7 @@ function Invoke-SkillsGit {
         $errorText = $errorTask.GetAwaiter().GetResult()
         $process.WaitForExit()
         if ($process.ExitCode -ne 0) {
-            throw "ss-skills-util Git operation failed: $errorText"
+            throw "ss-ai Git operation failed: $errorText"
         }
         ConvertFrom-Json -InputObject $output -AsHashtable -Depth 100
     } finally {

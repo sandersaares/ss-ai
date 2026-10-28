@@ -43,7 +43,7 @@ function Invoke-SkillsUtilityCargo {
         $stderr = $process.StandardError.ReadToEndAsync()
         $process.WaitForExit()
         [Console]::Error.Write($stderr.GetAwaiter().GetResult())
-        if ($process.ExitCode -ne 0) { throw "ss-skills-util compilation or installation failed (exit $($process.ExitCode))." }
+        if ($process.ExitCode -ne 0) { throw "ss-ai compilation or installation failed (exit $($process.ExitCode))." }
         $stdout.GetAwaiter().GetResult() -split '\r?\n' | Where-Object { $_ }
     } finally {
         $process.Dispose()
@@ -56,11 +56,11 @@ function Install-SkillsUtility {
 
     foreach ($command in @('rustup', 'cargo')) {
         if (-not (Get-Command $command -CommandType Application -ErrorAction SilentlyContinue)) {
-            throw "$command is required on PATH. Install Rustup/Cargo and the native C/C++ build tools described in packages\ss-skills-util\README.md."
+            throw "$command is required on PATH. Install Rustup/Cargo and the native C/C++ build tools described in packages\ss-ai\README.md."
         }
     }
     $repositoryRoot = Split-Path -Parent (Split-Path -Parent $PSScriptRoot)
-    $utilityPath = Join-Path $repositoryRoot 'packages\ss-skills-util'
+    $utilityPath = Join-Path $repositoryRoot 'packages\ss-ai'
     if (-not (Test-Path -LiteralPath (Join-Path $repositoryRoot 'Cargo.lock') -PathType Leaf)) {
         throw 'The repository Cargo.lock is required; restore it before running setup.'
     }
@@ -68,34 +68,34 @@ function Install-SkillsUtility {
     # Rustup selects the toolchain from the working directory, not --path.
     Push-Location -LiteralPath $repositoryRoot
     try {
-        Write-Host 'Building and installing ss-skills-util. Please wait; this may take a few minutes.' -ForegroundColor Yellow
+        Write-Host 'Building and installing ss-ai. Please wait; this may take a few minutes.' -ForegroundColor Yellow
         # Cargo's artifact messages identify the exact build without duplicating its
         # install-root precedence. Compare bytes, not version banners, after installation.
         $artifacts = @(Invoke-SkillsUtilityCargo -UtilityPath $utilityPath |
             ForEach-Object {
                 $message = ConvertFrom-Json -InputObject $_ -AsHashtable
                 if ($message['reason'] -eq 'compiler-artifact' -and
-                    $message['target']['name'] -ceq 'ss-skills-util' -and
+                    $message['target']['name'] -ceq 'ss-ai' -and
                     $message['target']['kind'] -contains 'bin') {
                     if ([string]::IsNullOrWhiteSpace($message['executable'])) {
-                        throw 'Cargo did not identify the ss-skills-util executable artifact.'
+                        throw 'Cargo did not identify the ss-ai executable artifact.'
                     }
                     $message['executable']
                 }
             })
-        if ($artifacts.Count -ne 1) { throw 'Cargo must report exactly one ss-skills-util executable artifact.' }
-        $application = Get-Command ss-skills-util -CommandType Application -ErrorAction SilentlyContinue | Select-Object -First 1
+        if ($artifacts.Count -ne 1) { throw 'Cargo must report exactly one ss-ai executable artifact.' }
+        $application = Get-Command ss-ai -CommandType Application -ErrorAction SilentlyContinue | Select-Object -First 1
         if (-not $application) {
-            throw "ss-skills-util is not on PATH. Add Cargo's configured installation binary directory to PATH and rerun setup."
+            throw "ss-ai is not on PATH. Add Cargo's configured installation binary directory to PATH and rerun setup."
         }
         $builtHash = (Get-FileHash -LiteralPath $artifacts[0] -Algorithm SHA256).Hash
         $pathHash = (Get-FileHash -LiteralPath $application.Source -Algorithm SHA256).Hash
         if ($builtHash -cne $pathHash) {
-            throw "PATH resolves ss-skills-util to '$($application.Source)', which does not match Cargo's artifact '$($artifacts[0])'. Put Cargo's configured installation binary directory before older copies on PATH and rerun setup."
+            throw "PATH resolves ss-ai to '$($application.Source)', which does not match Cargo's artifact '$($artifacts[0])'. Put Cargo's configured installation binary directory before older copies on PATH and rerun setup."
         }
         $version = & $application.Source --version
-        if ($LASTEXITCODE -ne 0 -or ($version -join "`n") -notmatch '^ss-skills-util \S+') {
-            throw 'The PATH ss-skills-util invocation failed. Check Cargo installation and PATH before linking skills.'
+        if ($LASTEXITCODE -ne 0 -or ($version -join "`n") -notmatch '^ss-ai \S+') {
+            throw 'The PATH ss-ai invocation failed. Check Cargo installation and PATH before linking skills.'
         }
         Write-Host "Installed $version from this repository." -ForegroundColor Green
     } finally {

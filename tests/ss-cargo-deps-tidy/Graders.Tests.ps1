@@ -1,7 +1,7 @@
 BeforeAll {
     $repository = Split-Path -Parent (Split-Path -Parent $PSScriptRoot)
     $script:Grader = Join-Path $repository 'dev\ss-cargo-deps-tidy\evals\Test-CargoTidied.ps1'
-    $script:Inventory = Join-Path $repository 'skills\ss-cargo-deps-tidy\scripts\Generate-Inventory.ps1'
+    $script:Utility = 'ss-ai'
 }
 
 Describe 'Cargo tidiness grader' {
@@ -17,12 +17,12 @@ Describe 'Cargo tidiness grader' {
         try {
             $env:WAZA_WORKSPACE_DIR = $workspace
             $env:TEMP = $null
-            & pwsh -NoProfile -File $script:Grader -ExpectationsPath $expectations -InventoryScript $script:Inventory
+            & pwsh -NoProfile -File $script:Grader -ExpectationsPath $expectations -UtilityPath $script:Utility
             $LASTEXITCODE | Should -Be 0
 
             # Deliberately violates padding and default-feature policy, without needing Cargo.
             [IO.File]::AppendAllText($manifest, "[workspace.dependencies]`nserde = '1'`n")
-            & pwsh -NoProfile -File $script:Grader -ExpectationsPath $expectations -InventoryScript $script:Inventory 2>$null
+            & pwsh -NoProfile -File $script:Grader -ExpectationsPath $expectations -UtilityPath $script:Utility 2>$null
             $LASTEXITCODE | Should -Be 1
         } finally {
             $env:WAZA_WORKSPACE_DIR = $previous

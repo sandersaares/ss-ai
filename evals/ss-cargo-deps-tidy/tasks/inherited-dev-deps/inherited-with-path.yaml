@@ -1,8 +1,8 @@
 id: inherited-dev-dep-with-path
 name: Inherited dev-dep - workspace entry already has path
 description: >
-  Smallest reproduction of bug #1 in Generate-Inventory.ps1's same-workspace
-  resolution. A workspace member declares a same-workspace dev-dependency
+  Smallest reproduction of a workspace name/path classification case.
+  A workspace member declares a same-workspace dev-dependency
   via `workspace = true`; the matching workspace.dependencies entry already
   carries a `path` attribute pointing at another member. The tidy skill must
   recognize this as a same-workspace dev-dep (Stage 3) and rewrite it to a

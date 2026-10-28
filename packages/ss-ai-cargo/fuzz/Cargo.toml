@@ -1,0 +1,31 @@
+[package]
+name = "ss-ai-cargo-fuzz"
+description = "Bounded parser fuzz target for ss-ai-cargo"
+version = "0.1.0"
+publish = false
+authors.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+include.workspace = true
+
+[package.metadata]
+cargo-fuzz = true
+
+[package.metadata.docs.rs]
+all-features = true
+
+[dependencies]
+libfuzzer-sys = { workspace = true, features = ["link_libfuzzer"] }
+ss-ai-cargo = { workspace = true, features = ["fuzzing"] }
+
+[[bin]]
+name = "manifest"
+path = "fuzz_targets/manifest.rs"
+test = false
+doc = false
+bench = false
+
+[lints]
+workspace = true

@@ -1,5 +1,5 @@
 ```text
-ss-skills-util review select --repository-url "{{REPOSITORY_URL}}" --session-id "{{SESSION_ID}}" --state-path "{{STATE_PATH}}" --claim-message "{{CLAIM_MESSAGE}}"
+ss-ai review select --repository-url "{{REPOSITORY_URL}}" --session-id "{{SESSION_ID}}" --state-path "{{STATE_PATH}}" --claim-message "{{CLAIM_MESSAGE}}"
 ```
 
 Placeholders to replace:

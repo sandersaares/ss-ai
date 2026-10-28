@@ -13,7 +13,7 @@ discussion, or automatically invoke `ss-review`.
 
 The skill ignores draft PRs. Do not list or count them in the report.
 
-Run the native `ss-skills-util` on PATH. Missing tooling requires the user's
+Run the native `ss-ai` on PATH. Missing tooling requires the user's
 normal `Install.ps1` setup in `ss-ai`, not an installation during this skill.
 Use GitHub CLI authentication or Azure CLI OAuth, never a personal access
 token. Keep credentials out of prompts and records.

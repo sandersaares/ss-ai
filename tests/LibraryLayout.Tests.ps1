@@ -58,7 +58,7 @@ Describe 'PowerShell library layout' {
             'ss-review\tool-calls\register-reviewer.md'
         )) {
             $content = Get-Content -LiteralPath (Join-Path $skills $recipe) -Raw
-            $content | Should -Match '(?m)^ss-skills-util '
+            $content | Should -Match '(?m)^ss-ai '
             $content | Should -Not -Match 'pwsh .* -File'
         }
         $proactorScripts = Join-Path $skills 'ss-review-proactor\scripts'

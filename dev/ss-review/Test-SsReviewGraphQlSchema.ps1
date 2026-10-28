@@ -40,7 +40,7 @@ if (-not $AdapterPath) {
     $AdapterPath = @(
         (Join-Path $adapterRoot 'GitHubPullRequestApi.ps1'),
         (Join-Path $adapterRoot 'GitHubIssueApi.ps1'),
-        (Join-Path $repoRoot 'packages\ss-skills-util\src\commits.graphql')
+        (Join-Path $repoRoot 'packages\ss-ai-review\src\commits.graphql')
     )
 }
 

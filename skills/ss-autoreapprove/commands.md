@@ -27,9 +27,9 @@ command finish rather than starting a duplicate.
 # Stage 1: discovery and history
 
 ```powershell
-ss-skills-util autoreapprove discover --repository-url "{{REPOSITORY}}" --state-path "{{RUN}}" --policy-path "{{POLICY}}" --tenant "{{TENANT}}" --dry-run
-ss-skills-util autoreapprove results --state-path "{{RUN}}" --after "{{AFTER_PR}}"
-ss-skills-util autoreapprove inspect --repository-url "{{REPOSITORY}}" --state-path "{{RUN}}" --pull-request-id "{{PR}}" --tenant "{{TENANT}}"
+ss-ai autoreapprove discover --repository-url "{{REPOSITORY}}" --state-path "{{RUN}}" --policy-path "{{POLICY}}" --tenant "{{TENANT}}" --dry-run
+ss-ai autoreapprove results --state-path "{{RUN}}" --after "{{AFTER_PR}}"
+ss-ai autoreapprove inspect --repository-url "{{REPOSITORY}}" --state-path "{{RUN}}" --pull-request-id "{{PR}}" --tenant "{{TENANT}}"
 ```
 
 Omit `--dry-run` only for an authorized publishing invocation. Omit `--tenant`
@@ -44,9 +44,9 @@ assess or report that PR.
 # Stage 2: preparation and evidence
 
 ```powershell
-ss-skills-util autoreapprove prepare --state-path "{{RUN}}" --pull-request-id "{{PR}}" --snapshot-digest "{{SNAPSHOT}}"
-ss-skills-util autoreapprove assessment --state-path "{{RUN}}" --pull-request-id "{{PR}}" --snapshot-digest "{{SNAPSHOT}}" --after "{{AFTER_CHANGE}}"
-ss-skills-util autoreapprove read --state-path "{{RUN}}" --pull-request-id "{{PR}}" --snapshot-digest "{{SNAPSHOT}}" --reference "{{REFERENCE}}" --offset "{{OFFSET}}"
+ss-ai autoreapprove prepare --state-path "{{RUN}}" --pull-request-id "{{PR}}" --snapshot-digest "{{SNAPSHOT}}"
+ss-ai autoreapprove assessment --state-path "{{RUN}}" --pull-request-id "{{PR}}" --snapshot-digest "{{SNAPSHOT}}" --after "{{AFTER_CHANGE}}"
+ss-ai autoreapprove read --state-path "{{RUN}}" --pull-request-id "{{PR}}" --snapshot-digest "{{SNAPSHOT}}" --reference "{{REFERENCE}}" --offset "{{OFFSET}}"
 ```
 
 Preparation returns the selected context and the first bounded metadata page.
@@ -59,8 +59,8 @@ insignificant decision. Do not substitute an arbitrary checkout or target tip.
 # Stage 3: judgments and completion
 
 ```powershell
-ss-skills-util autoreapprove judge --state-path "{{RUN}}" --pull-request-id "{{PR}}" --snapshot-digest "{{SNAPSHOT}}" --change-id "{{CHANGE}}" --disposition "{{DISPOSITION}}" --rationale "{{RATIONALE}}" --evidence "{{REFERENCE}}" --previous-digest "{{PREVIOUS}}"
-ss-skills-util autoreapprove complete --state-path "{{RUN}}" --pull-request-id "{{PR}}" --snapshot-digest "{{SNAPSHOT}}"
+ss-ai autoreapprove judge --state-path "{{RUN}}" --pull-request-id "{{PR}}" --snapshot-digest "{{SNAPSHOT}}" --change-id "{{CHANGE}}" --disposition "{{DISPOSITION}}" --rationale "{{RATIONALE}}" --evidence "{{REFERENCE}}" --previous-digest "{{PREVIOUS}}"
+ss-ai autoreapprove complete --state-path "{{RUN}}" --pull-request-id "{{PR}}" --snapshot-digest "{{SNAPSHOT}}"
 ```
 
 Repeat `--evidence` for additional returned references. A change judgment must
@@ -78,10 +78,10 @@ partial; it is not a completed no-work result.
 # Stage 4: publication and recovery
 
 ```powershell
-ss-skills-util autoreapprove refresh --repository-url "{{REPOSITORY}}" --state-path "{{RUN}}" --pull-request-id "{{PR}}" --tenant "{{TENANT}}"
-ss-skills-util autoreapprove publish --repository-url "{{REPOSITORY}}" --state-path "{{RUN}}" --pull-request-id "{{PR}}" --snapshot-digest "{{SNAPSHOT}}" --attribution "{{ATTRIBUTION}}" --tenant "{{TENANT}}"
-ss-skills-util autoreapprove notify --repository-url "{{REPOSITORY}}" --state-path "{{RUN}}" --pull-request-id "{{PR}}" --snapshot-digest "{{SNAPSHOT}}" --attribution "{{ATTRIBUTION}}" --tenant "{{TENANT}}"
-ss-skills-util autoreapprove results --state-path "{{RUN}}"
+ss-ai autoreapprove refresh --repository-url "{{REPOSITORY}}" --state-path "{{RUN}}" --pull-request-id "{{PR}}" --tenant "{{TENANT}}"
+ss-ai autoreapprove publish --repository-url "{{REPOSITORY}}" --state-path "{{RUN}}" --pull-request-id "{{PR}}" --snapshot-digest "{{SNAPSHOT}}" --attribution "{{ATTRIBUTION}}" --tenant "{{TENANT}}"
+ss-ai autoreapprove notify --repository-url "{{REPOSITORY}}" --state-path "{{RUN}}" --pull-request-id "{{PR}}" --snapshot-digest "{{SNAPSHOT}}" --attribution "{{ATTRIBUTION}}" --tenant "{{TENANT}}"
+ss-ai autoreapprove results --state-path "{{RUN}}"
 ```
 
 For `staleEvidence` or `staleDuringExecution` from any stage, stop the old PR

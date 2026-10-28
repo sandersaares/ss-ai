@@ -698,11 +698,11 @@ queries, registration, authorship enrichment, and publication remain separate
 operations so a read-only command cannot gain a remote or mutating behavior
 through a mistaken option.
 
-Reviewer registration runs through the shared `ss-skills-util` executable on
+Reviewer registration runs through the shared `ss-ai` executable on
 `PATH`, independently of these review-only PowerShell libraries. Its native
 transport and identity operations also serve proactor selection and confirmation.
 The remaining capture, analysis, and publication operations stay within this
-skill. See the utility's [implementation guide](../../../packages/ss-skills-util/docs/implementation.md)
+skill. See the utility's [implementation guide](../../../packages/ss-ai/docs/implementation.md)
 for its transaction and provider boundaries.
 
 ## Target resolution
@@ -1011,7 +1011,7 @@ service patch APIs may omit or truncate content. Publication computes the diff
 from the captured commit pair and fails if either commit is unavailable.
 
 Service-specific change identities remain adapter data where a platform needs
-them to place comments. The installed `ss-skills-util git diff` operation owns
+them to place comments. The installed `ss-ai git diff` operation owns
 exact Git comparison and path/hunk parsing. The PowerShell adapter maps the
 result into the reviewed-commit model and retains finding lookup and hunk
 membership. Parser fixtures invoke the same native parser; isolated Rust

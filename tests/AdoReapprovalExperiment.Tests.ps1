@@ -160,7 +160,7 @@ Describe 'Controlled ADO evidence experiment' {
 
         It 'waits through lock contention and preserves the complete winning initialization' {
             $output = Join-Path $TestDrive 'contended-fixture.json'
-            $fixture = Get-Content -LiteralPath (Join-Path $PSScriptRoot '..\packages\ss-skills-util\tests\fixtures\ado-no-approval-policy.json') -Raw |
+            $fixture = Get-Content -LiteralPath (Join-Path $PSScriptRoot '..\packages\ss-ai-review\tests\fixtures\ado-no-approval-policy.json') -Raw |
                 ConvertFrom-Json -AsHashtable -DateKind String
             $lock = [IO.File]::Open("$output.lock", [IO.FileMode]::OpenOrCreate, [IO.FileAccess]::ReadWrite, [IO.FileShare]::None)
             $contended = [Threading.ManualResetEventSlim]::new()
@@ -207,7 +207,7 @@ Describe 'Controlled ADO evidence experiment' {
 Describe 'ADO capture provider boundaries' {
     InModuleScope AdoExperiment {
         BeforeEach {
-            $script:stage = (Get-Content -LiteralPath (Join-Path $PSScriptRoot '..\packages\ss-skills-util\tests\fixtures\ado-no-approval-policy.json') -Raw |
+            $script:stage = (Get-Content -LiteralPath (Join-Path $PSScriptRoot '..\packages\ss-ai-review\tests\fixtures\ado-no-approval-policy.json') -Raw |
                 ConvertFrom-Json -AsHashtable -DateKind String).stages[1]
             $script:requests = @()
             $script:repeatPolicy = $false
@@ -294,7 +294,7 @@ Describe 'ADO capture provider boundaries' {
 Describe 'Sanitized ADO evidence fixture' {
     BeforeAll {
         $exporter = Join-Path $PSScriptRoot '..\dev\ss-autoreapprove\Export-AdoExperimentFixture.ps1'
-        $fixturePath = Join-Path $PSScriptRoot '..\packages\ss-skills-util\tests\fixtures\ado-no-approval-policy.json'
+        $fixturePath = Join-Path $PSScriptRoot '..\packages\ss-ai-review\tests\fixtures\ado-no-approval-policy.json'
         $fixtureText = Get-Content -LiteralPath $fixturePath -Raw
         $fixture = $fixtureText | ConvertFrom-Json -AsHashtable -DateKind String
 

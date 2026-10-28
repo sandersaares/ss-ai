@@ -230,11 +230,11 @@ index bbbbbbb..ccccccc 100644
 
 Describe 'ss-review native executable discovery' {
     It 'uses the first PATH application when another installation is also discoverable' {
-        $script:FirstNative = Get-Command ss-skills-util -CommandType Application | Select-Object -First 1
+        $script:FirstNative = Get-Command ss-ai -CommandType Application | Select-Object -First 1
         Mock Get-Command {
             $script:FirstNative
             [pscustomobject]@{ Source = 'not-the-first-PATH-application' }
-        } -ParameterFilter { ($Name -join ',') -eq 'ss-skills-util' }
+        } -ParameterFilter { ($Name -join ',') -eq 'ss-ai' }
 
         $result = Invoke-SkillsGit -ArgumentList @('path', '--value', 'src/example.rs')
         $result['path'] | Should -Be 'src/example.rs'

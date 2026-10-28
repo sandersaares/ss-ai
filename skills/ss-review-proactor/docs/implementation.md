@@ -3,7 +3,7 @@
 ## Boundaries
 
 The primary agent owns configuration, local checkout preparation, the skill
-handoff, and human interaction. The shared `ss-skills-util` executable owns repository enumeration,
+handoff, and human interaction. The shared `ss-ai` executable owns repository enumeration,
 eligibility, ordering, claim writes, the waiting period, and revalidation.
 It emits one JSON result and keeps a local journal in session state.
 

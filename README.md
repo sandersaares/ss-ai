@@ -47,7 +47,7 @@ pwsh -NoProfile -File path/to/ss-ai/Install.ps1
 ```
 
 Run as the normal user without elevation or `sudo`. Installation resolves
-sources from its own checkout, builds locked local `ss-skills-util`, and
+sources from its own checkout, builds locked local `ss-ai`, and
 compares Cargo's build artifact with the executable on `PATH` before
 activating instructions and skills. Reinstall between skill invocations
 to refresh local source. Cargo reports unrelated binary ownership conflicts;
@@ -80,7 +80,7 @@ Cargo before retrying. Do not run old and new workflow state together or replay
 uncertain remote writes; start fresh review sessions.
 
 From outside this checkout, confirm each skill appears once, instruction
-applicability is retained, and `ss-skills-util --version` resolves successfully.
+applicability is retained, and `ss-ai --version` resolves successfully.
 Installation does not authenticate clients, enable schedules, or approve reviews.
 
 ### Review reports and scheduled work

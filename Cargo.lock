@@ -62,6 +62,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "arbitrary"
+version = "1.5.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "3bc62ac97cc33321f50863d514c3bc38a453947a8f9e781137e47c7401020aed"
+
+[[package]]
 name = "atomic-waker"
 version = "1.1.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -342,6 +348,12 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "92773504d58c093f6de2459af4af33faa518c13451eb8f2b5698ed3d36e7c813"
 
 [[package]]
+name = "equivalent"
+version = "1.0.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "00d174d5400e5e8fd687ad1049e2f578285fa914201b1af7e8b112a4546bd826"
+
+[[package]]
 name = "errno"
 version = "0.3.14"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -463,6 +475,18 @@ dependencies = [
  "rand_core",
  "wasm-bindgen",
 ]
+
+[[package]]
+name = "glob"
+version = "0.3.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "e4eba85ea1d0a966a983acd07deee566e67395d2d96b6fb39e62b5a833f1eb0b"
+
+[[package]]
+name = "hashbrown"
+version = "0.17.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "ed5909b6e89a2db4456e54cd5f673791d7eca6732202bbf2a9cc504fe2f9b84a"
 
 [[package]]
 name = "heck"
@@ -674,6 +698,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "indexmap"
+version = "2.14.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "cc4e190f5d26ca7051642629da2c52fc03bde85a03197c99408dcd291734c855"
+dependencies = [
+ "equivalent",
+ "hashbrown",
+]
+
+[[package]]
 name = "ipnet"
 version = "2.12.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -803,6 +837,16 @@ name = "libc"
 version = "0.2.190"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "ce5d3ddc6d3fa000eb1536d85e147bfe31aacaba692ed6a876f95cb7c855be78"
+
+[[package]]
+name = "libfuzzer-sys"
+version = "0.4.13"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "a9fd2f41a1cba099f79a0b6b6c35656cf7c03351a7bae8ff0f28f25270f929d2"
+dependencies = [
+ "arbitrary",
+ "cc",
+]
 
 [[package]]
 name = "libmimalloc-sys"
@@ -1404,24 +1448,102 @@ dependencies = [
 ]
 
 [[package]]
-name = "ss-skills-util"
+name = "ss-ai"
 version = "0.1.0"
 dependencies = [
  "clap",
  "jiff",
  "mimalloc",
  "ohno",
+ "same-file",
+ "serde_json",
+ "sha2",
+ "ss-ai-cargo",
+ "ss-ai-git",
+ "ss-ai-review",
+ "ss-ai-runtime",
+ "tempfile",
+ "url",
+ "uuid",
+]
+
+[[package]]
+name = "ss-ai-assessment"
+version = "0.1.0"
+dependencies = [
+ "clap",
+ "ohno",
+ "serde",
+ "serde_json",
+ "sha2",
+ "ss-ai-runtime",
+ "static_assertions",
+]
+
+[[package]]
+name = "ss-ai-cargo"
+version = "0.1.0"
+dependencies = [
+ "glob",
+ "jiff",
+ "ohno",
+ "same-file",
+ "serde",
+ "serde_json",
+ "static_assertions",
+ "toml_edit",
+ "winapi-util",
+]
+
+[[package]]
+name = "ss-ai-cargo-fuzz"
+version = "0.1.0"
+dependencies = [
+ "libfuzzer-sys",
+ "ss-ai-cargo",
+]
+
+[[package]]
+name = "ss-ai-git"
+version = "0.1.0"
+dependencies = [
+ "ohno",
+ "regex",
+ "serde",
+ "ss-ai-runtime",
+ "static_assertions",
+]
+
+[[package]]
+name = "ss-ai-review"
+version = "0.1.0"
+dependencies = [
+ "clap",
+ "jiff",
+ "ohno",
  "regex",
  "reqwest",
  "serde",
  "serde_json",
  "sha2",
+ "ss-ai-assessment",
+ "ss-ai-runtime",
+ "static_assertions",
+ "tempfile",
+ "url",
+ "uuid",
+]
+
+[[package]]
+name = "ss-ai-runtime"
+version = "0.1.0"
+dependencies = [
+ "jiff",
+ "ohno",
  "static_assertions",
  "tempfile",
  "tick",
  "tokio",
- "url",
- "uuid",
  "windows-sys 0.61.2",
 ]
 
@@ -1610,6 +1732,36 @@ checksum = "c9cc2678c2cdd569ef8215e2afd7954ada2ae20b4fdd2c5fe6139a3b02d105db"
 dependencies = [
  "rustls",
  "tokio",
+]
+
+[[package]]
+name = "toml_datetime"
+version = "1.1.2+spec-1.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "2b86d767906c6c42421dcba507eb9d203e779497710a47782a224bb871653053"
+dependencies = [
+ "serde_core",
+]
+
+[[package]]
+name = "toml_edit"
+version = "0.25.17+spec-1.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "e3641d5bbb5349a79e1020a242d251efbc546ad8048d133958323ce9c40a9c9c"
+dependencies = [
+ "indexmap",
+ "toml_datetime",
+ "toml_parser",
+ "winnow",
+]
+
+[[package]]
+name = "toml_parser"
+version = "1.1.5+spec-1.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "baa693a8032d7e1cada7d0041e96126df243179ff061456783ac7f12bda4744c"
+dependencies = [
+ "winnow",
 ]
 
 [[package]]
@@ -1982,6 +2134,15 @@ name = "windows_x86_64_msvc"
 version = "0.52.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "589f6da84c646204747d1270a2a5661ea66ed1cced2631d546fdfb155959f9ec"
+
+[[package]]
+name = "winnow"
+version = "1.0.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "23b97319f7b8343df12cc98938e5c3eb436064524c8d2b4e30a1d3a36eecdf81"
+dependencies = [
+ "memchr",
+]
 
 [[package]]
 name = "writeable"

@@ -1,0 +1,22 @@
+[workspace]
+members = ["packages/*"]
+
+[workspace.dependencies]
+alias = { path = "packages/local", package = "local" }
+
+[dependencies]
+bare = "1.0"
+inline = {
+    version = "1.0",
+    features = ["a", "b"],
+}
+dotted.workspace = true
+other = "2"
+dotted.features = ["c"]
+
+[build-dependencies.subtable]
+version = "1.0"
+features = ["d"]
+
+[target.'cfg(unix)'.build-dependencies]
+targeted = { workspace = true }

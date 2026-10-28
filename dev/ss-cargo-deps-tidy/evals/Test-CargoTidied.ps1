@@ -2,8 +2,8 @@
 <#
 .SYNOPSIS
     Program-grader script. Verifies a Rust workspace has been correctly
-    tidied by the ss-cargo-deps-tidy skill, by running the skill's own
-    inventory script and asserting the resulting structure.
+    tidied by the ss-cargo-deps-tidy skill, by running the native
+    inventory command and asserting the resulting structure.
 
 .DESCRIPTION
     Invoked by waza's `program` grader. Reads `WAZA_WORKSPACE_DIR` from
@@ -39,14 +39,14 @@ param(
     [Parameter(Mandatory)]
     [string]$ExpectationsPath,
 
-    [Parameter(Mandatory)]
-    [string]$InventoryScript,
+    [string]$UtilityPath = 'ss-ai',
 
     [switch]$RequireBumps
 )
 
 $ErrorActionPreference = 'Stop'
 Set-StrictMode -Version Latest
+$PSNativeCommandUseErrorActionPreference = $true
 
 $workspace = $env:WAZA_WORKSPACE_DIR
 if (-not $workspace) {
@@ -58,8 +58,18 @@ if (-not (Test-Path $workspace)) {
 if (-not (Test-Path $ExpectationsPath)) {
     [Console]::Error.WriteLine("expectations file '$ExpectationsPath' does not exist"); exit 2
 }
-if (-not (Test-Path $InventoryScript)) {
-    [Console]::Error.WriteLine("inventory script '$InventoryScript' does not exist"); exit 2
+if ($UtilityPath.Contains([IO.Path]::DirectorySeparatorChar) -or $UtilityPath.Contains([IO.Path]::AltDirectorySeparatorChar)) {
+    if (-not (Test-Path -LiteralPath $UtilityPath -PathType Leaf)) {
+        [Console]::Error.WriteLine("native utility '$UtilityPath' does not exist"); exit 2
+    }
+    $utility = (Resolve-Path -LiteralPath $UtilityPath).ProviderPath
+} else {
+    $utilityCommand = Get-Command -Name $UtilityPath -CommandType Application -All -ErrorAction SilentlyContinue |
+        Select-Object -First 1
+    if (-not $utilityCommand) {
+        [Console]::Error.WriteLine("native utility '$UtilityPath' was not found on PATH"); exit 2
+    }
+    $utility = $utilityCommand.Path
 }
 
 $workspaceManifest = Join-Path $workspace 'Cargo.toml'
@@ -67,13 +77,18 @@ if (-not (Test-Path $workspaceManifest)) {
     [Console]::Error.WriteLine("workspace Cargo.toml not found at $workspaceManifest"); exit 2
 }
 
-# Unix shells need not define TEMP; use the platform's temporary directory.
 $inventoryPath = Join-Path ([IO.Path]::GetTempPath()) "ss-cargo-deps-tidy-grader-$([guid]::NewGuid()).json"
 try {
     $global:LASTEXITCODE = 0
-    & $InventoryScript -WorkspaceManifest $workspaceManifest -OutputPath $inventoryPath
+    $previousNativeErrorPreference = $PSNativeCommandUseErrorActionPreference
+    $PSNativeCommandUseErrorActionPreference = $false
+    try {
+        & $utility cargo inventory --workspace-manifest $workspaceManifest --output-path $inventoryPath
+    } finally {
+        $PSNativeCommandUseErrorActionPreference = $previousNativeErrorPreference
+    }
     if ($LASTEXITCODE -ne 0) {
-        [Console]::Error.WriteLine("Generate-Inventory.ps1 exited with code $LASTEXITCODE"); exit 2
+        [Console]::Error.WriteLine("ss-ai cargo inventory exited with code $LASTEXITCODE"); exit 2
     }
     $inv = Get-Content -LiteralPath $inventoryPath -Raw | ConvertFrom-Json
     $expectations = Get-Content -LiteralPath $ExpectationsPath -Raw | ConvertFrom-Json

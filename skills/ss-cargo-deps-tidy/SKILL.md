@@ -74,30 +74,44 @@ Execute all stages in sequence to complete the workflow.
 
 # Stage 1: Create inventory of dependency declarations
 
-**This stage is your FIRST action in the workflow.** Before opening, viewing, reading or listing any `Cargo.toml` file in the workspace, run the inventory script described below. The inventory is the single source of truth for every later stage; reading manifests by hand is wasted work and burns through your turn budget before you have made any edits.
+**This stage is your FIRST action in the workflow.** Before opening, viewing, reading or listing any `Cargo.toml` file in the workspace, run the native inventory command described below. The inventory is the single source of truth for every later stage; reading manifests by hand is wasted work and burns through your turn budget before you have made any edits.
 
 **Anti-pattern (do not do this):** opening the workspace, listing `packages/`, and then issuing one `view` call per `Cargo.toml`. The inventory captures every declaration in every manifest - name, section, version, features, default-features, path, style, line number, raw text - so you never need to read manifests up front. You only open a specific manifest later when a filter query has identified a concrete edit that needs to be made in it.
 
 Generate the inventory once at the start of the workflow and write it to a temporary file. All subsequent stages run filter queries against the loaded object - they never load the raw file contents into the conversation.
 
-**Critical:** Always invoke the script with `-OutputPath`. The JSON body can easily exceed 100 KB on real workspaces and is not suitable for direct inclusion in the agent context window. Do not `Get-Content` the inventory file without an immediate `| ConvertFrom-Json` and a follow-up filter; do not paste, summarize, or quote its raw contents.
+**Critical:** Always invoke the native command with `--output-path`. The JSON body can easily exceed 100 KB on real workspaces and is not suitable for direct inclusion in the agent context window. Do not `Get-Content` the inventory file without an immediate `| ConvertFrom-Json` and a follow-up filter; do not paste, summarize, or quote its raw contents. Inventory `sameWorkspace` is a tidy name/path classification, not a claim about Cargo registry resolution.
 
 ```powershell
+#Requires -Version 7.6
+
+Set-StrictMode -Version Latest
+$ErrorActionPreference = 'Stop'
+$PSNativeCommandUseErrorActionPreference = $true
+
 $inventoryPath = Join-Path ([IO.Path]::GetTempPath()) "cargo-deps-inventory-$([guid]::NewGuid()).json"
-& '{{SKILL_ROOT}}/scripts/Generate-Inventory.ps1' `
-    -WorkspaceManifest '{{WORKSPACE_MANIFEST}}' `
-    -OutputPath $inventoryPath
+$previousNativeErrorPreference = $PSNativeCommandUseErrorActionPreference
+$PSNativeCommandUseErrorActionPreference = $false
+try {
+    & ss-ai cargo inventory `
+        --workspace-manifest '{{WORKSPACE_MANIFEST}}' `
+        --output-path $inventoryPath
+} finally {
+    $PSNativeCommandUseErrorActionPreference = $previousNativeErrorPreference
+}
+if ($LASTEXITCODE -ne 0) {
+    throw 'Cargo inventory generation failed.'
+}
 Write-Host "Inventory written to: $inventoryPath"
 ```
 
 | Placeholder | Description |
 | --- | --- |
-| `SKILL_ROOT` | Absolute directory containing this skill's `SKILL.md`. |
 | `WORKSPACE_MANIFEST` | Absolute path to the workspace-level `Cargo.toml`. |
 
 If the command fails, stop and report its diagnostic; do not proceed with a partial inventory. On success, use the printed output path for the following queries.
 
-The script discovers all member packages automatically by expanding the workspace `members` / `exclude` declarations, so the workspace-level `Cargo.toml` is the only path you need to provide.
+The command discovers all member packages automatically by expanding the workspace `members` / `exclude` declarations, so the workspace-level `Cargo.toml` is the only path you need to provide.
 
 Record the printed path. Each subsequent stage may run in its own PowerShell session, so every stage that needs the inventory reloads it from this path before running its filter queries:
 
@@ -243,12 +257,13 @@ with `workspace = true` for regular dependencies. The path-only referencing requ
 
 # Stage 4: Centralize version management of dependencies
 
-List package-level declarations that still pin a version (Stage 3 has already removed versions from same-workspace dev-dependencies, so exclude those):
+List package-level declarations, including build dependencies and target-specific sections, that still pin a version (Stage 3 has already removed versions from same-workspace dev-dependencies, so exclude those):
 
 ```powershell
 $inv = Get-Content -LiteralPath '<inventory-path-from-stage-1>' -Raw | ConvertFrom-Json
 $inv.dependencies | Where-Object {
-    $_.section -in 'dependencies','dev-dependencies' -and $_.version -and -not $_.sameWorkspace
+    $_.section -in 'dependencies','dev-dependencies','build-dependencies' -and $_.version -and
+        -not ($_.section -eq 'dev-dependencies' -and $_.sameWorkspace)
 } | Select-Object manifest, line, section, name, version, raw
 ```
 
