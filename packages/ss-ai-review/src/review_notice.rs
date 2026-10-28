@@ -545,6 +545,9 @@ impl<'a> Store<'a> {
         if let Decision::NeedsReview { notice } = decision {
             return Ok(notice);
         }
+        if matches!(&decision, Decision::Ineligible { reason } if reason == "draft") {
+            return Err(fail("draft", "Draft PR excluded before notice publication"));
+        }
         if !input.evidence.equivalent(&fresh)? {
             return Err(fail(
                 "staleEvidence",

@@ -108,6 +108,17 @@ function Get-RustTestIdentity {
             }
         }
 
+        # Manifest parser tests embed these seeds; generated fuzz corpora are not build inputs.
+        foreach ($seed in @(
+            'packages/ss-ai-cargo/fuzz/seeds/dependencies.toml',
+            'packages/ss-ai-cargo/fuzz/seeds/malformed.toml'
+        )) {
+            $path = Join-Path $RepositoryRoot $seed
+            if (Test-Path -LiteralPath $path -PathType Leaf) {
+                Get-Item -LiteralPath $path
+            }
+        }
+
         # Reapproval tests embed the shared policy outside the Cargo package tree.
         $policy = Join-Path $RepositoryRoot 'skills/ss-autoreapprove/significance.md'
         if (Test-Path -LiteralPath $policy -PathType Leaf) {

@@ -98,7 +98,10 @@ fn output_is_atomically_replaced_and_summary_is_bounded() {
         String::from_utf8_lossy(&result.stderr)
     );
     let summary: Value = serde_json::from_slice(&result.stdout).unwrap();
-    assert_eq!(summary["outputPath"], output.to_str().unwrap());
+    let expected_output = fs::canonicalize(output.parent().unwrap())
+        .unwrap()
+        .join(output.file_name().unwrap());
+    assert_eq!(summary["outputPath"], expected_output.to_str().unwrap());
     assert_eq!(summary["memberCount"], 1);
     assert_eq!(summary["dependencyCount"], 1);
     let original = fs::read(&output).unwrap();
@@ -267,7 +270,7 @@ mod timestamp {
             .into_iter()
             .chain(arguments.iter().skip(2));
         let output = ss_ai::run_cargo(local, &FixedClock).unwrap();
-        assert!(output.contains("custom-executable inventory"));
+        assert!(output.contains("custom-executable cargo inventory"));
     }
 
     #[test]
@@ -283,7 +286,7 @@ mod timestamp {
                 Path::new("unused"),
             )
             .unwrap();
-            assert!(ordinary.contains(&format!("custom-executable {command}")));
+            assert!(ordinary.contains(&format!("custom-executable {namespace} {command}")));
             assert_eq!(ordinary, with_directory);
         }
     }

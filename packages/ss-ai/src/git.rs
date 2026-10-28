@@ -46,7 +46,7 @@ where
     I: IntoIterator<Item = T>,
     T: Into<OsString> + Clone,
 {
-    let cli = match GitCli::try_parse_from(arguments) {
+    let cli = match GitCli::try_parse_from(crate::command::namespace_arguments(arguments, "git")) {
         Ok(cli) => cli,
         Err(error)
             if matches!(

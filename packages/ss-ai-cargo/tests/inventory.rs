@@ -178,13 +178,19 @@ fn path_precedes_name_and_workspace_inheritance_preserves_resolution() {
     let workspace = Workspace::new();
     workspace.write(
         "Cargo.toml",
-        "[package]\nname = 'root'\n[workspace]\nmembers = ['a', 'b']\n[workspace.dependencies]\nalpha = { path = 'b' }\nalias = { path = 'a' }\n[dependencies]\nexternal = '1'\n",
+        "[package]\nname = 'root'\n[workspace]\nmembers = ['a', 'b', 'consumer']\n[workspace.dependencies]\nalpha = { package = 'beta', path = 'b' }\nalias = { path = 'a' }\nunresolved = '1'\n[dependencies]\nexternal = '1'\n",
     );
     workspace.write(
         "a/Cargo.toml",
         "[package]\nname = 'alpha'\n[dependencies]\nalias.workspace = true\n",
     );
     workspace.write("b/Cargo.toml", "[package]\nname = 'beta'\n");
+    // The parser reports declarations without requiring Cargo-valid combinations.
+    // This path checks the fallback when the workspace entry has no resolution.
+    workspace.write(
+        "consumer/Cargo.toml",
+        "[package]\nname = 'consumer'\n[dependencies]\nalpha = { path = '../b' }\nbeta = '1'\nunresolved = { workspace = true, path = '../a' }\nmissing.workspace = true\n[dev-dependencies]\nalpha.workspace = true\n[build-dependencies]\nbeta.workspace = true\nunresolved.workspace = true\n",
+    );
     let inventory = workspace.scan().unwrap();
     let alpha = inventory
         .dependencies
@@ -198,6 +204,42 @@ fn path_precedes_name_and_workspace_inheritance_preserves_resolution() {
         .find(|item| item.workspace == Some(true))
         .unwrap();
     assert_eq!(alias.resolved_manifest.as_deref(), Some("a/Cargo.toml"));
+    let consumer = |name: &str, section: &str| {
+        inventory
+            .dependencies
+            .iter()
+            .find(|item| {
+                item.manifest == "consumer/Cargo.toml"
+                    && item.name == name
+                    && item.section == section
+            })
+            .unwrap()
+    };
+    let inherited_alpha = consumer("alpha", "dev-dependencies");
+    assert!(inherited_alpha.same_workspace);
+    assert_eq!(
+        inherited_alpha.resolved_manifest.as_deref(),
+        Some("b/Cargo.toml")
+    );
+    for (name, expected) in [
+        ("alpha", Some("b/Cargo.toml")),
+        ("beta", Some("b/Cargo.toml")),
+        ("unresolved", Some("a/Cargo.toml")),
+        ("missing", None),
+    ] {
+        let dependency = consumer(name, "dependencies");
+        assert_eq!(dependency.resolved_manifest.as_deref(), expected, "{name}");
+        assert_eq!(dependency.same_workspace, expected.is_some(), "{name}");
+    }
+    let inherited_fallback = consumer("beta", "build-dependencies");
+    assert!(inherited_fallback.same_workspace);
+    assert_eq!(
+        inherited_fallback.resolved_manifest.as_deref(),
+        Some("b/Cargo.toml")
+    );
+    let unresolved = consumer("unresolved", "build-dependencies");
+    assert!(!unresolved.same_workspace);
+    assert_eq!(unresolved.resolved_manifest, None);
     assert_eq!(
         inventory
             .dependencies

@@ -36,20 +36,21 @@ where
     I: IntoIterator<Item = T>,
     T: Into<OsString> + Clone,
 {
-    let cli = match CargoCli::try_parse_from(arguments) {
-        Ok(cli) => cli,
-        Err(error)
-            if matches!(
-                error.kind(),
-                ErrorKind::DisplayHelp | ErrorKind::DisplayVersion
-            ) =>
-        {
-            return Ok(error.to_string());
-        }
-        Err(error) => {
-            return Err(caused_by("invalidInput", "Invalid command arguments", error).into());
-        }
-    };
+    let cli =
+        match CargoCli::try_parse_from(crate::command::namespace_arguments(arguments, "cargo")) {
+            Ok(cli) => cli,
+            Err(error)
+                if matches!(
+                    error.kind(),
+                    ErrorKind::DisplayHelp | ErrorKind::DisplayVersion
+                ) =>
+            {
+                return Ok(error.to_string());
+            }
+            Err(error) => {
+                return Err(caused_by("invalidInput", "Invalid command arguments", error).into());
+            }
+        };
     match cli.command {
         CargoCommand::Inventory {
             workspace_manifest,

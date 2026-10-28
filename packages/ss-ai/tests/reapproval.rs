@@ -1242,6 +1242,73 @@ fn refresh(root: &Path, provider: &Provider) -> Result<Value, AppError> {
     )
 }
 
+/// Draft preflight removes the PR even after ordinary stale retries are exhausted.
+fn draft_conversion_during_publication_is_removed() {
+    let repository = TempDir::new().unwrap();
+    let (old, new) = sources(repository.path());
+    for ado in [false, true] {
+        for (disposition, retries) in [
+            ("insignificant", 0),
+            ("significant", 0),
+            ("insignificant", 2),
+            ("significant", 2),
+            ("uncertain", 2),
+        ] {
+            let scope = TempDir::new().unwrap();
+            let root = scope.path().join("run");
+            let provider = if ado {
+                Provider::ado(repository.path(), &old, &new)
+            } else {
+                Provider::new(repository.path(), &old, &new)
+            };
+            let (mut snapshot, mut prepared) = prepare(&root, &provider, false);
+            for attempt in 0..retries {
+                assess_as(&root, &provider, &snapshot, &prepared, disposition);
+                let key = if ado { "description" } else { "body" };
+                provider.evidence.borrow_mut()["pullRequest"][key] =
+                    json!(format!("Changed discussion {attempt}"));
+                if disposition == "insignificant" {
+                    assert_eq!(
+                        publish(&root, &provider, &snapshot).unwrap()["items"][0]["status"],
+                        "staleDuringExecution"
+                    );
+                } else {
+                    assert_eq!(
+                        ss_ai::classification(&notify(&root, &provider, &snapshot).unwrap_err()),
+                        "staleEvidence"
+                    );
+                }
+                let refreshed = refresh(&root, &provider).unwrap();
+                assert_eq!(
+                    refreshed["items"][0]["staleRecovery"]["attempts"],
+                    attempt + 1
+                );
+                refreshed["items"][0]["snapshotDigest"]
+                    .as_str()
+                    .unwrap()
+                    .clone_into(&mut snapshot);
+                prepared = work(&root, &provider, "prepare", &snapshot, &[]).unwrap();
+            }
+            assess_as(&root, &provider, &snapshot, &prepared, disposition);
+            provider.evidence.borrow_mut()["pullRequest"][if ado { "isDraft" } else { "draft" }] =
+                json!(true);
+            let result = if disposition == "insignificant" {
+                publish(&root, &provider, &snapshot).unwrap()
+            } else {
+                notify(&root, &provider, &snapshot).unwrap()
+            };
+            assert_eq!(provider.writes.get(), 0);
+            assert_eq!(result["state"], "complete");
+            assert_eq!(result["items"], json!([]));
+            assert_eq!(result["counts"]["open"], 1);
+            let record: Value =
+                serde_json::from_slice(&fs::read(root.join("run.json")).unwrap()).unwrap();
+            assert_eq!(record["inventory"].as_array().unwrap().len(), 1);
+            assert_eq!(record["inventory"][0]["pullRequestId"], 2);
+        }
+    }
+}
+
 /// Source movement forces a new exact-source assessment on both publication paths.
 #[expect(
     clippy::cognitive_complexity,
@@ -2606,6 +2673,7 @@ fn native_stale_evidence_recovery_preserves_assessment_and_effect_boundaries() {
         .lock()
         .unwrap_or_else(PoisonError::into_inner);
     stale_preflight_recovery_reassesses_source_before_any_effect();
+    draft_conversion_during_publication_is_removed();
     stale_notification_recovery_exhausts_without_remote_writes();
     repeated_observation_has_a_distinct_snapshot();
     stale_inspection_recovery_is_bounded_and_rechecks_authority();

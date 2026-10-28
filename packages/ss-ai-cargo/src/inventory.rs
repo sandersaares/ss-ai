@@ -221,8 +221,9 @@ fn classify_dependencies(
     index: &MemberIndex,
 ) -> Result<Vec<Dependency>, ScanError> {
     let mut dependencies = Vec::new();
-    // This tidy heuristic gives paths precedence over name matches and then
-    // applies workspace inheritance. Name matching is not Cargo resolution.
+    // This tidy heuristic gives paths precedence over name matches, while a
+    // resolved inherited workspace entry takes precedence over both.
+    // Name matching is not Cargo resolution.
     // Ref: docs/design.md, same-workspace classification.
     for (path, scan) in scans {
         let directory = parent(&path)?;
@@ -261,9 +262,11 @@ fn classify_dependencies(
         })
         .collect();
     for dependency in &mut dependencies {
-        if !dependency.same_workspace && dependency.workspace == Some(true) {
-            dependency.resolved_manifest = inherited.get(&dependency.name).cloned();
-            dependency.same_workspace = dependency.resolved_manifest.is_some();
+        if dependency.workspace == Some(true)
+            && let Some(manifest) = inherited.get(&dependency.name)
+        {
+            dependency.resolved_manifest = Some(manifest.clone());
+            dependency.same_workspace = true;
         }
     }
 

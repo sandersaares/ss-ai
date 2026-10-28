@@ -42,6 +42,7 @@ struct GitHub {
     account: Cell<u64>,
     invalid_listing: bool,
     empty: bool,
+    draft_only: bool,
 }
 
 impl GitHub {
@@ -51,6 +52,7 @@ impl GitHub {
             account: Cell::new(42),
             invalid_listing: false,
             empty: false,
+            draft_only: false,
         }
     }
 }
@@ -74,6 +76,8 @@ impl Process for GitHub {
             ("GET", "repos/example/widgets/pulls?state=open&per_page=100") => {
                 if self.empty {
                     json!([[]])
+                } else if self.draft_only {
+                    json!([[{"number": 5, "draft": true}]])
                 } else if self.invalid_listing {
                     json!([[{"number": 1}], "truncated page"])
                 } else {
@@ -98,7 +102,6 @@ impl Process for GitHub {
                     1 => vec![json!("2026-09-01T00:00:00Z")],
                     2 => vec![json!("2026-09-14T12:00:00+02:00")],
                     4 => vec![json!(17)],
-                    5 => vec![json!("2026-09-27T00:00:00Z")],
                     6 if next => vec![
                         json!("2026-09-01T00:00:00Z"),
                         json!("2026-09-28T11:00:00+02:00"),
@@ -197,8 +200,8 @@ fn github_discovery_accounts_for_every_page_without_reading_excluded_content() {
     assert_eq!(summary["state"], "partial");
     assert_eq!(
         summary["counts"],
-        json!({"open": 6, "noRecentCommit": 2, "assessmentRequired": 2, "failed": 1, "draft": 1, "pending": 0,
-            "alreadyValid": 0, "noPriorApproval": 0, "ineligible": 1, "indeterminate": 0,
+        json!({"open": 5, "noRecentCommit": 2, "assessmentRequired": 2, "failed": 1, "pending": 0,
+            "alreadyValid": 0, "noPriorApproval": 0, "ineligible": 0, "indeterminate": 0,
             "staleDuringExecution": 0, "needsReview": 0, "wouldReapprove": 0,
             "readyToReapprove": 0, "reapproved": 0})
     );
@@ -208,13 +211,20 @@ fn github_discovery_accounts_for_every_page_without_reading_excluded_content() {
     assert_eq!(summary["nextAfter"], 2);
     assert!(!summary.to_string().contains("excluded"));
     let state = record(root.path());
-    assert_eq!(state["inventory"].as_array().unwrap().len(), 6);
+    assert_eq!(state["inventory"].as_array().unwrap().len(), 5);
+    assert!(
+        !state["inventory"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|entry| entry["pullRequestId"] == 5)
+    );
     assert_eq!(
         state["inventory"][1]["recency"]["latestNonfutureCommit"],
         "2026-09-14T10:00:00.000000000Z"
     );
     assert_eq!(
-        state["inventory"][5]["recency"]["latestNonfutureCommit"],
+        state["inventory"][4]["recency"]["latestNonfutureCommit"],
         "2026-09-28T09:00:00.000000000Z"
     );
     assert_eq!(state["inventory"][3]["recency"]["state"], "failed");
@@ -227,7 +237,7 @@ fn github_discovery_accounts_for_every_page_without_reading_excluded_content() {
             .iter()
             .filter(|call| *call == "graphql")
             .count(),
-        7
+        6
     );
 
     // Recovery rereads identity/scope, but never repeats completed recency work.
@@ -244,8 +254,70 @@ fn github_discovery_accounts_for_every_page_without_reading_excluded_content() {
     let page: Value =
         serde_json::from_str(&run(&args, &NoProcess, &NoHttp, &FixedClock).unwrap()).unwrap();
     assert_eq!(page["items"][0]["pullRequestId"], 4);
-    assert_eq!(page["items"][1]["status"], "ineligible");
-    assert_eq!(page["nextAfter"], 5);
+    assert_eq!(page["items"][1]["pullRequestId"], 6);
+    assert!(page["nextAfter"].is_null());
+}
+
+#[test]
+fn draft_only_discovery_has_no_inventory_counts_or_provider_work() {
+    let root = fixture();
+    let mut provider = GitHub::new();
+    provider.draft_only = true;
+    let summary: Value = serde_json::from_str(
+        &run(
+            &arguments(root.path(), "https://github.com/example/widgets"),
+            &provider,
+            &NoHttp,
+            &FixedClock,
+        )
+        .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(summary["state"], "complete");
+    assert_eq!(summary["counts"]["open"], 0);
+    assert!(summary["counts"].get("draft").is_none());
+    assert_eq!(summary["items"], json!([]));
+    assert_eq!(record(root.path())["inventory"], json!([]));
+    assert!(!provider.calls.borrow().iter().any(|call| call == "graphql"));
+}
+
+#[test]
+fn legacy_draft_inventory_is_removed_after_validation() {
+    let root = fixture();
+    let provider = GitHub::new();
+    run(
+        &arguments(root.path(), "https://github.com/example/widgets"),
+        &provider,
+        &NoHttp,
+        &FixedClock,
+    )
+    .unwrap();
+    let mut legacy = record(root.path());
+    let mut draft = legacy["inventory"][1].clone();
+    draft["pullRequestId"] = json!(5);
+    draft["url"] = json!("https://github.com/example/widgets/pull/5");
+    draft["title"] = json!("draft to discard");
+    draft["draft"] = json!(true);
+    legacy["inventory"].as_array_mut().unwrap().insert(4, draft);
+    fs::write(
+        root.path().join("run.json"),
+        serde_json::to_vec(&legacy).unwrap(),
+    )
+    .unwrap();
+
+    let result: Value = serde_json::from_str(
+        &run(
+            &result_arguments(root.path()),
+            &NoProcess,
+            &NoHttp,
+            &FixedClock,
+        )
+        .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(result["counts"]["open"], 5);
+    assert!(result["counts"].get("draft").is_none());
+    assert!(!record(root.path()).to_string().contains("draft to discard"));
 }
 
 #[test]
@@ -536,7 +608,7 @@ fn interrupted_discovery_resumes_only_pending_entries() {
         .unwrap(),
     )
     .unwrap();
-    assert_eq!(summary["counts"]["pending"], 5);
+    assert_eq!(summary["counts"]["pending"], 4);
     assert!(summary["items"].as_array().unwrap().is_empty());
     let provider = GitHub::new();
     run(&args, &provider, &NoHttp, &FixedClock).unwrap();
@@ -548,7 +620,7 @@ fn interrupted_discovery_resumes_only_pending_entries() {
             .iter()
             .filter(|call| *call == "graphql")
             .count(),
-        6
+        5
     );
     assert!(
         !provider
@@ -741,6 +813,7 @@ impl Http for AzureMetadata {
             let entries = if query.get("$skip").unwrap() == "0" {
                 vec![
                     json!({"pullRequestId": 2, "status": "active", "isDraft": false, "title": "cutoff"}),
+                    json!({"pullRequestId": 3, "isDraft": true}),
                 ]
             } else {
                 Vec::new()
@@ -788,7 +861,14 @@ fn azure_metadata_and_commit_pages_preserve_tenant_and_do_not_collect_vote_histo
             .iter()
             .any(|call| call.contains("continuationToken=next"))
     );
-    assert!(calls.iter().any(|call| call.contains("%24skip=1")));
+    assert!(calls.iter().any(|call| call.contains("%24skip=2")));
+    assert_eq!(summary["counts"]["open"], 1);
+    assert!(summary["counts"].get("draft").is_none());
+    assert_eq!(
+        record(root.path())["inventory"].as_array().unwrap().len(),
+        1
+    );
+    assert!(!calls.iter().any(|call| call.contains("/pullRequests/3/")));
 }
 
 /// Real captured provider shapes with injected transport, never live approvals.
@@ -993,6 +1073,35 @@ fn discover_azure_approval(root: &Path, provider: &AzureApproval, dry_run: bool)
             .all(|url| !url.contains("/threads") && !url.contains("/reviewers"))
     );
     provider.calls.borrow_mut().clear();
+}
+
+#[test]
+fn ado_pr_converted_to_draft_is_removed_during_inspection() {
+    let root = fixture();
+    let mut provider = AzureApproval::new(1);
+    discover_azure_approval(root.path(), &provider, true);
+    provider.fixture["stages"][1]["pullRequest"]["isDraft"] = json!(true);
+    let result: Value = serde_json::from_str(
+        &run(
+            &inspect_arguments(root.path(), 1),
+            &AzureToken,
+            &provider,
+            &FixedClock,
+        )
+        .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(result["state"], "complete");
+    assert_eq!(result["counts"]["open"], 1);
+    assert_eq!(result["items"], json!([]));
+    assert_eq!(record(root.path())["inventory"][0]["pullRequestId"], 2);
+    assert!(
+        !provider
+            .calls
+            .borrow()
+            .iter()
+            .any(|url| url.contains("/threads"))
+    );
 }
 
 #[test]
@@ -1758,7 +1867,7 @@ impl Process for GitHubApproval {
                 let request: Value = serde_json::from_slice(input).unwrap();
                 let variables = &request["variables"];
                 if request["query"].as_str().unwrap().contains("committedDate") {
-                    let date = if variables["num"] == 1 {
+                    let date = if variables["num"] == 1 || self.fault == "bothRecent" {
                         "2026-09-27T00:00:00Z"
                     } else {
                         "2026-08-01T00:00:00Z"
@@ -1817,6 +1926,43 @@ fn github_inspect_arguments(root: &Path, number: u32) -> Vec<OsString> {
         "--pull-request-id".into(),
         number.to_string().into(),
     ]
+}
+
+#[test]
+fn github_pr_converted_to_draft_is_removed_during_inspection() {
+    let root = fixture();
+    let mut provider = GitHubApproval::new();
+    provider.fault = "bothRecent";
+    run(
+        &arguments(root.path(), "https://github.com/example/widgets"),
+        &provider,
+        &NoHttp,
+        &FixedClock,
+    )
+    .unwrap();
+    provider.calls.borrow_mut().clear();
+    provider.evidence["pullRequest"]["draft"] = json!(true);
+    let result: Value = serde_json::from_str(
+        &run(
+            &github_inspect_arguments(root.path(), 1),
+            &provider,
+            &NoHttp,
+            &FixedClock,
+        )
+        .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(result["state"], "processing");
+    assert_eq!(result["counts"]["open"], 1);
+    assert_eq!(result["items"], json!([]));
+    assert_eq!(record(root.path())["inventory"][0]["pullRequestId"], 2);
+    assert!(
+        !provider
+            .calls
+            .borrow()
+            .iter()
+            .any(|path| path.contains("/reviews"))
+    );
 }
 
 #[test]

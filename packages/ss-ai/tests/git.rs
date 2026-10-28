@@ -99,7 +99,7 @@ fn borrowed_arguments_keep_the_original_executable_name_in_help() {
         .into_iter()
         .chain(arguments.iter().skip(2));
     let output = run_git(local, &NativeProcess::new(Path::new("."))).unwrap();
-    assert!(output.contains("custom-executable diff"));
+    assert!(output.contains("custom-executable git diff"));
 }
 
 #[test]

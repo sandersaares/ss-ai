@@ -16,17 +16,18 @@ publication remain in `ss-review`.
 
 ## Reapproval discovery
 
-Discovery narrows the supplied repository's open PRs using the shared
-commit-recency rule before reading approval history, discussions, or Git
-content. It does not reuse the proactor's exclusion of already-reviewed PRs.
+Discovery ignores draft PRs and narrows the supplied repository's other open
+PRs using the shared commit-recency rule before reading approval history,
+discussions, or Git content. It does not reuse the proactor's exclusion of already-reviewed PRs.
 Old PRs require no per-PR agent work; output exposes aggregate exclusion counts
 and bounded pages of recent candidates or explicit failures.
 
 A run binds the repository, authenticated account, trusted significance policy,
 and intended dry-run mode. Interrupted discovery resumes only unfinished
 recency work. Existing evidence stays intact; a fresh scan uses a new run.
-Drafts cannot become assessment candidates. Pending reads, per-PR failures,
-and scope failures remain distinct from complete no-work results.
+Drafts do not enter the inventory, counts, or results. A PR found to be a draft
+during inspection, refresh, or publication preflight is removed from the run. Pending reads, per-PR
+failures, and scope failures remain distinct from complete no-work results.
 
 Discovery never changes remote state, with or without the dry-run flag.
 Recent candidates are `assessmentRequired`, not approved or complete.

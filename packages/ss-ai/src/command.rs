@@ -55,3 +55,22 @@ fn local_arguments(arguments: &[OsString]) -> impl Iterator<Item = &OsString> {
         .into_iter()
         .chain(arguments.iter().skip(2))
 }
+
+/// Keeps the selected namespace in clap's usage without losing the executable name.
+pub(crate) fn namespace_arguments<I, T>(
+    arguments: I,
+    namespace: &str,
+) -> impl Iterator<Item = OsString>
+where
+    I: IntoIterator<Item = T>,
+    T: Into<OsString>,
+{
+    let mut arguments = arguments.into_iter();
+    let executable = arguments.next().map(|argument| {
+        let mut executable = argument.into();
+        executable.push(" ");
+        executable.push(namespace);
+        executable
+    });
+    executable.into_iter().chain(arguments.map(Into::into))
+}

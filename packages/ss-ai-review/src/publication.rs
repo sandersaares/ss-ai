@@ -653,6 +653,15 @@ impl<'a> Store<'a> {
             clock.now(),
         )?;
         if !fresh.equivalent(&operation.snapshot)? {
+            if matches!(&decision, Decision::Ineligible { reason } if reason == "draft") {
+                return self.finish(
+                    operation,
+                    State::Cancelled,
+                    Outcome::StaleDuringExecution,
+                    None,
+                    Some(("draft", "Draft PR excluded before approval publication")),
+                );
+            }
             let outcome = match decision {
                 Decision::AlreadyValid { .. } => Outcome::AlreadyValid,
                 Decision::Ineligible { .. } => Outcome::Ineligible,
