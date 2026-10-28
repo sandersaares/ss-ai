@@ -178,6 +178,10 @@ Operations use explicit repository coordinates and the authenticated account,
 not the current checkout or a display name. Required service evidence must
 be complete before it can justify a decision.
 
+Each skill run uses one installed version of the utility. Different versions
+are not required to share records or locks, even when runs share a session or
+host. An upgrade can change commands, record formats, and storage locations.
+
 Valid schema-2 proactor journals remain readable. A retained sibling lock
 covers the whole transaction, including validation, waiting, and remote
 effects. Readers can retain a complete opened version during atomic

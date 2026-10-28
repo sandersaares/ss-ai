@@ -952,14 +952,12 @@ pub(crate) fn data_directory() -> Result<PathBuf, AppError> {
     Ok(publication_data_directory(&root, cfg!(windows)))
 }
 
-/// Keeps publication recovery records in the same store across executable upgrades.
+/// Locates publication records under the application's host data directory.
 fn publication_data_directory(root: &Path, windows: bool) -> PathBuf {
-    // Pending publication intents must remain visible and cannot be replayed
-    // under a new executable name.
     if windows {
-        root.join("ss-skills-util")
+        root.join("ss-ai")
     } else {
-        root.join(".local").join("share").join("ss-skills-util")
+        root.join(".local").join("share").join("ss-ai")
     }
 }
 
@@ -1002,15 +1000,12 @@ mod tests {
     use crate::clock::timestamp;
 
     #[test]
-    fn publication_store_preserves_existing_directory() {
+    fn publication_store_uses_application_directory() {
         let root = Path::new("profile");
-        assert_eq!(
-            publication_data_directory(root, true),
-            root.join("ss-skills-util")
-        );
+        assert_eq!(publication_data_directory(root, true), root.join("ss-ai"));
         assert_eq!(
             publication_data_directory(root, false),
-            root.join(".local").join("share").join("ss-skills-util")
+            root.join(".local").join("share").join("ss-ai")
         );
     }
 

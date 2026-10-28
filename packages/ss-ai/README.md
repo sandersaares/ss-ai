@@ -376,10 +376,9 @@ requires a fresh run, while an accepted notice remains a conservative request
 for a separate review even if source changes during posting. Edited, malformed,
 or mismatched owned markers fail explicitly.
 
-The host journal lives under `%LOCALAPPDATA%\ss-skills-util\publications` on
-Windows or `$HOME/.local/share/ss-skills-util/publications` on Linux. This
-location preserves publication recovery records across executable upgrades. Stable
-repository/account/PR IDs select one retained sibling lock. It encloses the
+The host journal lives under `%LOCALAPPDATA%\ss-ai\publications` on Windows
+or `$HOME/.local/share/ss-ai/publications` on Linux. Stable repository/account/PR
+IDs select one retained sibling lock. It encloses the
 run lock, freshness reads, effect intent, write, and local result persistence.
 Schedules for the same scope must use one publishing host; this is not a
 distributed exactly-once guarantee.
