@@ -26,7 +26,7 @@ A run binds the repository, authenticated account, trusted significance policy,
 and intended dry-run mode. Interrupted discovery resumes only unfinished
 recency work. Existing evidence stays intact; a fresh scan uses a new run.
 Drafts do not enter the inventory, counts, or results. A PR found to be a draft
-during inspection or refresh is removed from the run. Pending reads, per-PR
+during inspection, refresh, or publication preflight is removed from the run. Pending reads, per-PR
 failures, and scope failures remain distinct from complete no-work results.
 
 Discovery never changes remote state, with or without the dry-run flag.

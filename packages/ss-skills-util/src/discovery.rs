@@ -391,6 +391,30 @@ impl DiscoveryRecord {
         journal.write_bytes(&serde_json::to_vec_pretty(self)?)
     }
 
+    /// Remove an excluded PR without returning another candidate as its result.
+    fn remove_draft(
+        &mut self,
+        number: NonZeroU32,
+        journal: &FileJournal<'_>,
+    ) -> Result<Value, AppError> {
+        let index = self
+            .inventory
+            .iter()
+            .position(|entry| entry.pull_request_id == number)
+            .ok_or_else(|| fail("invalidState", "Draft PR is missing from inventory"))?;
+        self.inventory.remove(index);
+        finish_state(self);
+        self.save(journal)?;
+        let mut summary = self.summary(0, NonZeroUsize::MIN);
+        *summary
+            .get_mut("items")
+            .ok_or_else(|| fail("invalidState", "Summary lacks items"))? = json!([]);
+        *summary
+            .get_mut("nextAfter")
+            .ok_or_else(|| fail("invalidState", "Summary lacks pagination"))? = Value::Null;
+        Ok(summary)
+    }
+
     fn load(journal: &FileJournal<'_>) -> Result<Option<Self>, AppError> {
         let Some(bytes) = journal.read_bytes()? else {
             return Ok(None);
@@ -1148,17 +1172,7 @@ pub(crate) fn inspect(
         if matches!(&observation, Ok((_, Decision::Ineligible { reason }, _)) if reason == "draft")
         {
             // A PR can become a draft after enumeration; do not retain its captured evidence.
-            run.inventory.remove(index);
-            finish_state(&mut run);
-            run.save(&journal)?;
-            let mut summary = run.summary(0, NonZeroUsize::MIN);
-            *summary
-                .get_mut("items")
-                .ok_or_else(|| fail("invalidState", "Summary lacks items"))? = json!([]);
-            *summary
-                .get_mut("nextAfter")
-                .ok_or_else(|| fail("invalidState", "Summary lacks pagination"))? = Value::Null;
-            return Ok(summary);
+            return run.remove_draft(number, &journal);
         }
         let mut scope_error = None;
         let inspection = match observation {
@@ -1439,6 +1453,22 @@ pub(crate) fn publish(
     });
     match result {
         Ok((receipt, automatic_approval)) => {
+            if receipt
+                .error
+                .as_ref()
+                .is_some_and(|error| error.kind == "draft")
+            {
+                if store.has_effect(&operation_run_id)
+                    || !store.preflight_only(&operation_run_id)
+                    || notices.has_attempt(&operation_run_id)
+                {
+                    return Err(fail(
+                        "ambiguousWrite",
+                        "Draft exclusion cannot discard a possible remote effect",
+                    ));
+                }
+                return run.remove_draft(input.number, &journal);
+            }
             let fatal = receipt
                 .error
                 .as_ref()
@@ -1610,6 +1640,17 @@ pub(crate) fn notify(
             finish_state(&mut run);
         }
         Err(error) => {
+            if classification(&error) == "draft" {
+                if notices.has_attempt(&operation_run_id)
+                    || publication.has_effect(&operation_run_id)
+                {
+                    return Err(fail(
+                        "ambiguousWrite",
+                        "Draft exclusion cannot discard a possible remote effect",
+                    ));
+                }
+                return run.remove_draft(input.number, &journal);
+            }
             let error = if notices.has_unresolved(&operation_run_id)
                 || run.state == RunState::Failed
             {

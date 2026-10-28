@@ -118,6 +118,8 @@ bounded refresh; accepted-but-stale results retain their original effects.
 Never substitute a direct vote write.
 Read the outcome and any publication error, including accepted-but-stale
 effects. Do not interpret a `failed` run as no remote change.
+Publication or notification can also return no item when preflight finds a
+draft; do not report or perform further work on that PR.
 
 The same publication command reconciles an interrupted attempt using its
 original run and assessment. It never repeats an effect that might have

@@ -464,12 +464,15 @@ impl<'a> Store<'a> {
                 clock.now(),
             )?;
             if !equivalent(&fresh, &operation.snapshot)? {
+                if matches!(&decision, Decision::Ineligible { reason } if reason == "draft") {
+                    return self.finish(
+                        operation,
+                        Outcome::StaleDuringExecution,
+                        Some(("draft", "Draft PR excluded before vote publication")),
+                    );
+                }
                 let outcome = match decision {
                     Decision::AlreadyValid { .. } => Outcome::AlreadyValid,
-                    // Refresh removes draft PRs from the run without authorizing a write.
-                    Decision::Ineligible { ref reason } if reason == "draft" => {
-                        Outcome::StaleDuringExecution
-                    }
                     Decision::Ineligible { .. } => Outcome::Ineligible,
                     _ => Outcome::StaleDuringExecution,
                 };

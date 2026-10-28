@@ -134,8 +134,8 @@ approval assessment and freshness checks; discovery is not authorization to
 publish.
 
 Discovery excludes drafts before checking commit recency. Drafts do not appear
-in the inventory, counts, or results. Inspection or refresh removes a PR that
-has become a draft and returns no item for it.
+in the inventory, counts, or results. Inspection, refresh, or publication
+preflight removes a PR that has become a draft and returns no item for it.
 
 `inspect` accepts a positive `PR_NUMBER` from the run's recent, nondraft
 inventory. It collects an immutable approval observation and returns that PR's
