@@ -11,7 +11,7 @@ authorizes qualifying renewals without per-PR confirmation. A dry run never
 writes remotely. Do not create schedules, merge, change policies, resolve
 discussion, or automatically invoke `ss-review`.
 
-Run the native `ss-skills-util` on PATH. Missing tooling requires the user's
+Run the native `ss-ai` on PATH. Missing tooling requires the user's
 normal `Install.ps1` setup in `ss-ai`, not an installation during this skill.
 Use GitHub CLI authentication or Azure CLI OAuth, never a personal access
 token. Keep credentials out of prompts and records.

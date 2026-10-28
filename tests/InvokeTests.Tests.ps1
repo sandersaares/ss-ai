@@ -22,7 +22,7 @@ BeforeAll {
         # execution boundary alongside the existing compiler command fixtures.
         $scripts = Join-Path $root 'scripts'
         $libraryDirectory = Join-Path $scripts 'lib'
-        $support = Join-Path $root 'packages/ss-skills-util/tests/support'
+        $support = Join-Path $root 'packages/ss-ai/tests/support'
         New-Item -ItemType Directory -Path $libraryDirectory, $support -Force | Out-Null
         [IO.File]::WriteAllText((Join-Path $support 'provider.rs'), 'provider fixture')
         $runner = Join-Path $scripts 'Invoke-Tests.ps1'

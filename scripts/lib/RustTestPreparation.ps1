@@ -227,7 +227,7 @@ function New-RustTestPreparation {
     try {
         $identity = Get-RustTestIdentity -RepositoryRoot $RepositoryRoot
 
-        $providerSource = Join-Path $RepositoryRoot 'packages/ss-skills-util/tests/support/provider.rs'
+        $providerSource = Join-Path $RepositoryRoot 'packages/ss-ai/tests/support/provider.rs'
         $provider = Join-Path $owned $(if ($IsWindows) { 'provider.exe' } else { 'provider' })
         $providerFailure = $null
         $requiresProvider = -not $TestTarget -or $TestTarget -contains 'native'
@@ -412,7 +412,7 @@ function Read-RustTestPreparation {
     $artifacts = @($record.executables)
     if ($record.provider) {
         Assert-RustRecordFields -Record $record.provider -Fields @('source', 'executable')
-        if ($record.provider.source.path -cne (Join-Path $RepositoryRoot 'packages/ss-skills-util/tests/support/provider.rs') -or
+        if ($record.provider.source.path -cne (Join-Path $RepositoryRoot 'packages/ss-ai/tests/support/provider.rs') -or
             (Split-Path -Parent $record.provider.executable.path) -cne $record.ownedDirectory) {
             throw 'Provider prerequisite ownership paths do not match.'
         }

@@ -39,7 +39,7 @@ param(
     [Parameter(Mandatory)]
     [string]$ExpectationsPath,
 
-    [string]$UtilityPath = 'ss-skills-util',
+    [string]$UtilityPath = 'ss-ai',
 
     [switch]$RequireBumps
 )
@@ -88,7 +88,7 @@ try {
         $PSNativeCommandUseErrorActionPreference = $previousNativeErrorPreference
     }
     if ($LASTEXITCODE -ne 0) {
-        [Console]::Error.WriteLine("ss-skills-util cargo inventory exited with code $LASTEXITCODE"); exit 2
+        [Console]::Error.WriteLine("ss-ai cargo inventory exited with code $LASTEXITCODE"); exit 2
     }
     $inv = Get-Content -LiteralPath $inventoryPath -Raw | ConvertFrom-Json
     $expectations = Get-Content -LiteralPath $ExpectationsPath -Raw | ConvertFrom-Json

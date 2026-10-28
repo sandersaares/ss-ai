@@ -8,10 +8,10 @@ $PSNativeCommandUseErrorActionPreference = $true
 BeforeAll {
     $script:Repository = Split-Path -Parent (Split-Path -Parent $PSScriptRoot)
     $script:Manifest = Join-Path $script:Repository 'tests\ss-cargo-deps-tidy\fixtures\virtual-workspace\Cargo.toml'
-    $utility = Get-Command -Name ss-skills-util -CommandType Application -All -ErrorAction SilentlyContinue |
+    $utility = Get-Command -Name ss-ai -CommandType Application -All -ErrorAction SilentlyContinue |
         Select-Object -First 1
     if (-not $utility) {
-        throw "Native utility 'ss-skills-util' was not found on PATH."
+        throw "Native utility 'ss-ai' was not found on PATH."
     }
     $script:UtilityPath = $utility.Path
 }

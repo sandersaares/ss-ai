@@ -55,7 +55,7 @@ if ($Suite -in @('All', 'Pester')) {
     if ($selected.Count -gt 0) {
         Push-Location -LiteralPath (Split-Path -Parent $PSScriptRoot)
         try {
-            & cargo build --package ss-skills-util --locked --quiet
+            & cargo build --package ss-ai --locked --quiet
             if ($LASTEXITCODE -ne 0) {
                 throw 'Building the native review test prerequisite failed.'
             }
@@ -111,7 +111,7 @@ if ($Suite -in @('All', 'Pester')) {
 
 if ($Suite -in @('All', 'Rust')) {
     if (-not (Get-Command cargo -CommandType Application -ErrorAction SilentlyContinue)) {
-        throw 'Cargo is required on PATH. See packages\ss-skills-util\README.md for build prerequisites.'
+        throw 'Cargo is required on PATH. See packages\ss-ai\README.md for build prerequisites.'
     }
 
     Push-Location -LiteralPath (Split-Path -Parent $PSScriptRoot)

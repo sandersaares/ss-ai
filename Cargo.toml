@@ -1,5 +1,5 @@
 [workspace]
-members = ["packages/ss-skills-assessment", "packages/ss-skills-cargo", "packages/ss-skills-cargo/fuzz", "packages/ss-skills-git", "packages/ss-skills-review", "packages/ss-skills-runtime", "packages/ss-skills-util"]
+members = ["packages/ss-ai-assessment", "packages/ss-ai-cargo", "packages/ss-ai-cargo/fuzz", "packages/ss-ai-git", "packages/ss-ai-review", "packages/ss-ai-runtime", "packages/ss-ai"]
 resolver = "3"
 
 [workspace.package]
@@ -23,11 +23,11 @@ same-file = { version = "1.0.6", default-features = false }
 serde = { version = "1.0.228", default-features = false, features = ["std"] }
 serde_json = { version = "1.0.150", default-features = false, features = ["std"] }
 sha2 = { version = "0.10.9", default-features = false, features = ["std"] }
-ss-skills-assessment = { path = "packages/ss-skills-assessment", default-features = false }
-ss-skills-cargo = { path = "packages/ss-skills-cargo", default-features = false }
-ss-skills-git = { path = "packages/ss-skills-git", default-features = false }
-ss-skills-review = { path = "packages/ss-skills-review", default-features = false }
-ss-skills-runtime = { path = "packages/ss-skills-runtime", default-features = false }
+ss-ai-assessment = { path = "packages/ss-ai-assessment", default-features = false }
+ss-ai-cargo = { path = "packages/ss-ai-cargo", default-features = false }
+ss-ai-git = { path = "packages/ss-ai-git", default-features = false }
+ss-ai-review = { path = "packages/ss-ai-review", default-features = false }
+ss-ai-runtime = { path = "packages/ss-ai-runtime", default-features = false }
 static_assertions = { version = "1.1.0", default-features = false }
 tempfile = { version = "3.20.0", default-features = false }
 tick = { version = "0.7.1", default-features = false }

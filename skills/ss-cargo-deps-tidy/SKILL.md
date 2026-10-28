@@ -93,7 +93,7 @@ $inventoryPath = Join-Path ([IO.Path]::GetTempPath()) "cargo-deps-inventory-$([g
 $previousNativeErrorPreference = $PSNativeCommandUseErrorActionPreference
 $PSNativeCommandUseErrorActionPreference = $false
 try {
-    & ss-skills-util cargo inventory `
+    & ss-ai cargo inventory `
         --workspace-manifest '{{WORKSPACE_MANIFEST}}' `
         --output-path $inventoryPath
 } finally {

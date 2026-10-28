@@ -1,0 +1,35 @@
+[package]
+name = "ss-ai"
+description = "Shared native operations for the ss-ai skills"
+version = "0.1.0"
+publish = false
+authors.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+include.workspace = true
+
+[package.metadata.docs.rs]
+all-features = true
+
+[dependencies]
+clap = { workspace = true, features = ["derive"] }
+mimalloc = { workspace = true }
+ohno = { workspace = true, features = ["app-err"] }
+same-file = { workspace = true }
+serde_json = { workspace = true }
+ss-ai-cargo = { workspace = true }
+ss-ai-git = { workspace = true }
+ss-ai-review = { workspace = true }
+ss-ai-runtime = { workspace = true }
+
+[dev-dependencies]
+jiff = { workspace = true }
+sha2 = { workspace = true }
+tempfile = { workspace = true }
+url = { workspace = true }
+uuid = { workspace = true, features = ["v4"] }
+
+[lints]
+workspace = true

@@ -88,7 +88,7 @@ Describe 'Automatic reapproval repository scope instructions' {
 
 Describe 'Automatic reapproval provider fixtures' {
     It 'validates the GitHub contract projection and its explicit provenance' {
-        $fixture = Join-Path $PSScriptRoot '..\packages\ss-skills-review\tests\fixtures\github-approval.json'
+        $fixture = Join-Path $PSScriptRoot '..\packages\ss-ai-review\tests\fixtures\github-approval.json'
         $schema = Join-Path $PSScriptRoot '..\dev\ss-autoreapprove\github-approval-fixture.schema.json'
         Test-Json -LiteralPath $fixture -SchemaFile $schema | Should -BeTrue
     }
@@ -100,10 +100,10 @@ Describe 'Automatic reapproval provider fixtures' {
         Test-Path -LiteralPath (Join-Path $skill 'significance.md') | Should -BeTrue
         Test-Path -LiteralPath (Join-Path $root 'dev\ss-autoreapprove\significance.md') | Should -BeFalse
         $recipes = Get-Content -LiteralPath (Join-Path $skill 'commands.md') -Raw
-        $help = & ss-skills-util autoreapprove --help | Out-String
+        $help = & ss-ai autoreapprove --help | Out-String
         $LASTEXITCODE | Should -Be 0
         foreach ($command in @('discover', 'results', 'inspect', 'refresh', 'prepare', 'assessment', 'read', 'judge', 'complete', 'publish', 'notify')) {
-            $recipes | Should -Match "(?m)^ss-skills-util autoreapprove $command "
+            $recipes | Should -Match "(?m)^ss-ai autoreapprove $command "
             $help | Should -Match "(?m)^\s+$command\s"
         }
         $recipes | Should -Not -Match 'pwsh .* -File|gh api|az devops|ConvertTo-Json'
@@ -115,11 +115,11 @@ Describe 'Automatic reapproval provider fixtures' {
         $recipes = Get-Content -LiteralPath (Join-Path $skill 'commands.md') -Raw
         $prompt | Should -Not -Match 'ADO publication.*not supported|ADO inspection and assessment are read-only'
         $recipes | Should -Not -Match 'ADO supports read-only|unsupported publication transaction'
-        $recipes | Should -Match '(?m)^ss-skills-util autoreapprove publish .*--tenant "\{\{TENANT\}\}"'
+        $recipes | Should -Match '(?m)^ss-ai autoreapprove publish .*--tenant "\{\{TENANT\}\}"'
         $recipes | Should -Match 'unique new structured vote on the assessed iteration'
         $prompt | Should -Match 'never issue a direct reviewer vote'
         $prompt | Should -Match 'never repeats an uncertain vote or audit'
-        $help = & ss-skills-util autoreapprove publish --help | Out-String
+        $help = & ss-ai autoreapprove publish --help | Out-String
         $LASTEXITCODE | Should -Be 0
         $help | Should -Match '\-\-tenant'
     }

@@ -50,13 +50,13 @@ Some skills ship with executable helper scripts that have their own unit tests. 
 
 ## Native component boundaries
 
-The installed `ss-skills-util` executable composes focused workspace packages.
-The [implementation ownership map](packages/ss-skills-util/docs/implementation.md)
+The installed `ss-ai` executable composes focused workspace packages.
+The [implementation ownership map](packages/ss-ai/docs/implementation.md)
 defines their dependency direction. Keep new domain logic in its owning
 component rather than adding it to the executable or a general-purpose helper
 crate.
 
-Cargo inventory parsing and workspace discovery live in `ss-skills-cargo`,
+Cargo inventory parsing and workspace discovery live in `ss-ai-cargo`,
 independently of review services and authentication. Its unit tests cover
 in-process parsing; integration tests cover filesystem behavior. The executable
 package owns command-line tests, and Pester covers the skill and grader callers.

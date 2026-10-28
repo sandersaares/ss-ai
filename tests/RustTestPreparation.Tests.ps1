@@ -55,7 +55,7 @@ BeforeAll {
     # Each invocation gets a source tree and record parent independent of the real checkout.
     function New-PreparationFixture {
         $root = Join-Path $TestDrive ([guid]::NewGuid().ToString('N') + ' with spaces')
-        $support = Join-Path $root 'packages/ss-skills-util/tests/support'
+        $support = Join-Path $root 'packages/ss-ai/tests/support'
         New-Item -ItemType Directory -Path $support -Force | Out-Null
         [IO.File]::WriteAllText((Join-Path $support 'provider.rs'), 'source')
         [IO.File]::WriteAllText((Join-Path $root 'Cargo.lock'), 'lock')
@@ -227,7 +227,7 @@ Describe 'Rust preparation boundary' {
     }
 
     It 'never publishes a record after source freshness changes during compilation' {
-        $script:TouchDuringBuild = Join-Path $fixture.root 'packages/ss-skills-util/tests/support/provider.rs'
+        $script:TouchDuringBuild = Join-Path $fixture.root 'packages/ss-ai/tests/support/provider.rs'
         { New-RustTestPreparation -RepositoryRoot $fixture.root -PrerequisitePath $fixture.record } |
             Should -Throw '*sources changed during preparation*'
 
@@ -300,7 +300,7 @@ Describe 'Rust preparation boundary' {
 
     It 'invalidates a same-version source edit' {
         $null = New-RustTestPreparation -RepositoryRoot $fixture.root -PrerequisitePath $fixture.record
-        Add-Content -LiteralPath (Join-Path $fixture.root 'packages/ss-skills-util/tests/support/provider.rs') -Value 'changed'
+        Add-Content -LiteralPath (Join-Path $fixture.root 'packages/ss-ai/tests/support/provider.rs') -Value 'changed'
 
         { Read-RustTestPreparation -RepositoryRoot $fixture.root -PrerequisitePath $fixture.record } | Should -Throw '*sourceSha256*'
     }
@@ -328,9 +328,9 @@ Describe 'Rust preparation boundary' {
     It 'rejects source freshness changes for <Asset> with rewrite = <Rewrite> before execution' -ForEach @(
         # All identity inputs need mtime coverage, not only Rust modules.
         foreach ($asset in @(
-            'packages/ss-skills-util/tests/support/provider.rs',
-            'packages/ss-skills-util/src/commits.graphql',
-            'packages/ss-skills-util/tests/fixtures/github-approval.json',
+            'packages/ss-ai/tests/support/provider.rs',
+            'packages/ss-ai/src/commits.graphql',
+            'packages/ss-ai/tests/fixtures/github-approval.json',
             'skills/ss-autoreapprove/significance.md',
             'Cargo.toml', 'Cargo.lock', 'rust-toolchain.toml', '.cargo/config.toml'
         )) {
@@ -363,8 +363,8 @@ Describe 'Rust preparation boundary' {
 
     It 'rejects changed embedded input <Asset> before Cargo execution' -ForEach @(
         # Cover each embedded input kind, including the policy outside the package tree.
-        @{ Asset = 'packages/ss-skills-util/src/commits.graphql' }
-        @{ Asset = 'packages/ss-skills-util/tests/fixtures/github-approval.json' }
+        @{ Asset = 'packages/ss-ai/src/commits.graphql' }
+        @{ Asset = 'packages/ss-ai/tests/fixtures/github-approval.json' }
         @{ Asset = 'skills/ss-autoreapprove/significance.md' }
     ) {
         $assetPath = Join-Path $fixture.root $Asset

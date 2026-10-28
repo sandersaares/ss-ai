@@ -56,7 +56,7 @@ Describe 'Skills utility installation' {
         $script:VersionMarker = Join-Path $TestDrive 'version-invoked'
         Remove-Item -LiteralPath $script:VersionMarker -ErrorAction SilentlyContinue
 
-        $content = "[IO.File]::WriteAllText('$($script:VersionMarker.Replace("'", "''"))', 'invoked'); 'ss-skills-util 0.1.0'; exit 0"
+        $content = "[IO.File]::WriteAllText('$($script:VersionMarker.Replace("'", "''"))', 'invoked'); 'ss-ai 0.1.0'; exit 0"
         [IO.File]::WriteAllText($script:InstalledUtility, $content)
         [IO.File]::WriteAllText($script:BuiltUtility, $content)
 
@@ -64,7 +64,7 @@ Describe 'Skills utility installation' {
             ($Name -join ',') -in @('rustup', 'cargo') -and $CommandType -eq 'Application'
         }
         Mock Get-Command { [pscustomobject]@{ Source = $script:InstalledUtility } } -ParameterFilter {
-            ($Name -join ',') -eq 'ss-skills-util' -and $CommandType -eq 'Application'
+            ($Name -join ',') -eq 'ss-ai' -and $CommandType -eq 'Application'
         }
         Mock Invoke-SkillsUtilityCargo {
             $script:UtilityPath = $UtilityPath
@@ -72,7 +72,7 @@ Describe 'Skills utility installation' {
             $global:LASTEXITCODE = 0
             @{
                 reason = 'compiler-artifact'
-                target = @{ name = 'ss-skills-util'; kind = @('bin') }
+                target = @{ name = 'ss-ai'; kind = @('bin') }
                 executable = $script:BuiltUtility
             } | ConvertTo-Json -Compress
         }
@@ -88,7 +88,7 @@ Describe 'Skills utility installation' {
         }
 
         $script:InstallLocation | Should -Be $script:RepoRoot
-        $script:UtilityPath | Should -Be (Join-Path $script:RepoRoot 'packages\ss-skills-util')
+        $script:UtilityPath | Should -Be (Join-Path $script:RepoRoot 'packages\ss-ai')
         Test-Path -LiteralPath $script:VersionMarker | Should -BeTrue
     }
 
@@ -96,11 +96,11 @@ Describe 'Skills utility installation' {
         Mock Write-Host {}
         Mock Invoke-SkillsUtilityCargo {
             Should -Invoke Write-Host -Times 1 -Exactly -ParameterFilter {
-                $Object -eq 'Building and installing ss-skills-util. Please wait; this may take a few minutes.'
+                $Object -eq 'Building and installing ss-ai. Please wait; this may take a few minutes.'
             }
             @{
                 reason = 'compiler-artifact'
-                target = @{ name = 'ss-skills-util'; kind = @('bin') }
+                target = @{ name = 'ss-ai'; kind = @('bin') }
                 executable = $script:BuiltUtility
             } | ConvertTo-Json -Compress
         }
@@ -196,7 +196,7 @@ Describe 'Skills utility installation' {
     }
 
     It 'preserves compiler failure and restores the caller location' {
-        Mock Invoke-SkillsUtilityCargo { throw 'ss-skills-util compilation or installation failed (exit 23).' }
+        Mock Invoke-SkillsUtilityCargo { throw 'ss-ai compilation or installation failed (exit 23).' }
 
         Push-Location $TestDrive
         try {
@@ -213,25 +213,25 @@ Describe 'Skills utility installation' {
         Mock Add-AgentsDirectoryToCopilotInstructions {}
         Mock Set-BashUserEnvironment {}
         Mock Install-CopilotSkills {}
-        Mock Invoke-SkillsUtilityCargo { throw 'ss-skills-util compilation or installation failed (exit 23).' }
+        Mock Invoke-SkillsUtilityCargo { throw 'ss-ai compilation or installation failed (exit 23).' }
 
         { Invoke-AiInstallation -HomeDirectory $TestDrive 6>$null } | Should -Throw '*exit 23*'
         Should -Invoke Install-CopilotSkills -Times 0 -Exactly
     }
 
     It 'reports missing PATH discovery rather than assuming the default Cargo root' {
-        Mock Get-Command { $null } -ParameterFilter { ($Name -join ',') -eq 'ss-skills-util' }
+        Mock Get-Command { $null } -ParameterFilter { ($Name -join ',') -eq 'ss-ai' }
 
         { Install-SkillsUtility } | Should -Throw "*configured installation binary directory*"
         Test-Path -LiteralPath $script:VersionMarker | Should -BeFalse
     }
 
     It 'rejects an unsuccessful installed executable' {
-        $content = "'ss-skills-util broken'; exit 31"
+        $content = "'ss-ai broken'; exit 31"
         [IO.File]::WriteAllText($script:InstalledUtility, $content)
         [IO.File]::WriteAllText($script:BuiltUtility, $content)
 
-        { Install-SkillsUtility } | Should -Throw '*PATH ss-skills-util invocation failed*'
+        { Install-SkillsUtility } | Should -Throw '*PATH ss-ai invocation failed*'
     }
 
     It 'rejects a successful executable with an invalid version banner (<Banner>)' -ForEach @(
@@ -241,7 +241,7 @@ Describe 'Skills utility installation' {
         [IO.File]::WriteAllText($script:InstalledUtility, $content)
         [IO.File]::WriteAllText($script:BuiltUtility, $content)
 
-        { Install-SkillsUtility } | Should -Throw '*PATH ss-skills-util invocation failed*'
+        { Install-SkillsUtility } | Should -Throw '*PATH ss-ai invocation failed*'
     }
 
     It 'rejects an older PATH artifact even when its version is unchanged' {
@@ -256,10 +256,10 @@ Describe 'Skills utility installation' {
             '{"reason":"build-finished","success":true}'
             '{"reason":"compiler-message","message":{"rendered":"fixture diagnostic"}}'
             '{"reason":"compiler-artifact","target":{"name":"dependency","kind":["bin"]},"executable":"must not be selected"}'
-            '{"reason":"compiler-artifact","target":{"name":"ss-skills-util","kind":["lib"]},"executable":"must not be selected"}'
+            '{"reason":"compiler-artifact","target":{"name":"ss-ai","kind":["lib"]},"executable":"must not be selected"}'
             @{
                 reason = 'compiler-artifact'
-                target = @{ name = 'ss-skills-util'; kind = @('bin') }
+                target = @{ name = 'ss-ai'; kind = @('bin') }
                 executable = $script:BuiltUtility
             } | ConvertTo-Json -Compress
         }
@@ -271,8 +271,8 @@ Describe 'Skills utility installation' {
     It 'rejects <Case> Cargo artifact output before invoking the installed executable' -ForEach @(
         @{ Case = 'missing'; Reply = '{"reason":"build-finished","success":true}' }
         @{ Case = 'wrong-case name'; Reply = '{"reason":"compiler-artifact","target":{"name":"SS-SKILLS-UTIL","kind":["bin"]},"executable":"not selected"}' }
-        @{ Case = 'missing executable'; Reply = '{"reason":"compiler-artifact","target":{"name":"ss-skills-util","kind":["bin"]}}' }
-        @{ Case = 'empty executable'; Reply = '{"reason":"compiler-artifact","target":{"name":"ss-skills-util","kind":["bin"]},"executable":""}' }
+        @{ Case = 'missing executable'; Reply = '{"reason":"compiler-artifact","target":{"name":"ss-ai","kind":["bin"]}}' }
+        @{ Case = 'empty executable'; Reply = '{"reason":"compiler-artifact","target":{"name":"ss-ai","kind":["bin"]},"executable":""}' }
         @{ Case = 'malformed'; Reply = '{not JSON}' }
     ) {
         $script:CargoReply = $Reply
@@ -287,7 +287,7 @@ Describe 'Skills utility installation' {
             foreach ($path in @($script:BuiltUtility, $script:InstalledUtility)) {
                 @{
                     reason = 'compiler-artifact'
-                    target = @{ name = 'ss-skills-util'; kind = @('bin') }
+                    target = @{ name = 'ss-ai'; kind = @('bin') }
                     executable = $path
                 } | ConvertTo-Json -Compress
             }
@@ -370,17 +370,17 @@ if (`$args.Count -ne 1 -or `$args[0] -cne '--version') {
 }
 
 [IO.File]::WriteAllText('$($marker.Replace("'", "''"))', 'invoked')
-'ss-skills-util fixture'
+'ss-ai fixture'
 exit 0
 "@
         [IO.File]::WriteAllText($version, $body)
 
         if ($IsWindows) {
-            $name = 'ss-skills-util.cmd'
+            $name = 'ss-ai.cmd'
             $launcher = "@echo off`r`n@`"$script:PowerShellExecutable`" -NoProfile -NonInteractive -File `"$version`" %*`r`n"
             $oldLauncher = "@rem stale same-version fixture`r`n$launcher"
         } else {
-            $name = 'ss-skills-util'
+            $name = 'ss-ai'
             # A shell launcher supports interpreter paths containing spaces; all fixture logic stays in PowerShell.
             $runtime = $script:PowerShellExecutable.Replace("'", "'\''")
             $fixture = $version.Replace("'", "'\''")
@@ -404,7 +404,7 @@ exit 0
 
         $reply = @{
             reason = 'compiler-artifact'
-            target = @{ name = 'ss-skills-util'; kind = @('bin') }
+            target = @{ name = 'ss-ai'; kind = @('bin') }
             executable = $built
         } | ConvertTo-Json -Compress
         $code = @"
@@ -442,7 +442,7 @@ try {
         $result.exitCode | Should -Be $ExitCode -Because ($result.stdout + $result.stderr)
         if ($ExitCode -eq 0) {
             Test-Path -LiteralPath $marker | Should -BeTrue
-            $result.stdout | Should -Match 'Installed ss-skills-util fixture'
+            $result.stdout | Should -Match 'Installed ss-ai fixture'
         } else {
             $result.stderr | Should -Match ([regex]::Escape($ErrorText))
             Test-Path -LiteralPath $marker | Should -BeFalse

@@ -127,7 +127,7 @@ appends the skill and session tokens; do not include those protocol markers
 yourself.
 
 Execute the selection command in `tool-calls/select-pull-request.md` using
-`ss-skills-util` directly on `PATH`; never reproduce selection logic with ad hoc
+`ss-ai` directly on `PATH`; never reproduce selection logic with ad hoc
 provider CLI calls.
 
 The helper considers all open, non-draft PRs not authored by or already assigned

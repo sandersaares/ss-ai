@@ -1,0 +1,30 @@
+[package]
+name = "ss-ai-runtime"
+description = "Shared runtime boundaries for skills"
+version = "0.1.0"
+publish = false
+authors.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+include.workspace = true
+
+[package.metadata.docs.rs]
+all-features = true
+
+[dependencies]
+jiff = { workspace = true }
+ohno = { workspace = true, features = ["app-err"] }
+tempfile = { workspace = true }
+tick = { workspace = true, features = ["tokio"] }
+tokio = { workspace = true, features = ["rt", "time"] }
+
+[dev-dependencies]
+static_assertions = { workspace = true }
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { workspace = true, features = ["Win32_Foundation", "Win32_Storage_FileSystem"] }
+
+[lints]
+workspace = true

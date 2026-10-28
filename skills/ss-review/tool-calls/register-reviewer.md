@@ -1,5 +1,5 @@
 ```text
-ss-skills-util reviewer register --url "{{PR_URL}}"
+ss-ai reviewer register --url "{{PR_URL}}"
 ```
 
 Placeholders to replace:

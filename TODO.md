@@ -32,7 +32,7 @@ Improvement ideas to revisit when the repo matures.
   [`skills/ss-cargo-deps-tidy/SKILL.md`](skills/ss-cargo-deps-tidy/SKILL.md)
   - once as prose under "Workspace-level feature flags" and once as
   inline PowerShell arrays in stage 6. A single source of truth (e.g.
-  emitted by `ss-skills-util cargo inventory`) would avoid drift, but
+  emitted by `ss-ai cargo inventory`) would avoid drift, but
   representing both the data and the rationale concisely is non-trivial.
   Needs more design thought.
 - **Cargo inventory/expectation readers.** Add schema-checked reading commands

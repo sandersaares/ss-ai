@@ -1448,7 +1448,27 @@ dependencies = [
 ]
 
 [[package]]
-name = "ss-skills-assessment"
+name = "ss-ai"
+version = "0.1.0"
+dependencies = [
+ "clap",
+ "jiff",
+ "mimalloc",
+ "ohno",
+ "same-file",
+ "serde_json",
+ "sha2",
+ "ss-ai-cargo",
+ "ss-ai-git",
+ "ss-ai-review",
+ "ss-ai-runtime",
+ "tempfile",
+ "url",
+ "uuid",
+]
+
+[[package]]
+name = "ss-ai-assessment"
 version = "0.1.0"
 dependencies = [
  "clap",
@@ -1456,12 +1476,12 @@ dependencies = [
  "serde",
  "serde_json",
  "sha2",
- "ss-skills-runtime",
+ "ss-ai-runtime",
  "static_assertions",
 ]
 
 [[package]]
-name = "ss-skills-cargo"
+name = "ss-ai-cargo"
 version = "0.1.0"
 dependencies = [
  "glob",
@@ -1475,26 +1495,26 @@ dependencies = [
 ]
 
 [[package]]
-name = "ss-skills-cargo-fuzz"
+name = "ss-ai-cargo-fuzz"
 version = "0.1.0"
 dependencies = [
  "libfuzzer-sys",
- "ss-skills-cargo",
+ "ss-ai-cargo",
 ]
 
 [[package]]
-name = "ss-skills-git"
+name = "ss-ai-git"
 version = "0.1.0"
 dependencies = [
  "ohno",
  "regex",
  "serde",
- "ss-skills-runtime",
+ "ss-ai-runtime",
  "static_assertions",
 ]
 
 [[package]]
-name = "ss-skills-review"
+name = "ss-ai-review"
 version = "0.1.0"
 dependencies = [
  "clap",
@@ -1505,8 +1525,8 @@ dependencies = [
  "serde",
  "serde_json",
  "sha2",
- "ss-skills-assessment",
- "ss-skills-runtime",
+ "ss-ai-assessment",
+ "ss-ai-runtime",
  "static_assertions",
  "tempfile",
  "url",
@@ -1514,7 +1534,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "ss-skills-runtime"
+name = "ss-ai-runtime"
 version = "0.1.0"
 dependencies = [
  "jiff",
@@ -1524,26 +1544,6 @@ dependencies = [
  "tick",
  "tokio",
  "windows-sys 0.61.2",
-]
-
-[[package]]
-name = "ss-skills-util"
-version = "0.1.0"
-dependencies = [
- "clap",
- "jiff",
- "mimalloc",
- "ohno",
- "same-file",
- "serde_json",
- "sha2",
- "ss-skills-cargo",
- "ss-skills-git",
- "ss-skills-review",
- "ss-skills-runtime",
- "tempfile",
- "url",
- "uuid",
 ]
 
 [[package]]
