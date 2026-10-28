@@ -3,13 +3,13 @@ use std::collections::{HashMap, HashSet};
 use jiff::Timestamp;
 use ohno::AppError;
 use serde::{Deserialize, Serialize};
-use serde_json::{Value, json};
+use serde_json::{Map, Value, json};
 
 use crate::api::Api;
 use crate::approval::Decision;
 use crate::clock::timestamp;
 use crate::error::fail;
-use crate::json::{array, boolean, field, identifier, nullable_field, text};
+use crate::json::{array, boolean, field, identifier, nullable_field, project, text};
 use crate::renewal::{Anchor, Audit};
 use crate::target::Target;
 
@@ -129,7 +129,7 @@ enum Standing<'a> {
 pub(crate) fn capture(api: &mut Api<'_>, target: &Target) -> Result<Evidence, AppError> {
     let first = observe(api, target)?;
     let second = observe(api, target)?;
-    if first != second {
+    if !equivalent(&first, &second)? {
         return Err(fail(
             "staleEvidence",
             "GitHub approval evidence changed during capture",
@@ -155,13 +155,94 @@ fn observe(api: &mut Api<'_>, target: &Target) -> Result<Evidence, AppError> {
         "id",
     )?;
     let review_comments = list(api, &format!("{}/comments", target.pr_api()), "id")?;
-    Ok(Evidence::History {
+    compact(&Evidence::History {
         pull_request: pr,
         reviews,
         timeline,
         comments,
         review_comments,
     })
+}
+
+/// Freshness uses the same focused evidence for new and retained observations.
+pub(crate) fn equivalent(left: &Evidence, right: &Evidence) -> Result<bool, AppError> {
+    Ok(compact(left)? == compact(right)?)
+}
+
+/// Keeps review authority and discussion rather than account profiles or reactions.
+fn compact(evidence: &Evidence) -> Result<Evidence, AppError> {
+    let mut evidence = evidence.clone();
+    let pr = match &mut evidence {
+        Evidence::State { pull_request } | Evidence::History { pull_request, .. } => pull_request,
+    };
+    *pr = project_pull_request(pr)?;
+    if let Evidence::History {
+        reviews,
+        comments,
+        review_comments,
+        ..
+    } = &mut evidence
+    {
+        for review in reviews {
+            *review = project(
+                review,
+                &[
+                    "id",
+                    "node_id",
+                    "state",
+                    "submitted_at",
+                    "body",
+                    "commit_id",
+                    "user",
+                ],
+            );
+            if let Some(user) = review.get_mut("user") {
+                *user = project(user, &["id", "node_id", "type"]);
+            }
+        }
+        *comments = project_comments(comments);
+        *review_comments = project_comments(review_comments);
+    }
+    Ok(evidence)
+}
+
+/// Discussion context and edit times remain material; likes and profile images do not.
+pub(crate) fn project_comments(comments: &[Value]) -> Vec<Value> {
+    comments
+        .iter()
+        .map(|comment| {
+            let mut comment = project(
+                comment,
+                &[
+                    "id",
+                    "node_id",
+                    "body",
+                    "created_at",
+                    "updated_at",
+                    "user",
+                    "in_reply_to_id",
+                    "path",
+                    "diff_hunk",
+                    "line",
+                    "side",
+                    "start_line",
+                    "start_side",
+                    "original_line",
+                    "original_start_line",
+                    "position",
+                    "original_position",
+                    "commit_id",
+                    "original_commit_id",
+                    "pull_request_review_id",
+                    "subject_type",
+                ],
+            );
+            if let Some(user) = comment.get_mut("user") {
+                *user = project(user, &["id", "node_id", "type"]);
+            }
+            comment
+        })
+        .collect()
 }
 
 /// Target-tip and merge bookkeeping changes do not alter source assessment authority.
@@ -172,15 +253,35 @@ fn project_pull_request(pr: &Value) -> Result<Value, AppError> {
     if !body.is_null() {
         text(body)?;
     }
-    Ok(json!({
-        "number": field(pr, "number")?, "state": field(pr, "state")?,
-        "draft": field(pr, "draft")?, "body": body,
-        "user": { "id": field(field(pr, "user")?, "id")? },
-        "head": { "sha": field(source, "sha")?, "ref": field(source, "ref")?,
+    let mut base = Map::from_iter([(
+        "repo".to_owned(),
+        json!({"id": field(field(field(pr, "base")?, "repo")?, "id")?}),
+    )]);
+    if let Some(target_ref) = pr.pointer("/base/ref") {
+        base.insert("ref".to_owned(), target_ref.clone());
+    }
+    let mut projected = Map::from_iter([
+        ("number".to_owned(), field(pr, "number")?.clone()),
+        ("state".to_owned(), field(pr, "state")?.clone()),
+        ("draft".to_owned(), field(pr, "draft")?.clone()),
+        ("body".to_owned(), body.clone()),
+        (
+            "user".to_owned(),
+            json!({ "id": field(field(pr, "user")?, "id")? }),
+        ),
+        (
+            "head".to_owned(),
+            json!({ "sha": field(source, "sha")?, "ref": field(source, "ref")?,
             "repo": if source_repository.is_null() { Value::Null }
-                else { json!({"id": field(source_repository, "id")?}) } },
-        "base": { "repo": { "id": field(field(field(pr, "base")?, "repo")?, "id")? } }
-    }))
+                else { json!({"id": field(source_repository, "id")?}) } }),
+        ),
+        ("base".to_owned(), Value::Object(base)),
+    ]);
+    // The title can convey requirements just as the description can.
+    if let Some(title) = pr.get("title") {
+        projected.insert("title".to_owned(), title.clone());
+    }
+    Ok(Value::Object(projected))
 }
 
 fn excluded(pr: &Value) -> Result<Option<Decision>, AppError> {
@@ -643,6 +744,69 @@ mod tests {
         value["timeline"][1]["state"] = json!("APPROVED");
         value["timeline"].as_array_mut().unwrap().remove(2);
         value
+    }
+
+    #[test]
+    fn focused_evidence_ignores_profiles_and_reactions_but_preserves_material_fields() {
+        let original: Evidence = serde_json::from_value(fixture()["evidence"].clone()).unwrap();
+        let mut rich = serde_json::to_value(&original).unwrap();
+        rich["pullRequest"]["user"]["avatar_url"] = json!("cosmetic-profile");
+        rich["reviews"][0]["html_url"] = json!("cosmetic-link");
+        rich["reviews"][0]["user"]["login"] = json!("cosmetic-name");
+        rich["comments"][0]["reactions"] = json!({"+1": 10});
+        rich["comments"][0]["user"] = json!({"id": 99, "login": "cosmetic-name"});
+        // Establish the meaningful author before changing its profile.
+        let mut baseline = serde_json::to_value(&original).unwrap();
+        baseline["comments"][0]["user"] = json!({"id": 99});
+        baseline["reviewComments"] = json!([{
+            "id": 10, "body": "Inline discussion", "path": "src/lib.rs", "line": 1,
+            "side": "RIGHT", "commit_id": "b".repeat(40), "user": {"id": 99},
+            // An intermediate commit's excerpt need not exist in either assessed tree.
+            "diff_hunk": "@@ -1 +1 @@\n-old\n+intermediate",
+            "created_at": "2026-01-08T21:00:00Z", "updated_at": "2026-01-08T21:00:00Z"
+        }]);
+        rich["reviewComments"] = baseline["reviewComments"].clone();
+        rich["reviewComments"][0]["user"]["avatar_url"] = json!("cosmetic-profile");
+        let baseline: Evidence = serde_json::from_value(baseline).unwrap();
+        let rich: Evidence = serde_json::from_value(rich).unwrap();
+        let lean = super::compact(&rich).unwrap();
+        assert_eq!(
+            serde_json::to_value(&lean).unwrap()["reviewComments"][0]["diff_hunk"],
+            serde_json::to_value(&rich).unwrap()["reviewComments"][0]["diff_hunk"]
+        );
+        assert!(super::equivalent(&baseline, &rich).unwrap());
+        assert!(super::equivalent(&rich, &lean).unwrap());
+        assert_eq!(super::compact(&lean).unwrap(), lean);
+        assert!(!serde_json::to_string(&lean).unwrap().contains("cosmetic-"));
+        let saved = serde_json::to_value(&rich).unwrap();
+        for (path, replacement) in [
+            ("/pullRequest/body", json!("New requirement")),
+            ("/pullRequest/base/ref", json!("another-target")),
+            ("/pullRequest/head/sha", json!("e".repeat(40))),
+            ("/pullRequest/head/repo/id", json!(456)),
+            ("/reviews/0/body", json!("New review concern")),
+            ("/reviews/1/state", json!("CHANGES_REQUESTED")),
+            ("/reviews/1/user/id", json!(99)),
+            ("/comments/0/body", json!("New objection")),
+            ("/comments/0/user/id", json!(42)),
+            ("/comments/0/updated_at", json!("2026-01-09T00:00:00Z")),
+            ("/reviewComments/0/path", json!("src/other.rs")),
+            ("/reviewComments/0/line", json!(2)),
+            (
+                "/reviewComments/0/diff_hunk",
+                json!("@@ -1 +1 @@\n-old\n+other"),
+            ),
+            (
+                "/timeline/2/pullRequestCommit/commit/oid",
+                json!("e".repeat(40)),
+            ),
+        ] {
+            let mut changed = saved.clone();
+            *changed.pointer_mut(path).unwrap() = replacement;
+            let changed = serde_json::from_value(changed).unwrap();
+            assert!(!super::equivalent(&rich, &changed).unwrap(), "{path}");
+        }
+        assert_eq!(serde_json::to_value(&rich).unwrap(), saved);
     }
 
     /// Adds a later decision without rewriting the older review or its baseline.

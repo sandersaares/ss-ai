@@ -69,6 +69,41 @@ with explicit medium reasoning and regular context. That worker owns preparation
 bounded evidence reads, judgments, and completion. It returns scalar results and
 a concise reason, not source or discussion text, and cannot publish.
 
+## Material evidence
+
+Freshness checks compare potentially material changes, not complete provider JSON.
+Capture enumerates complete service collections, validates their authority
+semantics, and retains focused records. Approval publication, needs-review
+publication, and discussion-only readback share those projections.
+
+The retained evidence includes stable repository and account identities, source
+commits and refs, PR content and state, individual decisions and pending review,
+human discussion and its source context, and applicable reviewer-policy settings.
+Comment bodies, authors, deletion, and content edit times remain material.
+GitHub inline comments retain their `diff_hunk` excerpts so objections about
+intermediate or outdated code remain understandable alongside source locations.
+Profile names, avatars, links, reactions, repository statistics, project revision
+counters, and merge jobs or queue progress do not affect freshness.
+
+ADO validates all returned policies before omitting disabled and known merge-only
+checks from new snapshots. It retains enabled reviewer policies and their
+applicability, not policy names, creator profiles, revision counters, or evaluation
+attempt identifiers in freshness comparisons. Unknown policy types, settings, and
+history semantics remain explicit failures. Pure routine system notifications
+are redundant with current source, PR state, and policy reads; they do not enter
+new evidence. Threads containing human replies, pending review, deleted history,
+or audit markers remain guarded.
+Structured event properties establish vote and reviewer authority; generated
+system-comment prose and its edit clock do not enter retained evidence.
+
+ADO's content-specific comment update time governs edit detection. The general
+update time serves as a fallback only when the content-specific field is absent.
+Metadata updates such as likes cannot invalidate an unchanged audit or notice.
+
+Comparisons project richer retained snapshots in memory. Stored snapshots,
+digests, assessment bindings, and recovery-journal integrity checks remain exact
+and unchanged.
+
 ## Bounded stale-evidence recovery
 
 Source or decision evidence can change during inspection or between assessment
@@ -271,8 +306,8 @@ mutable vote can affect a newer source or auto-merge before postflight; these
 checks detect that race rather than prevent it.
 
 Freshness comparisons ignore evaluation progress and context, which can change
-as the renewed vote satisfies aggregate policy. They retain complete captured
-evaluations and compare their configuration and reviewer-policy applicability.
+as the renewed vote satisfies aggregate policy. They compare effective reviewer
+configuration and applicability under the shared material-evidence rules above.
 The complete reviewer endpoint owns reviewer evidence rather than the PR's
 duplicated reviewer summary; the request-only `isReapprove` flag does not
 represent standing authority. Source, discussion, attention and decision

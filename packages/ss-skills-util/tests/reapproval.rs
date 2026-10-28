@@ -248,6 +248,20 @@ impl Provider {
     /// Reporting faults begin only after the provider's terminal receipt is durable.
     fn observation_override(&self) -> Option<Value> {
         let fault = self.fault.get();
+        if fault == "cosmeticEvidence" {
+            self.change_cosmetic_evidence();
+        }
+        if self.ado && fault == "projectBookkeeping" {
+            // Every observation differs, including capture pairs and publication postflight.
+            let mut evidence = self.evidence.borrow_mut();
+            let project = &mut evidence["pullRequest"]["repository"]["project"];
+            project["revision"] = json!(self.target_reads.get());
+            project["lastUpdateTime"] = json!(if self.target_reads.get().is_multiple_of(2) {
+                "2026-09-28T09:00:00Z"
+            } else {
+                "2026-09-28T09:01:00Z"
+            });
+        }
         if fault == "movingCapture" {
             self.target_reads.set(self.target_reads.get() + 1);
             let key = if self.ado { "description" } else { "body" };
@@ -314,7 +328,68 @@ impl Provider {
                 "state": "CHANGES_REQUESTED"
             }));
         }
+
         None
+    }
+
+    /// Changes presentation on every read, including notice-only reconciliation reads.
+    fn change_cosmetic_evidence(&self) {
+        let version = self.target_reads.get();
+        let label = format!("cosmetic-{version}");
+        let mut evidence = self.evidence.borrow_mut();
+        if self.ado {
+            evidence["pullRequest"]["mergeId"] = json!(label);
+            evidence["pullRequest"]["repository"]["size"] = json!(version);
+            evidence["pullRequest"]["repository"]["project"]["name"] = json!(label);
+            for reviewer in evidence["reviewers"].as_array_mut().unwrap() {
+                reviewer["displayName"] = json!(label);
+            }
+            for policy in evidence["policies"].as_array_mut().unwrap() {
+                policy["revision"] = json!(version);
+                policy["type"]["displayName"] = json!(label);
+            }
+            for evaluation in evidence["evaluations"].as_array_mut().unwrap() {
+                evaluation["evaluationId"] = json!(format!(
+                    "attempt-{version}-{}",
+                    evaluation["configuration"]["id"]
+                ));
+                evaluation["configuration"]["revision"] = json!(version);
+                evaluation["configuration"]["type"]["displayName"] = json!(label);
+            }
+            for thread in evidence["threads"].as_array_mut().unwrap() {
+                for comment in thread["comments"].as_array_mut().unwrap() {
+                    comment["usersLiked"] = json!([{"id": label}]);
+                    if let Some(author) = comment.get_mut("author") {
+                        author["displayName"] = json!(label);
+                    }
+                    if comment.get("lastContentUpdatedDate").is_none()
+                        && let Some(updated) = comment.get("lastUpdatedDate").cloned()
+                    {
+                        comment["lastContentUpdatedDate"] = updated;
+                    }
+                    if comment.get("lastContentUpdatedDate").is_some() {
+                        comment["lastUpdatedDate"] = json!(label);
+                    }
+                }
+            }
+            evidence["threads"].as_array_mut().unwrap().push(json!({
+                    "id": format!("routine-{version}"), "status": "closed",
+                    "publishedDate": "2026-09-28T09:00:00Z",
+                    "properties": {"CodeReviewThreadType": {"$type": "System.String", "$value": "MergeAttempt"}},
+                    "comments": [{"commentType": "system", "content": label}]
+                }));
+        } else {
+            for collection in ["reviews", "comments", "reviewComments"] {
+                for item in evidence[collection].as_array_mut().unwrap() {
+                    item["html_url"] = json!(label);
+                    item["reactions"] = json!({"+1": version});
+                    if let Some(user) = item.get_mut("user") {
+                        user["login"] = json!(label);
+                        user["avatar_url"] = json!(label);
+                    }
+                }
+            }
+        }
     }
 }
 
@@ -2537,6 +2612,101 @@ fn native_stale_evidence_recovery_preserves_assessment_and_effect_boundaries() {
     repeated_observation_has_a_distinct_snapshot();
     stale_inspection_recovery_is_bounded_and_rechecks_authority();
     stale_refresh_preserves_accepted_and_unknown_effects();
+}
+
+/// Project-wide updates cannot invalidate capture, approval, or needs-review preflight.
+#[test]
+fn ado_project_bookkeeping_does_not_stale_capture_publication_or_notice() {
+    let _guard = PROCESS_TEST_LOCK
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner);
+    let repository = TempDir::new().unwrap();
+    let (old, new) = sources(repository.path());
+    for disposition in ["insignificant", "significant"] {
+        let scope = TempDir::new().unwrap();
+        let root = scope.path().join("run");
+        let provider = Provider::ado(repository.path(), &old, &new);
+        provider.fault.set("projectBookkeeping");
+        let (snapshot, prepared) = prepare(&root, &provider, false);
+        let captured: Value =
+            serde_json::from_slice(&fs::read(root.join("run.json")).unwrap()).unwrap();
+        let inspection = &captured["inventory"][0]["inspection"];
+        let project =
+            &inspection["evidence"]["observation"]["pullRequest"]["repository"]["project"];
+        assert!(project.get("revision").is_none());
+        assert!(project.get("lastUpdateTime").is_none());
+        assess_as(&root, &provider, &snapshot, &prepared, disposition);
+        let result = if disposition == "insignificant" {
+            publish(&root, &provider, &snapshot).unwrap()
+        } else {
+            notify(&root, &provider, &snapshot).unwrap()
+        };
+        assert_eq!(
+            result["items"][0]["status"],
+            if disposition == "insignificant" {
+                "reapproved"
+            } else {
+                "needsReview"
+            },
+            "{result}"
+        );
+        assert_eq!(
+            provider.writes.get(),
+            if disposition == "insignificant" { 2 } else { 1 }
+        );
+        assert_ne!(
+            project["revision"],
+            provider.evidence.borrow()["pullRequest"]["repository"]["project"]["revision"]
+        );
+        let saved: Value =
+            serde_json::from_slice(&fs::read(root.join("run.json")).unwrap()).unwrap();
+        assert_eq!(&saved["inventory"][0]["inspection"], inspection);
+    }
+}
+
+/// Capture, both publication paths and discussion-only readback share materiality rules.
+#[test]
+fn cosmetic_evidence_churn_does_not_stale_approval_or_notice_on_either_provider() {
+    let _guard = PROCESS_TEST_LOCK
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner);
+    let repository = TempDir::new().unwrap();
+    let (old, new) = sources(repository.path());
+    for ado in [true, false] {
+        for disposition in ["insignificant", "significant"] {
+            let scope = TempDir::new().unwrap();
+            let root = scope.path().join("run");
+            let provider = if ado {
+                Provider::ado(repository.path(), &old, &new)
+            } else {
+                Provider::new(repository.path(), &old, &new)
+            };
+            provider.fault.set("cosmeticEvidence");
+            let (snapshot, prepared) = prepare(&root, &provider, false);
+            let saved = fs::read(root.join("run.json")).unwrap();
+            let captured: Value = serde_json::from_slice(&saved).unwrap();
+            let inspection = &captured["inventory"][0]["inspection"];
+            assert!(!inspection["evidence"].to_string().contains("cosmetic-"));
+            assess_as(&root, &provider, &snapshot, &prepared, disposition);
+            let result = if disposition == "insignificant" {
+                publish(&root, &provider, &snapshot).unwrap()
+            } else {
+                notify(&root, &provider, &snapshot).unwrap()
+            };
+            assert_eq!(
+                result["items"][0]["status"],
+                if disposition == "insignificant" {
+                    "reapproved"
+                } else {
+                    "needsReview"
+                },
+                "ADO={ado}: {result}"
+            );
+            let updated: Value =
+                serde_json::from_slice(&fs::read(root.join("run.json")).unwrap()).unwrap();
+            assert_eq!(&updated["inventory"][0]["inspection"], inspection);
+        }
+    }
 }
 
 /// Exercises real command dispatch and records while ADO effects remain entirely in memory.

@@ -9,7 +9,7 @@ use crate::api::Api;
 use crate::approval::{Decision, Evidence as ProviderEvidence};
 use crate::clock::timestamp;
 use crate::error::{Failure, fail};
-use crate::json::{array, boolean, field, identifier, text};
+use crate::json::{array, boolean, field, identifier, project, text};
 use crate::renewal::{Anchor, Audit};
 use crate::review_notice::ApprovalEvent;
 use crate::target::{Target, escape};
@@ -274,34 +274,12 @@ pub(crate) fn capture(api: &mut Api<'_>, target: &Target) -> Result<Evidence, Ap
 
 /// Collects one complete service observation without reading repository content.
 fn observe(api: &mut Api<'_>, target: &Target) -> Result<Evidence, AppError> {
-    let mut pr = api.transport.request(&target.pr_api(), "GET", None)?;
-    // Merge-attempt bookkeeping is not source authority; target names remain for policy routing.
-    let metadata = pr
-        .as_object_mut()
-        .ok_or_else(|| fail("service", "Malformed ADO pull request"))?;
-    for key in [
-        "lastMergeTargetCommit",
-        "lastMergeCommit",
-        "mergeStatus",
-        "mergeFailureType",
-        "mergeFailureMessage",
-        // The complete reviewer endpoint below owns vote/attention evidence.
-        "reviewers",
-    ] {
-        metadata.remove(key);
-    }
+    let pr = project_pull_request(&api.transport.request(&target.pr_api(), "GET", None)?);
     if excluded(&pr)?.is_some() {
         return Ok(Evidence::State { pull_request: pr });
     }
     let source_commit = read_ref(api, target, text(field(&pr, "sourceRefName")?)?)?;
-    let mut reviewers = unique_list(api, &format!("{}/reviewers", target.pr_api()), "id")?;
-    for reviewer in &mut reviewers {
-        // This request flag is not standing approval or pending-review authority.
-        reviewer
-            .as_object_mut()
-            .ok_or_else(|| fail("service", "Malformed ADO reviewer"))?
-            .remove("isReapprove");
-    }
+    let reviewers = unique_list(api, &format!("{}/reviewers", target.pr_api()), "id")?;
     let iterations = unique_list(api, &format!("{}/iterations", target.pr_api()), "id")?
         .iter()
         .map(|iteration| -> Result<Value, AppError> {
@@ -310,9 +288,11 @@ fn observe(api: &mut Api<'_>, target: &Target) -> Result<Evidence, AppError> {
         })
         .collect::<Result<Vec<_>, _>>()?;
     let threads = unique_list(api, &format!("{}/threads", target.pr_api()), "id")?;
+    // Validate notification structure and service time before discarding routine activity.
+    ordered_events(&threads, api.transport.clock.now())?;
     let evaluations = evaluations(api, target, &pr)?;
     let policies = policies(api, &pr)?;
-    Ok(Evidence::History {
+    compact(&Evidence::History {
         pull_request: pr,
         source_commit,
         reviewers,
@@ -323,37 +303,296 @@ fn observe(api: &mut Api<'_>, target: &Target) -> Result<Evidence, AppError> {
     })
 }
 
-/// Evaluation progress is not individual authority; configurations and applicability are.
+/// Shared freshness checks distinguish authority from provider bookkeeping.
 pub(crate) fn equivalent(left: &Evidence, right: &Evidence) -> Result<bool, AppError> {
     Ok(comparison(left)? == comparison(right)?)
 }
 
-/// Projects only non-authoritative evaluation bookkeeping, never source or discussion.
-fn comparison(evidence: &Evidence) -> Result<Evidence, AppError> {
+/// Keeps source, authority, and meaningful discussion, including from older snapshots.
+fn compact(evidence: &Evidence) -> Result<Evidence, AppError> {
     let mut evidence = evidence.clone();
-    if let Evidence::History { evaluations, .. } = &mut evidence {
-        for evaluation in evaluations {
-            let configuration = field(evaluation, "configuration")?;
-            let applicability = if text(field(field(configuration, "type")?, "id")?)?
-                == "fa4e907d-c16b-4a4c-9dfa-4906e5d171dd"
-            {
-                let status = text(field(evaluation, "status")?)?;
-                if !matches!(
-                    status,
-                    "queued" | "running" | "approved" | "rejected" | "notApplicable" | "broken"
-                ) {
-                    return Err(fail(
-                        "service",
-                        "Unknown ADO reviewer-policy evaluation status",
-                    ));
-                }
-                Some(status != "notApplicable")
-            } else {
-                None
-            };
-            *evaluation = json!({"evaluationId": field(evaluation, "evaluationId")?,
-                "configuration": configuration, "applicable": applicability});
+    let pr = match &mut evidence {
+        Evidence::State { pull_request } | Evidence::History { pull_request, .. } => pull_request,
+    };
+    *pr = project_pull_request(pr);
+    if let Evidence::History {
+        reviewers,
+        iterations,
+        threads,
+        policies,
+        evaluations,
+        ..
+    } = &mut evidence
+    {
+        for iteration in iterations {
+            *iteration = project(iteration, &["id", "createdDate", "sourceRefCommit"]);
+            if let Some(commit) = iteration.get_mut("sourceRefCommit") {
+                *commit = project(commit, &["commitId"]);
+            }
         }
+        for reviewer in reviewers {
+            // Group contributions do not turn an individual's vote into a proxy vote.
+            if let Some(groups) = reviewer.get("votedFor") {
+                array(groups)?;
+            }
+            *reviewer = project(
+                reviewer,
+                &[
+                    "id",
+                    "vote",
+                    "isContainer",
+                    "isFlagged",
+                    "hasDeclined",
+                    "inactive",
+                    "isDeletedInOrigin",
+                ],
+            );
+        }
+        *threads = project_threads(threads)?;
+        // Validate every returned policy before excluding known merge-only checks.
+        // Unknown vote semantics must remain failures, not disappear through projection.
+        approval_policy(policies, evaluations)?;
+        policies.retain(|policy| {
+            policy.pointer("/type/id").and_then(Value::as_str)
+                == Some("fa4e907d-c16b-4a4c-9dfa-4906e5d171dd")
+                && policy.get("isEnabled") == Some(&Value::Bool(true))
+        });
+        for policy in policies.iter_mut() {
+            *policy = project_policy(policy);
+        }
+        evaluations.retain(|evaluation| {
+            evaluation
+                .pointer("/configuration/type/id")
+                .and_then(Value::as_str)
+                == Some("fa4e907d-c16b-4a4c-9dfa-4906e5d171dd")
+                && policies
+                    .iter()
+                    .any(|policy| policy.get("id") == evaluation.pointer("/configuration/id"))
+        });
+        for evaluation in evaluations {
+            *evaluation = project(evaluation, &["evaluationId", "configuration", "status"]);
+            if let Some(configuration) = evaluation.get_mut("configuration") {
+                // The independent configuration read owns enablement and deletion.
+                // Evaluation replicas contribute only policy identity, settings and applicability.
+                *configuration =
+                    project(&project_policy(configuration), &["id", "type", "settings"]);
+            }
+        }
+    }
+    Ok(evidence)
+}
+
+/// Stable IDs and PR content matter; repository size and merge jobs do not.
+fn project_pull_request(pr: &Value) -> Value {
+    let mut pr = project(
+        pr,
+        &[
+            "pullRequestId",
+            "status",
+            "isDraft",
+            "title",
+            "description",
+            "sourceRefName",
+            "targetRefName",
+            "forkSource",
+            "repository",
+            "createdBy",
+        ],
+    );
+    if let Some(repository) = pr.get_mut("repository") {
+        *repository = project_repository(repository);
+    }
+    if let Some(source) = pr.get_mut("forkSource") {
+        *source = project(source, &["name", "repository"]);
+        if let Some(repository) = source.get_mut("repository") {
+            *repository = project_repository(repository);
+        }
+    }
+    if let Some(author) = pr.get_mut("createdBy") {
+        *author = project_identity(author);
+    }
+    pr
+}
+
+/// Fork and target references share stable scope rather than repository statistics.
+fn project_repository(repository: &Value) -> Value {
+    let mut repository = project(repository, &["id", "project", "isDisabled", "isFork"]);
+    if let Some(project_ref) = repository.get_mut("project") {
+        *project_ref = project(project_ref, &["id", "state", "visibility"]);
+    }
+    repository
+}
+
+/// Identity presentation is not attribution, group membership, or account standing.
+fn project_identity(identity: &Value) -> Value {
+    project(
+        identity,
+        &["id", "isContainer", "inactive", "isDeletedInOrigin"],
+    )
+}
+
+/// Policy names, creator profiles and revision counters do not define vote semantics.
+fn project_policy(policy: &Value) -> Value {
+    let mut policy = project(
+        policy,
+        &["id", "isEnabled", "isDeleted", "type", "settings"],
+    );
+    if let Some(kind) = policy.get_mut("type") {
+        *kind = project(kind, &["id"]);
+    }
+    policy
+}
+
+/// Shared discussion projection also protects notice readback from cosmetic changes.
+pub(crate) fn project_threads(threads: &[Value]) -> Result<Vec<Value>, AppError> {
+    let mut projected = Vec::new();
+    for thread in threads {
+        if routine_thread(thread)? {
+            continue;
+        }
+        let mut thread = project(
+            thread,
+            &[
+                "id",
+                "status",
+                "isDeleted",
+                "publishedDate",
+                "threadContext",
+                "pullRequestThreadContext",
+                "properties",
+                "identities",
+                "comments",
+            ],
+        );
+        if let Some(Value::Object(identities)) = thread.get_mut("identities") {
+            for identity in identities.values_mut() {
+                *identity = project_identity(identity);
+            }
+        }
+        if let Some(properties) = thread.get_mut("properties") {
+            *properties = project(
+                properties,
+                &[
+                    "CodeReviewThreadType",
+                    "CodeReviewVoteResult",
+                    "CodeReviewVotedByIdentity",
+                    "CodeReviewVotedByInitiatorIdentity",
+                    "CodeReviewReviewersUpdatedNumAdded",
+                    "CodeReviewReviewersUpdatedNumRemoved",
+                    "CodeReviewReviewersUpdatedNumChanged",
+                    "CodeReviewReviewersUpdatedNumDeclined",
+                    "CodeReviewReviewersUpdatedAddedIdentity",
+                    "CodeReviewReviewersUpdatedRemovedIdentity",
+                    "CodeReviewReviewersUpdatedByIdentity",
+                ],
+            );
+        }
+        if let Some(Value::Array(comments)) = thread.get_mut("comments") {
+            for comment in comments {
+                let service_text = comment.get("commentType").and_then(Value::as_str)
+                    == Some("system")
+                    && !comment
+                        .get("content")
+                        .and_then(Value::as_str)
+                        .is_some_and(|body| body.contains("<!-- ss-autoreapprove"));
+                let updated = comment
+                    .get("lastContentUpdatedDate")
+                    .or_else(|| comment.get("lastUpdatedDate"))
+                    .cloned();
+                *comment = project(
+                    comment,
+                    &[
+                        "id",
+                        "parentCommentId",
+                        "author",
+                        "content",
+                        "publishedDate",
+                        "isDeleted",
+                        "commentType",
+                    ],
+                );
+                if service_text {
+                    // Structured properties, not generated prose or its edit clock,
+                    // establish service vote/reviewer authority.
+                    if let Some(object) = comment.as_object_mut() {
+                        object.remove("content");
+                    }
+                } else if let Some(updated) = updated {
+                    // The content-specific clock distinguishes edits from likes. Older
+                    // service shapes expose only the general update clock.
+                    comment["lastContentUpdatedDate"] = updated;
+                }
+                if let Some(author) = comment.get_mut("author") {
+                    *author = project_identity(author);
+                }
+            }
+        }
+        projected.push(thread);
+    }
+    Ok(projected)
+}
+
+/// Routine service activity is redundant with current source, PR state and policy reads.
+fn routine_thread(thread: &Value) -> Result<bool, AppError> {
+    if is_deleted(thread) || thread.get("status").and_then(Value::as_str) == Some("pending") {
+        return Ok(false);
+    }
+    let comments = array(field(thread, "comments")?)?;
+    if comments.is_empty()
+        || comments.iter().any(|comment| {
+            is_deleted(comment)
+                || comment.get("commentType").and_then(Value::as_str) != Some("system")
+                || comment
+                    .get("content")
+                    .and_then(Value::as_str)
+                    .is_some_and(|body| body.contains("<!-- ss-autoreapprove"))
+        })
+    {
+        return Ok(false);
+    }
+    // Capture validates raw event semantics first. Discussion-only reconciliation
+    // needs no vote interpretation: unfamiliar or malformed history stays retained.
+    let kind = match thread.get("properties") {
+        None | Some(Value::Null) => {
+            return Ok(thread.get("identities").is_none_or(|identities| {
+                identities.is_null() || identities.as_object().is_some_and(Map::is_empty)
+            }));
+        }
+        Some(properties) => properties.get("CodeReviewThreadType"),
+    };
+    Ok(kind.is_some_and(|kind| {
+        kind.get("$type").and_then(Value::as_str) == Some("System.String")
+            && matches!(
+                kind.get("$value").and_then(Value::as_str),
+                Some(
+                    "RefUpdate"
+                        | "PolicyStatusUpdate"
+                        | "AutoCompleteUpdate"
+                        | "IsDraftUpdate"
+                        | "TitleUpdate"
+                        | "DescriptionUpdate"
+                        | "StatusUpdate"
+                        | "MergeAttempt"
+                )
+            )
+    }))
+}
+
+/// Compares effective applicability rather than transient evaluation attempts.
+fn comparison(evidence: &Evidence) -> Result<Evidence, AppError> {
+    let mut evidence = compact(evidence)?;
+    if let Evidence::History { evaluations, .. } = &mut evidence {
+        for evaluation in evaluations.iter_mut() {
+            let configuration = field(evaluation, "configuration")?;
+            // compact validates and retains only enabled reviewer-policy evaluations.
+            let applicability = text(field(evaluation, "status")?)? != "notApplicable";
+            *evaluation = json!({"configuration": configuration, "applicable": applicability});
+        }
+        evaluations.sort_by_key(|evaluation| {
+            evaluation
+                .pointer("/configuration/id")
+                .map(Value::to_string)
+        });
     }
     Ok(evidence)
 }
@@ -948,7 +1187,7 @@ fn decide_history(
             }
             // These structured activities do not change reviewer authority.
             "RefUpdate" | "PolicyStatusUpdate" | "AutoCompleteUpdate" | "IsDraftUpdate"
-            | "TitleUpdate" | "DescriptionUpdate" | "StatusUpdate" => false,
+            | "TitleUpdate" | "DescriptionUpdate" | "StatusUpdate" | "MergeAttempt" => false,
             _ => {
                 return Err(fail(
                     "service",
@@ -1154,15 +1393,15 @@ pub(crate) fn matching_audit(
         ));
     }
     let published = timestamp(text(field(comment, "publishedDate")?)?)?;
-    for name in ["lastContentUpdatedDate", "lastUpdatedDate"] {
-        if let Some(updated) = comment.get(name)
-            && timestamp(text(updated)?)? != published
-        {
-            return Err(fail(
-                "service",
-                "Edited ADO renewal audit cannot establish provenance",
-            ));
-        }
+    if let Some(updated) = comment
+        .get("lastContentUpdatedDate")
+        .or_else(|| comment.get("lastUpdatedDate"))
+        && timestamp(text(updated)?)? != published
+    {
+        return Err(fail(
+            "service",
+            "Edited ADO renewal audit cannot establish provenance",
+        ));
     }
     identifier(field(thread, "id")?)
 }
@@ -1546,6 +1785,228 @@ mod tests {
     }
 
     #[test]
+    fn project_bookkeeping_is_ignored_without_mutating_captured_evidence() {
+        let mut original = evidence(&fixture()["stages"][2]);
+        // Arbitrary project-wide versions differ without changing this PR's authority.
+        original["pullRequest"]["repository"]["project"]["revision"] = json!(7);
+        original["pullRequest"]["repository"]["project"]["lastUpdateTime"] =
+            json!("2026-01-01T00:00:00Z");
+        for scope in ["history", "state"] {
+            let mut original = original.clone();
+            if scope == "state" {
+                original = json!({"scope": scope, "pullRequest": original["pullRequest"]});
+            }
+            let captured: Evidence = serde_json::from_value(original.clone()).unwrap();
+            for key in ["revision", "lastUpdateTime"] {
+                for replacement in [Some(json!("changed")), None] {
+                    let mut changed = original.clone();
+                    let project = changed["pullRequest"]["repository"]["project"]
+                        .as_object_mut()
+                        .unwrap();
+                    if let Some(replacement) = replacement {
+                        project.insert(key.to_owned(), replacement);
+                    } else {
+                        project.remove(key);
+                    }
+                    let changed: Evidence = serde_json::from_value(changed).unwrap();
+                    assert!(
+                        super::equivalent(&captured, &changed).unwrap(),
+                        "{scope}: {key}"
+                    );
+                    assert!(
+                        super::equivalent(&changed, &captured).unwrap(),
+                        "{scope}: {key}"
+                    );
+                    assert_eq!(serde_json::to_value(&captured).unwrap(), original);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn focused_evidence_omits_cosmetics_and_merge_checks_without_rewriting_history() {
+        let original: Evidence = serde_json::from_value(renewed()).unwrap();
+        let mut rich = serde_json::to_value(&original).unwrap();
+        rich["pullRequest"]["mergeId"] = json!("cosmetic-job");
+        rich["pullRequest"]["completionQueueTime"] = json!("cosmetic-queue");
+        rich["pullRequest"]["repository"]["size"] = json!(999);
+        rich["pullRequest"]["repository"]["isInMaintenance"] = json!(true);
+        rich["pullRequest"]["repository"]["project"]["name"] = json!("cosmetic-project");
+        rich["reviewers"][0]["displayName"] = json!("cosmetic-reviewer");
+        rich["reviewers"][0]["votedFor"] = json!([{"id": "group", "vote": 10}]);
+        rich["iterations"][0]["author"] = json!({"displayName": "cosmetic-author"});
+        rich["iterations"][0]["sourceRefCommit"]["url"] = json!("cosmetic-link");
+        rich["threads"][1]["comments"][0]["usersLiked"] = json!([{"id": "other"}]);
+        rich["threads"][1]["comments"][0]["content"] = json!("cosmetic-system-text");
+        rich["threads"][1]["comments"][0]["lastContentUpdatedDate"] = json!("cosmetic-system-time");
+        rich["threads"][1]["comments"][0]["author"] = json!({"displayName": "cosmetic-author"});
+        for identity in rich["threads"][1]["identities"]
+            .as_object_mut()
+            .unwrap()
+            .values_mut()
+        {
+            identity["displayName"] = json!("cosmetic-actor");
+            identity["url"] = json!("cosmetic-link");
+        }
+        // Omitted author IDs in system comments do not establish vote authority;
+        // the structured actor mapping does.
+        let mut baseline = serde_json::to_value(&original).unwrap();
+        baseline["threads"][1]["comments"][0]["author"] = json!({});
+        let baseline: Evidence = serde_json::from_value(baseline).unwrap();
+        for policy in rich["policies"].as_array_mut().unwrap() {
+            policy["revision"] = json!(99);
+            policy["type"]["displayName"] = json!("cosmetic-policy");
+        }
+        let evaluation = rich["evaluations"]
+            .as_array_mut()
+            .unwrap()
+            .last_mut()
+            .unwrap();
+        evaluation["evaluationId"] = json!("another-attempt");
+        evaluation["configuration"]["revision"] = json!(99);
+        evaluation["configuration"]["isEnabled"] = json!(false);
+        evaluation["configuration"]["isDeleted"] = json!(true);
+        evaluation["configuration"]["type"]["displayName"] = json!("cosmetic-policy");
+        rich["policies"].as_array_mut().unwrap().push(json!({
+            "id": 90, "isEnabled": true, "type": {"id": "0609b952-1397-4640-95ec-e00a01b2c241"},
+            "settings": {"buildDefinitionId": 10}
+        }));
+        rich["threads"].as_array_mut().unwrap().push(json!({
+            "id": 91, "publishedDate": "2026-01-01T01:10:00Z", "status": "closed",
+            "properties": {"CodeReviewThreadType": {"$type": "System.String", "$value": "MergeAttempt"}},
+            "comments": [{"commentType": "system", "content": "cosmetic-job"}]
+        }));
+        let saved = rich.clone();
+        let rich: Evidence = serde_json::from_value(rich).unwrap();
+        let lean = super::compact(&rich).unwrap();
+        assert!(super::equivalent(&baseline, &rich).unwrap());
+        assert!(super::equivalent(&rich, &lean).unwrap());
+        assert!(super::equivalent(&lean, &rich).unwrap());
+        assert_eq!(super::compact(&lean).unwrap(), lean);
+        assert_eq!(serde_json::to_value(&rich).unwrap(), saved);
+        assert!(!serde_json::to_string(&lean).unwrap().contains("cosmetic-"));
+        assert_eq!(
+            decide(serde_json::to_value(lean).unwrap()).unwrap(),
+            decide(saved).unwrap()
+        );
+    }
+
+    #[test]
+    fn routine_notifications_keep_human_replies_pending_state_and_deleted_history() {
+        let routine = json!({
+            "id": 91, "publishedDate": "2026-01-01T01:10:00Z", "status": "closed",
+            "properties": {"CodeReviewThreadType": {"$type": "System.String", "$value": "PolicyStatusUpdate"}},
+            "comments": [{"commentType": "system", "content": "Policy progress"}]
+        });
+        assert!(
+            super::project_threads(std::slice::from_ref(&routine))
+                .unwrap()
+                .is_empty()
+        );
+        for extra in ["humanReply", "pending", "deleted"] {
+            let mut material = routine.clone();
+            match extra {
+                "humanReply" => material["comments"].as_array_mut().unwrap().push(json!({
+                    "id": 2, "commentType": "text", "content": "New objection", "author": {"id": "human"}
+                })),
+                "pending" => material["status"] = json!("pending"),
+                "deleted" => material["isDeleted"] = json!(true),
+                _ => unreachable!(),
+            }
+            assert_eq!(
+                super::project_threads(&[material]).unwrap().len(),
+                1,
+                "{extra}"
+            );
+        }
+        let mut unsupported = routine;
+        unsupported["properties"]["CodeReviewThreadType"]["$value"] = json!("UnknownVoteReset");
+        let projected = super::project_threads(&[unsupported]).unwrap();
+        assert_eq!(
+            projected[0]["properties"]["CodeReviewThreadType"]["$value"],
+            "UnknownVoteReset"
+        );
+    }
+
+    #[test]
+    fn audit_content_clock_ignores_reaction_updates_but_not_content_edits() {
+        let mut value = renewed();
+        let expected = decide(value.clone()).unwrap();
+        let audit = value["threads"].as_array_mut().unwrap().last_mut().unwrap();
+        audit["comments"][0]["lastContentUpdatedDate"] = json!("2026-01-01T01:05:00Z");
+        audit["comments"][0]["lastUpdatedDate"] = json!("2026-01-01T02:00:00Z");
+        assert_eq!(decide(value.clone()).unwrap(), expected);
+        let audit = value["threads"].as_array_mut().unwrap().last_mut().unwrap();
+        audit["comments"][0]["lastContentUpdatedDate"] = json!("2026-01-01T02:00:00Z");
+        decide(value).unwrap_err();
+    }
+
+    #[test]
+    fn project_bookkeeping_exclusion_preserves_substantive_evidence_guards() {
+        let mut original = renewed();
+        // Synthetic PR content and scope exercise guards alongside unrelated metadata churn.
+        original["pullRequest"]["repository"]["project"]["revision"] = json!(7);
+        original["pullRequest"]["repository"]["project"]["lastUpdateTime"] =
+            json!("2026-01-01T00:00:00Z");
+        original["pullRequest"]["repository"]["project"]["name"] = json!("fixture-project");
+        original["pullRequest"]["repository"]["project"]["state"] = json!("wellFormed");
+        original["pullRequest"]["repository"]["revision"] = json!(7);
+        original["pullRequest"]["revision"] = json!(7);
+        original["pullRequest"]["title"] = json!("Fixture PR");
+        original["pullRequest"]["description"] = json!("Fixture discussion");
+        original["evaluations"][0]["configuration"]["revision"] = json!(1);
+        original["threads"][1]["comments"]
+            .as_array_mut()
+            .unwrap()
+            .push(json!({
+                "id": 2, "commentType": "text", "content": "Fixture discussion"
+            }));
+        for (path, replacement) in [
+            (
+                "/pullRequest/repository/project/id",
+                json!("another-project"),
+            ),
+            ("/pullRequest/repository/project/state", json!("deleting")),
+            ("/pullRequest/repository/id", json!("another-repository")),
+            ("/pullRequest/pullRequestId", json!(2)),
+            (
+                "/pullRequest/sourceRefName",
+                json!("refs/heads/another-source"),
+            ),
+            (
+                "/pullRequest/targetRefName",
+                json!("refs/heads/another-target"),
+            ),
+            ("/pullRequest/status", json!("completed")),
+            ("/pullRequest/isDraft", json!(true)),
+            ("/pullRequest/title", json!("Changed title")),
+            ("/pullRequest/description", json!("New human objection")),
+            ("/sourceCommit", json!("e".repeat(40))),
+            (
+                "/iterations/0/sourceRefCommit/commitId",
+                json!("e".repeat(40)),
+            ),
+            ("/reviewers/0/vote", json!(0)),
+            ("/reviewers/0/id", json!("another-reviewer")),
+            ("/reviewers/0/isFlagged", json!(true)),
+            ("/reviewers/0/hasDeclined", json!(true)),
+            ("/threads/1/comments/1/content", json!("Changed discussion")),
+            ("/evaluations/0/status", json!("notApplicable")),
+        ] {
+            let mut changed = original.clone();
+            changed["pullRequest"]["repository"]["project"]["revision"] = json!(8);
+            changed["pullRequest"]["repository"]["project"]["lastUpdateTime"] =
+                json!("2026-01-01T01:00:00Z");
+            *changed
+                .pointer_mut(path)
+                .unwrap_or_else(|| panic!("Missing test field {path}")) = replacement;
+            let captured: Evidence = serde_json::from_value(original.clone()).unwrap();
+            let changed: Evidence = serde_json::from_value(changed).unwrap();
+            assert!(!super::equivalent(&captured, &changed).unwrap(), "{path}");
+        }
+    }
+
+    #[test]
     fn evaluation_progress_does_not_hide_configuration_applicability_or_discussion_changes() {
         let original = renewed();
         let original: Evidence = serde_json::from_value(original).unwrap();
@@ -1570,6 +2031,11 @@ mod tests {
         };
         evaluations.last_mut().unwrap()["configuration"]["settings"]["minimumApproverCount"] =
             json!(2);
+        super::equivalent(&original, &changed_policy).unwrap_err();
+        let Evidence::History { policies, .. } = &mut changed_policy else {
+            unreachable!()
+        };
+        policies.last_mut().unwrap()["settings"]["minimumApproverCount"] = json!(2);
         assert!(!super::equivalent(&original, &changed_policy).unwrap());
 
         let Evidence::History { threads, .. } = &mut progress else {

@@ -753,14 +753,9 @@ fn unchanged(evidence: &Evidence, operation: &Operation) -> Result<bool, AppErro
     equivalent(&stripped, &operation.snapshot)
 }
 
-/// Only ADO's non-authoritative evaluation progress is excluded from freshness checks.
+/// Approval publication shares capture and notice materiality rules.
 fn equivalent(left: &Evidence, right: &Evidence) -> Result<bool, AppError> {
-    match (left, right) {
-        (Evidence::AzureDevOps(left), Evidence::AzureDevOps(right)) => {
-            ado_approval::equivalent(left, right)
-        }
-        _ => Ok(false),
-    }
+    left.equivalent(right)
 }
 
 #[cfg(test)]

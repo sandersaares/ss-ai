@@ -194,8 +194,8 @@ The producer and consumer validate the full record, including excluded PRs.
 | Recency | `state` (`pending`, `recent`, `noRecentCommit`, `failed`); nullable UTC `checkedAt`, `latestNonfutureCommit`; Boolean `evidenceComplete`; nullable `error`. |
 | Inspection | UTC `capturedAt`; nullable `snapshotDigest`, `evidence`, `decision`, and `error`. Successful inspections have evidence, decision, and digest without an error; failed inspections have only an error. |
 | Evidence | `platform` (`gitHub` or `azureDevOps`) and provider-specific `observation`, matching the run's platform. |
-| ADO observation | `scope: state` with provider `pullRequest` metadata for closed/draft outcomes, or `scope: history` with `pullRequest`, full `sourceCommit`, and complete `reviewers`, source `iterations`, `threads`, `policies`, `evaluations` arrays. Provider objects retain their external field names. Target names serve policy routing; target commits and merge bookkeeping are not approval authority. |
-| GitHub observation | `scope: state` with provider `pullRequest` metadata for excluded states, or `scope: history` with `pullRequest`, complete `reviews`, relevant `timeline`, issue `comments`, and `reviewComments`. Provider objects retain their external field names. |
+| ADO observation | `scope: state` with focused `pullRequest` metadata for closed/draft outcomes, or `scope: history` with `pullRequest`, full `sourceCommit`, individual `reviewers`, source `iterations`, material `threads`, enabled reviewer `policies`, and their `evaluations`. Complete service enumeration precedes projection; records retain provider field names. Target names serve policy routing; target commits and merge bookkeeping are not approval authority. |
+| GitHub observation | `scope: state` with focused `pullRequest` metadata for excluded states, or `scope: history` with `pullRequest`, `reviews`, relevant `timeline`, issue `comments`, and `reviewComments`. Complete collection reads retain decision and discussion fields, not account profiles, links, or reactions. Records retain provider field names. |
 | Decision | `status: assessmentRequired` with `approvalEventId` and `anchor` (`reviewId`, full `sourceCommit`); `status: alreadyValid` with `approvalEventId`; `status: needsReview` with `notice`; `status: noPriorApproval`; or `status: ineligible` with a nonempty `reason`. |
 | Needs-review notice | Nonempty `commentId`, service `createdAt`, and nonempty `rationale`. |
 | Automatic approval | Nonempty `approvalEventId` and service `approvedAt`. Present only for valid automatic standing, not external approvals. |
@@ -210,13 +210,16 @@ An inspection's digest covers its capture time and complete evidence. Fresh
 recovery captures also bind the recovery attempt ID, so a repeated observation
 cannot reuse an earlier snapshot digest. Existing schema-8 captures without
 that binding remain readable.
+Freshness comparisons use the [material-evidence projections](docs/reapproval.md#material-evidence)
+for both newly captured and richer retained observations. Existing records and
+their digests are not rewritten; immutable assessment and journal bindings remain exact.
 Consumers recompute its conclusion and validate its run identity.
 Schema-7 records load with empty recovery state; their original journal identities,
 assessment contracts, and uncertain effects remain unchanged. Other older run
 schemas require a fresh run.
 
 ADO inspections ignore deleted threads and comments as authority while retaining
-the returned records in their snapshots. They report `noPriorApproval` when no
+their tombstones and audit evidence in snapshots. They report `noPriorApproval` when no
 applicable approval survives, or `ineligible` with reason `approvalEvidenceDeleted`
 when deletion prevents establishing renewal authority.
 
