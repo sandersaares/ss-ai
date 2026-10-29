@@ -38,10 +38,15 @@ impl Drop for TestFile {
 }
 
 /// Owns the fixture process and closes it even when an assertion fails.
+///
+/// The pipes carry line-based synchronization signals, not general logging.
+/// Acknowledgements establish lock acquisition and release ordering without
+/// timed waits; see the runtime implementation guide's time and waits section.
 struct PowerShell {
     child: Child,
     input: ChildStdin,
     output: BufReader<ChildStdout>,
+    response: String,
 }
 
 impl PowerShell {
@@ -64,6 +69,7 @@ impl PowerShell {
             child,
             input,
             output,
+            response: String::new(),
         }
     }
 
@@ -73,13 +79,13 @@ impl PowerShell {
     }
 
     fn expect(&mut self, expected: &str) {
-        let mut line = String::new();
+        self.response.clear();
         assert_ne!(
-            self.output.read_line(&mut line).unwrap(),
+            self.output.read_line(&mut self.response).unwrap(),
             0,
             "fixture exited"
         );
-        assert_eq!(line.trim_end(), expected);
+        assert_eq!(self.response.trim_end(), expected);
     }
 
     fn finish(&mut self) {

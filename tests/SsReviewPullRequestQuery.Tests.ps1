@@ -128,6 +128,7 @@ Describe 'Migration query compatibility fixtures' {
         $result = Invoke-QueryExecutable -Arguments (@('-Path', $script:FixtureCapture) + $Arguments)
         $result.exitCode | Should -Be 0 -Because $result.error
         $result.error | Should -BeNullOrEmpty
+        # The bounded local query boundary in the implementation guide limits serialized stdout.
         [Text.Encoding]::UTF8.GetByteCount($result.output) | Should -BeLessOrEqual 16384
         $expected = ConvertTo-Json -InputObject $script:ExpectedPages[$Query] -Depth 100 -Compress
         $result.output.TrimEnd("`r", "`n") | Should -BeExactly $expected
@@ -153,7 +154,7 @@ Describe 'Migration query compatibility fixtures' {
         $result = Invoke-QueryExecutable -Arguments @('-RequestPath', $requestPath)
         $result.exitCode | Should -Not -Be 0
         $result.output | Should -BeNullOrEmpty
-        $result.error | Should -Not -BeNullOrEmpty
+        $result.error | Should -Match "Invalid 'queryRequest' workflow data"
         [IO.File]::ReadAllText($requestPath) | Should -BeExactly $before
     }
 }
