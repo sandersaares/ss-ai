@@ -1,0 +1,49 @@
+{
+  "metadata": {
+    "schemaVersion": 1,
+    "query": "metadata",
+    "snapshotId": "FEF75D9836BAC16552C0569D1172931FFAC8B38B8B61E2F540DE07DDD4A10AF5",
+    "totalCount": 1,
+    "items": [
+      { "field": "title", "content": "Widget", "contentOffset": 0, "contentLength": 6, "contentComplete": true }
+    ],
+    "nextCursor": null,
+    "complete": true
+  },
+  "comments": {
+    "schemaVersion": 1,
+    "query": "comments",
+    "snapshotId": "FEF75D9836BAC16552C0569D1172931FFAC8B38B8B61E2F540DE07DDD4A10AF5",
+    "totalCount": 1,
+    "items": [
+      {
+        "threadId": "T",
+        "url": "https://example.invalid/thread/T",
+        "openingCommentId": "C",
+        "kind": "text",
+        "resolution": "resolved",
+        "isOutdated": true,
+        "context": { "filePath": "src/widget.rs", "side": "right", "startLine": 4, "endLine": 4 },
+        "decision": null,
+        "isAuthoredBySelf": false,
+        "eventUtc": "2026-10-01T12:00:00Z",
+        "lastUpdatedUtc": null,
+        "commentId": "C",
+        "commentUrl": "https://example.invalid/comment/C",
+        "parentId": null,
+        "author": { "id": "person", "displayName": "Reviewer" },
+        "authorship": "indeterminate",
+        "authorshipEvidence": [],
+        "threadIsAuthoredBySelf": false,
+        "publishedUtc": "2026-10-01T12:00:00Z",
+        "lastEditedUtc": null,
+        "content": "Quoted \"widget\"\n\uD83E\uDD16 evidence",
+        "contentOffset": 0,
+        "contentLength": 27,
+        "contentComplete": true
+      }
+    ],
+    "nextCursor": null,
+    "complete": true
+  }
+}

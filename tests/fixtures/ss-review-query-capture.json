@@ -1,0 +1,48 @@
+{
+  "schemaVersion": 3,
+  "platform": "gitHub",
+  "pullRequestUrl": "https://example.invalid/pr/1",
+  "repositoryUrl": "https://example.invalid/repo",
+  "fetchedUtc": "2026-10-01T12:00:00Z",
+  "target": { "platform": "gitHub", "pullRequestId": 1 },
+  "authenticatedIdentity": { "id": "person" },
+  "pullRequest": {
+    "id": 1,
+    "title": "Widget",
+    "description": "Review the widget.",
+    "reviewedSourceCommit": "source",
+    "reviewedMergeBaseCommit": "base"
+  },
+  "reviewers": [],
+  "revisions": [],
+  "threads": [
+    {
+      "id": "T",
+      "url": "https://example.invalid/thread/T",
+      "kind": "text",
+      "openingCommentId": "C",
+      "resolution": "resolved",
+      "isOutdated": true,
+      "isAuthoredBySelf": false,
+      "context": { "filePath": "src/widget.rs", "side": "right", "startLine": 4, "endLine": 4 },
+      "decision": null,
+      "eventUtc": "2026-10-01T12:00:00Z",
+      "lastUpdatedUtc": null,
+      "comments": [
+        {
+          "id": "C",
+          "content": "Quoted \"widget\"\n\uD83E\uDD16 evidence",
+          "url": "https://example.invalid/comment/C",
+          "parentId": null,
+          "author": { "id": "person", "displayName": "Reviewer" },
+          "authorship": "indeterminate",
+          "authorshipEvidence": [],
+          "isAuthoredBySelf": false,
+          "publishedUtc": "2026-10-01T12:00:00Z",
+          "lastEditedUtc": null
+        }
+      ],
+      "properties": { "native": "not projected" }
+    }
+  ]
+}

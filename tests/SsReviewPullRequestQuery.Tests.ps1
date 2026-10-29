@@ -112,6 +112,52 @@ BeforeAll {
     }
 }
 
+Describe 'Migration query compatibility fixtures' {
+    BeforeEach {
+        $script:FixtureCapture = Join-Path $PSScriptRoot 'fixtures\ss-review-query-capture.json'
+        $script:ExpectedPages = ConvertFrom-JsonVerbatim -Text (
+            [IO.File]::ReadAllText((Join-Path $PSScriptRoot 'fixtures\ss-review-query-expected.json'))
+        )
+    }
+
+    It 'preserves complete serialized projections and the snapshot identity for <Query>' -ForEach @(
+        @{ Query = 'metadata'; Arguments = @('-Query', 'metadata', '-Field', 'title') }
+        @{ Query = 'comments'; Arguments = @('-Query', 'comments', '-ThreadId', 'T', '-CommentId', 'C') }
+    ) {
+        $before = [IO.File]::ReadAllBytes($script:FixtureCapture)
+        $result = Invoke-QueryExecutable -Arguments (@('-Path', $script:FixtureCapture) + $Arguments)
+        $result.exitCode | Should -Be 0 -Because $result.error
+        $result.error | Should -BeNullOrEmpty
+        [Text.Encoding]::UTF8.GetByteCount($result.output) | Should -BeLessOrEqual 16384
+        $expected = ConvertTo-Json -InputObject $script:ExpectedPages[$Query] -Depth 100 -Compress
+        $result.output.TrimEnd("`r", "`n") | Should -BeExactly $expected
+        [Convert]::ToBase64String([IO.File]::ReadAllBytes($script:FixtureCapture)) |
+            Should -BeExactly ([Convert]::ToBase64String($before))
+    }
+
+    It 'rejects saved requests with <Mutation> without changing the saved record' -ForEach @(
+        @{ Mutation = 'a missing files array' }
+        @{ Mutation = 'an unknown selector' }
+    ) {
+        $root = Join-Path $TestDrive ([guid]::NewGuid().ToString('N'))
+        $null = [IO.Directory]::CreateDirectory($root)
+        $capture = Join-Path $root 'capture.json'
+        $requestPath = Join-Path $root 'request.json'
+        [IO.File]::Copy($script:FixtureCapture, $capture)
+        $request = New-PullRequestQueryRequest -Path $capture -DiagnosticsPath (Join-Path $root 'diagnostics.json') `
+            -Options (New-PullRequestQueryOptions -Query metadata -Field title)
+        if ($Mutation -ceq 'a missing files array') { $request.options.Remove('files') }
+        else { $request.options['unknown'] = 'unexpected' }
+        Write-PullRequestOutputFileAtomically -Path $requestPath -Content (ConvertTo-JsonText -Value $request)
+        $before = [IO.File]::ReadAllText($requestPath)
+        $result = Invoke-QueryExecutable -Arguments @('-RequestPath', $requestPath)
+        $result.exitCode | Should -Not -Be 0
+        $result.output | Should -BeNullOrEmpty
+        $result.error | Should -Not -BeNullOrEmpty
+        [IO.File]::ReadAllText($requestPath) | Should -BeExactly $before
+    }
+}
+
 Describe 'Saved PR query requests' {
     BeforeEach {
         $script:Document = New-QueryDocument
