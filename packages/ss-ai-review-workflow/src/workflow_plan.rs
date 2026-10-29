@@ -29,6 +29,19 @@ pub enum PlanKind {
     Decisions,
 }
 
+/// Maps schema names to their single required array.
+impl PlanKind {
+    fn field(self) -> &'static str {
+        match self {
+            Self::MergeCandidates => "clusters",
+            Self::MergePlan => "groups",
+            Self::Updates => "updates",
+            Self::Removals => "removals",
+            Self::Decisions => "decisions",
+        }
+    }
+}
+
 /// A candidate group whose members may overlap other candidate groups.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -250,19 +263,6 @@ pub(crate) fn parse_json(bytes: &[u8]) -> Result<Value, AppError> {
     Ok(value)
 }
 
-/// Maps schema names to their single required array.
-impl PlanKind {
-    fn field(self) -> &'static str {
-        match self {
-            Self::MergeCandidates => "clusters",
-            Self::MergePlan => "groups",
-            Self::Updates => "updates",
-            Self::Removals => "removals",
-            Self::Decisions => "decisions",
-        }
-    }
-}
-
 /// Enforces the same schema for every input and output boundary.
 fn parse_item(kind: PlanKind, value: Value) -> Result<PlanItem, AppError> {
     let invalid = |error| caused_by("invalidInput", "Invalid workflow item", error);
@@ -326,22 +326,21 @@ pub fn read(kind: PlanKind, path: &Path, clock: &dyn Clock) -> Result<Plan, AppE
 
 /// Parses the required versioned envelope before accepting its typed entries.
 fn parse_plan(kind: PlanKind, bytes: &[u8]) -> Result<Plan, AppError> {
-    let value = parse_json(bytes)?;
-    let object = value
-        .as_object()
+    let mut value = parse_json(bytes)?;
+    let value = value
+        .as_object_mut()
         .ok_or_else(|| fail("invalidInput", "Workflow plan must be an object"))?;
-    if object.len() != 2
-        || object.get("schemaVersion") != Some(&Value::from(1))
-        || !object.get(kind.field()).is_some_and(Value::is_array)
+    if value.len() != 2
+        || value.get("schemaVersion") != Some(&Value::from(1))
+        || !value.get(kind.field()).is_some_and(Value::is_array)
     {
         return Err(fail("invalidInput", "Invalid workflow plan envelope"));
     }
-    let items = object
-        .get(kind.field())
-        .and_then(Value::as_array)
-        .ok_or_else(|| fail("invalidInput", "Missing workflow list"))?
-        .iter()
-        .cloned()
+    let Some(Value::Array(items)) = value.remove(kind.field()) else {
+        return Err(fail("invalidInput", "Missing workflow list"));
+    };
+    let items = items
+        .into_iter()
         .map(|value| parse_item(kind, value))
         .collect::<Result<Vec<_>, _>>()?;
     Ok(Plan { kind, items })
@@ -481,4 +480,42 @@ fn write_plan(transaction: &FileTransaction<'_>, plan: &Plan) -> Result<(), AppE
     let bytes = serde_json::to_vec(&Value::Object(object))
         .map_err(|error| caused_by("invalidInput", "Cannot serialize workflow plan", error))?;
     transaction.write_bytes(&bytes)
+}
+
+#[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
+mod tests {
+    use super::{PlanItem, PlanKind, parse_plan};
+
+    #[test]
+    fn plan_parsing_moves_valid_items_and_rejects_invalid_envelopes() {
+        let plan = parse_plan(
+            PlanKind::Updates,
+            br#"{"schemaVersion":1,"updates":[{"findingId":"a","findingPath":"a.json"},{"findingId":"b","findingPath":"b.json"}]}"#,
+        )
+        .unwrap();
+        assert!(matches!(
+            plan.items(),
+            [PlanItem::Update(first), PlanItem::Update(second)]
+                if first.finding_id == "a" && second.finding_id == "b"
+        ));
+
+        for invalid in [
+            "[]",
+            r#"{"schemaVersion":2,"updates":[]}"#,
+            r#"{"schemaVersion":1,"updates":null}"#,
+            r#"{"schemaVersion":1,"removals":[]}"#,
+            r#"{"schemaVersion":1,"updates":[],"extra":true}"#,
+            r#"{"schemaVersion":1,"updates":[],"updates":[]}"#,
+            r#"{"schemaVersion":1,"updates":[],"Updates":[]}"#,
+            r#"{"schemaVersion":1,"updates":[{"findingId":"a","findingId":"b","findingPath":"a.json"}]}"#,
+            r#"{"schemaVersion":1,"updates":[{"findingId":"a","FindingId":"b","findingPath":"a.json"}]}"#,
+            r#"{"schemaVersion":1,"updates":[{"findingId":"a","findingPath":"a.json","extra":true}]}"#,
+        ] {
+            assert!(
+                parse_plan(PlanKind::Updates, invalid.as_bytes()).is_err(),
+                "{invalid}"
+            );
+        }
+    }
 }

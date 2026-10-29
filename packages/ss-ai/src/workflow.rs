@@ -362,6 +362,9 @@ where
                     ));
                 }
             };
+            if updates.is_empty() {
+                return Err(fail("invalidInput", "Update plan must not be empty"));
+            }
             findings::update(&artifact_path, &updates, clock)?;
             let ids: Vec<_> = updates.into_iter().map(|(id, _)| id).collect();
             Ok(serde_json::to_string(
@@ -389,6 +392,9 @@ where
                     _ => Err(fail("invalidInput", "Invalid removal plan item")),
                 })
                 .collect::<Result<Vec<_>, AppError>>()?;
+            if removals.is_empty() {
+                return Err(fail("invalidInput", "Removal plan must not be empty"));
+            }
             let clock = FixedTimestampClock {
                 timestamp: now_utc,
                 clock,

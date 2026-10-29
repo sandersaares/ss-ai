@@ -151,7 +151,13 @@ bounded pages.
 ## Local finding workflow
 
 The `workflow` commands maintain finding artifacts and finding plans without
-provider authentication. For example:
+provider authentication. A finding artifact stores a reviewer's recommendations
+and their lifecycle state. Finding plans describe proposed operations on findings.
+The reviewer's file-group journal records the worker's coverage progress and
+assessments; it is separate from the session-state and host journals. See the
+[finding-plan guide](../../skills/ss-review/data-guides/finding-plans.md) and
+[review-coverage guide](../../skills/ss-review/data-guides/review-coverage.md)
+for the record formats. For example:
 
 ```powershell
 #Requires -Version 7.6
@@ -167,9 +173,11 @@ ss-ai workflow plan-initialize --kind updates --path "{{PLAN_PATH}}"
 
 The `workflow --help` output lists the finding lifecycle, validation, index,
 candidate, consolidation, and plan commands. Authored finding content and plan
-items are supplied as UTF-8 JSON files. Completion requires the reviewer's
-file-group journal. The review workflow separately checks manifest-based coverage
-and records audit decisions.
+items are supplied as UTF-8 JSON files. Use the
+[finding structure](../../skills/ss-review/review.md#finding-structure) for
+authored findings and the finding-plan guide for plan items. Completion requires
+the reviewer's file-group journal. The review workflow separately checks
+manifest-based coverage and records audit decisions.
 
 ## Reapproval discovery
 

@@ -48,6 +48,14 @@ function Invoke-RustTestCargo {
         }
         if ($NativePrerequisiteSucceeds) {
             [IO.File]::WriteAllText((Join-Path $root $NativePesterName), @'
+#Requires -Version 7.6
+
+BeforeAll {
+    Set-StrictMode -Version Latest
+    $ErrorActionPreference = 'Stop'
+    $PSNativeCommandUseErrorActionPreference = $true
+}
+
 Describe 'prepared helper' {
     It 'receives the prebuilt test executable' {
         $env:SS_AI_FINDING_TEST_EXECUTABLE | Should -Not -BeNullOrEmpty

@@ -11,6 +11,8 @@ param(
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 $PSNativeCommandUseErrorActionPreference = $true
+# Decision plans belong to the audit family, which retains its PowerShell writer
+# until the audit and Markdown migration described in TODO.md, "Skill design".
 if ($Kind -ceq 'decisions') {
     . "$PSScriptRoot\lib\JsonValue.ps1"
     . "$PSScriptRoot\lib\PullRequestModel.ps1"

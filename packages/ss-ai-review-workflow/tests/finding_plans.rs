@@ -8,6 +8,7 @@
 use std::cell::{Cell, RefCell};
 use std::fs;
 use std::io::{self, Write};
+use std::panic::{RefUnwindSafe, UnwindSafe};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 use std::sync::mpsc::{self, Receiver, Sender};
@@ -45,6 +46,27 @@ impl Drop for TestDirectory {
     }
 }
 
+/// Public workflow records must remain usable across panic-catching boundaries.
+#[test]
+fn public_records_are_unwind_safe() {
+    fn assert_traits<T: UnwindSafe + RefUnwindSafe>() {}
+
+    assert_traits::<findings::InitializationResult>();
+    assert_traits::<findings::IndexResult>();
+    assert_traits::<findings::ConsolidationResult>();
+    assert_traits::<workflow_plan::PlanKind>();
+    assert_traits::<workflow_plan::Cluster>();
+    assert_traits::<workflow_plan::Merge>();
+    assert_traits::<workflow_plan::Update>();
+    assert_traits::<workflow_plan::Removal>();
+    assert_traits::<workflow_plan::Decision>();
+    assert_traits::<workflow_plan::DecisionValue>();
+    assert_traits::<workflow_plan::PlanItem>();
+    assert_traits::<workflow_plan::Plan>();
+}
+
+/// Failed batches leave the artifact intact while successful lifecycle and plan
+/// operations preserve identity, history, and idempotent plan authoring.
 #[test]
 fn artifacts_and_plans_preserve_work_across_failed_batches() {
     let directory = TestDirectory::new("batch");
@@ -173,6 +195,8 @@ fn artifacts_and_plans_preserve_work_across_failed_batches() {
     .unwrap();
 }
 
+/// Schema validation and conflict detection protect plans before publication,
+/// while explicit replacement permits an intended change to a merge group.
 #[test]
 fn plan_schemas_reject_malformed_records_and_conflicts() {
     let directory = TestDirectory::new("schemas");
@@ -265,6 +289,8 @@ fn artifact_rejects_unknown_fields() {
     assert!(findings::validate_artifact(&invalid).is_ok());
 }
 
+/// Completion receipts establish the reviewer evidence used by consolidation,
+/// whose merged locations and provenance must also remain usable by the index.
 #[test]
 fn merge_preserves_locations_and_untouched_findings() {
     let directory = TestDirectory::new("merge");
@@ -400,6 +426,8 @@ fn merge_preserves_locations_and_untouched_findings() {
     assert!(findings::validate_candidates(&candidates, &index, &clock).is_err());
 }
 
+/// Completion and resume are gated by journal evidence, including empty work,
+/// so a reviewer cannot advance or resume against unrelated unfinished work.
 #[test]
 fn completion_rejects_unfinished_or_unverified_work() {
     let directory = TestDirectory::new("completion");
@@ -479,44 +507,27 @@ fn completion_rejects_unfinished_or_unverified_work() {
     );
 }
 
+/// Concurrent allocation must observe the preceding writer's committed ID.
 #[test]
+#[cfg_attr(miri, ignore = "requires an isolated native subprocess")]
 fn concurrent_appends_allocate_distinct_ids() {
+    if !isolated_writer_test("concurrent_appends_allocate_distinct_ids") {
+        return;
+    }
     let directory = TestDirectory::new("concurrent");
     let clock = SystemClock::default();
     let artifact = directory.path("reviewer.json");
     let finding = directory.path("finding.json");
     fs::write(&finding, r#"{"title":"Problem","description":"What fails","reasoning":"Why","consequence":"Impact","recommendedAction":"Fix","anchor":{"kind":"file","path":"src/lib.rs"}}"#).unwrap();
     findings::initialize(&artifact, "reviewer", "correctness", false, &clock).unwrap();
-    let barrier = std::sync::Arc::new(std::sync::Barrier::new(2));
-    // Both workers must start before either join, because they share a barrier.
-    #[expect(
-        clippy::needless_collect,
-        reason = "Joining lazily would block at the barrier"
-    )]
-    let threads: Vec<_> = std::iter::repeat_with(|| {
-        std::thread::spawn({
-            let barrier = std::sync::Arc::clone(&barrier);
-            let artifact = artifact.clone();
-            let finding = finding.clone();
-            move || {
-                barrier.wait();
-                findings::add(
-                    &artifact,
-                    &finding,
-                    "reviewer",
-                    &[],
-                    &SystemClock::default(),
-                )
-                .unwrap()
-            }
-        })
-    })
-    .take(2)
-    .collect();
-    let mut ids: Vec<_> = threads
-        .into_iter()
-        .map(|thread| thread.join().unwrap())
-        .collect();
+    let results = synchronized_writers(&artifact, {
+        let artifact = artifact.clone();
+        move |_, clock| {
+            findings::add(&artifact, &finding, "reviewer", &[], clock)
+                .map_err(|error| error.to_string())
+        }
+    });
+    let mut ids: Vec<_> = results.into_iter().map(Result::unwrap).collect();
     ids.sort();
     assert_eq!(ids, ["reviewer-1", "reviewer-2"]);
     assert_eq!(
@@ -531,7 +542,7 @@ fn concurrent_appends_allocate_distinct_ids() {
 /// Reports contention and completion without elapsed-time coordination.
 enum UpdateEvent {
     Waiting(usize),
-    Complete(usize, bool),
+    Complete(usize, Result<String, String>),
 }
 
 /// Holds a worker on its first lock conflict until the test permits it.
@@ -591,7 +602,7 @@ fn native_process_lock_interop_helper() {
 
 impl Clock for UpdateClock {
     fn now(&self) -> Timestamp {
-        panic!("Updating findings must not depend on wall-clock time")
+        panic!("Writing findings and plans must not depend on wall-clock time")
     }
 
     fn wait(&self, _duration: Duration) -> Result<(), AppError> {
@@ -610,8 +621,251 @@ impl Clock for UpdateClock {
     }
 }
 
+/// Forces both writers to encounter the retained lock, then permits each retry
+/// only after the preceding writer has completed. Completion signals include
+/// errors and panics, so an early failure cannot masquerade as contention.
+fn synchronized_writers(
+    path: &Path,
+    operation: impl Fn(usize, &dyn Clock) -> Result<String, String> + Send + Sync + 'static,
+) -> Vec<Result<String, String>> {
+    let clock = SystemClock::default();
+    let transaction = FileTransaction::open(path, &clock).unwrap();
+    let (events, received) = mpsc::channel();
+    let operation = std::sync::Arc::new(operation);
+    let mut permits = Vec::new();
+    let mut workers = Vec::new();
+    for index in 0..2 {
+        let (permit, receiver) = mpsc::channel();
+        permits.push(permit);
+        workers.push(std::thread::spawn({
+            let events = events.clone();
+            let operation = std::sync::Arc::clone(&operation);
+            move || {
+                let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    let clock = UpdateClock {
+                        index,
+                        events: events.clone(),
+                        permit: RefCell::new(Some(receiver)),
+                    };
+                    operation(index, &clock)
+                }))
+                .unwrap_or_else(|_| Err("Worker panicked".into()));
+                events
+                    .send(UpdateEvent::Complete(index, result))
+                    .expect("The coordinator receives results until every worker completes");
+            }
+        }));
+    }
+    drop(events);
+    let mut waiting = Vec::new();
+    let mut results = Vec::new();
+    for _ in 0..2 {
+        match received.recv() {
+            Ok(UpdateEvent::Waiting(index)) => waiting.push(index),
+            Ok(UpdateEvent::Complete(index, result)) => results.push((index, result)),
+            Err(_) => break,
+        }
+    }
+    drop(transaction);
+    for index in &waiting {
+        if permits[*index].send(()).is_ok() {
+            match received.recv() {
+                Ok(UpdateEvent::Complete(index, result)) => results.push((index, result)),
+                Ok(UpdateEvent::Waiting(index)) => {
+                    results.push((index, Err("Unexpected repeated contention".into())));
+                }
+                Err(_) => break,
+            }
+        }
+    }
+    drop(permits);
+    for worker in workers {
+        worker.join().unwrap();
+    }
+    waiting.sort_unstable();
+    results.sort_by_key(|(index, _)| *index);
+    assert_eq!(waiting, [0, 1], "Both workers must encounter contention");
+    assert_eq!(results.len(), 2, "Both workers must report completion");
+    assert_eq!(
+        results.iter().map(|(index, _)| *index).collect::<Vec<_>>(),
+        [0, 1],
+        "Each worker must report its own result"
+    );
+    results.into_iter().map(|(_, result)| result).collect()
+}
+
+/// Concurrent plan writers must use the last committed state for idempotency,
+/// conflicts, and replacement as well as ordinary appends.
 #[test]
+#[cfg_attr(miri, ignore = "requires an isolated native subprocess")]
+fn synchronized_plan_appends_preserve_committed_state() {
+    if !isolated_writer_test("synchronized_plan_appends_preserve_committed_state") {
+        return;
+    }
+    let directory = TestDirectory::new("synchronized-plans");
+    let clock = SystemClock::default();
+    for (kind, name, first, second) in [
+        (
+            workflow_plan::PlanKind::MergeCandidates,
+            "candidates",
+            json!({"findingIds":["a","b"]}),
+            json!({"findingIds":["c","d"]}),
+        ),
+        (
+            workflow_plan::PlanKind::MergePlan,
+            "merges",
+            json!({"sourceFindingIds":["a","b"],"findingPath":"f"}),
+            json!({"sourceFindingIds":["c","d"],"findingPath":"g"}),
+        ),
+        (
+            workflow_plan::PlanKind::Updates,
+            "updates",
+            json!({"findingId":"a","findingPath":"f"}),
+            json!({"findingId":"b","findingPath":"g"}),
+        ),
+        (
+            workflow_plan::PlanKind::Removals,
+            "removals",
+            json!({"findingId":"a","reason":"first"}),
+            json!({"findingId":"b","reason":"second"}),
+        ),
+        (
+            workflow_plan::PlanKind::Decisions,
+            "decisions",
+            json!({"findingId":"a","decision":"approved"}),
+            json!({"findingId":"b","decision":"rejected"}),
+        ),
+    ] {
+        for duplicate in [false, true] {
+            let plan = directory.path(&format!("{name}-{duplicate}.json"));
+            let drafts = [
+                directory.path(&format!("{name}-first.json")),
+                directory.path(&format!("{name}-second.json")),
+            ];
+            fs::write(&drafts[0], serde_json::to_vec(&first).unwrap()).unwrap();
+            fs::write(
+                &drafts[1],
+                serde_json::to_vec(if duplicate { &first } else { &second }).unwrap(),
+            )
+            .unwrap();
+            workflow_plan::initialize(kind, &plan, &clock).unwrap();
+            let results = synchronized_writers(&plan, {
+                let plan = plan.clone();
+                move |index, clock| {
+                    workflow_plan::append(kind, &plan, &drafts[index], None, clock)
+                        .map(|()| String::new())
+                        .map_err(|error| error.to_string())
+                }
+            });
+            assert!(results.iter().all(Result::is_ok), "{name}: {results:?}");
+            let items = workflow_plan::read(kind, &plan, &clock).unwrap();
+            assert_eq!(items.items().len(), if duplicate { 1 } else { 2 }, "{name}");
+        }
+    }
+
+    let plan = directory.path("conflicting-merges.json");
+    let drafts = [
+        directory.path("merge-first.json"),
+        directory.path("merge-second.json"),
+    ];
+    fs::write(
+        &drafts[0],
+        r#"{"sourceFindingIds":["a","b"],"findingPath":"f"}"#,
+    )
+    .unwrap();
+    fs::write(
+        &drafts[1],
+        r#"{"sourceFindingIds":["b","c"],"findingPath":"g"}"#,
+    )
+    .unwrap();
+    workflow_plan::initialize(workflow_plan::PlanKind::MergePlan, &plan, &clock).unwrap();
+    let results = synchronized_writers(&plan, {
+        let plan = plan.clone();
+        move |index, clock| {
+            workflow_plan::append(
+                workflow_plan::PlanKind::MergePlan,
+                &plan,
+                &drafts[index],
+                None,
+                clock,
+            )
+            .map(|()| String::new())
+            .map_err(|error| error.to_string())
+        }
+    });
+    assert_eq!(results.iter().filter(|result| result.is_ok()).count(), 1);
+    assert_eq!(results.iter().filter(|result| result.is_err()).count(), 1);
+    let error = results
+        .iter()
+        .find_map(|result| result.as_ref().err())
+        .unwrap();
+    assert!(error.contains("conflicts"), "{error}");
+    assert_eq!(
+        workflow_plan::read(workflow_plan::PlanKind::MergePlan, &plan, &clock)
+            .unwrap()
+            .items()
+            .len(),
+        1
+    );
+
+    let plan = directory.path("replacements.json");
+    let drafts = [
+        directory.path("replace-first.json"),
+        directory.path("replace-second.json"),
+    ];
+    workflow_plan::initialize(workflow_plan::PlanKind::Updates, &plan, &clock).unwrap();
+    for (index, id) in ["a", "b"].into_iter().enumerate() {
+        fs::write(
+            &drafts[index],
+            serde_json::to_vec(&json!({"findingId":id,"findingPath":"old"})).unwrap(),
+        )
+        .unwrap();
+        workflow_plan::append(
+            workflow_plan::PlanKind::Updates,
+            &plan,
+            &drafts[index],
+            None,
+            &clock,
+        )
+        .unwrap();
+        fs::write(
+            &drafts[index],
+            serde_json::to_vec(&json!({"findingId":id,"findingPath":"new"})).unwrap(),
+        )
+        .unwrap();
+    }
+    let results = synchronized_writers(&plan, {
+        let plan = plan.clone();
+        move |index, clock| {
+            workflow_plan::append(
+                workflow_plan::PlanKind::Updates,
+                &plan,
+                &drafts[index],
+                Some(index),
+                clock,
+            )
+            .map(|()| String::new())
+            .map_err(|error| error.to_string())
+        }
+    });
+    assert!(results.iter().all(Result::is_ok), "{results:?}");
+    let plan = workflow_plan::read(workflow_plan::PlanKind::Updates, &plan, &clock).unwrap();
+    assert_eq!(plan.items().len(), 2);
+    for item in plan.items() {
+        let workflow_plan::PlanItem::Update(update) = item else {
+            panic!("Expected an update")
+        };
+        assert_eq!(Path::new(&update.finding_path).file_name().unwrap(), "new");
+    }
+}
+
+/// Updates to distinct findings must survive a contended read-modify-write.
+#[test]
+#[cfg_attr(miri, ignore = "requires an isolated native subprocess")]
 fn synchronized_updates_preserve_both_rewrites() {
+    if !isolated_writer_test("synchronized_updates_preserve_both_rewrites") {
+        return;
+    }
     let directory = TestDirectory::new("synchronized-updates");
     let clock = SystemClock::default();
     let artifact = directory.path("reviewer.json");
@@ -632,61 +886,46 @@ fn synchronized_updates_preserve_both_rewrites() {
     content["title"] = json!("Second rewrite");
     fs::write(&two, serde_json::to_vec(&content).unwrap()).unwrap();
 
-    // Both updates must encounter the held lock before either can read the artifact.
-    let transaction = FileTransaction::open(&artifact, &clock).unwrap();
-    let (events, received) = mpsc::channel();
-    let mut permits = Vec::new();
-    let mut workers = Vec::new();
-    for (index, (id, path)) in [("g1-1", one), ("g1-2", two)].into_iter().enumerate() {
-        let (permit, receiver) = mpsc::channel();
-        permits.push(permit);
-        workers.push(std::thread::spawn({
-            let artifact = artifact.clone();
-            let events = events.clone();
-            move || {
-                let clock = UpdateClock {
-                    index,
-                    events: events.clone(),
-                    permit: RefCell::new(Some(receiver)),
-                };
-                let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                    findings::update(&artifact, &[(id.to_owned(), path)], &clock)
-                }));
-                events
-                    .send(UpdateEvent::Complete(
-                        index,
-                        result.is_ok_and(|result| result.is_ok()),
-                    ))
-                    .unwrap();
-            }
-        }));
-    }
-    let mut waiting = Vec::new();
-    let mut results = Vec::new();
-    for _ in 0..2 {
-        match received.recv().unwrap() {
-            UpdateEvent::Waiting(index) => waiting.push(index),
-            UpdateEvent::Complete(index, success) => results.push((index, success)),
+    let results = synchronized_writers(&artifact, {
+        let artifact = artifact.clone();
+        let updates = [("g1-1", one), ("g1-2", two)];
+        move |index, clock| {
+            let (id, path) = &updates[index];
+            findings::update(&artifact, &[(id.to_string(), path.clone())], clock)
+                .map(|()| String::new())
+                .map_err(|error| error.to_string())
         }
-    }
-    drop(transaction);
-    // Release one worker at a time so retries do not depend on scheduling or time.
-    for index in &waiting {
-        permits[*index].send(()).unwrap();
-        match received.recv().unwrap() {
-            UpdateEvent::Complete(completed, success) => results.push((completed, success)),
-            UpdateEvent::Waiting(_) => panic!("A permitted worker unexpectedly retried"),
-        }
-    }
-    for worker in workers {
-        worker.join().unwrap();
-    }
-    assert_eq!(waiting.len(), 2);
-    assert_eq!(results.len(), 2);
-    assert!(results.iter().all(|(_, success)| *success));
+    });
+    assert!(results.iter().all(Result::is_ok), "{results:?}");
     let artifact = findings::read_artifact(&artifact, &clock).unwrap();
     assert_eq!(artifact["findings"][0]["title"], "First rewrite");
     assert_eq!(artifact["findings"][1]["title"], "Second rewrite");
+}
+
+/// Isolates controlled locks from unrelated process creation in this test
+/// binary: a forked child can retain a lock descriptor until it executes.
+fn isolated_writer_test(name: &str) -> bool {
+    const MARKER: &str = "SS_AI_ISOLATED_WRITER_TEST";
+    if std::env::var_os(MARKER).is_some_and(|value| value == name) {
+        return true;
+    }
+    let output = Command::new(std::env::current_exe().unwrap())
+        .args(["--exact", name, "--nocapture"])
+        .env(MARKER, name)
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "Isolated test {name} failed:\n{}\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(
+        String::from_utf8_lossy(&output.stdout).contains("test result: ok. 1 passed;"),
+        "Isolated test {name} did not execute exactly once:\n{}",
+        String::from_utf8_lossy(&output.stdout)
+    );
+    false
 }
 
 /// Runs the predecessor model so both implementations consume actual records.
@@ -713,6 +952,8 @@ fn powershell_output(script: &str, arguments: &[&str], work_dir: &Path) -> Outpu
         .unwrap()
 }
 
+/// Alternating native and PowerShell writers must retain compatible lifecycle
+/// records through completion, indexing, and consolidation in either reader.
 #[test]
 #[cfg_attr(miri, ignore = "The predecessor model runs in a separate process")]
 fn powershell_and_rust_share_lifecycle_index_and_consolidation_records() {
@@ -861,6 +1102,8 @@ fn powershell_and_rust_share_lifecycle_index_and_consolidation_records() {
     assert_eq!(rust_output, ps_output);
 }
 
+/// Shared authored content must receive the same acceptance decisions in
+/// native and predecessor validators, including boundary values.
 #[test]
 #[cfg_attr(miri, ignore = "The predecessor model runs in a separate process")]
 fn finding_content_cases_match_the_predecessor_corpus() {
@@ -916,6 +1159,8 @@ fn finding_content_cases_match_the_predecessor_corpus() {
     }
 }
 
+/// Both implementations must reject lossy or conflicting merges and retain
+/// equivalent records when the replacement covers the source evidence.
 #[test]
 #[cfg_attr(miri, ignore = "The predecessor model runs in a separate process")]
 fn consolidation_merge_cases_match_the_predecessor_corpus() {
@@ -1034,6 +1279,7 @@ fn consolidation_merge_cases_match_the_predecessor_corpus() {
     assert_eq!(fs::read(&native_output).unwrap(), native_before);
 }
 
+/// Both validators must agree about anchor shapes and path normalization.
 #[test]
 #[cfg_attr(miri, ignore = "The predecessor model runs in a separate process")]
 fn finding_anchor_cases_match_the_predecessor_corpus() {
@@ -1120,6 +1366,7 @@ fn finding_anchor_cases_match_the_predecessor_corpus() {
     }
 }
 
+/// Damaged reviewer evidence remains visible in equivalent validation reports.
 #[test]
 #[cfg_attr(miri, ignore = "The predecessor model runs in a separate process")]
 fn standalone_validation_reports_all_damaged_reviewer_evidence() {

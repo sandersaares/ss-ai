@@ -2,6 +2,8 @@
 
 use std::collections::{HashMap, HashSet};
 use std::fs;
+#[cfg(windows)]
+use std::os::windows::fs::MetadataExt;
 use std::path::{Path, PathBuf};
 
 use ohno::AppError;
@@ -49,6 +51,9 @@ pub struct ConsolidationResult {
     /// Destination supplied by the caller.
     pub output_path: PathBuf,
 }
+
+/// Keeps authored content distinct from unchecked JSON and stored provenance.
+struct ValidatedContent(Value);
 
 /// Reads a strictly validated finding artifact.
 ///
@@ -461,7 +466,7 @@ pub fn add_with_context(
     let content = read_content(finding_path, clock)?;
     if let Some(context_path) = context_path {
         let context = ss_ai_review_context::read_capture(context_path, clock)?;
-        validate_follow_up(&content, &context)?;
+        validate_follow_up(&content.0, &context)?;
     }
     let transaction = FileTransaction::open(path, clock)?;
     let bytes = transaction
@@ -537,7 +542,7 @@ pub fn build_index_result(
 ) -> Result<IndexResult, AppError> {
     let (sources, artifact_count) = reviewer_sources(directory, clock)?;
     let mut records = Vec::new();
-    for (artifact, finding) in &sources {
+    for (metadata, finding) in &sources {
         let anchor = finding
             .get("anchor")
             .ok_or_else(|| invalid("Missing anchor"))?;
@@ -551,8 +556,8 @@ pub fn build_index_result(
             }
         }
         let mut record = json!({
-            "id": finding["id"], "reviewerId": artifact["reviewerId"],
-            "focusArea": artifact["focusArea"], "title": finding["title"],
+            "id": finding["id"], "reviewerId": metadata["reviewerId"],
+            "focusArea": metadata["focusArea"], "title": finding["title"],
             "description": finding["description"], "recommendedAction": finding["recommendedAction"],
             "anchorPath": anchor["path"], "impactedPaths": paths,
         });
@@ -663,8 +668,6 @@ fn validate_index(index: &Value) -> Result<HashSet<String>, AppError> {
 /// Matches the filesystem provider's hidden-file filtering for directory reads.
 #[cfg(windows)]
 fn hidden_entry(entry: &fs::DirEntry) -> Result<bool, AppError> {
-    use std::os::windows::fs::MetadataExt;
-
     // Windows marks hidden entries with FILE_ATTRIBUTE_HIDDEN.
     const FILE_ATTRIBUTE_HIDDEN: u32 = 0x2;
     let metadata = entry
@@ -719,11 +722,17 @@ fn reviewer_sources(
         if artifact.get("kind") != Some(&json!("reviewer")) {
             return Err(invalid("Expected reviewer artifact"));
         }
+        // The index needs only these fields; copying the full artifact per finding
+        // would also repeatedly copy every finding and the removal history.
+        let metadata = json!({
+            "reviewerId": artifact.get("reviewerId"),
+            "focusArea": artifact.get("focusArea"),
+        });
         for finding in array(artifact.get("findings"), "findings")? {
             if !ids.insert(text(finding.get("id"), "id")?.to_owned()) {
                 return Err(invalid("Duplicate finding identifier across artifacts"));
             }
-            result.push((artifact.clone(), finding.clone()));
+            result.push((metadata.clone(), finding.clone()));
         }
     }
     Ok((result, artifact_count))
@@ -827,7 +836,7 @@ pub fn consolidate_result(
                 fields.remove(name);
             }
             Some((
-                content,
+                validated_content(content)?,
                 text(finding.get("origin"), "origin")?.to_owned(),
                 vec![source_id.to_owned()],
             ))
@@ -835,7 +844,7 @@ pub fn consolidate_result(
             None
         };
         if let Some((mut content, origin, ids)) = record {
-            normalize_content(&mut content)?;
+            normalize_content(&mut content.0)?;
             let id = next_id(&artifact)?;
             let record = make_record(&content, &id, &origin, &ids)?;
             artifact
@@ -870,7 +879,8 @@ pub fn consolidate_result(
 }
 
 /// Prevents a merge from discarding positions or changing a reply destination.
-fn validate_merge(content: &mut Value, sources: &[&Value]) -> Result<(), AppError> {
+fn validate_merge(content: &mut ValidatedContent, sources: &[&Value]) -> Result<(), AppError> {
+    let content = &mut content.0;
     let covering = coverage(content)?;
     let mut follow_up: Option<Value> = None;
     for source in sources {
@@ -1277,7 +1287,7 @@ fn publish(transaction: &FileTransaction<'_>, value: &Value) -> Result<(), AppEr
 }
 
 /// Reads authored finding content and applies its canonical stored form.
-fn read_content(path: &Path, clock: &dyn Clock) -> Result<Value, AppError> {
+fn read_content(path: &Path, clock: &dyn Clock) -> Result<ValidatedContent, AppError> {
     let bytes = read_bytes(path, clock)?.ok_or_else(|| {
         fail(
             "invalidInput",
@@ -1290,15 +1300,21 @@ fn read_content(path: &Path, clock: &dyn Clock) -> Result<Value, AppError> {
             format!("Finding content '{}': {error}", path.display()),
         )
     };
-    let mut value = parse_json(&bytes).map_err(context)?;
-    validate_content(&value, false).map_err(context)?;
-    normalize_content(&mut value).map_err(context)?;
+    let value = parse_json(&bytes).map_err(context)?;
+    let mut value = validated_content(value).map_err(context)?;
+    normalize_content(&mut value.0).map_err(context)?;
     Ok(value)
+}
+
+/// Establishes the authored-content boundary before adding tool-owned fields.
+fn validated_content(value: Value) -> Result<ValidatedContent, AppError> {
+    validate_content(&value, false)?;
+    Ok(ValidatedContent(value))
 }
 
 /// Constructs the tool-owned portion without trusting author-supplied identity.
 fn make_record(
-    content: &Value,
+    content: &ValidatedContent,
     id: &str,
     origin: &str,
     source_ids: &[String],
@@ -1310,6 +1326,7 @@ fn make_record(
     record.insert("origin".into(), json!(origin));
     record.extend(
         content
+            .0
             .as_object()
             .ok_or_else(|| invalid("Invalid finding content"))?
             .clone(),
@@ -1398,6 +1415,8 @@ fn validate_content(value: &Value, record: bool) -> Result<(), AppError> {
         "recommendedAction",
     ] {
         let prose = text(fields.get(name), name)?;
+        // Tracker title limits motivate the bound; UTF-16 units match the
+        // retained .NET string-length check in FindingModel.ps1.
         if (name == "title" && prose.encode_utf16().count() > 255)
             || prose
                 .chars()
@@ -1486,18 +1505,18 @@ fn location(value: &Value, anchor: bool) -> Result<(), AppError> {
 
 /// Normalizes repository paths and supplies the stored line defaults.
 fn normalize_content(value: &mut Value) -> Result<(), AppError> {
-    let fields = value
+    let value = value
         .as_object_mut()
         .ok_or_else(|| invalid("Invalid finding"))?;
     for name in ["references", "impactedLocations"] {
-        fields.entry(name).or_insert_with(|| json!([]));
+        value.entry(name).or_insert_with(|| json!([]));
     }
     normalize_location(
-        fields
+        value
             .get_mut("anchor")
             .ok_or_else(|| invalid("Missing anchor"))?,
     )?;
-    for location in fields
+    for location in value
         .get_mut("impactedLocations")
         .and_then(Value::as_array_mut)
         .ok_or_else(|| invalid("Invalid locations"))?
@@ -1509,14 +1528,14 @@ fn normalize_content(value: &mut Value) -> Result<(), AppError> {
 
 /// Normalizes a single location after validation.
 fn normalize_location(value: &mut Value) -> Result<(), AppError> {
-    let fields = value
+    let value = value
         .as_object_mut()
         .ok_or_else(|| invalid("Invalid location"))?;
-    let path = canonical_path(text(fields.get("path"), "path")?)?;
-    fields.insert("path".into(), json!(path));
-    if let Some(start) = fields.get("startLine").cloned() {
-        fields.entry("endLine").or_insert(start);
-        fields.entry("side").or_insert_with(|| json!("right"));
+    let path = canonical_path(text(value.get("path"), "path")?)?;
+    value.insert("path".into(), json!(path));
+    if let Some(start) = value.get("startLine").cloned() {
+        value.entry("endLine").or_insert(start);
+        value.entry("side").or_insert_with(|| json!("right"));
     }
     Ok(())
 }
