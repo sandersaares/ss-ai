@@ -13,7 +13,7 @@ use crate::clock::timestamp;
 use crate::error::fail;
 use crate::json::{array, boolean, field, identifier, nullable_field, project, text};
 use crate::renewal::{Anchor, Audit};
-use crate::target::Target;
+use crate::target::{Target, escape};
 
 /// Complete review, dismissal, and discussion observations remain distinct from authority.
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
@@ -26,6 +26,7 @@ pub(crate) enum Evidence {
     History {
         #[serde(rename = "pullRequest")]
         pull_request: Value,
+        policy: Policy,
         reviews: Vec<Value>,
         timeline: Vec<Value>,
         comments: Vec<Value>,
@@ -70,6 +71,7 @@ impl Evidence {
             return Ok(ineligible("selfIsAuthor"));
         }
         let Self::History {
+            policy,
             reviews,
             timeline,
             comments,
@@ -94,8 +96,32 @@ impl Evidence {
         for collection in [comments, review_comments] {
             validate_comments(collection, observed_at)?;
         }
-        interpret(reviews, timeline, account, repository, number, observed_at)
+        interpret(
+            reviews,
+            timeline,
+            account,
+            repository,
+            number,
+            observed_at,
+            &Freshness {
+                policy,
+                head: text(field(source, "sha")?)?,
+            },
+        )
     }
+}
+
+/// Effective source-freshness requirements, not aggregate merge eligibility.
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub(crate) struct Policy {
+    require_last_push_approval: bool,
+}
+
+/// Binds source-standing interpretation to one captured policy and current head.
+struct Freshness<'a> {
+    policy: &'a Policy,
+    head: &'a str,
 }
 
 /// Service-time ordering keeps a later withdrawal from reviving an earlier approval.
@@ -120,6 +146,7 @@ enum Standing<'a> {
     Approval {
         anchor: Anchor,
         review: &'a str,
+        source: String,
         dismissed: Option<bool>,
     },
     Negative,
@@ -145,6 +172,7 @@ fn observe(api: &mut Api<'_>, target: &Target) -> Result<Evidence, AppError> {
     if excluded(&pr)?.is_some() {
         return Ok(Evidence::State { pull_request: pr });
     }
+    let policy = policy(api, target, &pr)?;
     let reviews = list(api, &format!("{}/reviews", target.pr_api()), "node_id")?;
     let timeline = timeline(api, target)?;
     let comments = list(
@@ -159,10 +187,65 @@ fn observe(api: &mut Api<'_>, target: &Target) -> Result<Evidence, AppError> {
     let review_comments = list(api, &format!("{}/comments", target.pr_api()), "id")?;
     compact(&Evidence::History {
         pull_request: pr,
+        policy,
         reviews,
         timeline,
         comments,
         review_comments,
+    })
+}
+
+/// Joins classic protection and effective rulesets to the observed source and target.
+fn policy(api: &mut Api<'_>, target: &Target, pr: &Value) -> Result<Policy, AppError> {
+    let response = api.transport.graphql(
+        include_str!("approval-policy.graphql"),
+        &json!({
+            "owner": target.organization, "repo": target.repository,
+            "num": target.pull_request_id
+        }),
+    )?;
+    let observed = response
+        .pointer("/data/repository/pullRequest")
+        .ok_or_else(|| fail("service", "Missing GitHub approval-policy evidence"))?;
+    let base = text(field(field(pr, "base")?, "ref")?)?;
+    let head = text(field(field(pr, "head")?, "sha")?)?;
+    if base.is_empty()
+        || text(field(observed, "baseRefName")?)? != base
+        || text(field(observed, "headRefOid")?)? != head
+    {
+        return Err(fail(
+            "staleEvidence",
+            "GitHub policy source or target changed",
+        ));
+    }
+    let base_ref = field(observed, "baseRef")?;
+    if text(field(base_ref, "name")?)? != base {
+        return Err(fail("service", "GitHub policy has another target branch"));
+    }
+    let classic = nullable_field(base_ref, "branchProtectionRule")?;
+    let mut required = if classic.is_null() {
+        false
+    } else {
+        let reviews = boolean(field(classic, "requiresApprovingReviews")?)?;
+        let last_push = boolean(field(classic, "requireLastPushApproval")?)?;
+        reviews && last_push
+    };
+    // This endpoint resolves active organization and repository rules for the branch.
+    // Bypass permissions and unrelated merge checks do not grant approval authority.
+    for rule in api.transport.list(&format!(
+        "{}/rules/branches/{}",
+        target.repository_api(),
+        escape(base)
+    ))? {
+        if text(field(&rule, "type")?)? == "pull_request" {
+            required |= boolean(field(
+                field(&rule, "parameters")?,
+                "require_last_push_approval",
+            )?)?;
+        }
+    }
+    Ok(Policy {
+        require_last_push_approval: required,
     })
 }
 
@@ -358,6 +441,7 @@ fn interpret(
     repository: &str,
     number: u32,
     now: Timestamp,
+    freshness: &Freshness<'_>,
 ) -> Result<Decision, AppError> {
     let mut review_nodes = HashMap::new();
     let mut dismissals = HashMap::new();
@@ -525,7 +609,7 @@ fn interpret(
     if pending {
         return Ok(ineligible("pendingHumanReview"));
     }
-    decide_events(events)
+    decide_events(events, freshness)
 }
 
 /// Reports join failures without copying review bodies or other private content.
@@ -571,7 +655,10 @@ fn history_conflict(
 }
 
 /// Later explicit approvals replace old authority; comment-only reviews do not.
-fn decide_events(mut events: Vec<Event<'_>>) -> Result<Decision, AppError> {
+fn decide_events(
+    mut events: Vec<Event<'_>>,
+    freshness: &Freshness<'_>,
+) -> Result<Decision, AppError> {
     events.sort_by_key(|event| event.at);
     let mut previous = None;
     let mut standing = Standing::None;
@@ -588,6 +675,7 @@ fn decide_events(mut events: Vec<Event<'_>>) -> Result<Decision, AppError> {
                         source_commit: source.to_owned(),
                     },
                     review,
+                    source: source.to_owned(),
                     dismissed: None,
                 }
             }
@@ -595,13 +683,22 @@ fn decide_events(mut events: Vec<Event<'_>>) -> Result<Decision, AppError> {
                 standing = match standing {
                     Standing::Approval {
                         anchor,
-                        dismissed: Some(true),
+                        source,
+                        dismissed,
                         ..
-                    } if anchor == audit.anchor => Standing::Approval {
-                        anchor,
-                        review,
-                        dismissed: None,
-                    },
+                    } if anchor == audit.anchor
+                        && (dismissed == Some(true)
+                            || dismissed.is_none()
+                                && freshness.policy.require_last_push_approval
+                                && source != audit.source_commit) =>
+                    {
+                        Standing::Approval {
+                            anchor,
+                            review,
+                            source: audit.source_commit,
+                            dismissed: None,
+                        }
+                    }
                     _ => Standing::UnknownRenewal,
                 };
             }
@@ -624,16 +721,28 @@ fn decide_events(mut events: Vec<Event<'_>>) -> Result<Decision, AppError> {
     Ok(match standing {
         Standing::None => Decision::NoPriorApproval,
         Standing::Approval {
+            anchor,
             review,
+            source,
             dismissed: None,
-            ..
-        } => Decision::AlreadyValid {
-            approval_event_id: review.to_owned(),
-        },
+        } => {
+            // A retained APPROVED review is not source-fresh under a last-push rule.
+            // Do not infer this requirement from SHA differences or merge blockage alone.
+            if source != freshness.head && freshness.policy.require_last_push_approval {
+                return Ok(Decision::AssessmentRequired {
+                    anchor,
+                    approval_event_id: review.to_owned(),
+                });
+            }
+            Decision::AlreadyValid {
+                approval_event_id: review.to_owned(),
+            }
+        }
         Standing::Approval {
             anchor,
             review,
             dismissed: Some(true),
+            ..
         } => Decision::AssessmentRequired {
             anchor,
             approval_event_id: review.to_owned(),
@@ -770,6 +879,7 @@ mod tests {
         assert!(!serde_json::to_string(&lean).unwrap().contains("cosmetic-"));
         let saved = serde_json::to_value(&rich).unwrap();
         for (path, replacement) in [
+            ("/policy/requireLastPushApproval", json!(true)),
             ("/pullRequest/body", json!("New requirement")),
             ("/pullRequest/base/ref", json!("another-target")),
             ("/pullRequest/head/sha", json!("e".repeat(40))),
@@ -854,6 +964,153 @@ mod tests {
         );
     }
 
+    #[test]
+    fn retained_approval_requires_source_assessment_only_under_last_push_policy() {
+        let mut value = valid();
+        // PR microsoft/oxidizer#878 retains APPROVED with no dismissal while its
+        // effective organization/repository rules require last-push approval.
+        value["reviews"][1]["commit_id"] = json!("3e0c50139d7d6b1d4e81be840d6855bd8d502de0");
+        value["pullRequest"]["head"]["sha"] = json!("278e0a34fc5a317fa6aa9345e4540e816dd5f663");
+        value["pullRequest"]["reviewDecision"] = Value::Null;
+        value["pullRequest"]["mergeStateStatus"] = json!("BLOCKED");
+        assert_eq!(decide(value.clone()).unwrap().status(), "alreadyValid");
+
+        value["policy"]["requireLastPushApproval"] = json!(true);
+        assert_eq!(
+            decide(value.clone()).unwrap(),
+            Decision::AssessmentRequired {
+                anchor: Anchor {
+                    review_id: "review-2".to_owned(),
+                    source_commit: "3e0c50139d7d6b1d4e81be840d6855bd8d502de0".to_owned(),
+                },
+                approval_event_id: "review-2".to_owned(),
+            }
+        );
+        value["reviews"][1]["commit_id"] = value["pullRequest"]["head"]["sha"].clone();
+        assert_eq!(decide(value).unwrap().status(), "alreadyValid");
+    }
+
+    #[test]
+    fn last_push_policy_does_not_restore_missing_or_withdrawn_authority() {
+        let mut value = valid();
+        value["policy"]["requireLastPushApproval"] = json!(true);
+        for state in ["CHANGES_REQUESTED", "PENDING"] {
+            let mut changed = value.clone();
+            later_review(&mut changed, state, "Independent human decision.");
+            assert_eq!(decide(changed).unwrap().status(), "ineligible");
+        }
+        let mut no_prior = value.clone();
+        no_prior["reviews"][1]["user"] = json!({"id": 99, "node_id": "user-99"});
+        assert_eq!(decide(no_prior).unwrap(), Decision::NoPriorApproval);
+
+        let mut removed = value;
+        removed["timeline"].as_array_mut().unwrap().push(json!({
+            "__typename": "ReviewRequestRemovedEvent", "id": "removed",
+            "createdAt": "2026-01-09T01:00:00Z",
+            "requestedReviewer": {"__typename": "User", "id": "user-42"}
+        }));
+        assert_eq!(decide(removed).unwrap().reason(), Some("reviewerRemoved"));
+
+        let mut dismissed = fixture()["evidence"].clone();
+        dismissed["policy"]["requireLastPushApproval"] = json!(true);
+        dismissed["timeline"][2]["pullRequestCommit"] = Value::Null;
+        assert_eq!(
+            decide(dismissed).unwrap().reason(),
+            Some("approvalDismissed")
+        );
+    }
+
+    #[test]
+    fn retained_renewals_keep_the_external_anchor_across_source_pushes() {
+        let mut value = valid();
+        value["policy"]["requireLastPushApproval"] = json!(true);
+        let audit = json!({
+            "schemaVersion": 1, "operationId": Uuid::new_v4().to_string(),
+            "repositoryId": "123", "accountId": "42", "pullRequestId": 1,
+            "anchor": {"reviewId": "review-2", "sourceCommit": "a".repeat(40)},
+            "sourceCommit": "b".repeat(40), "policyDigest": "1".repeat(64),
+            "assessmentDigest": "2".repeat(64), "state": "submitted"
+        });
+        later_review(
+            &mut value,
+            "APPROVED",
+            &format!("<!-- ss-autoreapprove {audit} -->"),
+        );
+        value["reviews"][3]["commit_id"] = json!("b".repeat(40));
+        assert_eq!(
+            decide(value.clone()).unwrap().approval_event_id(),
+            Some("review-4")
+        );
+        assert_eq!(decide(value.clone()).unwrap().status(), "alreadyValid");
+
+        value["pullRequest"]["head"]["sha"] = json!("d".repeat(40));
+        assert_eq!(
+            decide(value.clone()).unwrap(),
+            Decision::AssessmentRequired {
+                anchor: Anchor {
+                    review_id: "review-2".to_owned(),
+                    source_commit: "a".repeat(40)
+                },
+                approval_event_id: "review-4".to_owned(),
+            }
+        );
+        // A freshness rule cannot legitimize renewal without a changed source,
+        // after withdrawal, or with another anchor.
+        for state in ["CHANGES_REQUESTED", "PENDING"] {
+            let mut changed = value.clone();
+            changed["reviews"][1]["state"] = json!(state);
+            changed["timeline"][1]["state"] = json!(state);
+            assert!(!decide(changed).is_ok_and(|decision| decision.status() == "alreadyValid"));
+        }
+        let mut unchanged = value.clone();
+        let mut unchanged_audit = audit.clone();
+        unchanged_audit["sourceCommit"] = json!("a".repeat(40));
+        unchanged["reviews"][3]["body"] =
+            json!(format!("<!-- ss-autoreapprove {unchanged_audit} -->"));
+        unchanged["reviews"][3]["commit_id"] = json!("a".repeat(40));
+        assert!(
+            decide(unchanged)
+                .unwrap_err()
+                .to_string()
+                .contains("unreconciledRenewalEvidence")
+        );
+        let mut mismatched = value.clone();
+        let mut mismatched_audit = audit;
+        mismatched_audit["anchor"]["reviewId"] = json!("another-anchor");
+        mismatched["reviews"][3]["body"] =
+            json!(format!("<!-- ss-autoreapprove {mismatched_audit} -->"));
+        assert!(
+            decide(mismatched)
+                .unwrap_err()
+                .to_string()
+                .contains("unreconciledRenewalEvidence")
+        );
+        value["policy"]["requireLastPushApproval"] = json!(false);
+        assert!(
+            decide(value)
+                .unwrap_err()
+                .to_string()
+                .contains("unreconciledRenewalEvidence")
+        );
+    }
+
+    #[test]
+    fn approval_evidence_requires_complete_policy_records() {
+        for baseline in [valid(), fixture()["evidence"].clone()] {
+            let mut missing = baseline.clone();
+            missing.as_object_mut().unwrap().remove("policy");
+            serde_json::from_value::<Evidence>(missing).unwrap_err();
+            for policy in [
+                Value::Null,
+                json!({}),
+                json!({"requireLastPushApproval": null}),
+            ] {
+                let mut malformed = baseline.clone();
+                malformed["policy"] = policy;
+                serde_json::from_value::<Evidence>(malformed).unwrap_err();
+            }
+        }
+    }
     #[test]
     fn renewals_preserve_the_external_anchor_and_cannot_override_a_withdrawal() {
         let mut value = fixture()["evidence"].clone();

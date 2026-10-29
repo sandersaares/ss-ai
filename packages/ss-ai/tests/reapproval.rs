@@ -139,10 +139,6 @@ impl Provider {
             .as_object_mut()
             .unwrap()
             .remove("sha");
-        evidence["pullRequest"]["base"]
-            .as_object_mut()
-            .unwrap()
-            .remove("ref");
         Self {
             number: 1,
             candidates: vec![1],
@@ -395,6 +391,40 @@ impl Provider {
             }
         }
     }
+    /// Keeps read-only policy and history routing separate from publication effects.
+    fn github_graphql(&self, input: &[u8], evidence: &Value) -> Value {
+        let request: Value = serde_json::from_slice(input).unwrap();
+        match request["query"].as_str().unwrap() {
+            query if query.contains("ApprovalPolicy") => {
+                json!({"data": {"repository": {"pullRequest": {
+                    "headRefOid": evidence["pullRequest"]["head"]["sha"],
+                    "baseRefName": "fixture-target",
+                    "baseRef": {"name": "fixture-target", "branchProtectionRule": null}
+                }}}})
+            }
+            query if query.contains("committedDate") => {
+                let at = if self
+                    .candidates
+                    .iter()
+                    .any(|number| request["variables"]["num"] == *number)
+                {
+                    "2026-09-27T00:00:00Z"
+                } else {
+                    "2020-01-01T00:00:00Z"
+                };
+                json!({"data": {"repository": {"pullRequest": {"commits": {
+                    "nodes": [{"commit": {"committedDate": at}}],
+                    "pageInfo": {"hasNextPage": false, "endCursor": null}
+                }}}}})
+            }
+            _ => {
+                assert_eq!(request["variables"]["num"], self.number);
+                json!({"data": {"repository": {"pullRequest": {"timelineItems": {
+                    "nodes": evidence["timeline"], "pageInfo": {"hasNextPage": false, "endCursor": null}
+                }}}}})
+            }
+        }
+    }
 }
 
 impl Process for Provider {
@@ -563,29 +593,12 @@ impl Process for Provider {
             "repos/example/widgets/pulls/1/comments?per_page=100" => {
                 json!([evidence["reviewComments"]])
             }
-            "graphql" => {
-                let request: Value = serde_json::from_slice(input).unwrap();
-                if request["query"].as_str().unwrap().contains("committedDate") {
-                    let at = if self
-                        .candidates
-                        .iter()
-                        .any(|number| request["variables"]["num"] == *number)
-                    {
-                        "2026-09-27T00:00:00Z"
-                    } else {
-                        "2020-01-01T00:00:00Z"
-                    };
-                    json!({"data": {"repository": {"pullRequest": {"commits": {
-                        "nodes": [{"commit": {"committedDate": at}}],
-                        "pageInfo": {"hasNextPage": false, "endCursor": null}
-                    }}}}})
-                } else {
-                    assert_eq!(request["variables"]["num"], self.number);
-                    json!({"data": {"repository": {"pullRequest": {"timelineItems": {
-                        "nodes": evidence["timeline"], "pageInfo": {"hasNextPage": false, "endCursor": null}
-                    }}}}})
-                }
+            "repos/example/widgets/rules/branches/fixture-target?per_page=100" => {
+                json!([[{"type": "pull_request", "parameters": {
+                    "require_last_push_approval": evidence["policy"]["requireLastPushApproval"]
+                }}]])
             }
+            "graphql" => self.github_graphql(input, &evidence),
             _ => panic!("Unexpected provider path {path}"),
         };
         Ok(ProcessOutput::new(
@@ -2371,6 +2384,7 @@ fn native_git_assessment_and_guarded_publication_have_exact_effect_boundaries() 
     let baseline = git(repository.path(), &["status", "--porcelain=v1"]);
     for fault in [
         "",
+        "lastPush",
         "dryRun",
         "lostReply",
         "unknown",
@@ -2396,6 +2410,13 @@ fn native_git_assessment_and_guarded_publication_have_exact_effect_boundaries() 
         } else {
             repository.provider(false)
         };
+        if fault == "lastPush" {
+            let mut evidence = provider.evidence.borrow_mut();
+            evidence["policy"]["requireLastPushApproval"] = json!(true);
+            evidence["reviews"][1]["state"] = json!("APPROVED");
+            evidence["timeline"][1]["state"] = json!("APPROVED");
+            evidence["timeline"].as_array_mut().unwrap().remove(2);
+        }
         let (snapshot, prepared) = prepare(&root, &provider, fault == "dryRun");
         assert_eq!(prepared["oldCommit"], old);
         assert_eq!(prepared["newCommit"], new);

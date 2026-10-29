@@ -35,8 +35,10 @@ unsupported, or mismatched marker is unresolved renewal evidence, never a fresh
 external approval.
 
 The interpreter processes complete history chronologically. A renewal is valid
-only if the current standing approval has a service-proven change-caused dismissal
-and the marker names exactly its existing external anchor. It changes the standing
+only when its marker names exactly the existing external anchor and either the
+standing approval has a service-proven change-caused dismissal or an effective
+last-push approval requirement calls for assessment of a different source
+revision. It changes the standing
 review but does not move that anchor. A later external approval establishes a new
 anchor. A renewal cannot restore authority after a negative decision, reviewer
 removal, or dismissal with an unknown cause. A pending owned review blocks
@@ -50,6 +52,25 @@ This does not establish that a human dismissed the review. New commits alone do
 not prove invalidation. Source comparisons always use the original anchor source and
 current source, including removals after force-pushes. Historical target tips,
 merge bases, instrumented approvals, and warm-up observations are not prerequisites.
+
+GitHub's last-push requirement deliberately retains stale `APPROVED` reviews rather
+than dismissing them. Inspection combines classic branch protection with the
+effective organization and repository rules returned by `rules/branches/{branch}`.
+If any applicable rule requires last-push approval, a retained approval on a
+different source revision produces `assessmentRequired`. The current PR head and
+the review's approved commit supply the source binding; commit dates and aggregate
+`reviewDecision` or merge blockage do not supply expiry authority.
+This conservatively reassesses changed source under that requirement, without
+claiming that every different revision is a reviewable push or that the account
+can satisfy all merge requirements. An approval bound to the current source
+remains `alreadyValid`. With no last-push requirement, an undismissed approval
+remains `alreadyValid` despite a different source commit.
+See [GitHub's review requirement semantics](https://docs.github.com/en/repositories/configuring-branches-and-merges-in-your-repository/managing-protected-branches/about-protected-branches#require-pull-request-reviews-before-merging).
+
+Last-push requirements cannot restore a dismissed approval with an unknown cause,
+an initial approval, a withdrawal, a negative decision, or pending human review.
+Policy changes participate in freshness checks before and after publication.
+Approval snapshots require complete policy evidence.
 
 ## Evidence and publication
 

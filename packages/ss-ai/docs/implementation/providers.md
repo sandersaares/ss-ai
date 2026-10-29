@@ -40,6 +40,15 @@ routine notifications or known merge-only policies. These boundaries prevent
 irrelevant service activity from causing staleness without concealing unknown
 authority semantics. See [material evidence](../reapproval.md#material-evidence).
 
+GitHub approval capture joins REST PR source and target identity to a GraphQL
+observation of classic branch protection, then reads every page of the effective
+branch rules. It retains the combined last-push approval requirement rather than
+unrelated merge restrictions or ruleset presentation. This covers organization
+and repository rulesets without treating a retained `APPROVED` review as proof of
+source freshness. Renewal replay retains each standing review's approved source
+separately from its original external anchor, so another source update never
+moves the cumulative comparison baseline.
+
 ## Account identity and registration
 
 Azure DevOps connection data identifies the authenticated user, not a different

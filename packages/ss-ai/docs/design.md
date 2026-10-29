@@ -14,6 +14,13 @@ session. Registration does
 not approve a pull request. Review capture, findings, report rendering, and
 publication remain in `ss-review`.
 
+## Version compatibility
+
+Sessions and persisted workflow state belong to the utility version that creates
+them. Different versions of `ss-ai` do not need to read, resume, or migrate each
+other's sessions. Keep state validation strict rather than adding cross-version
+compatibility handling. Use the same utility version throughout a session.
+
 ## Reapproval discovery
 
 Discovery ignores draft PRs and narrows the supplied repository's other open
@@ -77,8 +84,8 @@ within the run rather than terminating the PR's work.
 
 ## GitHub approval inspection
 
-Complete submitted reviews and service dismissal events establish current
-standing. A dismissal cause identifies the invalidating commit, not the
+Complete submitted reviews, service dismissal events, and effective branch review
+requirements establish current standing. A dismissal cause identifies the invalidating commit, not the
 approved baseline. Later manual approvals replace earlier authority;
 comment-only reviews leave it unchanged, including when GitHub omits them from
 the timeline. Negative decisions and removal of the account's review request
@@ -86,6 +93,14 @@ prevent reuse of the old approval.
 
 Dismissals remove approval authority. Only service-proven source-change
 invalidation permits renewal assessment; other dismissals are ineligible.
+
+GitHub can retain an `APPROVED` review while requiring approval of the most recent
+reviewable push. When effective classic protection or an active organization or
+repository ruleset requires last-push approval, an approval bound to an older
+source revision requires cumulative source assessment. A review on the current
+source remains valid. Different source commits without that requirement do not
+establish expiry. This classification preserves the account's existing authority;
+it does not assert that aggregate merge requirements are met or identify the last pusher.
 
 Inspection preserves pending human reviews and treats unknown renewal markers
 as unreconciled evidence, not new external approvals. It captures current

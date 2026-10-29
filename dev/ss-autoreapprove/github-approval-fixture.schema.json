@@ -25,10 +25,18 @@
       "description": "Projected provider objects retain external field names and receive semantic validation through the native evidence consumer.",
       "type": "object",
       "additionalProperties": false,
-      "required": ["scope", "pullRequest", "reviews", "timeline", "comments", "reviewComments"],
+      "required": ["scope", "pullRequest", "policy", "reviews", "timeline", "comments", "reviewComments"],
       "properties": {
         "scope": { "const": "history" },
         "pullRequest": { "type": "object" },
+        "policy": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["requireLastPushApproval"],
+          "properties": {
+            "requireLastPushApproval": { "type": "boolean" }
+          }
+        },
         "reviews": { "type": "array", "items": { "type": "object" } },
         "timeline": { "type": "array", "items": { "type": "object" } },
         "comments": { "type": "array", "items": { "type": "object" } },
