@@ -1,4 +1,10 @@
 ```powershell
+#Requires -Version 7.6
+
+Set-StrictMode -Version Latest
+$ErrorActionPreference = 'Stop'
+$PSNativeCommandUseErrorActionPreference = $true
+
 pwsh -NoProfile -NonInteractive -File "{{SKILL_ROOT}}/scripts/Copy-ReviewInstructionSources.ps1" `
   -SessionStateDirectory "{{SESSION_STATE}}"
 ```
