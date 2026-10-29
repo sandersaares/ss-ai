@@ -197,6 +197,12 @@ fn page(output: Output) -> Value {
     serde_json::from_slice(&stdout).unwrap()
 }
 
+/// Removes only the process line ending so JSON bytes can be compared directly.
+fn line_payload(output: &[u8]) -> &[u8] {
+    let output = output.strip_suffix(b"\n").expect("output must end in LF");
+    output.strip_suffix(b"\r").unwrap_or(output)
+}
+
 /// Ensures a rejected request neither leaks stdout nor mutates persisted data.
 fn rejected(output: Output) {
     let Output {
@@ -367,13 +373,24 @@ fn direct_queries_match_powershell_and_canonical_fixture() {
         let mut args = vec!["-Path", Fixture::path(&fixture.capture), "-Query", query];
         args.extend(powershell);
         let powershell_output = fixture.powershell("Read-PullRequestContext.ps1", &args);
-        assert_eq!(native_output.stdout, powershell_output.stdout);
+        // PowerShell uses the platform line ending; native stdout uses LF.
+        assert_eq!(
+            line_payload(&native_output.stdout),
+            line_payload(&powershell_output.stdout)
+        );
         let native = page(native_output);
         let powershell = page(powershell_output);
         assert_eq!(native, expected[query]);
         assert_eq!(native, powershell);
     }
     assert_eq!(fs::read(&fixture.capture).unwrap(), before);
+}
+
+#[test]
+fn line_payload_preserves_json_bytes_with_either_line_ending() {
+    let json = b"{\"text\":\"a\\nb\"}";
+    assert_eq!(line_payload(b"{\"text\":\"a\\nb\"}\n"), json);
+    assert_eq!(line_payload(b"{\"text\":\"a\\nb\"}\r\n"), json);
 }
 
 #[test]
