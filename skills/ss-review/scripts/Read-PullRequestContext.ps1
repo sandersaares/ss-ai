@@ -30,46 +30,69 @@ Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 $PSNativeCommandUseErrorActionPreference = $true
 
-. "$PSScriptRoot\lib\JsonValue.ps1"
-. "$PSScriptRoot\lib\PullRequestModel.ps1"
-. "$PSScriptRoot\lib\PullRequestContextQuery.ps1"
-. "$PSScriptRoot\lib\WorkflowData.ps1"
-. "$PSScriptRoot\lib\ReviewInput.ps1"
-. "$PSScriptRoot\lib\PullRequestQueryRequest.ps1"
-
-try {
-    if ($PSCmdlet.ParameterSetName -eq 'Saved') {
-        $result = Read-SavedPullRequestQuery -RequestPath $RequestPath -Next:$Next -Restart:$Restart
-        [Console]::OutputEncoding = [Text.UTF8Encoding]::new($false)
-        [Console]::WriteLine($result)
-        exit 0
+# Match the query excerpt limit because parser errors can include captured evidence.
+function Get-NativeContextErrorExcerpt {
+    param([AllowEmptyString()][string] $Text)
+    $message = $Text.Trim() -replace '^(?:(?:invalidInput|service): )+', ''
+    $length = [Math]::Min(240, $message.Length)
+    if ($length -lt $message.Length -and $length -gt 0 -and [char]::IsHighSurrogate($message[$length - 1])) {
+        $length--
     }
-    # Selection depends on argument presence so invalid selectors cannot widen the query.
-    $hasFilesJson = $PSBoundParameters.ContainsKey('FilesJson')
-    $hasFilesPath = $PSBoundParameters.ContainsKey('FilesPath')
-    if ($hasFilesJson -and $hasFilesPath) { throw 'Supply either -FilesJson or -FilesPath, not both.' }
-    if ($hasFilesJson -and [string]::IsNullOrWhiteSpace($FilesJson)) { throw '-FilesJson requires a nonempty JSON array of strings.' }
-    if ($hasFilesPath -and [string]::IsNullOrWhiteSpace($FilesPath)) { throw '-FilesPath requires a nonempty file path.' }
-    $files = @()
-    if ($hasFilesJson -or $hasFilesPath) {
-        $fileText = if ($hasFilesPath) {
-            (Read-PullRequestFileText -Path ((Resolve-PullRequestPath -Path $FilesPath)) -Encoding ([Text.Encoding]::UTF8))
-        } else { $FilesJson }
-        $files = ConvertFrom-JsonVerbatim -Text $fileText
-        if ($files -isnot [object[]] -or $files.Count -eq 0) { throw 'File selectors must be a nonempty JSON array of strings.' }
-    }
-    $options = New-PullRequestQueryOptions -Query $Query -Field $Field -Files $files -Scope $Scope `
-        -Kind $Kind -Resolution $Resolution -ThreadId $ThreadId -CommentId $CommentId `
-        -Authorship $Authorship -IndexOnly:$IndexOnly -Text $Text -PageSize $PageSize
-    $document = Read-PullRequestContextDocument -Path $Path
-    $previous = if ($ComparePath) { Read-PullRequestContextDocument -Path $ComparePath } else { $null }
-    $result = Read-PullRequestContextQuery -Document $document -Options $options -Previous $previous -Cursor $Cursor
-    [Console]::OutputEncoding = [Text.UTF8Encoding]::new($false)
-    [Console]::WriteLine($result)
-} catch {
-    # Parsing errors can quote captured text. Keep diagnostics useful without dumping evidence.
-    $message = $_.Exception.Message
-    $excerpt = Get-PullRequestQueryExcerpt -Text $message
-    [Console]::Error.WriteLine("Context query failed: $($excerpt['excerpt'])")
-    exit 1
+    $message.Substring(0, $length)
 }
+
+# Forward bytes without PowerShell's native command output conversion.
+function Invoke-NativeContext {
+    param([string[]] $Arguments)
+    $program = Get-Command ss-ai -CommandType Application -ErrorAction Stop | Select-Object -First 1
+    $start = [Diagnostics.ProcessStartInfo]::new($program.Source)
+    $start.WorkingDirectory = (Get-Location).ProviderPath
+    $start.UseShellExecute = $false
+    $start.RedirectStandardOutput = $true
+    $start.RedirectStandardError = $true
+    $start.StandardOutputEncoding = [Text.UTF8Encoding]::new($false, $true)
+    $start.StandardErrorEncoding = [Text.UTF8Encoding]::new($false, $true)
+    foreach ($argument in @('context') + $Arguments) { $start.ArgumentList.Add($argument) }
+    $process = [Diagnostics.Process]::Start($start)
+    try {
+        $output = $process.StandardOutput.ReadToEndAsync()
+        $errors = $process.StandardError.ReadToEndAsync()
+        $process.WaitForExit()
+        [Console]::OutputEncoding = [Text.UTF8Encoding]::new($false)
+        $text = $output.GetAwaiter().GetResult()
+        $errorText = $errors.GetAwaiter().GetResult()
+        if ($process.ExitCode -ne 0) {
+            $excerpt = Get-NativeContextErrorExcerpt -Text $errorText
+            [Console]::Error.WriteLine("Context query failed: $excerpt")
+            exit $process.ExitCode
+        }
+        [Console]::Write($text)
+        [Console]::Error.Write($errorText)
+    } finally { $process.Dispose() }
+}
+
+$arguments = [Collections.Generic.List[string]]::new()
+if ($PSCmdlet.ParameterSetName -eq 'Saved') {
+    $arguments.Add('read-saved')
+    $arguments.Add("--request-path=$RequestPath")
+    if ($Next) { $arguments.Add('--next') }
+    if ($Restart) { $arguments.Add('--restart') }
+} else {
+    $arguments.Add('read')
+    $arguments.Add("--path=$Path")
+    $arguments.Add("--query=$Query")
+    $arguments.Add("--scope=$Scope")
+    $arguments.Add("--page-size=$PageSize")
+    foreach ($entry in @(
+        @('Field', 'field'), @('FilesJson', 'files-json'), @('FilesPath', 'files-path'),
+        @('Kind', 'kind'), @('Resolution', 'resolution'), @('ThreadId', 'thread-id'),
+        @('CommentId', 'comment-id'), @('Authorship', 'authorship'), @('Text', 'text'),
+        @('ComparePath', 'compare-path'), @('Cursor', 'cursor')
+    )) {
+        if ($PSBoundParameters.ContainsKey($entry[0])) {
+            $arguments.Add("--$($entry[1])=$($PSBoundParameters[$entry[0]])")
+        }
+    }
+    if ($IndexOnly) { $arguments.Add('--index-only') }
+}
+Invoke-NativeContext -Arguments $arguments.ToArray()

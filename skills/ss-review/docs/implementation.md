@@ -148,7 +148,7 @@ blockers to the primary session.
 PR dispatch prompts reference the calling-shell contract in their registered
 query recipe rather than repeating its instructions.
 
-Assignments and query requests use the shared workflow schema validator and
+Assignments and query requests validate the shared workflow schemas and use
 atomic writers. Preparation uses the existing focus-area/group validators and
 the reusable overview heading validator, which ignores fenced examples.
 Design references, significant-change interpretation, and scope preservation
@@ -833,15 +833,15 @@ the publication decision.
 
 ## Bounded local query boundary
 
-`Read-PullRequestContext.ps1` is the read-only composition root for agent access
-to canonical captures. It validates named arguments, reads and validates local
-capture data, selects a projection, and serializes a bounded page. It neither
-fetches service data nor modifies a capture. Publication and validation keep
-their full-document readers and path-based inputs; query projections are not
-replacement canonical artifacts.
+The native `ss-ai context` commands read canonical captures and return bounded
+projections without contacting a provider or modifying evidence. The
+`Read-PullRequestContext.ps1` and `New-PullRequestQueryRequest.ps1` entry points
+adapt typed PowerShell arguments to these operations and propagate failures.
+Publication and validation keep their full-document readers and path-based
+inputs; query projections are not replacement canonical artifacts.
 
 Workers create requests with typed arguments to `New-PullRequestQueryRequest.ps1`.
-The existing serializer writes normalized selectors together with both capture
+The native operation writes normalized selectors together with both capture
 identities and their paths. Saved requests use the same reading-snapshot identity
 as direct queries, including the authorship policy and applied semantic decisions.
 Literal search text may come from a UTF-8 file;
@@ -877,6 +877,10 @@ The projection layer exposes these operations:
 | `comments` | Chronological comments for a selected thread, an exact thread/comment pair, an authorship class, or an explicit file/global selection. Verbatim content and attribution support semantic interpretation. `-IndexOnly` omits bodies and excerpts for allocation and discovery. |
 | `search` | Case-insensitive literal `-Text` matches against complete comment bodies and the description when scope permits; one bounded match excerpt per matching comment. |
 | `changes` | Delta entries comparing required `-ComparePath` with `-Path`, with baseline/current/both references for targeted evidence retrieval. |
+
+Search uses Unicode simple case folding without normalization or
+multi-character expansion. Match offsets refer to the original text in UTF-16
+code units.
 
 The metadata allowlist covers capture and PR identity, title and description,
 author and creation time, refs and reviewed commits, self-authorship, draft status, reviewers,

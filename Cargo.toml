@@ -1,5 +1,5 @@
 [workspace]
-members = ["packages/ss-ai-assessment", "packages/ss-ai-cargo", "packages/ss-ai-cargo/fuzz", "packages/ss-ai-git", "packages/ss-ai-review", "packages/ss-ai-runtime", "packages/ss-ai"]
+members = ["packages/ss-ai-assessment", "packages/ss-ai-cargo", "packages/ss-ai-cargo/fuzz", "packages/ss-ai-git", "packages/ss-ai-review", "packages/ss-ai-review-context", "packages/ss-ai-review-context/fuzz", "packages/ss-ai-runtime", "packages/ss-ai"]
 resolver = "3"
 
 [workspace.package]
@@ -18,6 +18,7 @@ libfuzzer-sys = { version = "0.4.10", default-features = false }
 mimalloc = { version = "0.1.52", default-features = false }
 ohno = { version = "0.5.0", default-features = false }
 regex = { version = "1.12.2", default-features = false, features = ["std"] }
+regex-syntax = { version = "0.8.11", default-features = false, features = ["std"] }
 reqwest = { version = "0.13.4", default-features = false }
 same-file = { version = "1.0.6", default-features = false }
 serde = { version = "1.0.228", default-features = false, features = ["std"] }
@@ -27,6 +28,7 @@ ss-ai-assessment = { path = "packages/ss-ai-assessment", default-features = fals
 ss-ai-cargo = { path = "packages/ss-ai-cargo", default-features = false }
 ss-ai-git = { path = "packages/ss-ai-git", default-features = false }
 ss-ai-review = { path = "packages/ss-ai-review", default-features = false }
+ss-ai-review-context = { path = "packages/ss-ai-review-context", default-features = false }
 ss-ai-runtime = { path = "packages/ss-ai-runtime", default-features = false }
 static_assertions = { version = "1.1.0", default-features = false }
 tempfile = { version = "3.20.0", default-features = false }
