@@ -9,21 +9,21 @@ BeforeAll {
 }
 
 Describe 'Proactor loop instructions' {
-    It 'defaults to one review and requires an explicit user opt-in rather than a schedule alone' {
-        $script:ProactorPrompt | Should -Match 'By default, each invocation starts at most one review'
-        $script:RunControl | Should -Match 'Enable loop\s+mode only when the user explicitly requests it'
+    It 'defaults to loop mode and requires an explicit one-shot request to stop after one review' {
+        $script:ProactorPrompt | Should -Match 'By default, each invocation continues with another review'
+        $script:RunControl | Should -Match 'Loop mode is\s+the default'
+        $script:RunControl | Should -Match 'Use one-shot mode only when the user explicitly requests it'
         $script:RunControl | Should -Match 'user-authored schedule prompt, or a later direct message'
-        $script:RunControl | Should -Match 'A schedule alone\s+does not enable looping'
-        $script:RunControl | Should -Match '> Run ss-review-proactor in loop mode\.'
+        $script:RunControl | Should -Match '> Run ss-review-proactor in one-shot mode\.'
     }
 
     It 'honors the latest stop-after-current instruction throughout review and compaction' {
         $script:RunControl | Should -Match '"the current review is the last one", "stop after this review"'
-        $script:RunControl | Should -Match 'disable looping immediately but continue\s+the current review through its remaining phases'
+        $script:RunControl | Should -Match 'disable looping immediately\s+but continue\s+the current review through its remaining phases'
         $script:RunControl | Should -Match 'across handoff, user-input pauses, and\s+compaction'
-        $script:RunControl | Should -Match 'restarting stage 1 must not re-enable looping from that original prompt'
-        $script:RunControl | Should -Match 'current review has already finished, do not select another PR'
-        $script:RunControl | Should -Match 'this invocation only, not future scheduled invocations'
+        $script:RunControl | Should -Match 'restarting\s+stage 1 must not restore a superseded mode\s+from the original invocation'
+        $script:RunControl | Should -Match 'current review has already finished, do not select another\s+PR'
+        $script:RunControl | Should -Match 'Direct loop-control messages affect this invocation only'
         $script:ReviewPrompt | Should -Match '\[run-control rules\]\(\.\./ss-review-proactor/SKILL.md#run-control\)'
         $script:ReviewPrompt | Should -Match 'disables further cycles without ending this review or answering a pending audit or merge question'
     }

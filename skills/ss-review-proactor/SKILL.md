@@ -1,6 +1,6 @@
 ---
 name: ss-review-proactor
-description: Select and claim an eligible GitHub or Azure DevOps pull request, then execute ss-review in the same primary user-facing session. Repeat completed reviews only when the user explicitly requests loop mode. Use when the user explicitly invokes ss-review-proactor or a user-configured schedule invokes it. Never answer human decision gates on autopilot.
+description: Select and claim eligible GitHub or Azure DevOps pull requests, then execute ss-review in the same primary user-facing session. Repeat completed reviews by default; stop after one review only when the user explicitly requests one-shot mode. Use when the user explicitly invokes ss-review-proactor or a user-configured schedule invokes it. Never answer human decision gates on autopilot.
 ---
 
 # Scope and execution ownership
@@ -11,8 +11,10 @@ have its own primary session where a real user can answer questions.
 
 The user may specify a repository; otherwise use the Git repository where this
 skill is invoked. The user defines the schedule. Do not create or modify an
-automation. By default, each invocation starts at most one review. Both this
-skill and its sibling `ss-review` must be installed.
+automation. By default, each invocation continues with another review after
+each completed review. The user can request one-shot mode to stop after the
+first completed review. Both this skill and its sibling `ss-review` must be
+installed.
 
 Every question to the user is a hard suspension point. Ask through the primary
 session's user-input tool and accept only the real user's own direct answer.
@@ -27,27 +29,30 @@ This also applies to evaluation of findings and pull request approval inside
 
 # Run control
 
-A review cycle runs stages 1 through 5 for one completed review. Loop mode
-repeats these cycles sequentially in this same primary session. Enable loop
-mode only when the user explicitly requests it in the invocation, a
-user-authored schedule prompt, or a later direct message. A schedule alone
-does not enable looping. For example:
+A review cycle runs stages 1 through 5 for one completed review. Loop mode is
+the default and repeats these cycles sequentially in this same primary
+session. Use one-shot mode only when the user explicitly requests it in the
+invocation, a user-authored schedule prompt, or a later direct message. For
+example:
 
-> Run ss-review-proactor in loop mode.
+> Run ss-review-proactor in one-shot mode.
 
 If the user says "the current review is the last one", "stop after this review",
-or otherwise asks to leave loop mode, disable looping immediately but continue
-the current review through its remaining phases. This instruction applies
-during `ss-review` too. It is not cancellation, an audit decision, or merge
-approval; any unanswered question still requires its own answer. If the
-current review has already finished, do not select another PR.
+or otherwise asks to stop after the current review, disable looping immediately
+but continue the current review through its remaining phases.
+This instruction applies during `ss-review` too. It is not cancellation, an
+audit decision, or merge approval; any unanswered question still requires its
+own answer. If the current review has already finished, do not select another
+PR.
 
-Retain the latest loop instruction, original invocation directory, resolved
-configuration, current PR, absolute cycle paths, and return point in the
-primary session's prose checkpoint across handoff, user-input pauses, and
-compaction. A later stop instruction overrides the original request to loop;
-restarting stage 1 must not re-enable looping from that original prompt.
-Loop control affects this invocation only, not future scheduled invocations.
+Retain the latest loop or one-shot instruction, original invocation directory,
+resolved configuration, current PR, absolute cycle paths, and return point in
+the primary session's prose checkpoint across handoff, user-input pauses, and
+compaction. A later mode instruction overrides an earlier one; restarting
+stage 1 must not restore a superseded mode from the original invocation.
+Direct loop-control messages affect this invocation only. A user-authored
+schedule prompt applies its one-shot or loop instruction to each scheduled
+invocation.
 
 # Error recovery
 
