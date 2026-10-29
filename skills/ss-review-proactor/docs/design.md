@@ -4,11 +4,11 @@
 
 `ss-review-proactor` finds a pull request for the current user to review and
 hands it to `ss-review` in the same primary, user-facing session. The user
-configures the schedule outside this skill. By default, each invocation starts
-at most one review. The user can explicitly request loop mode to start another
-review after each completion. An invocation with no qualifying pull
-request finishes without requesting work or changing the schedule, including
-in loop mode.
+configures the schedule outside this skill. By default, each invocation
+continues with another review after each completion. The user can explicitly
+request one-shot mode to stop after the first completed review. An invocation
+with no qualifying pull request finishes without requesting work or changing
+the schedule, including in loop mode.
 
 GitHub and Azure DevOps Services repositories are supported. Authentication is
 the same as in `ss-review`: the signed-in GitHub CLI account or the Azure CLI
@@ -23,16 +23,18 @@ parent rather than using the parent itself or an existing user checkout.
 
 A review cycle includes configuration, selection and claim, checkout and
 confirmation, the full `ss-review` workflow, and the outcome summary. Loop mode
-repeats that cycle sequentially in the owning session. Only an explicit user
-request enables it, whether in an invocation, a user-authored schedule prompt,
-or a direct message during the session.
+repeats that cycle sequentially in the owning session by default. One-shot
+mode requires an explicit user request, whether in an invocation, a
+user-authored schedule prompt, or a direct message during the session.
 
 The user can say "the current review is the last one" to disable looping while
 letting the current review finish. This remains available during `ss-review`
 and its user-input pauses. The instruction controls future selection, not
-finding decisions, merge approval, or cancellation. The latest instruction
-survives workflow handoffs and compaction and overrides an earlier loop request.
-It does not change the schedule or future invocations.
+finding decisions, merge approval, or cancellation. The latest instruction survives workflow handoffs and compaction and overrides
+an earlier mode request.
+Direct messages do not change the schedule or future invocations. A
+user-authored schedule prompt can specify one-shot mode for its scheduled
+invocations.
 
 The next cycle begins only after all review phases, including publication and
 learning, finish. A review with nothing to publish still completes normally.
