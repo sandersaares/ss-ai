@@ -118,6 +118,24 @@ Describe 'ss-review configured instruction discovery' {
         } finally { [IO.Directory]::Delete($link) }
     }
 
+    It 'reports a dangling instruction-directory link instead of omitting guidance' {
+        $target = Join-Path $TestDrive ([guid]::NewGuid().ToString('N'))
+        [void][IO.Directory]::CreateDirectory($target)
+        $parent = Join-Path $script:Base '.github'
+        [void][IO.Directory]::CreateDirectory($parent)
+        $kind = if ($IsWindows) { 'Junction' } else { 'SymbolicLink' }
+        $link = Join-Path $parent 'instructions'
+        New-Item -ItemType $kind -Path $link -Target $target | Out-Null
+        [IO.Directory]::Delete($target)
+        $previous = Copy-TestInstructions -Directories ''
+        try {
+            { Copy-TestInstructions -Directories $script:Base } | Should -Throw '*missing*link target*'
+            Test-Path -LiteralPath (Join-Path $previous.sourceDirectory 'skill\focus-areas.md') | Should -BeTrue
+        } finally {
+            if ($IsWindows) { [IO.Directory]::Delete($link) } else { [IO.File]::Delete($link) }
+        }
+    }
+
     It 'keeps repeated snapshots stable and removes deleted sources with nested session state' {
         $script:Session = Join-Path $script:Base 'session'
         [void][IO.Directory]::CreateDirectory($script:Session)
@@ -148,6 +166,8 @@ Describe 'ss-review configured instruction discovery' {
         try {
             (Copy-TestInstructions -Directories $script:Base).externalFileCount | Should -Be 1
             Remove-Item -LiteralPath $source
+            (Copy-TestInstructions -Directories $script:Base).externalFileCount | Should -Be 0
+            # The next pass encounters a dangling alias after the empty snapshot removes its target.
             (Copy-TestInstructions -Directories $script:Base).externalFileCount | Should -Be 0
         } finally {
             # The empty replacement removes the target; Unix treats a dangling

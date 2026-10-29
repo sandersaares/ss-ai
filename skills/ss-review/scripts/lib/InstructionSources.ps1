@@ -37,18 +37,27 @@ function Get-ReviewInstructionRoot {
 # Resolves linked ancestors as well as the final directory so session exclusions
 # use filesystem-resolved paths without assuming case sensitivity from the OS.
 function Resolve-ReviewInstructionDirectory {
-    param([Parameter(Mandatory)][string] $Path)
+    param([Parameter(Mandatory)][string] $Path, [switch] $AllowMissing)
 
-    $directory = Get-Item -LiteralPath $Path -Force
-    if ($directory -isnot [IO.DirectoryInfo]) {
-        throw "Instruction directory is not a directory: $Path"
+    try { $directory = Get-Item -LiteralPath $Path -Force -ErrorAction Stop }
+    catch [Management.Automation.ItemNotFoundException] {
+        if (-not $AllowMissing) { throw }
+        # Missing destinations are resolved only to classify excluded session aliases;
+        # they never become instruction inputs.
+        $missing = [IO.DirectoryInfo]::new($Path)
+        if ($null -eq $missing.Parent) { throw }
+        $parent = Resolve-ReviewInstructionDirectory -Path $missing.Parent.FullName -AllowMissing
+        return [IO.DirectoryInfo]::new((Join-Path $parent.FullName $missing.Name))
     }
     if ($null -ne $directory.LinkTarget) {
         $target = $directory.ResolveLinkTarget($true)
-        if ($null -eq $target -or -not $target.Exists) {
+        if ($null -eq $target -or (-not $target.Exists -and -not $AllowMissing)) {
             throw "Configured instruction directory has a missing link target: $Path"
         }
-        return Resolve-ReviewInstructionDirectory -Path $target.FullName
+        return Resolve-ReviewInstructionDirectory -Path $target.FullName -AllowMissing:$AllowMissing
+    }
+    if ($directory -isnot [IO.DirectoryInfo]) {
+        throw "Instruction directory is not a directory: $Path"
     }
     if ($null -eq $directory.Parent) { return $directory }
     $parent = Resolve-ReviewInstructionDirectory -Path $directory.Parent.FullName
@@ -87,6 +96,22 @@ function Get-ReviewInstructionFile {
         $ancestors = @($current.Ancestors) + $identity
         foreach ($child in (Get-ChildItem -LiteralPath $directory.FullName -Force | Sort-Object -Property Name -CaseSensitive)) {
             $relative = if ($current.Relative) { "$($current.Relative)/$($child.Name)" } else { $child.Name }
+            if ($null -ne $child.LinkTarget) {
+                # A dangling directory symlink can appear as FileInfo. Resolve links before
+                # filtering by type or filename, while excluding generated targets even after removal.
+                $target = $child.ResolveLinkTarget($true)
+                if ($null -eq $target) {
+                    throw "Configured instruction entry has a missing link target: $($child.FullName)"
+                }
+                $targetParent = Resolve-ReviewInstructionDirectory -Path (Split-Path -Parent $target.FullName) -AllowMissing
+                $targetPath = Join-Path $targetParent.FullName $target.Name
+                if ($targetPath -ceq $ExcludedDirectory -or $targetPath.StartsWith($excludedPrefix, [StringComparison]::Ordinal)) {
+                    continue
+                }
+                if (-not $target.Exists) {
+                    throw "Configured instruction entry has a missing link target: $($child.FullName)"
+                }
+            }
             if ($child -is [IO.DirectoryInfo]) {
                 $pending.Push(@{ Path = $child.FullName; Relative = $relative; Ancestors = $ancestors })
             } elseif ($child.Name -ceq 'AGENTS.md' -or $child.Name.EndsWith('.instructions.md', [StringComparison]::Ordinal)) {

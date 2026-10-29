@@ -5,6 +5,18 @@ BeforeAll {
     . "$script:Skill\scripts\lib\FocusAreaPreparation.ps1"
     . "$script:Skill\scripts\lib\FocusAreaCache.ps1"
     $script:MoveItemCommand = Get-Command Move-Item -CommandType Cmdlet
+    $script:GetChildItemCommand = Get-Command Get-ChildItem -CommandType Cmdlet
+    $script:ConvertToJsonCommand = Get-Command ConvertTo-Json -CommandType Cmdlet
+
+    # Probes actual sharing at the index and final-output boundaries without retrying or waiting.
+    function Assert-TestSnapshotReaderOwnership {
+        $reader = [IO.File]::Open("$($global:FocusAreaSnapshotTest.LockPath).lock", 'Open', 'Read', 'Read')
+        $reader.Dispose()
+        {
+            $writer = [IO.File]::Open("$($global:FocusAreaSnapshotTest.LockPath).lock", 'Open', 'ReadWrite', 'None')
+            $writer.Dispose()
+        } | Should -Throw
+    }
 
     # Fixture spans use real line positions so validation and copying exercise the same contract.
     function New-TestSpan {
@@ -113,6 +125,64 @@ Describe 'ss-review focus-area preparation' {
         }
         Save-TestFocusMap
         [IO.File]::WriteAllText((Join-Path $script:Session 'focus-area-expansion-status.json'), '{"schemaVersion":1,"state":"Complete","references":[]}')
+    }
+
+    It 'waits for snapshot publication and holds shared ownership throughout <CommandName>' -ForEach @(
+        @{ CommandName = 'Test-FocusAreaMap.ps1' }
+        @{ CommandName = 'Update-FocusAreaMap.ps1' }
+        @{ CommandName = 'New-FocusAreaArtifacts.ps1' }
+        @{ CommandName = 'Update-FocusAreaExpansion.ps1' }
+    ) {
+        # Executables have their own script scopes; share fixture state across only this test's
+        # mocked command boundaries and remove it when the transaction finishes.
+        $global:FocusAreaSnapshotTest = @{
+            LockPath = Join-Path $script:Session 'focus-area-cache-operation'
+            SourceDirectory = Join-Path $script:Session 'instruction-set-source'
+            SourceBackup = Join-Path $script:Session 'instruction-set-source.previous'
+            GetChildItemCommand = $script:GetChildItemCommand
+            ConvertToJsonCommand = $script:ConvertToJsonCommand
+        }
+        $global:FocusAreaSnapshotTest.Lock = Open-PullRequestFileLock -Path $global:FocusAreaSnapshotTest.LockPath
+        [IO.Directory]::Move($global:FocusAreaSnapshotTest.SourceDirectory, $global:FocusAreaSnapshotTest.SourceBackup)
+        # Pause publication between renames and release it only when the reader contends.
+        Mock Start-Sleep {
+            [IO.Directory]::Move($global:FocusAreaSnapshotTest.SourceBackup, $global:FocusAreaSnapshotTest.SourceDirectory)
+            $global:FocusAreaSnapshotTest.Lock.Dispose()
+        }
+        Mock Get-ChildItem {
+            # Another reader remains compatible, but a publisher cannot replace this generation.
+            Assert-TestSnapshotReaderOwnership
+            & $global:FocusAreaSnapshotTest.GetChildItemCommand -LiteralPath $LiteralPath -Recurse:$Recurse -Force:$Force
+        } -ParameterFilter { $LiteralPath -eq $global:FocusAreaSnapshotTest.SourceDirectory }
+        Mock ConvertTo-Json {
+            Assert-TestSnapshotReaderOwnership
+            & $global:FocusAreaSnapshotTest.ConvertToJsonCommand -InputObject $InputObject -Compress
+        } -ParameterFilter { $Compress }
+        $arguments = @{ SessionStateDirectory = $script:Session }
+        switch ($CommandName) {
+            'Update-FocusAreaExpansion.ps1' { $arguments.Operation = 'Read' }
+            'Update-FocusAreaMap.ps1' {
+                $arguments.Path = Join-Path $script:Session 'merged-map.json'
+                $arguments.Operation = 'Append'
+                $arguments.InputPath = $script:MapPath
+            }
+            default { $arguments.MapPath = $script:MapPath }
+        }
+        try {
+            $null = & (Join-Path $script:Skill "scripts\$CommandName") @arguments | ConvertFrom-Json
+            Should -Invoke Start-Sleep -Times 1 -Exactly
+            Should -Invoke Get-ChildItem -Times 1 -ParameterFilter { $LiteralPath -eq $global:FocusAreaSnapshotTest.SourceDirectory }
+            Should -Invoke ConvertTo-Json -Times 1 -ParameterFilter { $Compress }
+            # Reader ownership must not survive the completed transaction.
+            $writer = Open-PullRequestFileLock -Path $global:FocusAreaSnapshotTest.LockPath
+            $writer.Dispose()
+        } finally {
+            if ([IO.Directory]::Exists($global:FocusAreaSnapshotTest.SourceBackup)) {
+                [IO.Directory]::Move($global:FocusAreaSnapshotTest.SourceBackup, $global:FocusAreaSnapshotTest.SourceDirectory)
+            }
+            $global:FocusAreaSnapshotTest.Lock.Dispose()
+            Remove-Variable -Name FocusAreaSnapshotTest -Scope Global
+        }
     }
 
     It 'renders exact headings, source lines, frontmatter and independent scopes with LF endings' {

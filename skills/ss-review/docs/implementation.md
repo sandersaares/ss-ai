@@ -92,13 +92,19 @@ Directory links are traversed with ancestry-cycle detection, including installed
 `.github/instructions` links. Discovery excludes the current review's session-state
 tree, resolving linked ancestors and links into its descendants so generated
 copies cannot become instruction inputs on a later snapshot.
-Missing/unreadable roots or files fail explicitly;
+Discovery resolves links before filtering file types because a dangling directory
+link can appear as a file. Aliases into generated session state remain excluded
+even when their copied targets no longer exist.
+Missing/unreadable roots or files and unresolved links fail explicitly;
 empty roots and an empty configuration are valid.
 
 Copying preserves exact bytes and permits concurrent readers and atomic source
 replacement. Publication replaces the complete snapshot under the same retained
-session lock as cache operations, with rollback if replacement fails. Authorized
-repository sources are added separately before lookup. The generation recipe,
+session lock as cache operations, with rollback if replacement fails. Snapshot
+consumers hold that lock in shared mode across source indexing, span reads,
+validation, rendering and output publication. They acquire it before any per-document
+lock, so concurrent readers can proceed while snapshot and cache replacement wait.
+Authorized repository sources are added separately before lookup. The generation recipe,
 discovery implementation, exact source paths, and source bytes participate in
 the cache key, so incompatible instruction provenance produces a miss.
 Runtime scripts, report templates, and pinned npm manifests stay together in
