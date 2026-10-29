@@ -15,6 +15,17 @@
 
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
+$PSNativeCommandUseErrorActionPreference = $true
+
+# Counts only discovered user sources in the current snapshot, not the skill's
+# built-in guidance or separately authorized repository instructions.
+function Get-ReviewUserInstructionFileCount {
+    param([Parameter(Mandatory)][string] $InputDirectory)
+
+    $external = Join-Path $InputDirectory 'external'
+    if (-not (Test-Path -LiteralPath $external)) { return 0 }
+    return @(Get-ChildItem -LiteralPath $external -Recurse -Force -File).Count
+}
 
 # Locates the record. All entry points must agree on this path, since a store extends the record a
 # restore left behind. It sits in session state rather than in the cache because it describes what

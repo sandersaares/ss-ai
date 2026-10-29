@@ -116,13 +116,13 @@ frontmatter at lines 1-3 and inherited scope at line 4:
     "categoryId": "script-contracts",
     "content": {
       "root": "instruction-set-raw",
-      "path": "ss-ai\\instructions\\powershell.instructions.md",
+      "path": "external\\<root-identity>\\.github\\instructions\\powershell.instructions.md",
       "startLine": 6,
       "endLine": 8
     },
     "sources": [{
       "root": "instruction-set-source",
-      "path": "ss-ai\\instructions\\powershell.instructions.md",
+      "path": "external\\<root-identity>\\.github\\instructions\\powershell.instructions.md",
       "startLine": 6,
       "endLine": 8
     }],
@@ -131,7 +131,7 @@ frontmatter at lines 1-3 and inherited scope at line 4:
       "pathScope": null,
       "declarations": [{
         "root": "instruction-set-raw",
-        "path": "ss-ai\\instructions\\powershell.instructions.md",
+        "path": "external\\<root-identity>\\.github\\instructions\\powershell.instructions.md",
         "startLine": 1,
         "endLine": 4
       }],

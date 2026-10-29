@@ -861,6 +861,58 @@ Keep names clear.
         $diagnostics.reason | Should -Be 'InvalidEntry'
     }
 
+    It 'reports <Count> user instruction files on cache misses, hits and stores' -ForEach @(
+        @{ Count = 0 }
+        @{ Count = 2 }
+    ) {
+        for ($index = 0; $index -lt $Count; $index++) {
+            $path = Join-Path $script:Inputs "external\configured\.github\instructions\custom-$index.instructions.md"
+            [void][IO.Directory]::CreateDirectory((Split-Path -Parent $path))
+            [IO.File]::WriteAllText($path, '# Custom guidance')
+        }
+        foreach ($relative in @('skill\focus-areas.md', 'review-repository\AGENTS.md')) {
+            $path = Join-Path $script:Inputs $relative
+            [void][IO.Directory]::CreateDirectory((Split-Path -Parent $path))
+            [IO.File]::WriteAllText($path, '# Not user-scoped')
+        }
+        $arguments = @(
+            '-SessionStateDirectory', $script:Session,
+            '-InputDirectory', $script:Inputs,
+            '-RecipePath', $script:Recipe,
+            '-CacheDirectory', $script:Cache,
+            '-GeneratorProfile', 'gpt-5-mini',
+            '-FreshnessDays', '7',
+            '-NowUtc', $script:Now.ToString('O')
+        )
+        $first = Invoke-CacheCliProcess -Script 'Restore-FocusAreaCache.ps1' -ArgumentList $arguments
+        $first.ExitCode | Should -Be 0 -Because $first.StandardError
+        ($first.StandardOutput | ConvertFrom-Json).status | Should -Be 'Miss'
+        ($first.StandardOutput | ConvertFrom-Json).userInstructionFileCount | Should -Be $Count
+
+        $store = Invoke-CacheCliProcess -Script 'Save-FocusAreaCache.ps1' -ArgumentList $arguments
+        $store.ExitCode | Should -Be 0 -Because $store.StandardError
+        $diagnosticsPath = Join-Path $script:Session 'focus-area-cache-diagnostics.json'
+        (Get-Content -LiteralPath $diagnosticsPath -Raw | ConvertFrom-Json).userInstructionFileCount | Should -Be $Count
+
+        $hit = Invoke-CacheCliProcess -Script 'Restore-FocusAreaCache.ps1' -ArgumentList $arguments
+        $hit.ExitCode | Should -Be 0 -Because $hit.StandardError
+        ($hit.StandardOutput | ConvertFrom-Json).status | Should -Be 'Hit'
+        ($hit.StandardOutput | ConvertFrom-Json).userInstructionFileCount | Should -Be $Count
+        $diagnostics = Get-Content -LiteralPath $diagnosticsPath -Raw | ConvertFrom-Json
+        $diagnostics.cache | Should -Be 'Hit'
+        $diagnostics.userInstructionFileCount | Should -Be $Count
+
+        Get-ChildItem -LiteralPath (Join-Path $script:Session 'focus-areas') -Filter '*.md' -File | Remove-Item
+        $invalid = Invoke-CacheCliProcess -Script 'Test-FocusAreaArtifacts.ps1' -ArgumentList @(
+            '-SessionStateDirectory', $script:Session
+        )
+        $invalid.ExitCode | Should -Not -Be 0
+        $diagnostics = Get-Content -LiteralPath $diagnosticsPath -Raw | ConvertFrom-Json
+        $diagnostics.cache | Should -Be 'Miss'
+        $diagnostics.reason | Should -Be 'ValidationFailed'
+        $diagnostics.userInstructionFileCount | Should -Be $Count
+    }
+
     It 'requires a finalized expansion manifest for CLI store operations' {
         Set-Content -LiteralPath (Join-Path $script:Session 'focus-area-expansion-status.json') -Value '{"schemaVersion":1,"state":"Unknown","references":[]}'
         $processResult = Invoke-CacheCliProcess -Script 'Save-FocusAreaCache.ps1' -ArgumentList @(
@@ -977,6 +1029,7 @@ Keep names clear.
             ConvertFrom-Json
         $diagnostics.cache | Should -Be 'Miss'
         $diagnostics.reason | Should -Be 'ValidationFailed'
+        $diagnostics.userInstructionFileCount | Should -Be 0
         $diagnostics.PSObject.Properties.Name | Should -Not -Contain 'inputState'
     }
 

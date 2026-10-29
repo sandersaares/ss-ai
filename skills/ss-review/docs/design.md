@@ -101,12 +101,18 @@ fallbacks retain their non-blocking behavior.
 
 ## Guidance scope
 
-The `ss-ai` installation supplies reusable instructions from its canonical
-`instructions/` bundle. Review preparation preserves the files and their
-applicability metadata verbatim, independently of instructions injected into
-the session. Repository-specific guidance enters review criteria only when
-the user explicitly authorizes it. Installed skill links do not change
-instruction ownership or review approval authority.
+Users supply their own instruction sets through `COPILOT_CUSTOM_INSTRUCTIONS_DIRS`,
+a comma-separated list of directories on every platform. Review preparation
+includes every recursively discovered `AGENTS.md` and `*.instructions.md` from
+those roots, preserving file contents and applicability metadata verbatim.
+It does not depend on instruction names, a particular instruction repository,
+or instructions already injected into the session. With no configured roots,
+the review uses the skill's built-in focus areas alone. Missing or unreadable
+configured roots produce an explicit error.
+
+Repository-specific guidance enters review criteria only when the user explicitly
+authorizes it, including by configuring its root in the environment variable.
+Installed skill links do not change instruction ownership or review approval authority.
 
 Workers receive explicit authorization for their bounded task, not for invoking
 the orchestration workflow. Shared reading instructions include resolved paths,
@@ -523,7 +529,10 @@ changes performance only; it never reduces coverage.
 
 Preparation quality remains visible in the review diagnostics. This lets the
 user distinguish ordinary reuse from degraded instruction expansion without
-making cache behavior part of the substantive conclusions.
+making cache behavior part of the substantive conclusions. Beside cache Hit/Miss,
+diagnostics report the discovered user-scoped instruction-file count, including
+zero when no external files were found. Built-in guidance and separately authorized
+repository instructions do not contribute to this count.
 
 ## Local data
 

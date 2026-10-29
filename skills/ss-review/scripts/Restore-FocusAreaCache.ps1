@@ -63,6 +63,8 @@ try {
         -FreshnessDays $FreshnessDays `
         -NowUtc $NowUtc `
         -Refresh:$Refresh
+    $userInstructionFileCount = Get-ReviewUserInstructionFileCount -InputDirectory $InputDirectory
+    $result | Add-Member -NotePropertyName userInstructionFileCount -NotePropertyValue $userInstructionFileCount
 
     # A restore begins the record rather than extending an existing one, so a repeated restore never
     # reports a superseded attempt alongside the current one.
@@ -71,6 +73,7 @@ try {
         -Diagnostics @{
             cache = $result.status
             reason = $result.reason
+            userInstructionFileCount = $userInstructionFileCount
         }
 
     $result | ConvertTo-Json -Compress

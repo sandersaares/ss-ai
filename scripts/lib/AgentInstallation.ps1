@@ -2,8 +2,9 @@
 
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
+$PSNativeCommandUseErrorActionPreference = $true
 
-# One link operation serves both installed instruction discovery and skill discovery.
+# User-scoped links expose skills without copying their runtime files.
 # Preserve non-link content and make incomplete installation an explicit error.
 function Set-AgentDirectoryLink {
     [CmdletBinding(PositionalBinding = $false)]
@@ -41,7 +42,7 @@ function Install-CopilotSkills {
     }
 }
 
-# Build failures must precede all instruction/skill activation, and settings stay client-owned.
+# Build failures must precede skill activation and legacy cleanup; settings stay client-owned.
 function Invoke-AiInstallation {
     [CmdletBinding(PositionalBinding = $false)]
     param([string] $HomeDirectory = $HOME)
@@ -51,16 +52,21 @@ function Invoke-AiInstallation {
     }
     $repository = Split-Path -Parent (Split-Path -Parent $PSScriptRoot)
     $agentsDirectory = Join-Path $HomeDirectory '.config\ss-ai\agents'
-    if ($agentsDirectory.Contains(',')) {
-        throw 'The instruction registration path must not contain a comma: it delimits the environment list.'
-    }
     Install-SkillsUtility
-    Set-AgentDirectoryLink -Source (Join-Path $repository 'instructions') -Path (Join-Path $agentsDirectory '.github\instructions')
     Install-CopilotSkills -TargetRoot (Join-Path $HomeDirectory '.copilot\skills')
     if ($IsWindows) {
-        Add-AgentsDirectoryToCopilotInstructions -AgentsDirectory $agentsDirectory -HomeDirectory $HomeDirectory
+        Remove-LegacyCopilotInstructionRegistration -AgentsDirectory $agentsDirectory -HomeDirectory $HomeDirectory
     } else {
-        Set-BashUserEnvironment -AgentsDirectory $agentsDirectory -HomeDirectory $HomeDirectory
+        Remove-LegacyBashEnvironment -AgentsDirectory $agentsDirectory -HomeDirectory $HomeDirectory
+    }
+
+    # Only the current checkout's obsolete instruction link is ours to remove.
+    # Other links and non-link content can belong to a separate instruction provider.
+    $instructionLink = Join-Path $agentsDirectory '.github\instructions'
+    $existing = Get-Item -LiteralPath $instructionLink -Force -ErrorAction SilentlyContinue
+    if ($null -ne $existing -and $existing.Attributes.HasFlag([IO.FileAttributes]::ReparsePoint) -and
+        $existing.Target -ceq (Join-Path $repository 'instructions')) {
+        Remove-Item -LiteralPath $instructionLink -Force
     }
     Write-Host 'AI installation complete. Start a new shell and agent session.' -ForegroundColor Green
 }

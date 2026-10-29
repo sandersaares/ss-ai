@@ -10,7 +10,7 @@ BeforeDiscovery {
     $ExpectedSkills  = @(Get-ChildItem -LiteralPath $skillsDir -Directory | Select-Object -ExpandProperty Name)
     $ExpectedSkillCount = $ExpectedSkills.Count
 
-    $probeDir = Join-Path ([System.IO.Path]::GetTempPath()) ("ss-ai-symlink-probe-" + [guid]::NewGuid().ToString('N'))
+    $probeDir = Join-Path $PSScriptRoot (".ss-ai-symlink-probe-" + [guid]::NewGuid().ToString('N'))
     New-Item -ItemType Directory -Path $probeDir -Force | Out-Null
     $probeLink = Join-Path $probeDir 'link'
     try {
@@ -29,7 +29,7 @@ BeforeAll {
     $script:ExpectedLinkType = if ($IsWindows) { 'Junction' } else { 'SymbolicLink' }
 
     function New-TempWorkspace {
-        $path = Join-Path ([System.IO.Path]::GetTempPath()) ("ss-ai-installer-test-" + [guid]::NewGuid().ToString('N'))
+        $path = Join-Path $TestDrive ("ss-ai-installer-test-" + [guid]::NewGuid().ToString('N'))
         New-Item -ItemType Directory -Path $path -Force | Out-Null
         $path
     }
