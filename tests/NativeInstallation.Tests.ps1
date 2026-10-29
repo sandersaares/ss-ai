@@ -210,8 +210,8 @@ Describe 'Skills utility installation' {
     }
 
     It 'refuses to link skills when Cargo fails' {
-        Mock Add-AgentsDirectoryToCopilotInstructions {}
-        Mock Set-BashUserEnvironment {}
+        Mock Remove-LegacyCopilotInstructionRegistration {}
+        Mock Remove-LegacyBashEnvironment {}
         Mock Install-CopilotSkills {}
         Mock Invoke-SkillsUtilityCargo { throw 'ss-ai compilation or installation failed (exit 23).' }
 

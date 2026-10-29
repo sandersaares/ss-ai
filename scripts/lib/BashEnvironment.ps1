@@ -2,10 +2,10 @@
 
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
+$PSNativeCommandUseErrorActionPreference = $true
 
-# Exports at shell startup, rather than copying the installer's inherited environment.
-# Quoted patterns match whole entries literally, including shell metacharacters in paths.
-function Get-BashEnvironmentContent {
+# Reproduce the legacy managed block only to recognize ownership during cleanup.
+function Get-LegacyBashEnvironmentContent {
     param(
         [Parameter(Mandatory)][string] $AgentsDirectory
     )
@@ -95,15 +95,16 @@ function Write-BashConfigurationText {
     }
 }
 
-# Ubuntu Bash loads .profile at login and .bashrc for interactive/SSH shells.
-# A user-supplied Bash login profile takes precedence over .profile, so wire it too.
-function Set-BashUserEnvironment {
+# Remove recognized ss-ai exports and loaders without changing user-owned shell content.
+function Remove-LegacyBashEnvironment {
     param(
         [Parameter(Mandatory)][string] $AgentsDirectory,
         [string] $HomeDirectory = $HOME
     )
 
-    $content = Get-BashEnvironmentContent -AgentsDirectory $AgentsDirectory
+    # Commas were rejected by the old installer, so such homes have no managed block.
+    if ($AgentsDirectory.Contains(',')) { return }
+    $content = Get-LegacyBashEnvironmentContent -AgentsDirectory $AgentsDirectory
     $environmentPath = Join-Path $HomeDirectory '.config\ss-ai\environment.sh'
     [void][IO.Directory]::CreateDirectory((Split-Path -Parent $environmentPath))
     $lock = Open-BashEnvironmentLock -Path $environmentPath
@@ -112,37 +113,34 @@ function Set-BashUserEnvironment {
         # Both independent installers acquire their private lock before this shared
         # retained lock. Discovery and the entire startup transaction need protection.
         $startupLock = Open-BashEnvironmentLock -Path (Join-Path $HomeDirectory '.config\shell-startup')
-        $profiles = [Collections.Generic.List[string]]::new()
-        $profiles.Add((Join-Path $HomeDirectory '.profile'))
-        $profiles.Add((Join-Path $HomeDirectory '.bashrc'))
-        foreach ($name in @('.bash_profile', '.bash_login')) {
-            $path = Join-Path $HomeDirectory $name
-            if (Test-Path -LiteralPath $path) {
-                $profiles.Add($path)
-                break
+        $environmentFile = Get-Item -LiteralPath $environmentPath -Force -ErrorAction SilentlyContinue
+        # A manually substituted file link is not an installer-owned payload.
+        if ($null -ne $environmentFile -and $environmentFile.Attributes.HasFlag([IO.FileAttributes]::ReparsePoint)) { return }
+        $existingEnvironment = Read-BashConfigurationText -Path $environmentPath
+        $remaining = $existingEnvironment
+        # Require the complete exact managed block, never a similar user-written export.
+        if ($existingEnvironment.StartsWith($content, [StringComparison]::Ordinal)) {
+            $remaining = $existingEnvironment.Substring($content.Length)
+            if ($remaining.Length -eq 0) {
+                Remove-Item -LiteralPath $environmentPath
+            } else {
+                Write-BashConfigurationText -Path $environmentPath -Content $remaining
             }
         }
-
+        # User additions still need their loader; unrecognized files remain untouched.
+        if (Test-Path -LiteralPath $environmentPath) { return }
         $sourceLine = '[ ! -f "$HOME/.config/ss-ai/environment.sh" ] || . "$HOME/.config/ss-ai/environment.sh"'
-        $sourceBlock = "# Load the repository's per-user AI environment.`n$sourceLine`n"
-        Write-BashConfigurationText -Path $environmentPath -Content $content
-        foreach ($path in $profiles) {
+        foreach ($name in @('.profile', '.bashrc', '.bash_profile', '.bash_login')) {
+            $path = Join-Path $HomeDirectory $name
+            if (-not (Test-Path -LiteralPath $path)) { continue }
             $existing = Read-BashConfigurationText -Path $path
-            if (($existing -split '\r?\n') -ccontains $sourceLine) { continue }
-
-            # Ubuntu's .bashrc returns early for noninteractive SSH commands.
-            # Load before that guard; login profiles load after their own PATH edits.
-            $updated = if ((Split-Path -Leaf $path) -eq '.bashrc') {
-                $sourceBlock + $existing
-            } else {
-                $existing + "`n" + $sourceBlock
-            }
+            $pattern = '(?m)^(?:# Load the repository''s per-user AI environment\.\r?\n)?' +
+                [regex]::Escape($sourceLine) + '(?:\r?\n|$)'
+            $updated = [regex]::Replace($existing, $pattern, '')
             Write-BashConfigurationText -Path $path -Content $updated
         }
     } finally {
         if ($null -ne $startupLock) { $startupLock.Dispose() }
         $lock.Dispose()
     }
-
-    Write-Host "Configured Bash Copilot instructions. Start a new Bash session to load them." -ForegroundColor Yellow
 }

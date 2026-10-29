@@ -25,7 +25,7 @@ Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 
 # Marks every body this skill publishes as written by an agent rather than by the operator whose
-# account posts it (instructions/global.instructions.md, "Communication policy").
+# account posts it (docs/design.md, "Publication").
 # It is applied by the renderer rather than by each publication path, so no path can omit it.
 $script:FindingMarkdownAuthorshipPrefix = '[Copilot speaking]'
 
@@ -251,6 +251,12 @@ function New-ReviewSummaryMarkdown {
     # "Focus-area reuse").
     $cache = [string] (Get-JsonProperty -Node $Diagnostics -Name 'cache')
     $table.Add("| Cache | $(if ([string]::Equals($cache, 'Hit', [StringComparison]::OrdinalIgnoreCase)) { 'Hit' } else { 'Miss' }) |")
+    $userInstructionFileCount = Get-JsonProperty -Node $Diagnostics -Name 'userInstructionFileCount'
+    if ($null -ne $userInstructionFileCount -and
+        (($userInstructionFileCount -isnot [int] -and $userInstructionFileCount -isnot [long]) -or $userInstructionFileCount -lt 0)) {
+        throw 'User instruction file count must be a nonnegative integer.'
+    }
+    $table.Add("| User instruction files | $($userInstructionFileCount ?? 'Not recorded') |")
 
     # Reported only when expansion was degraded. Complete expansion is the ordinary case and stating
     # it on every review would train the reader to skip the row that matters.

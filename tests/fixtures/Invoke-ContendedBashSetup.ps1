@@ -10,6 +10,7 @@ param(
 
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
+$PSNativeCommandUseErrorActionPreference = $true
 . "$PSScriptRoot\..\..\scripts\lib\BashEnvironment.ps1"
 $script:WaitCount = 0
 
@@ -42,5 +43,5 @@ if ($IndependentParticipant) {
         $privateLock.Dispose()
     }
 } else {
-    Set-BashUserEnvironment -HomeDirectory $HomeDirectory -AgentsDirectory "/$CheckoutName/agents" 6>$null
+    Remove-LegacyBashEnvironment -HomeDirectory $HomeDirectory -AgentsDirectory (Join-Path $HomeDirectory '.config\ss-ai\agents')
 }

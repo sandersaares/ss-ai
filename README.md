@@ -1,6 +1,6 @@
 # AI tooling by Sander Saares
 
-Reusable instructions, [agent skills](https://agentskills.io/home), their
+[Agent skills](https://agentskills.io/home), their
 native helper, and companion evaluations. See [LICENSE](LICENSE) for terms.
 This repository supplies material used by agents. Installation does not manage
 general machine setup or user-facing Copilot preferences.
@@ -16,13 +16,13 @@ general machine setup or user-facing Copilot preferences.
 | [`ss-autoreapprove`](skills/ss-autoreapprove/SKILL.md) | Renews invalidated approvals only under the installed significance policy; supports read-only dry runs. |
 
 Each skill lives under `skills/<name>/`, with `SKILL.md` as its entry point
-and runtime commands under `scripts/`. The parallel `instructions/` root
-contains reusable guidance with its original applicability metadata.
+and runtime commands under `scripts/`. Instructions come from independently
+configured directories rather than from this repository.
 
 ## Requirements
 
 - Latest stable PowerShell (`pwsh`); scripts target the 7.6 release line.
-- Git and an agent supporting skills. Copilot CLI uses the instruction registration below.
+- Git and an agent supporting skills.
 - Rustup/Cargo and the pinned repository toolchain. Windows needs Visual Studio
   C++ Build Tools and Windows SDK; Ubuntu needs a compiler/linker such as
   `build-essential` for mimalloc. Cargo's configured installation binary
@@ -49,32 +49,35 @@ pwsh -NoProfile -File path/to/ss-ai/Install.ps1
 Run as the normal user without elevation or `sudo`. Installation resolves
 sources from its own checkout, builds locked local `ss-ai`, and
 compares Cargo's build artifact with the executable on `PATH` before
-activating instructions and skills. Reinstall between skill invocations
+activating skills. Reinstall between skill invocations
 to refresh local source. Cargo reports unrelated binary ownership conflicts;
 the installer reports shadowing executables rather than guessing an install root.
 
-Skills link into `~/.copilot/skills/`. Instructions link from
-`~/.config/ss-ai/agents/.github/instructions/` to this checkout's `instructions/`;
-the installer registers the containing repo-shaped `agents` directory once in
-`COPILOT_CUSTOM_INSTRUCTIONS_DIRS`. This does not load the checkout's development
-`AGENTS.md` as global guidance. Other clients must support these installed
-discovery locations or configure their own supported registration.
+Skills link into `~/.copilot/skills/`. The installer does not bundle instructions
+or register instruction roots. Skills discover optional instructions through
+`COPILOT_CUSTOM_INSTRUCTIONS_DIRS`, a comma-separated list of external roots.
+Use your own instructions or run `Configure-Pc` in `dev-env` separately to
+install and register its instructions. Other clients must support skill discovery
+at the installed location or configure their own supported registration.
 
-Windows uses junctions and user-registry instruction registration. Ubuntu uses
-symbolic links and `~/.config/ss-ai/environment.sh`, loaded from Bash startup
-files before noninteractive SSH guards. Both preserve unrelated entries and
-report non-link collisions explicitly. `-HomeDirectory` selects the home for
-links and Bash configuration; Windows environment registration remains user-scoped.
+Windows uses junctions; Ubuntu uses symbolic links. Both report non-link
+collisions explicitly. `-HomeDirectory` selects the home for links and legacy
+cleanup; Windows environment cleanup remains user-scoped.
 No installer changes Copilot mouse settings or other interaction preferences.
 Start a new shell and agent session after setup. Configure Windows and each
 WSL/Linux user environment separately.
 
 ### Updating an existing installation
 
-Finish active skill invocations. Remove only identified obsolete instruction
-registrations, skill links, and duplicate direct skill discovery roots through
-the client's supported settings. Preserve unrelated configuration and non-link
-installations, then run `Install.ps1` here. If Cargo reports
+Finish active skill invocations, then run `Install.ps1` here. The installer
+removes the exact legacy `~/.config/ss-ai/agents` registration from the Windows
+user environment, or recognized ss-ai exports and startup loaders on Ubuntu.
+It preserves other instruction roots, user shell content, and non-link content.
+An obsolete instruction link is removed only when it points at this checkout.
+Modified or unrecognized legacy configuration remains available for manual review.
+Configure external instructions separately through `dev-env` or your own setup.
+Remove duplicate direct skill discovery roots through the client's supported
+settings while preserving unrelated configuration. If Cargo reports
 an actual source-ownership conflict, resolve that specific registration through
 Cargo before retrying. Do not run old and new workflow state together or replay
 uncertain remote writes; start fresh review sessions.
