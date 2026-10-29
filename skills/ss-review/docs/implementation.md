@@ -89,7 +89,10 @@ Each root identity hashes its absolute configured path, keeping equally named fi
 from distinct roots separate and binding cache provenance to the instruction owner.
 The command returns the root-to-prefix mapping for reference expansion and learning.
 Directory links are traversed with ancestry-cycle detection, including installed
-`.github/instructions` links. Missing/unreadable roots or files fail explicitly;
+`.github/instructions` links. Discovery excludes the current review's session-state
+tree, resolving linked ancestors and links into its descendants so generated
+copies cannot become instruction inputs on a later snapshot.
+Missing/unreadable roots or files fail explicitly;
 empty roots and an empty configuration are valid.
 
 Copying preserves exact bytes and permits concurrent readers and atomic source

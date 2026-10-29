@@ -118,11 +118,58 @@ Describe 'ss-review configured instruction discovery' {
         } finally { [IO.Directory]::Delete($link) }
     }
 
-    It 'discovers before creating staging when session state is inside a configured root' {
+    It 'keeps repeated snapshots stable and removes deleted sources with nested session state' {
         $script:Session = Join-Path $script:Base 'session'
         [void][IO.Directory]::CreateDirectory($script:Session)
-        New-InstructionFixture -Root $script:Base -Relative 'custom.instructions.md' | Out-Null
+        $source = New-InstructionFixture -Root $script:Base -Relative 'custom.instructions.md'
         (Copy-TestInstructions -Directories $script:Base).externalFileCount | Should -Be 1
+        $arguments = @{
+            InputDirectory = Join-Path $script:Session 'instruction-set-source'
+            RecipePath = Join-Path $script:Skill 'prepare-focus-areas.md'
+            GeneratorProfile = 'test'
+            FreshnessDays = 7
+            NowUtc = [DateTimeOffset]'2026-10-29T00:00:00Z'
+        }
+        $key = (Get-FocusAreaCacheDescriptor @arguments).Key
+        (Copy-TestInstructions -Directories $script:Base).externalFileCount | Should -Be 1
+        (Get-FocusAreaCacheDescriptor @arguments).Key | Should -BeExactly $key
+        Remove-Item -LiteralPath $source
+        (Copy-TestInstructions -Directories $script:Base).externalFileCount | Should -Be 0
+        @(Get-ChildItem -LiteralPath $arguments.InputDirectory -Recurse -Filter '*.instructions.md').Count | Should -Be 0
+    }
+
+    It 'excludes links directly into generated session subtrees' {
+        $source = New-InstructionFixture -Root $script:Base -Relative 'custom.instructions.md'
+        $first = Copy-TestInstructions -Directories $script:Base
+        $target = Join-Path $first.sourceDirectory $first.roots[0].prefix
+        $kind = if ($IsWindows) { 'Junction' } else { 'SymbolicLink' }
+        $link = Join-Path $script:Base 'old-snapshot'
+        New-Item -ItemType $kind -Path $link -Target $target | Out-Null
+        try {
+            (Copy-TestInstructions -Directories $script:Base).externalFileCount | Should -Be 1
+            Remove-Item -LiteralPath $source
+            (Copy-TestInstructions -Directories $script:Base).externalFileCount | Should -Be 0
+        } finally {
+            # The empty replacement removes the target; Unix treats a dangling
+            # directory symlink as a file, while Windows junctions remain directories.
+            if ($IsWindows) { [IO.Directory]::Delete($link) } else { [IO.File]::Delete($link) }
+        }
+    }
+
+    It 'excludes session state reached through a linked parent directory' {
+        $sessions = Join-Path $script:Base 'sessions'
+        [void][IO.Directory]::CreateDirectory((Join-Path $sessions 'current'))
+        $kind = if ($IsWindows) { 'Junction' } else { 'SymbolicLink' }
+        $link = Join-Path $TestDrive ([guid]::NewGuid().ToString('N'))
+        New-Item -ItemType $kind -Path $link -Target $sessions | Out-Null
+        try {
+            $script:Session = Join-Path $link 'current'
+            $source = New-InstructionFixture -Root $script:Base -Relative 'custom.instructions.md'
+            (Copy-TestInstructions -Directories $script:Base).externalFileCount | Should -Be 1
+            (Copy-TestInstructions -Directories $script:Base).externalFileCount | Should -Be 1
+            Remove-Item -LiteralPath $source
+            (Copy-TestInstructions -Directories $script:Base).externalFileCount | Should -Be 0
+        } finally { [IO.Directory]::Delete($link) }
     }
 
     It 'replaces a prior snapshot without retaining removed guidance' {

@@ -68,7 +68,7 @@ function Read-BashConfigurationText {
 function Write-BashConfigurationText {
     param(
         [Parameter(Mandatory)][string] $Path,
-        [Parameter(Mandatory)][string] $Content
+        [Parameter(Mandatory)][AllowEmptyString()][string] $Content
     )
 
     $file = [IO.FileInfo]::new($Path)

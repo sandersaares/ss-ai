@@ -44,6 +44,21 @@ Describe 'Legacy Bash instruction cleanup' {
         }
     }
 
+    It 'clears loader-only startup files without rejecting empty content' {
+        [IO.File]::WriteAllText($script:EnvironmentPath, (Get-LegacyBashEnvironmentContent -AgentsDirectory $script:AgentsDirectory))
+        foreach ($name in @('.profile', '.bashrc', '.bash_profile', '.bash_login')) {
+            [IO.File]::WriteAllText((Join-Path $script:HomeDirectory $name), $script:Loader)
+        }
+
+        Remove-LegacyBashEnvironment @script:SetupParameters
+        Remove-LegacyBashEnvironment @script:SetupParameters
+
+        foreach ($name in @('.profile', '.bashrc', '.bash_profile', '.bash_login')) {
+            Read-BashConfigurationText -Path (Join-Path $script:HomeDirectory $name) | Should -BeExactly ''
+        }
+        Test-Path -LiteralPath $script:EnvironmentPath | Should -BeFalse
+    }
+
     It 'removes a recognized loader with a missing environment and preserves line endings' {
         $original = "export KEEP=yes`r`n" + $script:Loader.Replace("`n", "`r`n") + "export ALSO_KEEP=yes`r`n"
         [IO.File]::WriteAllText($script:ProfilePath, $original)

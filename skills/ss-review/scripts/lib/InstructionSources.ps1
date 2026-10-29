@@ -34,23 +34,53 @@ function Get-ReviewInstructionRoot {
     }
 }
 
+# Resolves linked ancestors as well as the final directory so session exclusions
+# use filesystem-resolved paths without assuming case sensitivity from the OS.
+function Resolve-ReviewInstructionDirectory {
+    param([Parameter(Mandatory)][string] $Path)
+
+    $directory = Get-Item -LiteralPath $Path -Force
+    if ($directory -isnot [IO.DirectoryInfo]) {
+        throw "Instruction directory is not a directory: $Path"
+    }
+    if ($null -ne $directory.LinkTarget) {
+        $target = $directory.ResolveLinkTarget($true)
+        if ($null -eq $target -or -not $target.Exists) {
+            throw "Configured instruction directory has a missing link target: $Path"
+        }
+        return Resolve-ReviewInstructionDirectory -Path $target.FullName
+    }
+    if ($null -eq $directory.Parent) { return $directory }
+    $parent = Resolve-ReviewInstructionDirectory -Path $directory.Parent.FullName
+    return Get-Item -LiteralPath (Join-Path $parent.FullName $directory.Name) -Force
+}
+
 # Walks linked instruction trees as well as ordinary directories. An ancestry check
 # rejects cycles deterministically rather than hanging or silently omitting guidance.
 function Get-ReviewInstructionFile {
-    param([Parameter(Mandatory)][string] $Root)
+    param(
+        [Parameter(Mandatory)][string] $Root,
+        [Parameter(Mandatory)][string] $ExcludedDirectory
+    )
 
     $pending = [Collections.Generic.Stack[object]]::new()
-    $pending.Push(@{ Path = $Root; Relative = ''; Ancestors = @() })
+    $pending.Push(@{ Path = (Resolve-ReviewInstructionDirectory -Path $Root).FullName; Relative = ''; Ancestors = @() })
+    $excludedPrefix = $ExcludedDirectory.TrimEnd([IO.Path]::DirectorySeparatorChar) + [IO.Path]::DirectorySeparatorChar
     while ($pending.Count -gt 0) {
         $current = $pending.Pop()
         $directory = Get-Item -LiteralPath $current.Path -Force
         if ($null -ne $directory.LinkTarget) {
-            $directory = $directory.ResolveLinkTarget($true)
+            $directory = Resolve-ReviewInstructionDirectory -Path $directory.FullName
         }
         if ($null -eq $directory -or -not $directory.Exists) {
             throw "Configured instruction directory has a missing link target: $($current.Path)"
         }
         $identity = [IO.Path]::TrimEndingDirectorySeparator($directory.FullName)
+        # Generated instructions are outputs, never new user guidance. Check resolved
+        # descendants too, because a link can enter below the session directory itself.
+        if ($identity -ceq $ExcludedDirectory -or $identity.StartsWith($excludedPrefix, [StringComparison]::Ordinal)) {
+            continue
+        }
         if ($current.Ancestors -ccontains $identity) {
             throw "Configured instruction directory contains a link cycle: $($current.Path)"
         }
@@ -94,9 +124,12 @@ function Copy-ReviewInstructionSources {
     )
 
     $roots = @(Get-ReviewInstructionRoot -DirectoryList $DirectoryList -BaseDirectory $BaseDirectory)
+    [void][IO.Directory]::CreateDirectory($SessionStateDirectory)
+    $excluded = [IO.Path]::TrimEndingDirectorySeparator(
+        (Resolve-ReviewInstructionDirectory -Path $SessionStateDirectory).FullName)
     # Finish discovery before creating staging: a configured root may contain session state.
     $discoveredRoots = @(foreach ($root in $roots) {
-        @{ Root = $root; Files = @(Get-ReviewInstructionFile -Root $root.Path) }
+        @{ Root = $root; Files = @(Get-ReviewInstructionFile -Root $root.Path -ExcludedDirectory $excluded) }
     })
     $destination = Join-Path $SessionStateDirectory 'instruction-set-source'
     $staging = Join-Path $SessionStateDirectory ("instruction-set-source.$([guid]::NewGuid().ToString('N')).tmp")

@@ -35,6 +35,8 @@ Execute `pwsh-calls/copy-instruction-sources.md` before fetching or expanding an
 
 The environment variable is a comma-separated directory list on every platform, not a platform PATH list. Surrounding whitespace and empty entries are ignored; relative entries resolve against the command's working directory. Repeated identical absolute roots are included once. There is no shell-variable or tilde expansion. An unset or empty list uses only the built-in focus areas. Existing empty roots are allowed; configured missing or unreadable roots and link cycles are errors, never grounds for silently reducing coverage. Do not require particular instruction filenames or fall back to a co-located instruction checkout.
 
+Discovery excludes the current review's session-state tree, including links into its descendants, so generated copies do not become user instruction sources on a later snapshot.
+
 ONLY IF EXPLICITLY AUTHORIZED (default no), also copy each repository instruction file (e.g. `AGENTS.md`) that governs the reviewed content to its repository-relative path under `instruction-set-source/review-repository/`. Explicitly configured external roots remain sources even if they overlap the reviewed repository; do not discover additional repository instructions implicitly.
 
 Use filesystem copy tools for authorized repository instructions as well. Do not read a source into context and write its contents back out: the cache key covers the exact bytes of every source, so incidental rewriting turns a reusable entry into a miss.
