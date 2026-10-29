@@ -731,6 +731,32 @@ Describe 'Review summary' {
             }
         }
 
+        It 'reports user instruction counts next to cache outcomes on both platforms' {
+            foreach ($platform in @('gitHub', 'azureDevOps')) {
+                foreach ($cache in @('Hit', 'Miss')) {
+                    foreach ($count in @(0, 7)) {
+                        $summary = New-ReviewSummaryMarkdown -Diagnostics @{
+                            cache = $cache
+                            userInstructionFileCount = $count
+                        } -Platform $platform
+                        $summary | Should -Match "\| Cache \| $cache \|\r?\n\| User instruction files \| $count \|"
+                    }
+                }
+            }
+        }
+
+        It 'does not invent a discovered count for older diagnostics' {
+            New-ReviewSummaryMarkdown -Diagnostics @{ cache = 'Hit' } -Platform 'gitHub' |
+                Should -BeLike '*| User instruction files | Not recorded |*'
+        }
+
+        It 'rejects malformed user instruction counts' {
+            foreach ($count in @(-1, 'seven', 1.5)) {
+                { New-ReviewSummaryMarkdown -Diagnostics @{ userInstructionFileCount = $count } -Platform 'gitHub' } |
+                    Should -Throw '*nonnegative integer*'
+            }
+        }
+
         # A session that recorded no restore reused nothing, so the honest report is a miss.
         It 'reports a miss where the record says nothing about the cache' {
             New-ReviewSummaryMarkdown -Diagnostics @{} -Platform 'gitHub' | Should -BeLike '*| Cache | Miss |*'

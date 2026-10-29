@@ -29,6 +29,9 @@ if ($Operation -in @('Complete', 'Fail')) {
     if ($Operation -ceq 'Complete' -and $null -ne $failure) { throw 'Successful expansion must not carry an error.' }
     if ($Operation -ceq 'Fail' -and $outputs.Count -ne 0) { throw 'Failed expansion must not claim outputs.' }
 }
-Update-FocusAreaExpansion -Path (Join-Path $SessionStateDirectory 'focus-area-expansion-status.json') `
-    -SessionStateDirectory $SessionStateDirectory -Operation $Operation -InputRecord $inputRecord `
-    -ReferenceId $ReferenceId -OutputPath $outputs -Failure $failure | ConvertTo-Json -Depth 32 -Compress
+$sourceLock = Open-PullRequestFileLock -Path (Join-Path $SessionStateDirectory 'focus-area-cache-operation') -Shared
+try {
+    Update-FocusAreaExpansion -Path (Join-Path $SessionStateDirectory 'focus-area-expansion-status.json') `
+        -SessionStateDirectory $SessionStateDirectory -Operation $Operation -InputRecord $inputRecord `
+        -ReferenceId $ReferenceId -OutputPath $outputs -Failure $failure | ConvertTo-Json -Depth 32 -Compress
+} finally { $sourceLock.Dispose() }

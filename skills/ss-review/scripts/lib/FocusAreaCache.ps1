@@ -31,6 +31,9 @@ $PSNativeCommandUseErrorActionPreference = $true
 # Ref: docs/implementation.md, "Cache inputs".
 $script:FocusAreaGenerationRoot = Split-Path -Parent (Split-Path -Parent $PSScriptRoot)
 $script:FocusAreaGenerationFiles = @(
+    'scripts\Copy-ReviewInstructionSources.ps1'
+    'scripts\lib\InstructionSources.ps1'
+    'pwsh-calls\copy-instruction-sources.md'
     'focus-area-format.md'
     'schemas\focus-area-map.schema.json'
     'scripts\lib\FocusAreaPreparation.ps1'

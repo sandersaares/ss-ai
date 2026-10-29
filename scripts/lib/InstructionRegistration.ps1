@@ -4,83 +4,35 @@ Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 $PSNativeCommandUseErrorActionPreference = $true
 
-# Opens the user registry boundary separately so tests never change real settings.
+# Opens the cleanup boundary separately so tests never change real settings.
 function Get-UserEnvironmentKey {
     [CmdletBinding(PositionalBinding = $false)]
     param()
 
     $key = [Microsoft.Win32.Registry]::CurrentUser.OpenSubKey('Environment', $true)
-    if ($null -eq $key) {
-        $key = [Microsoft.Win32.Registry]::CurrentUser.CreateSubKey('Environment')
-    }
     return $key
 }
 
-# Preserve unrelated entries and their registry expansion behavior during registration.
-function Add-DirectoryToUserEnvironmentList {
+# Remove only the exact root written by ss-ai, preserving all other text and value kinds.
+function Remove-LegacyDirectoryFromUserEnvironment {
     [CmdletBinding(PositionalBinding = $false)]
     param(
-        [Parameter(Mandatory)] [string] $VariableName,
-        [Parameter(Mandatory)] [string] $Directory,
-        [string] $Separator = ';'
+        [Parameter(Mandatory)] [string] $Directory
     )
 
-    # Appends $Directory to a delimited, user-scoped environment
-    # variable (PATH, COPILOT_CUSTOM_INSTRUCTIONS_DIRS, ...) without disturbing
-    # the entries already there. Returns $true when the value was changed and
-    # $false when $Directory was already present, so the caller knows whether a
-    # WM_SETTINGCHANGE broadcast is warranted.
-    #
-    # Read and write the value directly through the registry rather than through
-    # [Environment]::GetEnvironmentVariable/SetEnvironmentVariable. The .NET
-    # helpers expand %VAR% references on read and always write a plain REG_SZ
-    # value; that would bake literal paths into entries like %USERPROFILE%\...
-    # and stop Windows from expanding any variable references the user keeps in
-    # the value. Going through the registry with DoNotExpandEnvironmentNames and
-    # preserving the REG_EXPAND_SZ value kind keeps both intact.
+    $VariableName = 'COPILOT_CUSTOM_INSTRUCTIONS_DIRS'
     $environmentKey = Get-UserEnvironmentKey
-
+    if ($null -eq $environmentKey) { return $false }
     try {
         $rawValue = $environmentKey.GetValue($VariableName, '', [Microsoft.Win32.RegistryValueOptions]::DoNotExpandEnvironmentNames)
         if ($rawValue -isnot [string]) {
             throw "User environment variable '$VariableName' must contain a string; leaving malformed registration unchanged."
         }
-        $currentValue = $rawValue
-        Write-Verbose "Add-DirectoryToUserEnvironmentList: current user-scoped '$VariableName' is '$currentValue'."
-
-        # Preserve the existing value kind so %VAR% references keep expanding;
-        # default to REG_EXPAND_SZ when the variable does not exist yet.
-        $valueKind = [Microsoft.Win32.RegistryValueKind]::ExpandString
-        foreach ($valueName in $environmentKey.GetValueNames()) {
-            if ($valueName -ieq $VariableName) {
-                $valueKind = $environmentKey.GetValueKind($VariableName)
-                break
-            }
-        }
-        Write-Verbose "Add-DirectoryToUserEnvironmentList: '$VariableName' value kind is '$valueKind'."
-
-        $entries = [System.Collections.Generic.List[string]]::new()
-        if (-not [string]::IsNullOrEmpty($currentValue)) {
-            foreach ($entry in ($currentValue -split [regex]::Escape($Separator))) {
-                if (-not [string]::IsNullOrEmpty($entry)) {
-                    $entries.Add($entry)
-                }
-            }
-        }
-
-        # Compare without trailing separators so an existing entry is recognised
-        # regardless of whether it was stored with a trailing backslash.
-        $normalizedTarget = $Directory.TrimEnd('\')
-        foreach ($entry in $entries) {
-            if ($entry.TrimEnd('\') -ieq $normalizedTarget) {
-                Write-Verbose "Add-DirectoryToUserEnvironmentList: '$Directory' already present in '$VariableName'; leaving it unchanged."
-                return $false
-            }
-        }
-
-        $entries.Add($Directory)
-        $newValue = $entries -join $Separator
-        Write-Verbose "Add-DirectoryToUserEnvironmentList: new '$VariableName' ($valueKind) is '$newValue'."
+        $entries = @($rawValue -split ',')
+        if ($entries -cnotcontains $Directory) { return $false }
+        # Do not expand references or normalize unrelated entries during migration.
+        $valueKind = $environmentKey.GetValueKind($VariableName)
+        $newValue = @($entries | Where-Object { $_ -cne $Directory }) -join ','
         $environmentKey.SetValue($VariableName, $newValue, $valueKind)
         return $true
     }
@@ -89,6 +41,7 @@ function Add-DirectoryToUserEnvironmentList {
     }
 }
 
+# Notify applications after a persisted user-environment change.
 function Send-EnvironmentChangeBroadcast {
     [CmdletBinding(PositionalBinding = $false)]
     param()
@@ -115,8 +68,8 @@ public static extern System.IntPtr SendMessageTimeout(
     [void][SsAi.NativeMethods]::SendMessageTimeout($HWND_BROADCAST, $WM_SETTINGCHANGE, [System.IntPtr]::Zero, 'Environment', $SMTO_ABORTIFHUNG, [uint32]5000, [ref]$result)
 }
 
-# Register the repo-shaped installed root, not the repository development guide.
-function Add-AgentsDirectoryToCopilotInstructions {
+# Serialize cleanup with previous ss-ai installers using their retained lock.
+function Remove-LegacyCopilotInstructionRegistration {
     [CmdletBinding(PositionalBinding = $false)]
     param(
         [Parameter(Mandatory)][string] $AgentsDirectory,
@@ -127,7 +80,7 @@ function Add-AgentsDirectoryToCopilotInstructions {
     [void][IO.Directory]::CreateDirectory((Split-Path -Parent $registration))
     $lock = Open-BashEnvironmentLock -Path $registration
     try {
-        $changed = Add-DirectoryToUserEnvironmentList -VariableName 'COPILOT_CUSTOM_INSTRUCTIONS_DIRS' -Directory $AgentsDirectory -Separator ','
+        $changed = Remove-LegacyDirectoryFromUserEnvironment -Directory $AgentsDirectory
     } finally { $lock.Dispose() }
     if ($changed) { Send-EnvironmentChangeBroadcast }
 }

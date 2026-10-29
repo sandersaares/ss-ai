@@ -16,9 +16,12 @@ $PSNativeCommandUseErrorActionPreference = $true
 . "$PSScriptRoot\lib\PullRequestModel.ps1"
 . "$PSScriptRoot\lib\FocusAreaPreparation.ps1"
 
-$validated = Read-FocusAreaMap -MapPath $MapPath -SessionStateDirectory $SessionStateDirectory
-[ordered]@{
-    status = 'Valid'
-    categoryCount = $validated.Map['categories'].Count
-    chapterCount = $validated.Map['chapters'].Count
-} | ConvertTo-Json -Compress
+$sourceLock = Open-PullRequestFileLock -Path (Join-Path $SessionStateDirectory 'focus-area-cache-operation') -Shared
+try {
+    $validated = Read-FocusAreaMap -MapPath $MapPath -SessionStateDirectory $SessionStateDirectory
+    [ordered]@{
+        status = 'Valid'
+        categoryCount = $validated.Map['categories'].Count
+        chapterCount = $validated.Map['chapters'].Count
+    } | ConvertTo-Json -Compress
+} finally { $sourceLock.Dispose() }

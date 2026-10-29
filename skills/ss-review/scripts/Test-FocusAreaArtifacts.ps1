@@ -36,12 +36,12 @@ try {
         # A failure here must overwrite any hit already recorded, so the summary never reports reuse
         # that did not survive validation. The error is rethrown so the caller sees a failed command and
         # takes the recovery path prepare-focus-areas.md prescribes for the stage it is in.
-        Write-FocusAreaCacheDiagnostics `
-            -SessionStateDirectory $SessionStateDirectory `
-            -Diagnostics @{
-                cache = 'Miss'
-                reason = 'ValidationFailed'
-            }
+        $previous = Get-FocusAreaCacheDiagnostics -SessionStateDirectory $SessionStateDirectory
+        $diagnostics = @{ cache = 'Miss'; reason = 'ValidationFailed' }
+        if ($previous.ContainsKey('userInstructionFileCount')) {
+            $diagnostics.userInstructionFileCount = $previous.userInstructionFileCount
+        }
+        Write-FocusAreaCacheDiagnostics -SessionStateDirectory $SessionStateDirectory -Diagnostics $diagnostics
         throw
     }
 

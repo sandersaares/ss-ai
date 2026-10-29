@@ -1,7 +1,6 @@
 # Agent guide for `ss-ai`
 
-Reusable instructions live under `instructions/`, skills under `skills/`,
-native tooling under `packages/`, Waza evaluations under `evals/`, and
+Skills live under `skills/`, native tooling under `packages/`, Waza evaluations under `evals/`, and
 Pester tests under `tests/`. Resolve the active checkout root, including
 worktrees and paths containing spaces; never assume a user's installation path.
 
@@ -14,7 +13,7 @@ explicit parameter positions. Dot-sourced libraries belong under `lib/`.
 `tests/LibraryLayout.Tests.ps1` covers root `Install.ps1`, repository scripts,
 skill executables, and developer/evaluation tools.
 
-Use root `Install.ps1` for instructions, skills, and runtime dependencies;
+Use root `Install.ps1` for skills and runtime dependencies;
 do not introduce a second installation command. Do not configure user-facing
 Copilot preferences. `scripts/Invoke-Tests.ps1` is the test entry point.
 Keep developer tools off the user PATH.
@@ -47,8 +46,11 @@ contract. Test required inclusion and irrelevant-document exclusion.
 Later review stages improve findings under the same eligibility rules.
 Separate finding validity, explanation clarity, and remedy practicality.
 
-When changing native code, read the package's `AGENTS.md` and relevant
-instructions under `instructions/`. Waza guides are conditional evaluation
+Skills discover user-supplied instructions through the comma-separated
+`COPILOT_CUSTOM_INSTRUCTIONS_DIRS` environment variable; do not assume a
+co-located instruction repository or require personal instruction filenames.
+When changing native code, read the package's `AGENTS.md` and applicable
+configured instructions. Waza guides are conditional evaluation
 context, not prerequisites for native or review-helper work.
 
 ## Repository layout

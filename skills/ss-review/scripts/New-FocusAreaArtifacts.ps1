@@ -18,14 +18,17 @@ $PSNativeCommandUseErrorActionPreference = $true
 . "$PSScriptRoot\lib\WorkflowData.ps1"
 . "$PSScriptRoot\lib\FocusAreaExpansion.ps1"
 
-$expansion = Read-WorkflowData -Kind expansion -Path (Join-Path $SessionStateDirectory 'focus-area-expansion-status.json')
-Assert-FocusAreaExpansion -Document $expansion -SessionStateDirectory $SessionStateDirectory -RequireFinal
+$sourceLock = Open-PullRequestFileLock -Path (Join-Path $SessionStateDirectory 'focus-area-cache-operation') -Shared
+try {
+    $expansion = Read-WorkflowData -Kind expansion -Path (Join-Path $SessionStateDirectory 'focus-area-expansion-status.json')
+    Assert-FocusAreaExpansion -Document $expansion -SessionStateDirectory $SessionStateDirectory -RequireFinal
 
-$validated = Read-FocusAreaMap -MapPath $MapPath -SessionStateDirectory $SessionStateDirectory -RequireComplete
-$documents = ConvertTo-FocusAreaDocuments -ValidatedMap $validated
-Write-FocusAreaDocuments -Documents $documents -SessionStateDirectory $SessionStateDirectory
-[ordered]@{
-    status = 'Assembled'
-    categoryCount = $validated.Map['categories'].Count
-    chapterCount = $validated.Map['chapters'].Count
-} | ConvertTo-Json -Compress
+    $validated = Read-FocusAreaMap -MapPath $MapPath -SessionStateDirectory $SessionStateDirectory -RequireComplete
+    $documents = ConvertTo-FocusAreaDocuments -ValidatedMap $validated
+    Write-FocusAreaDocuments -Documents $documents -SessionStateDirectory $SessionStateDirectory
+    [ordered]@{
+        status = 'Assembled'
+        categoryCount = $validated.Map['categories'].Count
+        chapterCount = $validated.Map['chapters'].Count
+    } | ConvertTo-Json -Compress
+} finally { $sourceLock.Dispose() }

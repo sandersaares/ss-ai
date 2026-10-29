@@ -1,11 +1,12 @@
 #Requires -Version 7.6
 <#
 .SYNOPSIS
-    Installs ss-ai instructions, skills, and their shared native dependency.
+    Installs ss-ai skills and their shared native dependency.
 .DESCRIPTION
     Supports Windows and Ubuntu. Requires Rustup/Cargo and native build tools.
     Builds locked local source and verifies the executable on PATH before linking
-    agent material. Does not configure Copilot interaction settings or authenticate
+    skills. Removes recognized legacy ss-ai instruction registration, but does not
+    install instructions, configure Copilot interaction settings, or authenticate
     provider tools. Run separately in Windows and each Linux user environment.
 .PARAMETER HomeDirectory
     User home containing .copilot and .config. Defaults to the current user's home.

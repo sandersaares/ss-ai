@@ -76,11 +76,38 @@ The mode never creates synthetic human verdicts or merge decisions. It stops on 
 
 ## Worker input boundary
 
-The installed skill resolves its filesystem link to the canonical checkout.
-Preparation copies the sibling `instructions/` tree under
-`instruction-set-source/ss-ai/instructions/`. The generation recipe and exact
-source bytes participate in the cache key, so incompatible instruction
-provenance produces a miss rather than requiring a legacy cache reader.
+`Copy-ReviewInstructionSources.ps1` snapshots the skill's built-in focus areas
+and recursively discovers `AGENTS.md` and `*.instructions.md` under the roots
+in `COPILOT_CUSTOM_INSTRUCTIONS_DIRS`. The comma-separated list accepts spaces
+inside paths, trims surrounding whitespace, ignores empty entries, and resolves
+relative entries against the caller's working directory without shell expansion.
+Repeated identical absolute roots are included once. Discovery compares resolved
+path identities ordinally, preserving distinct Unicode spellings without assuming
+filesystem case sensitivity from the operating system.
+
+The snapshot uses `skill/focus-areas.md` and `external/<root-identity>/<relative-path>`.
+Each root identity hashes its absolute configured path, keeping equally named files
+from distinct roots separate and binding cache provenance to the instruction owner.
+The command returns the root-to-prefix mapping for reference expansion and learning.
+Directory links are traversed with ancestry-cycle detection, including installed
+`.github/instructions` links. Discovery excludes the current review's session-state
+tree, resolving linked ancestors and links into its descendants so generated
+copies cannot become instruction inputs on a later snapshot.
+Discovery resolves links before filtering file types because a dangling directory
+link can appear as a file. Aliases into generated session state remain excluded
+even when their copied targets no longer exist.
+Missing/unreadable roots or files and unresolved links fail explicitly;
+empty roots and an empty configuration are valid.
+
+Copying preserves exact bytes and permits concurrent readers and atomic source
+replacement. Publication replaces the complete snapshot under the same retained
+session lock as cache operations, with rollback if replacement fails. Snapshot
+consumers hold that lock in shared mode across source indexing, span reads,
+validation, rendering and output publication. They acquire it before any per-document
+lock, so concurrent readers can proceed while snapshot and cache replacement wait.
+Authorized repository sources are added separately before lookup. The generation recipe,
+discovery implementation, exact source paths, and source bytes participate in
+the cache key, so incompatible instruction provenance produces a miss.
 Runtime scripts, report templates, and pinned npm manifests stay together in
 the skill tree so installed links and checkout-relative use share assets.
 
@@ -674,9 +701,13 @@ Stores and restores wait through temporary cache-key contention. Assembly and
 cache copies also hold the session artifact-set lock throughout replacement or
 inspection, so another command cannot observe a partly swapped set.
 
-Diagnostics record whether the cache was used and whether source expansion was
-degraded. Publication consumes those diagnostics without coupling substantive
-finding content to cache behavior.
+Diagnostics record whether the cache was used, the discovered user instruction-file
+count, and whether source expansion was degraded. Restore counts the current
+snapshot's `external/` files before recording either Hit or Miss, rather than
+reusing a count from cached artifacts or rediscovering a changed environment.
+Store merges preserve that count, and failed artifact validation carries it
+forward while resetting cache status to Miss. Publication displays it beside
+the cache result without coupling substantive finding content to cache behavior.
 
 ## Pull request capture layout
 

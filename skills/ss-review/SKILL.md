@@ -458,8 +458,8 @@ If changes are needed, create a new Git worktree to prepare a pull request in th
 The relevant repo depends on the specific instructions/guidelines that need updates:
 
 * The work being reviewed may have its own instructions and guidelines, in which case a pull request should be created in that repo.
-* The `ss-ai` checkout containing this skill supplies the canonical `instructions/` bundle referenced during review preparation.
-* Other sources of instructions may be present in the current context (due to user-specific configuration), in which case a pull request should be created in the repo that contains those instructions.
+* User-scoped instructions come from the roots configured in `COPILOT_CUSTOM_INSTRUCTIONS_DIRS`. Use the source-root mapping returned during preparation to locate their owning repository; never assume that the skill's checkout owns them.
+* The skill's own `focus-areas.md` and workflow guidance belong to the `ss-ai` repository.
 
 If you cannot determine the correct repo for some changes, propose the changes directly to the user and ask how to best apply them. You may create multiple pull requests if the changes span multiple repos.
 
