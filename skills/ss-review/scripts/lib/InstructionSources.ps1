@@ -87,13 +87,14 @@ function Get-ReviewInstructionFile {
         $identity = [IO.Path]::TrimEndingDirectorySeparator($directory.FullName)
         # Generated instructions are outputs, never new user guidance. Check resolved
         # descendants too, because a link can enter below the session directory itself.
-        if ($identity -ceq $ExcludedDirectory -or $identity.StartsWith($excludedPrefix, [StringComparison]::Ordinal)) {
+        if ([StringComparer]::Ordinal.Equals($identity, $ExcludedDirectory) -or $identity.StartsWith($excludedPrefix, [StringComparison]::Ordinal)) {
             continue
         }
-        if ($current.Ancestors -ccontains $identity) {
+        # Linguistic comparisons can equate distinct Unicode directory names.
+        $ancestors = [Collections.Generic.HashSet[string]]::new([string[]]$current.Ancestors, [StringComparer]::Ordinal)
+        if (-not $ancestors.Add($identity)) {
             throw "Configured instruction directory contains a link cycle: $($current.Path)"
         }
-        $ancestors = @($current.Ancestors) + $identity
         foreach ($child in (Get-ChildItem -LiteralPath $directory.FullName -Force | Sort-Object -Property Name -CaseSensitive)) {
             $relative = if ($current.Relative) { "$($current.Relative)/$($child.Name)" } else { $child.Name }
             if ($null -ne $child.LinkTarget) {
@@ -105,7 +106,7 @@ function Get-ReviewInstructionFile {
                 }
                 $targetParent = Resolve-ReviewInstructionDirectory -Path (Split-Path -Parent $target.FullName) -AllowMissing
                 $targetPath = Join-Path $targetParent.FullName $target.Name
-                if ($targetPath -ceq $ExcludedDirectory -or $targetPath.StartsWith($excludedPrefix, [StringComparison]::Ordinal)) {
+                if ([StringComparer]::Ordinal.Equals($targetPath, $ExcludedDirectory) -or $targetPath.StartsWith($excludedPrefix, [StringComparison]::Ordinal)) {
                     continue
                 }
                 if (-not $target.Exists) {

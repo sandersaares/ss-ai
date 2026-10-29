@@ -81,8 +81,9 @@ and recursively discovers `AGENTS.md` and `*.instructions.md` under the roots
 in `COPILOT_CUSTOM_INSTRUCTIONS_DIRS`. The comma-separated list accepts spaces
 inside paths, trims surrounding whitespace, ignores empty entries, and resolves
 relative entries against the caller's working directory without shell expansion.
-Repeated identical absolute roots are included once; path comparisons do not
-assume filesystem case sensitivity from the operating system.
+Repeated identical absolute roots are included once. Discovery compares resolved
+path identities ordinally, preserving distinct Unicode spellings without assuming
+filesystem case sensitivity from the operating system.
 
 The snapshot uses `skill/focus-areas.md` and `external/<root-identity>/<relative-path>`.
 Each root identity hashes its absolute configured path, keeping equally named files

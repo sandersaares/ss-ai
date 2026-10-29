@@ -80,6 +80,44 @@ Describe 'ss-review configured instruction discovery' {
         $result.externalFileCount | Should -Be 0
     }
 
+    It 'distinguishes Unicode path identities during <Case>' -ForEach @(
+        @{ Case = 'root exclusion' }
+        @{ Case = 'linked-target exclusion' }
+        @{ Case = 'linked ancestry checks' }
+    ) {
+        # Canonically equivalent spellings expose linguistic equality without relying on culture.
+        $composed = Join-Path $script:Base ([string][char]0x00E9)
+        $decomposed = Join-Path $script:Base ('e' + [char]0x0301)
+        [void][IO.Directory]::CreateDirectory($composed)
+        [void][IO.Directory]::CreateDirectory($decomposed)
+        [IO.File]::WriteAllText((Join-Path $composed 'identity-probe'), 'Distinct directory probe.')
+        if ([IO.File]::Exists((Join-Path $decomposed 'identity-probe'))) {
+            Set-ItResult -Skipped -Because 'The fixture filesystem identifies these Unicode spellings as one directory.'
+            return
+        }
+        $source = New-InstructionFixture -Root $decomposed -Relative 'custom.instructions.md'
+        $root = $decomposed
+        $relative = 'custom.instructions.md'
+        $link = $null
+        if ($Case -ne 'linked ancestry checks') { $script:Session = $composed }
+        if ($Case -ne 'root exclusion') {
+            $root = if ($Case -eq 'linked ancestry checks') { $composed } else { Join-Path $script:Base 'configured' }
+            [void][IO.Directory]::CreateDirectory($root)
+            $link = Join-Path $root 'linked'
+            $kind = if ($IsWindows) { 'Junction' } else { 'SymbolicLink' }
+            New-Item -ItemType $kind -Path $link -Target $decomposed | Out-Null
+            $relative = 'linked\custom.instructions.md'
+        }
+        try {
+            $result = Copy-TestInstructions -Directories $root
+            $result.externalFileCount | Should -Be 1
+            $copy = Join-Path $result.sourceDirectory "$($result.roots[0].prefix)\$relative"
+            [IO.File]::ReadAllBytes($copy) | Should -Be ([IO.File]::ReadAllBytes($source))
+        } finally {
+            if ($null -ne $link) { [IO.Directory]::Delete($link) }
+        }
+    }
+
     It 'fails explicitly on a missing root and leaves the previous snapshot intact' {
         New-InstructionFixture -Root $script:Base -Relative 'previous.instructions.md' | Out-Null
         $first = Copy-TestInstructions -Directories $script:Base
