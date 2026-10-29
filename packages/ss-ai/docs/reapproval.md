@@ -207,6 +207,19 @@ draft activity does not change approval authority.
 System notifications with null or omitted property bags do not supply vote,
 reset, or reviewer authority. Inspection does not interpret their prose.
 
+Reviewer-decline events use the typed `CodeReviewReviewersUpdatedNumDeclined`
+count, `CodeReviewReviewersUpdatedChangedIdentity` identity mapping, and
+`CodeReviewReviewersUpdatedChangedDecline` string state. Inspection retains
+these fields and replays the events in service-time order alongside votes.
+A decline invalidates preceding approval authority and reports `ineligible`
+with reason `pendingHumanReview` until superseded. Undoing a decline neither
+grants approval authority nor erases withdrawals and negative votes.
+A later direct account-owned positive vote establishes a new approval event
+and source anchor; a proxy vote does not clear a decline.
+Current decline and pending-review flags still veto renewal. Malformed decline
+fields, incomplete bulk identity evidence, and ambiguous decision ordering
+remain explicit failures.
+
 Deleted threads and comments do not contribute events, pending reviews, or
 renewal authority. Their payloads may be absent; complete observations still retain
 the returned tombstones and fence changes to them. A current positive vote alone

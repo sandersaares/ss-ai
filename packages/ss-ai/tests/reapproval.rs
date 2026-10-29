@@ -2680,6 +2680,68 @@ fn native_stale_evidence_recovery_preserves_assessment_and_effect_boundaries() {
     stale_refresh_preserves_accepted_and_unknown_effects();
 }
 
+/// Inspection persists chronological decline decisions without any service effects.
+#[test]
+fn ado_decline_history_inspection_retains_evidence_and_respects_later_votes() {
+    let _guard = PROCESS_TEST_LOCK
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner);
+    let repository = TempDir::new().unwrap();
+    let (old, new) = sources(repository.path());
+    for (later_vote, status, reason) in [
+        (None, "ineligible", Some("pendingHumanReview")),
+        (Some(0), "ineligible", Some("approvalWithdrawn")),
+        (Some(-10), "ineligible", Some("negativeDecision")),
+        (Some(10), "alreadyValid", None),
+    ] {
+        let scope = TempDir::new().unwrap();
+        let root = scope.path().join("run");
+        let provider = Provider::ado(repository.path(), &old, &new);
+        let decline: Value = serde_json::from_str(include_str!(
+            "../../ss-ai-review/tests/fixtures/ado-reviewer-decline.json"
+        ))
+        .unwrap();
+        provider.evidence.borrow_mut()["threads"]
+            .as_array_mut()
+            .unwrap()
+            .push(decline["thread"].clone());
+        if let Some(vote) = later_vote {
+            provider.ado_vote(vote, 4, "2026-01-01T13:00:00Z");
+        }
+        let inspected = discover_inspect(&root, &provider, false);
+        assert_eq!(inspected["items"][0]["status"], status, "{inspected}");
+        assert!(inspected["items"][0]["snapshotDigest"].is_string());
+        assert_eq!(inspected["items"][0]["error"], Value::Null);
+        let stored: Value =
+            serde_json::from_slice(&fs::read(root.join("run.json")).unwrap()).unwrap();
+        let inspection = &stored["inventory"][0]["inspection"];
+        assert_eq!(inspection["decision"]["status"], status, "{inspection}");
+        if let Some(reason) = reason {
+            assert_eq!(inspection["decision"]["reason"], reason);
+        } else {
+            assert_eq!(inspection["decision"]["approvalEventId"], "4");
+        }
+        let captured = &inspection["evidence"]["observation"]["threads"];
+        let decline = captured
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|thread| thread["id"] == 90)
+            .unwrap();
+        assert_eq!(
+            decline["properties"]["CodeReviewReviewersUpdatedChangedDecline"]["$value"],
+            "True"
+        );
+        assert_eq!(
+            decline["properties"]["CodeReviewReviewersUpdatedChangedIdentity"]["$value"],
+            "1"
+        );
+        let results = invoke(&root, &provider, "results", &[]).unwrap();
+        assert_eq!(results["items"][0]["status"], status);
+        assert_eq!(provider.writes.get(), 0);
+    }
+}
+
 /// Project-wide updates cannot invalidate capture, approval, or needs-review preflight.
 #[test]
 fn ado_project_bookkeeping_does_not_stale_capture_publication_or_notice() {

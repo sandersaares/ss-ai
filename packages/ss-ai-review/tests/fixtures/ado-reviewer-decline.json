@@ -1,0 +1,29 @@
+{
+  "provenance": {
+    "source": "Read-only ADO Services history inspection of a reviewer decline followed by a direct positive vote.",
+    "sanitization": "Identities and thread identifiers replaced; timestamps synthetic; private names, URLs and generated prose omitted.",
+    "limitation": "The captured transition sets ChangedDecline to True. False transitions in tests are synthetic and never establish approval authority."
+  },
+  "thread": {
+    "id": 90,
+    "publishedDate": "2026-01-01T00:28:00Z",
+    "isDeleted": false,
+    "status": null,
+    "properties": {
+      "CodeReviewThreadType": {"$type": "System.String", "$value": "ReviewersUpdate"},
+      "CodeReviewReviewersUpdatedByIdentity": {"$type": "System.String", "$value": "1"},
+      "CodeReviewReviewersUpdatedChangedDecline": {"$type": "System.String", "$value": "True"},
+      "CodeReviewReviewersUpdatedChangedIdentity": {"$type": "System.String", "$value": "1"},
+      "CodeReviewReviewersUpdatedNumAdded": {"$type": "System.Int32", "$value": 0},
+      "CodeReviewReviewersUpdatedNumChanged": {"$type": "System.Int32", "$value": 0},
+      "CodeReviewReviewersUpdatedNumDeclined": {"$type": "System.Int32", "$value": 1},
+      "CodeReviewReviewersUpdatedNumRemoved": {"$type": "System.Int32", "$value": 0}
+    },
+    "identities": {
+      "1": {"id": "10000000-0000-4000-8000-000000000001"}
+    },
+    "comments": [
+      {"id": 1, "commentType": "system", "publishedDate": "2026-01-01T00:28:00Z"}
+    ]
+  }
+}
