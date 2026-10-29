@@ -186,6 +186,12 @@ Dismissals without proven source-change invalidation are `ineligible` with reaso
 `approvalDismissed`. Unknown renewal markers and ambiguous ordering are explicit
 service failures. A proven commit-caused dismissal produces
 `assessmentRequired` with the original external review and source commit.
+An effective last-push approval requirement from classic branch protection or
+organization/repository rulesets also produces `assessmentRequired` for a retained
+`APPROVED` review on another source revision. An approval bound to the current
+source remains `alreadyValid`. Different commits without that requirement do not
+establish expiry. Unavailable or malformed policy evidence fails explicitly;
+classification does not assert aggregate merge eligibility.
 UI and pre-install approvals need no historical target snapshot. Renewals link
 back to that external anchor without moving it.
 

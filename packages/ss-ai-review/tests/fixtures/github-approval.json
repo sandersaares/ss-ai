@@ -5,13 +5,14 @@
     "source": "https://github.com/github/docs/pull/46209",
     "contract": "https://docs.github.com/en/graphql/reference/objects#reviewdismissedevent",
     "description": "Read-only REST and GraphQL observations establish the review states, ordering, review-ID join, and distinct approved and staleness-causing commits. Identifiers, repository metadata, refs, timestamps, and prose are synthetic. This is not a complete capture of the source PR.",
-    "limitations": "The source establishes commit-caused dismissal, not a manual-dismissal experiment or a historical target tip. Null-cause and other counterexamples are explicit test mutations."
+    "limitations": "The source establishes commit-caused dismissal, not a manual-dismissal experiment or a historical target tip. The disabled last-push policy is synthetic. Null-cause and other counterexamples are explicit test mutations."
   },
   "accountId": "42",
   "repositoryId": "123",
   "observedAt": "2026-01-10T00:00:00Z",
   "evidence": {
     "scope": "history",
+    "policy": { "requireLastPushApproval": false },
     "pullRequest": {
       "number": 1,
       "state": "open",

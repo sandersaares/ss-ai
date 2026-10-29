@@ -98,7 +98,11 @@ automatic renewal does not reset it. Never reassess an active marker.
 The anchor is the latest applicable approval by the authenticated account
 not issued by this skill. Renewals retain that anchor. Later human withdrawals,
 negative decisions, removals, and pending reviews prevent automatic renewal.
-GitHub requires a service-proven change-caused dismissal, not merely new commits.
+GitHub requires either a service-proven change-caused dismissal or an effective
+last-push approval requirement with a retained approval on an older source
+revision. That requirement can come from classic protection or organization or
+repository rulesets. A different commit alone does not establish expiry; a retained
+`APPROVED` state alone does not prove source freshness under that requirement.
 
 GitHub UI approvals and approvals predating installation can qualify without
 instrumented full reviews, a cache observation, or a warm-up run. Only exact

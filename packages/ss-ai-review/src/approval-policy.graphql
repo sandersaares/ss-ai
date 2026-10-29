@@ -1,0 +1,15 @@
+query ApprovalPolicy($owner: String!, $repo: String!, $num: Int!) {
+  repository(owner: $owner, name: $repo) {
+    pullRequest(number: $num) {
+      headRefOid
+      baseRefName
+      baseRef {
+        name
+        branchProtectionRule {
+          requiresApprovingReviews
+          requireLastPushApproval
+        }
+      }
+    }
+  }
+}

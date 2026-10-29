@@ -1863,10 +1863,41 @@ impl Process for GitHubApproval {
             "repos/example/widgets/pulls/1/comments?per_page=100" => {
                 pages(&self.evidence["reviewComments"])
             }
+            "repos/example/widgets/rules/branches/fixture-target?per_page=100" => {
+                assert!(arguments.iter().any(|argument| argument == "--paginate"));
+                assert!(arguments.iter().any(|argument| argument == "--slurp"));
+                let required = self.evidence["policy"]["requireLastPushApproval"].clone();
+                let required = if self.fault == "policyMovement" && self.pr_reads.get() > 1 {
+                    json!(!required.as_bool().unwrap())
+                } else {
+                    required
+                };
+                // Both active rulesets contribute; a later disabled requirement
+                // or an unrelated merge check must not override an earlier one.
+                json!([[{"type": "pull_request", "parameters": {
+                    "require_last_push_approval": required
+                }}], [
+                    {"type": "required_status_checks"},
+                    {"type": "pull_request", "parameters": {"require_last_push_approval": false}}
+                ]])
+            }
             "graphql" => {
                 let request: Value = serde_json::from_slice(input).unwrap();
                 let variables = &request["variables"];
-                if request["query"].as_str().unwrap().contains("committedDate") {
+                let query = request["query"].as_str().unwrap();
+                if query.contains("ApprovalPolicy") {
+                    let classic = if matches!(self.fault, "classicLastPush" | "classicDisabled") {
+                        json!({"requiresApprovingReviews": self.fault != "classicDisabled",
+                            "requireLastPushApproval": true})
+                    } else {
+                        Value::Null
+                    };
+                    json!({"data": {"repository": {"pullRequest": {
+                        "headRefOid": self.evidence["pullRequest"]["head"]["sha"],
+                        "baseRefName": "fixture-target",
+                        "baseRef": {"name": "fixture-target", "branchProtectionRule": classic}
+                    }}}})
+                } else if query.contains("committedDate") {
                     let date = if variables["num"] == 1 || self.fault == "bothRecent" {
                         "2026-09-27T00:00:00Z"
                     } else {
@@ -2072,6 +2103,57 @@ fn github_inspection_joins_complete_old_approval_history_in_both_modes() {
 }
 
 #[test]
+fn github_retained_approval_uses_effective_rulesets_and_classic_last_push_requirements() {
+    for (fault, required, current_source, status) in [
+        ("", true, false, "assessmentRequired"),
+        ("classicLastPush", false, false, "assessmentRequired"),
+        ("classicDisabled", false, false, "alreadyValid"),
+        ("", false, false, "alreadyValid"),
+        ("", true, true, "alreadyValid"),
+    ] {
+        let root = fixture();
+        let mut provider = GitHubApproval::new();
+        provider.valid();
+        provider.fault = fault;
+        provider.evidence["policy"]["requireLastPushApproval"] = json!(required);
+        if current_source {
+            provider.evidence["reviews"][1]["commit_id"] =
+                provider.evidence["pullRequest"]["head"]["sha"].clone();
+        }
+        run(
+            &arguments(root.path(), "https://github.com/example/widgets"),
+            &provider,
+            &NoHttp,
+            &FixedClock,
+        )
+        .unwrap();
+        let output = run(
+            &github_inspect_arguments(root.path(), 1),
+            &provider,
+            &NoHttp,
+            &FixedClock,
+        )
+        .unwrap();
+        let result: Value = serde_json::from_str(&output).unwrap();
+        assert_eq!(result["items"][0]["status"], status, "{fault}");
+        let saved = record(root.path());
+        assert_eq!(
+            saved["inventory"][0]["inspection"]["evidence"]["observation"]["policy"]["requireLastPushApproval"],
+            required || fault == "classicLastPush"
+        );
+        assert_eq!(
+            provider
+                .calls
+                .borrow()
+                .iter()
+                .filter(|path| path.contains("/rules/branches/"))
+                .count(),
+            2
+        );
+    }
+}
+
+#[test]
 fn unknown_renewal_is_a_counted_failure_not_completed_indeterminate_work() {
     let root = fixture();
     let mut provider = GitHubApproval::new();
@@ -2119,17 +2201,26 @@ fn github_capture_failures_cannot_leave_success_shaped_snapshots() {
         "discussion",
         "missingDecision",
         "conflictingComment",
+        "policyMovement",
+        "malformedPolicy",
     ] {
         let root = fixture();
         let mut provider = GitHubApproval::new();
         provider.fault = fault;
-        if fault == "missingDecision" {
-            provider.evidence["timeline"]
-                .as_array_mut()
-                .unwrap()
-                .remove(1);
-        } else if fault == "conflictingComment" {
-            provider.evidence["timeline"][0]["state"] = json!("APPROVED");
+        match fault {
+            "missingDecision" => {
+                provider.evidence["timeline"]
+                    .as_array_mut()
+                    .unwrap()
+                    .remove(1);
+            }
+            "conflictingComment" => {
+                provider.evidence["timeline"][0]["state"] = json!("APPROVED");
+            }
+            "malformedPolicy" => {
+                provider.evidence["policy"]["requireLastPushApproval"] = Value::Null;
+            }
+            _ => {}
         }
         run(
             &arguments(root.path(), "https://github.com/example/widgets"),
@@ -2188,7 +2279,7 @@ fn github_capture_failures_cannot_leave_success_shaped_snapshots() {
             assert!(saved["inventory"][0]["inspection"]["snapshotDigest"].is_null());
             assert!(saved["inventory"][0]["inspection"]["decision"].is_null());
         }
-        if matches!(fault, "movement" | "discussion") {
+        if matches!(fault, "movement" | "discussion" | "policyMovement") {
             assert_eq!(
                 saved["inventory"][0]["inspection"]["error"]["kind"],
                 "staleEvidence"
