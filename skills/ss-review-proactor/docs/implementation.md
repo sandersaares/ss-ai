@@ -8,8 +8,8 @@ eligibility, ordering, claim writes, the waiting period, and revalidation.
 It emits one JSON result and keeps a local journal in session state.
 
 Loop control belongs to the primary agent, not the selection executable.
-The agent defaults to one review and repeats stages 1 through 5 only under
-the user's explicit loop instruction. It retains the latest instruction and
+The agent repeats stages 1 through 5 by default and runs only one review under
+the user's explicit one-shot instruction. It retains the latest instruction and
 the stage-5 return point in its prose checkpoint through `ss-review`, pauses,
 and compaction. A request to make the current review the last one disables the
 next cycle without interrupting that review or answering its human gates.
@@ -143,8 +143,9 @@ discussion as diagnostics.
 
 ## Verification
 
-Instruction contract tests cover opt-in control, the latest-user-instruction
-boundary, completion-only continuation, empty-selection termination, and
+Instruction contract tests cover default looping, explicit one-shot control,
+the latest-user-instruction boundary, completion-only continuation,
+empty-selection termination, and
 per-cycle state isolation across the proactor and review handoff. Recovery
 contracts cover corrected invocations, bounded transient retries, preserved
 human gates, and reconciliation before replaying ambiguous external writes.
