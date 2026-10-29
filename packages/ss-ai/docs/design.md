@@ -11,8 +11,8 @@ The first consumers are `ss-review-proactor` for selection and confirmation
 and `ss-review` for reviewer registration and exact Git comparisons. The
 proactor's intentional handoff to `ss-review` remains in the primary user-facing
 session. Registration does
-not approve a pull request. Review capture, findings, report rendering, and
-publication remain in `ss-review`.
+not approve a pull request. The `ss-review` workflow owns review capture,
+judgments, report rendering, and publication.
 
 ## Version compatibility
 
@@ -179,6 +179,14 @@ capture identities, replay the last page by default, and require an explicit
 continuation or restart. Authorship decisions remain separate from captured
 evidence. Invalid or changed inputs produce errors rather than incomplete
 results.
+
+## Local finding artifacts
+
+Local finding commands maintain reviewer artifacts, their finding history, and
+consolidation plans without contacting a provider. Artifact completion remains
+explicit, including for a review with no findings. Identifiers remain stable
+through updates and are not reused after removal. The review workflow keeps
+coverage validation and audit decisions separate from these local operations.
 
 ## Functional areas
 

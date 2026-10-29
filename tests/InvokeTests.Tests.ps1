@@ -12,6 +12,8 @@ BeforeAll {
             [switch] $FailClippy,
             [switch] $FailPrepare,
             [switch] $FailNativePester,
+            [switch] $NativePrerequisiteSucceeds,
+            [string] $NativePesterName = 'SsReviewGitDiff.Tests.ps1',
             [int] $PreviousExit = 0,
             [int] $TestExit = 0
         )
@@ -42,9 +44,19 @@ function Invoke-RustTestCargo {
         $truth = if ($FailPester) { '$false' } else { '$true' }
         [IO.File]::WriteAllText($test, "Describe 'fixture' { It 'reports the requested outcome' { `$global:LASTEXITCODE = $TestExit; $truth | Should -BeTrue } }")
         if ($FailNativePester) {
-            [IO.File]::WriteAllText((Join-Path $root 'SsReviewGitDiff.Tests.ps1'), "throw 'A blocked native consumer must not run'")
+            [IO.File]::WriteAllText((Join-Path $root $NativePesterName), "throw 'A blocked native consumer must not run'")
         }
-        $testPath = if ($FailNativePester) { $root } else { $test }
+        if ($NativePrerequisiteSucceeds) {
+            [IO.File]::WriteAllText((Join-Path $root $NativePesterName), @'
+Describe 'prepared helper' {
+    It 'receives the prebuilt test executable' {
+        $env:SS_AI_FINDING_TEST_EXECUTABLE | Should -Not -BeNullOrEmpty
+        Test-Path -LiteralPath $env:SS_AI_FINDING_TEST_EXECUTABLE -PathType Leaf | Should -BeTrue
+    }
+}
+'@)
+        }
+        $testPath = if ($FailNativePester -or $NativePrerequisiteSucceeds) { $root } else { $test }
         $suiteArgument = if ($Suite) { " -Suite $Suite" } else { '' }
 
         # Distinct nonzero statuses identify which command boundary supplied a failure.
@@ -69,8 +81,22 @@ function cargo {
 
     [IO.File]::AppendAllText('__LOG__', "$($args[0])`n")
     if ($args[0] -eq 'build') {
-        $global:LASTEXITCODE = 29
+        $global:LASTEXITCODE = if (__NATIVE_SUCCEEDS__) { 0 } else { 29 }
         return
+    }
+    if ($args[0] -eq 'metadata') {
+        $global:LASTEXITCODE = 0
+        return (@{ target_directory = '__ROOT__' } | ConvertTo-Json -Compress)
+    }
+    if ($args[0] -eq 'test' -and $args -contains 'finding_plans') {
+        $global:LASTEXITCODE = 0
+        $executable = Join-Path '__ROOT__' 'finding-helper'
+        [IO.File]::WriteAllText($executable, 'fixture')
+        return (@{
+            reason = 'compiler-artifact'
+            target = @{ name = 'finding_plans' }
+            executable = $executable
+        } | ConvertTo-Json -Compress)
     }
 
     $global:LASTEXITCODE = if ($args[0] -eq 'clippy') { __CLIPPY_EXIT__ } else { 0 }
@@ -111,6 +137,8 @@ exit $LASTEXITCODE
         $code = $code.Replace('__LOG__', $log.Replace("'", "''")).Replace('__CLIPPY_EXIT__', [string]$clippyExit).
             Replace('__RUNNER__', $runner.Replace("'", "''")).Replace('__TEST__', $testPath.Replace("'", "''")).
             Replace('__SUITE__', $suiteArgument).Replace('__PREVIOUS_EXIT__', [string]$PreviousExit).
+            Replace('__ROOT__', $root.Replace("'", "''")).
+            Replace('__NATIVE_SUCCEEDS__', $(if ($NativePrerequisiteSucceeds) { '$true' } else { '$false' })).
             Replace('__FAIL_PREPARE__', $(if ($FailPrepare) { '$true' } else { '$false' }))
 
         $start = [Diagnostics.ProcessStartInfo]::new((Get-Process -Id $PID).Path)
@@ -173,6 +201,28 @@ Describe 'Repository test entry point' {
         $result.code | Should -Not -Be 0
         $result.output | Should -Match 'reports the requested outcome'
         $result.output | Should -Not -Match 'A blocked native consumer must not run'
+    }
+
+    It 'builds the native prerequisite for <Name>' -ForEach @(
+        @{ Name = 'SsReviewFindingModel.Tests.ps1' }
+        @{ Name = 'SsReviewFindingConsolidation.Tests.ps1' }
+        @{ Name = 'SsReviewSelfReview.Tests.ps1' }
+        @{ Name = 'SsReviewSharedFiles.Tests.ps1' }
+        @{ Name = 'SsReviewWorkflowData.Tests.ps1' }
+        @{ Name = 'SsReviewWork.Tests.ps1' }
+        @{ Name = 'SsReviewCoverageBatch.Tests.ps1' }
+    ) {
+        $result = Invoke-TestRunnerFixture -FailNativePester -NativePesterName $Name
+        $result.calls | Should -Be @('build') -Because $result.output
+        $result.code | Should -Not -Be 0
+        $result.output | Should -Not -Match 'A blocked native consumer must not run'
+    }
+
+    It 'prepares a private concurrency helper before running shared-file tests' {
+        $result = Invoke-TestRunnerFixture -NativePrerequisiteSucceeds -NativePesterName 'SsReviewSharedFiles.Tests.ps1'
+        $result.code | Should -Be 0 -Because $result.output
+        $result.calls | Should -Be @('build', 'metadata', 'test') -Because $result.output
+        $result.output | Should -Match 'receives the prebuilt test executable'
     }
 
     It 'rejects combining Rust-only selection with Pester paths' {

@@ -105,7 +105,7 @@ Describe 'Shared workflow file transactions' {
         $path = Join-Path $script:Root 'findings.json'
         $artifact = New-FindingArtifactDocument -Kind reviewer -ReviewerId shared -FocusArea correctness
         Write-FindingArtifact -Path $path -Document $artifact
-        $commands = @(foreach ($name in @('alpha', 'beta', 'gamma')) {
+        $findings = @(foreach ($name in @('alpha', 'beta', 'gamma')) {
             $findingPath = Join-Path $script:Root "$name.json"
             $finding = @{
                 title = $name; description = 'Preserve concurrent work.'
@@ -113,14 +113,61 @@ Describe 'Shared workflow file transactions' {
                 recommendedAction = 'Serialize the transaction.'; anchor = @{ kind = 'file'; path = 'source.ps1' }
             }
             Write-PullRequestOutputFile -Path $findingPath -Content (ConvertTo-JsonText -Value $finding)
-            @{ name = 'Add-Finding.ps1'; parameters = @{ ArtifactPath = $path; FindingPath = $findingPath } }
+            $findingPath
         })
-        $results = @(Invoke-ContendedReviewCommand -Path $path -Command $commands)
-        foreach ($result in $results) { $result.exitCode | Should -Be 0 -Because $result.errors }
+        # The native helper signals from its injected contention clock, not a
+        # PowerShell Start-Sleep mock that cannot observe the native process.
+        $nativeTestExecutable = $env:SS_AI_FINDING_TEST_EXECUTABLE
+        if ([string]::IsNullOrWhiteSpace($nativeTestExecutable) -or
+            -not [IO.File]::Exists($nativeTestExecutable)) {
+            throw 'SS_AI_FINDING_TEST_EXECUTABLE must name the prepared native finding test executable.'
+        }
+        $processes = [Collections.Generic.List[object]]::new()
+        $lock = Open-PullRequestFileLock -Path $path
+        try {
+            foreach ($findingPath in $findings) {
+                $start = [Diagnostics.ProcessStartInfo]::new($nativeTestExecutable)
+                $start.WorkingDirectory = Split-Path -Parent $PSScriptRoot
+                $start.UseShellExecute = $false
+                $start.RedirectStandardInput = $true
+                $start.RedirectStandardOutput = $true
+                $start.RedirectStandardError = $true
+                foreach ($argument in @('native_process_lock_interop_helper', '--exact', '--nocapture')) {
+                    $start.ArgumentList.Add($argument)
+                }
+                $start.Environment['SS_AI_TEST_INTEROP_ARTIFACT'] = $path
+                $start.Environment['SS_AI_TEST_INTEROP_FINDING'] = $findingPath
+                $process = [Diagnostics.Process]::Start($start)
+                $processes.Add(@{ process = $process; output = $process.StandardOutput.ReadToEndAsync() })
+            }
+            foreach ($item in $processes) {
+                $diagnostics = [Collections.Generic.List[string]]::new()
+                while ($null -ne ($line = $item.process.StandardError.ReadLine())) {
+                    if ($line -ceq 'lock-contended') { break }
+                    $diagnostics.Add($line)
+                }
+                if ($null -eq $line) { throw "Native child exited before lock contention: $($diagnostics -join [Environment]::NewLine)" }
+            }
+            $lock.Dispose()
+            foreach ($item in $processes) {
+                $item.process.StandardInput.WriteLine('retry')
+                $item.process.StandardInput.Close()
+                $errors = $item.process.StandardError.ReadToEnd()
+                $item.process.WaitForExit()
+                $item.process.ExitCode | Should -Be 0 -Because "$errors $($item.output.GetAwaiter().GetResult())"
+            }
+        } finally {
+            $lock.Dispose()
+            foreach ($item in $processes) { $item.process.StandardInput.Close() }
+            foreach ($item in $processes) {
+                $item.process.WaitForExit()
+                $item.process.Dispose()
+            }
+        }
         $saved = Read-FindingArtifact -Path $path
         @($saved.findings.title) | Should -Be @('alpha', 'beta', 'gamma')
-        @($saved.findings.id | Sort-Object -Unique).Count | Should -Be $commands.Count
-        @($results | ForEach-Object { ($_.output | ConvertFrom-Json).findingId }) | Should -Be @($saved.findings.id)
+        @($saved.findings.id | Sort-Object -Unique).Count | Should -Be $findings.Count
+        @($saved.findings.id) | Should -Be @('shared-1', 'shared-2', 'shared-3')
     }
 
     It 'initializes and appends the shared decision log without losing concurrent decisions' {

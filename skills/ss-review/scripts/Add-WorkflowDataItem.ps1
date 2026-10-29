@@ -11,19 +11,20 @@ param(
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 $PSNativeCommandUseErrorActionPreference = $true
-. "$PSScriptRoot\lib\JsonValue.ps1"
-. "$PSScriptRoot\lib\PullRequestModel.ps1"
-. "$PSScriptRoot\lib\WorkflowData.ps1"
-$item = ConvertFrom-JsonVerbatim -Text ((Read-PullRequestFileText -Path ((Resolve-PullRequestPath -Path $ItemPath))))
-$field = Get-WorkflowListName -Kind $Kind
-Assert-WorkflowData -Kind $Kind -Value ([ordered]@{ schemaVersion = 1; $field = @($item) })
-# Resolve document references at the draft boundary, so moving the assembled plan cannot change them.
-if ($Kind -in @('mergePlan', 'updates') -and (Test-JsonProperty -Node $item -Name 'findingPath')) {
-    $findingPath = $item['findingPath']
-    if ($findingPath -is [string] -and -not [IO.Path]::IsPathFullyQualified($findingPath)) {
-        $item['findingPath'] = [IO.Path]::GetFullPath((Join-Path (Split-Path -Parent (Resolve-PullRequestPath -Path $ItemPath)) $findingPath))
-    }
+if ($Kind -ceq 'decisions') {
+    . "$PSScriptRoot\lib\JsonValue.ps1"
+    . "$PSScriptRoot\lib\PullRequestModel.ps1"
+    . "$PSScriptRoot\lib\WorkflowData.ps1"
+    $item = ConvertFrom-JsonVerbatim -Text (Read-PullRequestFileText -Path (Resolve-PullRequestPath -Path $ItemPath))
+    Assert-WorkflowData -Kind $Kind -Value ([ordered]@{ schemaVersion = 1; decisions = @($item) })
+    $index = if ($PSBoundParameters.ContainsKey('ReplaceIndex')) { $ReplaceIndex } else { -1 }
+    Add-WorkflowListItem -Kind $Kind -Path $Path -Item $item -ReplaceIndex $index
+    @{ status = 'Recorded'; path = (Resolve-PullRequestPath -Path $Path); kind = $Kind } | ConvertTo-Json -Compress
+    return
 }
-$index = if ($PSBoundParameters.ContainsKey('ReplaceIndex')) { $ReplaceIndex } else { -1 }
-Add-WorkflowListItem -Kind $Kind -Path $Path -Item $item -ReplaceIndex $index
-@{ status = 'Recorded'; path = (Resolve-PullRequestPath -Path $Path); kind = $Kind } | ConvertTo-Json -Compress
+. "$PSScriptRoot\lib\NativeWorkflowBridge.ps1"
+$fullPath = $ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath($Path)
+$fullItemPath = $ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath($ItemPath)
+$arguments = @('plan-append', "--kind=$Kind", "--path=$fullPath", "--item-path=$fullItemPath")
+if ($PSBoundParameters.ContainsKey('ReplaceIndex')) { $arguments += "--replace-index=$ReplaceIndex" }
+Invoke-NativeReviewWorkflow -Arguments $arguments

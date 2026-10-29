@@ -148,6 +148,29 @@ without normalization or multi-character expansion. The skill's
 `pwsh-calls/query-pr-context.md` describes the selection and consumption of
 bounded pages.
 
+## Local finding workflow
+
+The `workflow` commands maintain finding artifacts and finding plans without
+provider authentication. For example:
+
+```powershell
+#Requires -Version 7.6
+
+Set-StrictMode -Version Latest
+$ErrorActionPreference = 'Stop'
+$PSNativeCommandUseErrorActionPreference = $true
+
+ss-ai workflow initialize-finding --output-directory "{{DIRECTORY}}" `
+  --reviewer-id "{{REVIEWER_ID}}" --focus-area "{{FOCUS_AREA}}"
+ss-ai workflow plan-initialize --kind updates --path "{{PLAN_PATH}}"
+```
+
+The `workflow --help` output lists the finding lifecycle, validation, index,
+candidate, consolidation, and plan commands. Authored finding content and plan
+items are supplied as UTF-8 JSON files. Completion requires the reviewer's
+file-group journal. The review workflow separately checks manifest-based coverage
+and records audit decisions.
+
 ## Reapproval discovery
 
 Discovery collects open-PR metadata and complete commit timestamps before

@@ -9,8 +9,14 @@ param(
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 $PSNativeCommandUseErrorActionPreference = $true
-. "$PSScriptRoot\lib\JsonValue.ps1"
-. "$PSScriptRoot\lib\PullRequestModel.ps1"
-. "$PSScriptRoot\lib\WorkflowData.ps1"
-New-WorkflowList -Kind $Kind -Path $Path
-@{ status = 'Created'; path = (Resolve-PullRequestPath -Path $Path); kind = $Kind } | ConvertTo-Json -Compress
+if ($Kind -ceq 'decisions') {
+    . "$PSScriptRoot\lib\JsonValue.ps1"
+    . "$PSScriptRoot\lib\PullRequestModel.ps1"
+    . "$PSScriptRoot\lib\WorkflowData.ps1"
+    New-WorkflowList -Kind $Kind -Path $Path
+    @{ status = 'Created'; path = (Resolve-PullRequestPath -Path $Path); kind = $Kind } | ConvertTo-Json -Compress
+    return
+}
+. "$PSScriptRoot\lib\NativeWorkflowBridge.ps1"
+$fullPath = $ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath($Path)
+Invoke-NativeReviewWorkflow -Arguments @('plan-initialize', "--kind=$Kind", "--path=$fullPath")

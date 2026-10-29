@@ -1470,6 +1470,7 @@ dependencies = [
  "ss-ai-git",
  "ss-ai-review",
  "ss-ai-review-context",
+ "ss-ai-review-workflow",
  "ss-ai-runtime",
  "tempfile",
  "url",
@@ -1561,6 +1562,18 @@ name = "ss-ai-review-context-fuzz"
 version = "0.1.0"
 dependencies = [
  "libfuzzer-sys",
+ "serde_json",
+ "ss-ai-review-context",
+ "ss-ai-runtime",
+]
+
+[[package]]
+name = "ss-ai-review-workflow"
+version = "0.1.0"
+dependencies = [
+ "jiff",
+ "ohno",
+ "serde",
  "serde_json",
  "ss-ai-review-context",
  "ss-ai-runtime",

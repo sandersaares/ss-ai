@@ -78,6 +78,7 @@ BeforeAll {
             publishedUtc       = '2024-05-06T07:08:09.0000000Z'
             lastEditedUtc      = $null
             isEdited           = $false
+            isAuthoredBySelf   = $false
             authorship         = 'human'
             authorshipEvidence = @()
         }
@@ -112,6 +113,7 @@ BeforeAll {
             resolution       = 'active'
             kind             = $Kind
             isOutdated       = $false
+            isAuthoredBySelf = $false
             context          = $ThreadContext
             anchorKey        = $Id
             properties       = [ordered]@{}
@@ -173,7 +175,12 @@ BeforeAll {
                 uniqueName  = 'runner@example.invalid'
                 kind        = 'service'
             }
-            pullRequest           = [ordered]@{ title = 'Add retry policy' }
+            pullRequest           = [ordered]@{
+                title                   = 'Add retry policy'
+                description             = $null
+                reviewedSourceCommit    = $null
+                reviewedMergeBaseCommit = $null
+            }
             reviewers             = @()
             revisions             = @()
             threads               = $Thread
@@ -1541,6 +1548,25 @@ Describe 'Finding executables' {
         $accepted['exitCode'] | Should -Be 0
         $refused['exitCode'] | Should -Not -Be 0
         (Get-SingleLineErrorText -Text $refused['standardError']) | Should -BeLike "*'RT_typo'*"
+    }
+
+    It 'rejects malformed captured discussion without coercing fields' {
+        Initialize-TestArtifact | Out-Null
+        $capture = New-CaptureDocument -Platform 'gitHub' -Thread @(
+            New-CaptureThread -Id 'RT_kw1' -Kind 'text' -OpeningCommentId 'PRRC_1' -ThreadContext (New-CaptureThreadContext)
+        )
+        $capture['pullRequest']['description'] = 42
+        $capturePath = Join-Path $script:WorkRoot 'invalid-capture.json'
+        Write-TestJsonFile -Path $capturePath -Value $capture | Out-Null
+
+        $result = Invoke-SkillExecutable -Name 'Add-Finding.ps1' -ArgumentList @(
+            '-ArtifactPath', $script:ArtifactPath
+            '-FindingPath', (New-TestFindingFile -Name 'follow-up.json' -Override @{ followUp = [ordered]@{ threadId = 'RT_kw1'; commentId = 'PRRC_1' } })
+            '-ContextPath', $capturePath
+        )
+
+        $result['exitCode'] | Should -Not -Be 0
+        (Get-JsonArrayProperty -Node (Read-FindingArtifact -Path $script:ArtifactPath) -Name 'findings').Count | Should -Be 0
     }
 
     It 'records a finding produced by synthesis with its provenance' {

@@ -34,23 +34,18 @@ param(
 
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
+$PSNativeCommandUseErrorActionPreference = $true
 
-. "$PSScriptRoot\lib\JsonValue.ps1"
-. "$PSScriptRoot\lib\PullRequestModel.ps1"
-. "$PSScriptRoot\lib\WorkflowData.ps1"
-. "$PSScriptRoot\lib\FindingModel.ps1"
-
-$updates = Get-FindingUpdateRequest -FindingId $FindingId -FindingPath $FindingPath -PlanPath $PlanPath
-$lock = Open-WorkflowDataLock -Path $ArtifactPath
-try {
-    $document = Read-FindingArtifact -Path $ArtifactPath
-    $updated = Set-FindingBatchInArtifact -Document $document -Update $updates
-
-    # Rejected batches leave the previously committed artifact unchanged.
-    Write-FindingArtifact -Path $ArtifactPath -Document $document
-} finally { $lock.Dispose() }
-
-[ordered]@{
-    artifactPath = Resolve-PullRequestPath -Path $ArtifactPath
-    updated      = $updated
-} | ConvertTo-Json -Depth 32 -Compress
+. "$PSScriptRoot\lib\NativeWorkflowBridge.ps1"
+$artifact = $ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath($ArtifactPath)
+$arguments = @('update-finding', "--artifact-path=$artifact")
+if ($FindingId) { $arguments += "--finding-id=$FindingId" }
+if ($FindingPath) {
+    $finding = $ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath($FindingPath)
+    $arguments += "--finding-path=$finding"
+}
+if ($PlanPath) {
+    $plan = $ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath($PlanPath)
+    $arguments += "--plan-path=$plan"
+}
+Invoke-NativeReviewWorkflow -Arguments $arguments
