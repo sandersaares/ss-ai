@@ -18,6 +18,15 @@ BeforeAll {
         Copy-ReviewInstructionSources -SessionStateDirectory $script:Session `
             -SkillRoot $script:Skill -DirectoryList $Directories -BaseDirectory $script:Base
     }
+
+    # Captures the complete corpus so failed refreshes cannot discard or rewrite prior guidance.
+    function Get-TestInstructionSnapshot {
+        param([string] $Directory)
+        @(Get-ChildItem -LiteralPath $Directory -Recurse -File | ForEach-Object {
+            $relative = [IO.Path]::GetRelativePath($Directory, $_.FullName)
+            "$relative`0$([Convert]::ToBase64String([IO.File]::ReadAllBytes($_.FullName)))"
+        } | Sort-Object -CaseSensitive)
+    }
 }
 
 Describe 'ss-review configured instruction discovery' {
@@ -72,9 +81,11 @@ Describe 'ss-review configured instruction discovery' {
     }
 
     It 'fails explicitly on a missing root and leaves the previous snapshot intact' {
-        $first = Copy-TestInstructions -Directories ''
+        New-InstructionFixture -Root $script:Base -Relative 'previous.instructions.md' | Out-Null
+        $first = Copy-TestInstructions -Directories $script:Base
+        $before = @(Get-TestInstructionSnapshot -Directory $first.sourceDirectory)
         { Copy-TestInstructions -Directories (Join-Path $script:Base 'missing') } | Should -Throw
-        Test-Path -LiteralPath (Join-Path $first.sourceDirectory 'skill\focus-areas.md') | Should -BeTrue
+        @(Get-TestInstructionSnapshot -Directory $first.sourceDirectory) | Should -BeExactly $before
     }
 
     It 'rejects a file configured as an instruction root' {
@@ -84,11 +95,13 @@ Describe 'ss-review configured instruction discovery' {
 
     It 'propagates unreadable-source failures and preserves the previous snapshot' {
         $source = New-InstructionFixture -Root $script:Base -Relative 'a.instructions.md'
-        $first = Copy-TestInstructions -Directories ''
+        $first = Copy-TestInstructions -Directories $script:Base
+        $before = @(Get-TestInstructionSnapshot -Directory $first.sourceDirectory)
+        [IO.File]::WriteAllText($source, 'Replacement guidance must not replace the prior corpus on failure.')
         $locked = [IO.File]::Open($source, [IO.FileMode]::Open, [IO.FileAccess]::Write, [IO.FileShare]::None)
         try {
             { Copy-TestInstructions -Directories $script:Base } | Should -Throw
-            Test-Path -LiteralPath (Join-Path $first.sourceDirectory 'skill\focus-areas.md') | Should -BeTrue
+            @(Get-TestInstructionSnapshot -Directory $first.sourceDirectory) | Should -BeExactly $before
         } finally { $locked.Dispose() }
         @(Get-ChildItem -LiteralPath $script:Session -Filter '*.tmp').Count | Should -Be 0
     }
@@ -119,6 +132,9 @@ Describe 'ss-review configured instruction discovery' {
     }
 
     It 'reports a dangling instruction-directory link instead of omitting guidance' {
+        New-InstructionFixture -Root $script:Base -Relative 'previous.instructions.md' | Out-Null
+        $previous = Copy-TestInstructions -Directories $script:Base
+        $before = @(Get-TestInstructionSnapshot -Directory $previous.sourceDirectory)
         $target = Join-Path $TestDrive ([guid]::NewGuid().ToString('N'))
         [void][IO.Directory]::CreateDirectory($target)
         $parent = Join-Path $script:Base '.github'
@@ -127,10 +143,9 @@ Describe 'ss-review configured instruction discovery' {
         $link = Join-Path $parent 'instructions'
         New-Item -ItemType $kind -Path $link -Target $target | Out-Null
         [IO.Directory]::Delete($target)
-        $previous = Copy-TestInstructions -Directories ''
         try {
             { Copy-TestInstructions -Directories $script:Base } | Should -Throw '*missing*link target*'
-            Test-Path -LiteralPath (Join-Path $previous.sourceDirectory 'skill\focus-areas.md') | Should -BeTrue
+            @(Get-TestInstructionSnapshot -Directory $previous.sourceDirectory) | Should -BeExactly $before
         } finally {
             if ($IsWindows) { [IO.Directory]::Delete($link) } else { [IO.File]::Delete($link) }
         }
