@@ -48,7 +48,7 @@ Do not include any other files. Instruction files governing reviewed content are
 Invoke the cache commands from the skill's `scripts/` directory, replacing both placeholders:
 
 * `SKILL_ROOT` is the directory containing this prompt.
-* `SESSION_STATE` is the current review's session-state directory.
+* `SESSION_STATE` is the absolute directory containing this review's artifacts.
 
 Run every cache command with `-NonInteractive`, so that a missing required parameter fails immediately instead of waiting for input that will never arrive.
 
@@ -65,7 +65,7 @@ A successful command returns JSON with `status: "Valid"`. If validation fails, t
 
 On `status: "Miss"`, continue with the full workflow below. The default seven-day freshness window intentionally causes periodic misses so external references are refreshed. Use `-Refresh` only when the user explicitly requests regeneration.
 
-The restore result and `focus-area-cache-diagnostics.json` report `userInstructionFileCount` alongside cache Hit/Miss. This counts discovered user-scoped files in the current snapshot, including zero when only built-in guidance is present, on both hits and misses. It excludes the built-in focus areas and separately authorized repository sources.
+The restore result and `{{SESSION_STATE}}/focus-area-cache-diagnostics.json` report `userInstructionFileCount` alongside cache Hit/Miss. This counts discovered user-scoped files in the current snapshot, including zero when only built-in guidance is present, on both hits and misses. It excludes the built-in focus areas and separately authorized repository sources.
 
 # Stage 2: prepare expanded raw inputs
 
