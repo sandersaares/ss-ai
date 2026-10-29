@@ -147,6 +147,7 @@ BeforeAll {
             publishedUtc       = '2024-05-06T07:08:09.0000000Z'
             lastEditedUtc      = $null
             isEdited           = $false
+            isAuthoredBySelf   = $false
             authorship         = 'human'
             authorshipEvidence = @()
         }
@@ -177,6 +178,7 @@ BeforeAll {
             resolution       = 'active'
             kind             = $Kind
             isOutdated       = $false
+            isAuthoredBySelf = $false
             context          = [ordered]@{
                 filePath          = '/src/retry.rs'
                 side              = 'right'
@@ -234,6 +236,7 @@ BeforeAll {
             }
             pullRequest           = [ordered]@{
                 title                   = 'Add retry policy'
+                description             = $null
                 reviewedSourceCommit    = $SourceCommit
                 reviewedMergeBaseCommit = $MergeBaseCommit
             }

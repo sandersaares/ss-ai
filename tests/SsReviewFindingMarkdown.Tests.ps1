@@ -957,7 +957,7 @@ Describe 'Rendering executable' {
         $emitted = ConvertFrom-JsonVerbatim -Text $result['standardOutput']
         (Get-JsonProperty -Node $emitted -Name 'auditDocumentPath') | Should -BeExactly $auditPath
         (Get-JsonProperty -Node $emitted -Name 'auditDocumentUri') |
-            Should -BeExactly ([uri] $auditPath).AbsoluteUri
+            Should -BeExactly ([uri]::new($auditPath, [UriKind]::Absolute)).AbsoluteUri
         (Get-JsonProperty -Node $emitted -Name 'auditDocumentUri') |
             Should -Match '/audit%20files%20\(local\)/audit-findings\.md$'
 

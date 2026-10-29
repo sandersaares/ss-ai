@@ -60,6 +60,8 @@ Describe 'prepared helper' {
     It 'receives the prebuilt test executable' {
         $env:SS_AI_FINDING_TEST_EXECUTABLE | Should -Not -BeNullOrEmpty
         Test-Path -LiteralPath $env:SS_AI_FINDING_TEST_EXECUTABLE -PathType Leaf | Should -BeTrue
+        $env:SS_AI_AUDIT_TEST_EXECUTABLE | Should -Not -BeNullOrEmpty
+        Test-Path -LiteralPath $env:SS_AI_AUDIT_TEST_EXECUTABLE -PathType Leaf | Should -BeTrue
     }
 }
 '@)
@@ -98,13 +100,16 @@ function cargo {
     }
     if ($args[0] -eq 'test' -and $args -contains 'finding_plans') {
         $global:LASTEXITCODE = 0
-        $executable = Join-Path '__ROOT__' 'finding-helper'
-        [IO.File]::WriteAllText($executable, 'fixture')
-        return (@{
-            reason = 'compiler-artifact'
-            target = @{ name = 'finding_plans' }
-            executable = $executable
-        } | ConvertTo-Json -Compress)
+        foreach ($target in @('finding_plans', 'audit')) {
+            $executable = Join-Path '__ROOT__' "$target-helper"
+            [IO.File]::WriteAllText($executable, 'fixture')
+            @{
+                reason = 'compiler-artifact'
+                target = @{ name = $target }
+                executable = $executable
+            } | ConvertTo-Json -Compress
+        }
+        return
     }
 
     $global:LASTEXITCODE = if ($args[0] -eq 'clippy') { __CLIPPY_EXIT__ } else { 0 }
@@ -214,6 +219,7 @@ Describe 'Repository test entry point' {
     It 'builds the native prerequisite for <Name>' -ForEach @(
         @{ Name = 'SsReviewFindingModel.Tests.ps1' }
         @{ Name = 'SsReviewFindingConsolidation.Tests.ps1' }
+        @{ Name = 'SsReviewReports.Tests.ps1' }
         @{ Name = 'SsReviewSelfReview.Tests.ps1' }
         @{ Name = 'SsReviewSharedFiles.Tests.ps1' }
         @{ Name = 'SsReviewWorkflowData.Tests.ps1' }

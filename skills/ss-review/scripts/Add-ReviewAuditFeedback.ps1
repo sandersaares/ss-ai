@@ -12,11 +12,8 @@ param(
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 $PSNativeCommandUseErrorActionPreference = $true
-. "$PSScriptRoot\lib\JsonValue.ps1"
-. "$PSScriptRoot\lib\PullRequestModel.ps1"
-. "$PSScriptRoot\lib\WorkflowData.ps1"
-. "$PSScriptRoot\lib\FindingModel.ps1"
-. "$PSScriptRoot\lib\ReviewAuditState.ps1"
-Add-ReviewAuditFeedback -Path (Join-Path $OutputDirectory 'audit-feedback.json') -FindingsPath $FindingsPath `
-    -ResponseId $ResponseId -FindingId $FindingId -Text ((Read-PullRequestFileText -Path ((Resolve-PullRequestPath -Path $TextPath))))
-@{ status = 'Recorded'; findingId = $FindingId; responseId = $ResponseId } | ConvertTo-Json -Compress
+. "$PSScriptRoot\lib\NativeWorkflowBridge.ps1"
+$path = $ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath((Join-Path $OutputDirectory 'audit-feedback.json'))
+$findings = $ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath($FindingsPath)
+$text = $ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath($TextPath)
+Invoke-NativeReviewWorkflow -Arguments @('audit-add-feedback', "--path=$path", "--findings-path=$findings", "--response-id=$ResponseId", "--finding-id=$FindingId", "--text-path=$text")

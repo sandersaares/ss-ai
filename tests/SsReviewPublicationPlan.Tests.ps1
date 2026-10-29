@@ -205,7 +205,7 @@ index 3333333..4444444 100644
             $Context = $null
         )
 
-        if ($null -eq $Context) { $Context = [ordered]@{ path = 'src/app.ps1'; rightLine = 3 } }
+        if ($null -eq $Context) { $Context = [ordered]@{ filePath = 'src/app.ps1'; startLine = 3; endLine = 3; side = 'right' } }
 
         [ordered]@{
             id               = $Id
@@ -214,6 +214,9 @@ index 3333333..4444444 100644
             resolution       = $Resolution
             kind             = $Kind
             isOutdated       = $false
+            isAuthoredBySelf = $false
+            eventUtc         = $null
+            lastUpdatedUtc   = $null
             context          = $Context
             anchorKey        = "src/app.ps1:3"
             properties       = [ordered]@{}
@@ -239,6 +242,8 @@ index 3333333..4444444 100644
             target               = $Target
             authenticatedIdentity = [ordered]@{ uniqueName = 'runner' }
             pullRequest          = [ordered]@{
+                title                   = 'Review fixture'
+                description             = $null
                 reviewedSourceCommit    = $script:SourceCommit
                 reviewedMergeBaseCommit = $script:MergeBaseCommit
                 isDraft                 = $false

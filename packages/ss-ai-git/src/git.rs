@@ -16,6 +16,15 @@ pub struct Comparison {
     pub(crate) files: Vec<FileDiff>,
 }
 
+impl Comparison {
+    /// Returns the changed files in comparison order.
+    #[inline]
+    #[must_use]
+    pub fn files(&self) -> &[FileDiff] {
+        &self.files
+    }
+}
+
 /// Reads committed content without external diff or text conversion programs.
 pub fn compare(
     process: &dyn Process,

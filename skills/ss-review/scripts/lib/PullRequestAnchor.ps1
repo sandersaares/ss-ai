@@ -37,14 +37,14 @@
 # carry, so that a finding whose anchor publication would reject is removed while the run can still
 # report it rather than during publication.
 #
-# This is a library file: it is dot-sourced rather than executed, defines only functions and
-# constants, and dot-sources nothing itself. It calls Get-JsonProperty, Get-JsonArrayProperty and
-# Set-JsonProperty from JsonValue.ps1, ConvertTo-CanonicalFindingPath from FindingModel.ps1, and
-# Get-GitDiffFile and Test-GitDiffLineInHunk from GitDiff.ps1, which the executable composition root
-# loads alongside this file.
+# The native resolver owns the shared anchor rules; this library adapts the
+# publication calls and keeps the existing document mutation interface.
 
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
+$PSNativeCommandUseErrorActionPreference = $true
+
+. "$PSScriptRoot\NativeWorkflowBridge.ps1"
 
 # The kinds of anchor a finding may carry. A line anchor addresses a range within a changed file; a
 # file anchor addresses the file as a whole.
@@ -72,48 +72,11 @@ function Resolve-PullRequestAnchor {
         [System.Collections.IDictionary] $DiffFile
     )
 
-    $kind = [string] (Get-JsonProperty -Node $Anchor -Name 'kind' -Default 'file')
-    if ($script:PullRequestAnchorKinds -notcontains $kind) {
-        throw "An anchor of kind '$kind' cannot be resolved. An anchor is either a line anchor or a file anchor."
+    $result = Invoke-NativeReviewWorkflowWithJson -Arguments @('resolve-anchor') -PathOption 'request-path' -Value @{
+        anchor = $Anchor
+        diffFile = $DiffFile
     }
-
-    $anchorPath = ConvertTo-CanonicalFindingPath -Path ([string] (Get-JsonProperty -Node $Anchor -Name 'path'))
-    $filePath = [string] (Get-JsonProperty -Node $DiffFile -Name 'path')
-
-    # The pairing is the caller's, and a mismatched pair would resolve one file's anchor against
-    # another file's hunks, which is the one way this function could produce a confidently wrong
-    # answer rather than a failure.
-    if (-not [string]::Equals($anchorPath, $filePath, [StringComparison]::OrdinalIgnoreCase)) {
-        throw "An anchor on '$anchorPath' cannot be resolved against the diff entry for '$filePath'."
-    }
-
-    if ($kind -eq 'file') {
-        return New-ResolvedPullRequestAnchor -Kind 'file' -Path $filePath
-    }
-
-    $startLine = [int] (Get-JsonProperty -Node $Anchor -Name 'startLine' -Default 0)
-    $endLine = [int] (Get-JsonProperty -Node $Anchor -Name 'endLine' -Default 0)
-    if ($endLine -le 0) { $endLine = $startLine }
-    if ($startLine -le 0) {
-        throw "A line anchor on '$filePath' names no line."
-    }
-    if ($endLine -lt $startLine) {
-        throw "A line anchor on '$filePath' ends at line $endLine, before it starts at line $startLine."
-    }
-
-    $side = [string] (Get-JsonProperty -Node $Anchor -Name 'side' -Default $script:PullRequestAnchorDefaultSide)
-    if ([string]::IsNullOrWhiteSpace($side)) { $side = $script:PullRequestAnchorDefaultSide }
-    $side = $side.ToLowerInvariant()
-    if ($script:PullRequestAnchorSides -notcontains $side) {
-        throw "A line anchor on '$filePath' names side '$side', which is neither the post-change nor the pre-change side."
-    }
-
-    if (Test-GitDiffLineInHunk -File $DiffFile -StartLine $startLine -EndLine $endLine -Side $side) {
-        return New-ResolvedPullRequestAnchor -Kind 'line' -Path $filePath -StartLine $startLine -EndLine $endLine -Side $side
-    }
-
-    $range = if ($startLine -eq $endLine) { "line $startLine" } else { "lines $startLine-$endLine" }
-    New-ResolvedPullRequestAnchor -Kind 'file' -Path $filePath -DowngradeReason "No hunk of the reviewed diff covers $range on the $side side of '$filePath', so the finding is reported against the file."
+    ConvertFrom-Json -InputObject $result -AsHashtable -NoEnumerate
 }
 
 # Resolves one anchor against a whole diff, failing when the pull request does not change the file.
@@ -129,13 +92,11 @@ function Resolve-PullRequestAnchorInDiff {
         [System.Collections.IDictionary] $Diff
     )
 
-    $anchorPath = ConvertTo-CanonicalFindingPath -Path ([string] (Get-JsonProperty -Node $Anchor -Name 'path'))
-    $file = Get-GitDiffFile -Diff $Diff -Path $anchorPath
-    if ($null -eq $file) {
-        throw "The reviewed diff does not change '$anchorPath', so a finding cannot be anchored to it. Anchor the finding to a file the pull request changes."
+    $result = Invoke-NativeReviewWorkflowWithJson -Arguments @('resolve-anchor') -PathOption 'request-path' -Value @{
+        anchor = $Anchor
+        diff = $Diff
     }
-
-    Resolve-PullRequestAnchor -Anchor $Anchor -DiffFile $file
+    ConvertFrom-Json -InputObject $result -AsHashtable -NoEnumerate
 }
 
 # Removes every approved finding the reviewed diff can no longer carry, reporting what it removed
@@ -183,6 +144,9 @@ function Remove-ApprovedFindingOutsideDiff {
             $kept.Add($finding)
             continue
         } catch {
+            # Only an unresolvable authored anchor may be dropped. A failed
+            # native process or malformed diff must stop the whole operation.
+            if (-not $_.Exception.Message.Contains('Unresolvable anchor:')) { throw }
             $reason = $_.Exception.Message
         }
 

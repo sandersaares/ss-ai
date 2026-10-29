@@ -30,6 +30,15 @@ function Invoke-NativeReviewWorkflow {
     } finally { $process.Dispose() }
 }
 
+# Keeps arrays intact when returning shared rendered prose to PowerShell publishers.
+function Invoke-NativeReviewMarkdown {
+    param([Parameter(Mandatory)][System.Collections.IDictionary] $Request)
+
+    $output = Invoke-NativeReviewWorkflowWithJson -Arguments @('render') -PathOption 'request-path' -Value $Request
+    $result = ConvertFrom-Json -InputObject $output -AsHashtable -NoEnumerate
+    if ($result -is [array]) { , $result } else { $result }
+}
+
 # Keeps structured prose out of process arguments and removes each private request after use.
 function Invoke-NativeReviewWorkflowWithJson {
     param(

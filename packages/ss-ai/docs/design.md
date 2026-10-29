@@ -188,6 +188,12 @@ explicit, including for a review with no findings. Identifiers remain stable
 through updates and are not reused after removal. The review workflow keeps
 coverage validation and audit decisions separate from these local operations.
 
+Local audit commands maintain append-only finding decisions and verbatim
+feedback, and bind merge decisions to the reviewed pull request and source.
+Approved projections require settled decisions and retain the evidence binding
+needed for freshness checks. Shared Markdown rendering supplies the same finding
+prose to audit and publication without granting approval or contacting a provider.
+
 ## Functional areas
 
 Skills invoke named commands and consume complete JSON results. The command
