@@ -55,9 +55,11 @@ iteration approval. The approving event and its source iteration form the
 assessment anchor. This classification does not claim that aggregate merge
 requirements are satisfied.
 
-Reviewer removal, withdrawals, and negative decisions prevent using old
-authority. Missing reset causality, unknown policy settings, and uninterpretable
-history are explicit tooling failures, never successful unresolved outcomes.
+Reviewer removal, declines, withdrawals, and negative decisions prevent using old
+authority. Inspection replays participation and vote events chronologically:
+a later direct approval establishes new authority after a decline; undoing the
+decline alone does not. Missing reset causality, unknown policy settings, and
+uninterpretable history are explicit tooling failures, never successful unresolved outcomes.
 Current reset settings and a later push alone do not prove why a vote is zero.
 Routine untyped system notifications do not change approval standing or supply
 vote-reset authority.

@@ -483,6 +483,8 @@ pub(crate) fn project_threads(threads: &[Value]) -> Result<Vec<Value>, AppError>
                     "CodeReviewReviewersUpdatedNumDeclined",
                     "CodeReviewReviewersUpdatedAddedIdentity",
                     "CodeReviewReviewersUpdatedRemovedIdentity",
+                    "CodeReviewReviewersUpdatedChangedIdentity",
+                    "CodeReviewReviewersUpdatedChangedDecline",
                     "CodeReviewReviewersUpdatedByIdentity",
                 ],
             );
@@ -1054,7 +1056,7 @@ fn system_event_kind(thread: &Value) -> Result<Option<&str>, AppError> {
         })
 }
 
-/// Latest explicit decisions and removals supersede every older positive event.
+/// Latest explicit decisions and participation changes supersede older authority.
 fn decide_history(
     events: &[Event<'_>],
     iterations: &[Value],
@@ -1067,6 +1069,7 @@ fn decide_history(
     let mut latest = None;
     let mut approval = None;
     let mut removed = false;
+    let mut declined = None;
     let mut relevant_time = None;
     let mut anchor = None;
     for event in events {
@@ -1133,6 +1136,11 @@ fn decide_history(
                     // A proxy positive vote is not the account's approval authority.
                     approval = applicable.then_some(event);
                     removed = false;
+                    if initiator == account || declined == Some(false) {
+                        // A direct decision resumes review after an earlier decline.
+                        // Proxy votes cannot clear the account's participation veto.
+                        declined = None;
+                    }
                     true
                 } else {
                     false
@@ -1152,36 +1160,52 @@ fn decide_history(
                         true,
                     ),
                 ] {
-                    let count = property(event.value, count, "System.Int32")?
-                        .as_u64()
-                        .ok_or_else(|| fail("service", "Invalid reviewer-update count"))?;
-                    if count > 1 {
-                        return Err(fail(
-                            "service",
-                            format!(
-                                "ADO reviewer event {} needs complete bulk identity evidence for {identity} (count {count})",
-                                event.id
-                            ),
-                        ));
-                    }
-                    if count == 1 && actor(event.value, identity)? == account {
+                    if updated_reviewer(event, count, identity)? == Some(account) {
                         relevant = true;
                         approval = None;
                         anchor = None;
                         latest = None;
                         removed = removing;
+                        declined = None;
                     }
                 }
-                for key in [
-                    "CodeReviewReviewersUpdatedNumChanged",
+                if let Some(reviewer) = updated_reviewer(
+                    event,
                     "CodeReviewReviewersUpdatedNumDeclined",
-                ] {
-                    if property(event.value, key, "System.Int32")? != &json!(0) {
-                        return Err(fail(
-                            "service",
-                            format!("ADO reviewer event {} has unsupported {key}", event.id),
-                        ));
+                    "CodeReviewReviewersUpdatedChangedIdentity",
+                )? {
+                    let value = match text(property(
+                        event.value,
+                        "CodeReviewReviewersUpdatedChangedDecline",
+                        "System.String",
+                    )?)? {
+                        "True" => true,
+                        "False" => false,
+                        _ => {
+                            return Err(fail(
+                                "service",
+                                format!(
+                                    "ADO reviewer event {} has invalid decline state",
+                                    event.id
+                                ),
+                            ));
+                        }
+                    };
+                    if reviewer == account {
+                        relevant = true;
+                        // Neither declining nor undoing a decline approves a source.
+                        // A later direct vote must establish its own external anchor.
+                        approval = None;
+                        anchor = None;
+                        declined = Some(value);
                     }
+                }
+                let key = "CodeReviewReviewersUpdatedNumChanged";
+                if property(event.value, key, "System.Int32")? != &json!(0) {
+                    return Err(fail(
+                        "service",
+                        format!("ADO reviewer event {} has unsupported {key}", event.id),
+                    ));
                 }
                 relevant
             }
@@ -1213,6 +1237,11 @@ fn decide_history(
             reason: "reviewerRemoved".to_owned(),
         });
     }
+    if declined == Some(true) {
+        return Ok(Decision::Ineligible {
+            reason: "pendingHumanReview".to_owned(),
+        });
+    }
     if current.is_some_and(|value| value < 0) || latest.is_some_and(|value| value < 0) {
         return Ok(Decision::Ineligible {
             reason: "negativeDecision".to_owned(),
@@ -1225,6 +1254,11 @@ fn decide_history(
         return Ok(Decision::Ineligible {
             reason: "approvalWithdrawn".to_owned(),
         });
+    }
+    if declined == Some(false) && current == latest {
+        // The service may retain a positive vote while participation changes.
+        // Clearing the decline does not restore its superseded approval event.
+        return Ok(Decision::NoPriorApproval);
     }
     if latest.is_none() && deleted_history {
         // A current positive vote alone supplies neither an external approval
@@ -1281,6 +1315,28 @@ fn decide_history(
         "service",
         format!("ADO current vote {current:?} does not match history {latest:?}"),
     ))
+}
+
+/// Resolves single-reviewer transitions without guessing bulk account attribution.
+fn updated_reviewer<'a>(
+    event: &Event<'a>,
+    count: &str,
+    identity: &str,
+) -> Result<Option<&'a str>, AppError> {
+    let count = property(event.value, count, "System.Int32")?
+        .as_u64()
+        .ok_or_else(|| fail("service", "Invalid reviewer-update count"))?;
+    match count {
+        0 => Ok(None),
+        1 => actor(event.value, identity).map(Some),
+        _ => Err(fail(
+            "service",
+            format!(
+                "ADO reviewer event {} needs complete bulk identity evidence for {identity} (count {count})",
+                event.id
+            ),
+        )),
+    }
 }
 
 /// Producer and publication validation use the same latest source-iteration binding.
@@ -2415,6 +2471,339 @@ mod tests {
             Decision::Ineligible {
                 reason: "reviewerRemoved".to_owned()
             }
+        );
+    }
+
+    /// Replays the captured decline shape without retaining private service content.
+    fn decline_event() -> Value {
+        let fixture: Value =
+            serde_json::from_str(include_str!("../tests/fixtures/ado-reviewer-decline.json"))
+                .unwrap();
+        fixture["thread"].clone()
+    }
+
+    #[test]
+    fn later_direct_approval_supersedes_a_historical_decline() {
+        let mut value = evidence(&fixture()["stages"][1]);
+        let mut approval = value["threads"][1].clone();
+        approval["id"] = json!(91);
+        approval["publishedDate"] = json!("2026-01-01T00:29:00Z");
+        value["threads"] = json!([value["threads"][0], decline_event(), approval]);
+        value["reviewers"][0]["votedFor"] = json!([{"id": "group", "vote": 10}]);
+        let expected = Decision::AlreadyValid {
+            approval_event_id: "91".to_owned(),
+        };
+        assert_eq!(decide(value.clone()).unwrap(), expected);
+        let captured: Evidence = serde_json::from_value(value.clone()).unwrap();
+        let compact = super::compact(&captured).unwrap();
+        assert_eq!(
+            decide(serde_json::to_value(compact).unwrap()).unwrap(),
+            expected
+        );
+        value["threads"].as_array_mut().unwrap().reverse();
+        assert_eq!(decide(value).unwrap(), expected);
+    }
+
+    #[test]
+    fn decline_invalidates_old_authority_even_if_current_flags_are_clear() {
+        for current_vote in [0, 10] {
+            for flag in [false, true] {
+                let mut value = evidence(&fixture()["stages"][2]);
+                value["threads"]
+                    .as_array_mut()
+                    .unwrap()
+                    .push(decline_event());
+                value["reviewers"][0]["vote"] = json!(current_vote);
+                value["reviewers"][0]["hasDeclined"] = json!(flag);
+                reviewer_policy(&mut value, json!({"requireVoteOnEachIteration": true}));
+                assert_eq!(
+                    decide(value).unwrap(),
+                    Decision::Ineligible {
+                        reason: "pendingHumanReview".to_owned()
+                    }
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn undoing_a_decline_cannot_restore_an_old_approval() {
+        for current_vote in [0, -5, -10, 5, 10] {
+            let mut value = evidence(&fixture()["stages"][2]);
+            value["threads"][1]["properties"]["CodeReviewVoteResult"]["$value"] =
+                json!(current_vote.to_string());
+            let mut undo = decline_event();
+            undo["id"] = json!(91);
+            undo["publishedDate"] = json!("2026-01-01T00:29:00Z");
+            undo["properties"]["CodeReviewReviewersUpdatedChangedDecline"]["$value"] =
+                json!("False");
+            value["threads"]
+                .as_array_mut()
+                .unwrap()
+                .extend([decline_event(), undo]);
+            value["reviewers"][0]["vote"] = json!(current_vote);
+            let expected = match current_vote {
+                0 => Decision::Ineligible {
+                    reason: "approvalWithdrawn".to_owned(),
+                },
+                -5 | -10 => Decision::Ineligible {
+                    reason: "negativeDecision".to_owned(),
+                },
+                _ => Decision::NoPriorApproval,
+            };
+            assert_eq!(decide(value).unwrap(), expected);
+        }
+        let mut value = evidence(&fixture()["stages"][1]);
+        let mut undo = decline_event();
+        undo["properties"]["CodeReviewReviewersUpdatedChangedDecline"]["$value"] = json!("False");
+        value["threads"].as_array_mut().unwrap().push(undo);
+        value["reviewers"][0]["vote"] = json!(0);
+        assert!(
+            decide(value)
+                .unwrap_err()
+                .to_string()
+                .contains("does not match history")
+        );
+    }
+
+    #[test]
+    fn votes_after_decline_keep_their_own_decision_and_actor_semantics() {
+        for (vote, reason) in [
+            (0, "approvalWithdrawn"),
+            (-5, "negativeDecision"),
+            (-10, "negativeDecision"),
+            (5, "alreadyValid"),
+            (10, "alreadyValid"),
+        ] {
+            for direct in [true, false] {
+                let mut value = evidence(&fixture()["stages"][1]);
+                let mut event = value["threads"][1].clone();
+                event["id"] = json!(91);
+                event["publishedDate"] = json!("2026-01-01T00:29:00Z");
+                event["properties"]["CodeReviewVoteResult"]["$value"] = json!(vote.to_string());
+                if !direct {
+                    event["identities"]["2"] = json!({"id": "proxy"});
+                    event["properties"]["CodeReviewVotedByInitiatorIdentity"]["$value"] =
+                        json!("2");
+                }
+                value["threads"]
+                    .as_array_mut()
+                    .unwrap()
+                    .extend([decline_event(), event]);
+                value["reviewers"][0]["vote"] = json!(vote);
+                let expected = if !direct {
+                    Decision::Ineligible {
+                        reason: "pendingHumanReview".to_owned(),
+                    }
+                } else if vote > 0 {
+                    Decision::AlreadyValid {
+                        approval_event_id: "91".to_owned(),
+                    }
+                } else {
+                    Decision::Ineligible {
+                        reason: reason.to_owned(),
+                    }
+                };
+                assert_eq!(
+                    decide(value).unwrap(),
+                    expected,
+                    "vote {vote}, direct {direct}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn post_decline_approval_uses_its_own_source_anchor_and_current_vetoes() {
+        let mut value = evidence(&fixture()["stages"][3]);
+        let mut approval = value["threads"][1].clone();
+        approval["id"] = json!(91);
+        // This approval follows the decline and the middle source iteration.
+        approval["publishedDate"] = json!("2026-01-01T00:29:00Z");
+        value["threads"]
+            .as_array_mut()
+            .unwrap()
+            .extend([decline_event(), approval]);
+        reviewer_policy(&mut value, json!({"requireVoteOnEachIteration": true}));
+        assert_eq!(
+            decide(value.clone()).unwrap(),
+            Decision::AssessmentRequired {
+                anchor: Anchor {
+                    review_id: "91".to_owned(),
+                    source_commit: value["iterations"][1]["sourceRefCommit"]["commitId"]
+                        .as_str()
+                        .unwrap()
+                        .to_owned(),
+                },
+                approval_event_id: "91".to_owned(),
+            }
+        );
+        for flag in ["hasDeclined", "isFlagged"] {
+            let mut pending = value.clone();
+            pending["reviewers"][0][flag] = json!(true);
+            assert_eq!(
+                decide(pending).unwrap(),
+                Decision::Ineligible {
+                    reason: "pendingHumanReview".to_owned()
+                }
+            );
+        }
+        value["threads"].as_array_mut().unwrap().push(json!({
+            "id": 92, "status": "pending",
+            "comments": [{"author": {"id": fixture()["accountId"]}, "commentType": "text"}]
+        }));
+        assert_eq!(
+            decide(value).unwrap(),
+            Decision::Ineligible {
+                reason: "pendingHumanReview".to_owned()
+            }
+        );
+    }
+
+    #[test]
+    fn decline_attribution_and_state_are_material_evidence() {
+        let mut value = evidence(&fixture()["stages"][2]);
+        value["threads"]
+            .as_array_mut()
+            .unwrap()
+            .push(decline_event());
+        let original: Evidence = serde_json::from_value(value.clone()).unwrap();
+        let compact = super::compact(&original).unwrap();
+        assert!(super::equivalent(&original, &compact).unwrap());
+        assert_eq!(super::compact(&compact).unwrap(), compact);
+        assert_eq!(
+            decide(serde_json::to_value(compact).unwrap()).unwrap(),
+            decide(value.clone()).unwrap()
+        );
+        for (path, replacement) in [
+            (
+                "/properties/CodeReviewReviewersUpdatedChangedDecline/$value",
+                json!("False"),
+            ),
+            (
+                "/properties/CodeReviewReviewersUpdatedChangedIdentity/$value",
+                json!("2"),
+            ),
+            ("/identities/1/id", json!("another-account")),
+        ] {
+            let mut changed = value.clone();
+            *changed["threads"]
+                .as_array_mut()
+                .unwrap()
+                .last_mut()
+                .unwrap()
+                .pointer_mut(path)
+                .unwrap() = replacement;
+            let changed: Evidence = serde_json::from_value(changed).unwrap();
+            assert!(!super::equivalent(&original, &changed).unwrap(), "{path}");
+        }
+        let mut other = value.clone();
+        other["threads"].as_array_mut().unwrap().last_mut().unwrap()["identities"]["1"]["id"] =
+            json!("another-account");
+        assert_eq!(
+            decide(other).unwrap(),
+            Decision::AlreadyValid {
+                approval_event_id: "2".to_owned()
+            }
+        );
+        for comment_only in [false, true] {
+            let mut deleted = value.clone();
+            let event = deleted["threads"]
+                .as_array_mut()
+                .unwrap()
+                .last_mut()
+                .unwrap();
+            if comment_only {
+                event["comments"][0]["isDeleted"] = json!(true);
+            } else {
+                event["isDeleted"] = json!(true);
+            }
+            assert_eq!(
+                decide(deleted).unwrap(),
+                Decision::AlreadyValid {
+                    approval_event_id: "2".to_owned()
+                }
+            );
+        }
+    }
+
+    #[test]
+    fn malformed_decline_evidence_and_tied_decisions_remain_explicit_failures() {
+        for (path, replacement) in [
+            (
+                "/properties/CodeReviewReviewersUpdatedNumDeclined/$type",
+                json!("System.String"),
+            ),
+            (
+                "/properties/CodeReviewReviewersUpdatedNumDeclined/$value",
+                json!("1"),
+            ),
+            (
+                "/properties/CodeReviewReviewersUpdatedNumDeclined/$value",
+                json!(-1),
+            ),
+            (
+                "/properties/CodeReviewReviewersUpdatedNumDeclined/$value",
+                json!(2),
+            ),
+            (
+                "/properties/CodeReviewReviewersUpdatedChangedDecline/$type",
+                json!("System.Boolean"),
+            ),
+            (
+                "/properties/CodeReviewReviewersUpdatedChangedDecline/$value",
+                json!(true),
+            ),
+            (
+                "/properties/CodeReviewReviewersUpdatedChangedDecline/$value",
+                json!("unknown"),
+            ),
+            (
+                "/properties/CodeReviewReviewersUpdatedChangedIdentity/$value",
+                json!("missing"),
+            ),
+            (
+                "/properties/CodeReviewReviewersUpdatedChangedIdentity",
+                Value::Null,
+            ),
+            (
+                "/properties/CodeReviewReviewersUpdatedChangedDecline",
+                Value::Null,
+            ),
+            ("/identities/1/id", Value::Null),
+        ] {
+            let mut value = evidence(&fixture()["stages"][1]);
+            let mut decline = decline_event();
+            *decline.pointer_mut(path).unwrap() = replacement;
+            value["threads"].as_array_mut().unwrap().push(decline);
+            decide(value).expect_err(path);
+        }
+        let mut value = evidence(&fixture()["stages"][1]);
+        value["threads"][1]["publishedDate"] = decline_event()["publishedDate"].clone();
+        value["threads"]
+            .as_array_mut()
+            .unwrap()
+            .push(decline_event());
+        assert!(
+            decide(value)
+                .unwrap_err()
+                .to_string()
+                .contains("Ambiguous ADO decision ordering")
+        );
+    }
+
+    #[test]
+    fn decline_prevents_a_renewal_from_reusing_earlier_external_authority() {
+        let mut value = renewed();
+        value["threads"]
+            .as_array_mut()
+            .unwrap()
+            .push(decline_event());
+        assert!(
+            decide(value)
+                .unwrap_err()
+                .to_string()
+                .contains("no preceding approval authority")
         );
     }
 
