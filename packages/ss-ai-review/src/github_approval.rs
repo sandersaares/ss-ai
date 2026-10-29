@@ -26,9 +26,7 @@ pub(crate) enum Evidence {
     History {
         #[serde(rename = "pullRequest")]
         pull_request: Value,
-        // Older snapshots lack policy evidence; absence must not imply a disabled rule.
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        policy: Option<Policy>,
+        policy: Policy,
         reviews: Vec<Value>,
         timeline: Vec<Value>,
         comments: Vec<Value>,
@@ -106,7 +104,7 @@ impl Evidence {
             number,
             observed_at,
             &Freshness {
-                policy: policy.as_ref(),
+                policy,
                 head: text(field(source, "sha")?)?,
             },
         )
@@ -122,7 +120,7 @@ pub(crate) struct Policy {
 
 /// Binds source-standing interpretation to one captured policy and current head.
 struct Freshness<'a> {
-    policy: Option<&'a Policy>,
+    policy: &'a Policy,
     head: &'a str,
 }
 
@@ -189,7 +187,7 @@ fn observe(api: &mut Api<'_>, target: &Target) -> Result<Evidence, AppError> {
     let review_comments = list(api, &format!("{}/comments", target.pr_api()), "id")?;
     compact(&Evidence::History {
         pull_request: pr,
-        policy: Some(policy),
+        policy,
         reviews,
         timeline,
         comments,
@@ -691,9 +689,7 @@ fn decide_events(
                     } if anchor == audit.anchor
                         && (dismissed == Some(true)
                             || dismissed.is_none()
-                                && freshness
-                                    .policy
-                                    .is_some_and(|policy| policy.require_last_push_approval)
+                                && freshness.policy.require_last_push_approval
                                 && source != audit.source_commit) =>
                     {
                         Standing::Approval {
@@ -732,16 +728,11 @@ fn decide_events(
         } => {
             // A retained APPROVED review is not source-fresh under a last-push rule.
             // Do not infer this requirement from SHA differences or merge blockage alone.
-            if source != freshness.head {
-                let policy = freshness
-                    .policy
-                    .ok_or_else(|| unresolved("missingApprovalPolicy"))?;
-                if policy.require_last_push_approval {
-                    return Ok(Decision::AssessmentRequired {
-                        anchor,
-                        approval_event_id: review.to_owned(),
-                    });
-                }
+            if source != freshness.head && freshness.policy.require_last_push_approval {
+                return Ok(Decision::AssessmentRequired {
+                    anchor,
+                    approval_event_id: review.to_owned(),
+                });
             }
             Decision::AlreadyValid {
                 approval_event_id: review.to_owned(),
@@ -1104,18 +1095,21 @@ mod tests {
     }
 
     #[test]
-    fn missing_legacy_policy_is_not_evidence_that_an_old_approval_is_current() {
-        let mut value = valid();
-        value.as_object_mut().unwrap().remove("policy");
-        assert!(
-            decide(value)
-                .unwrap_err()
-                .to_string()
-                .contains("missingApprovalPolicy")
-        );
-        let mut dismissed = fixture()["evidence"].clone();
-        dismissed.as_object_mut().unwrap().remove("policy");
-        assert_eq!(decide(dismissed).unwrap().status(), "assessmentRequired");
+    fn approval_evidence_requires_complete_policy_records() {
+        for baseline in [valid(), fixture()["evidence"].clone()] {
+            let mut missing = baseline.clone();
+            missing.as_object_mut().unwrap().remove("policy");
+            serde_json::from_value::<Evidence>(missing).unwrap_err();
+            for policy in [
+                Value::Null,
+                json!({}),
+                json!({"requireLastPushApproval": null}),
+            ] {
+                let mut malformed = baseline.clone();
+                malformed["policy"] = policy;
+                serde_json::from_value::<Evidence>(malformed).unwrap_err();
+            }
+        }
     }
     #[test]
     fn renewals_preserve_the_external_anchor_and_cannot_override_a_withdrawal() {

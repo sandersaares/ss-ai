@@ -14,6 +14,13 @@ session. Registration does
 not approve a pull request. Review capture, findings, report rendering, and
 publication remain in `ss-review`.
 
+## Version compatibility
+
+Sessions and persisted workflow state belong to the utility version that creates
+them. Different versions of `ss-ai` do not need to read, resume, or migrate each
+other's sessions. Keep state validation strict rather than adding cross-version
+compatibility handling. Use the same utility version throughout a session.
+
 ## Reapproval discovery
 
 Discovery ignores draft PRs and narrows the supplied repository's other open

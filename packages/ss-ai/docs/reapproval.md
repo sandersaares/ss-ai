@@ -70,8 +70,7 @@ See [GitHub's review requirement semantics](https://docs.github.com/en/repositor
 Last-push requirements cannot restore a dismissed approval with an unknown cause,
 an initial approval, a withdrawal, a negative decision, or pending human review.
 Policy changes participate in freshness checks before and after publication.
-Older snapshots without policy evidence remain readable, but cannot establish
-current standing for an undismissed approval on another source revision.
+Approval snapshots require complete policy evidence.
 
 ## Evidence and publication
 
