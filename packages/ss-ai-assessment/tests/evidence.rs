@@ -727,7 +727,7 @@ fn requested_context_is_exact_contiguous_required_and_snapshot_bound_for_every_d
 }
 
 #[test]
-fn new_context_after_a_judgment_blocks_completion_without_discarding_conditional_replacement() {
+fn new_context_invalidates_affected_judgments_until_they_are_recorded_again() {
     let change = change(
         "file",
         Content::Text {
@@ -738,7 +738,12 @@ fn new_context_after_a_judgment_blocks_completion_without_discarding_conditional
         },
     );
     let id = change.id.clone();
-    let mut assessment = assessment(inventory(vec![change]), "discussion");
+    let mut other = change_copy(&change);
+    other.old.as_mut().unwrap().path = "other".into();
+    other.new.as_mut().unwrap().path = "other".into();
+    other.id = change_id("M", other.old.as_ref(), other.new.as_ref()).unwrap();
+    let other_id = other.id.clone();
+    let mut assessment = assessment(inventory(vec![change, other]), "discussion");
     read_all(&mut assessment, "policy", "policy", "policy", "discussion");
     read_all(
         &mut assessment,
@@ -748,6 +753,7 @@ fn new_context_after_a_judgment_blocks_completion_without_discarding_conditional
         "discussion",
     );
     read_patch(&mut assessment, &id, "policy", "discussion");
+    read_patch(&mut assessment, &other_id, "policy", "discussion");
     let digest = assessment
         .record(
             &id,
@@ -757,7 +763,16 @@ fn new_context_after_a_judgment_blocks_completion_without_discarding_conditional
             "discussion",
         )
         .unwrap();
-    assessment
+    let other_digest = assessment
+        .record(
+            &other_id,
+            judgment(&other_id, Disposition::Insignificant),
+            None,
+            "policy",
+            "discussion",
+        )
+        .unwrap();
+    let cumulative_digest = assessment
         .record(
             "cumulative",
             judgment("cumulative", Disposition::Insignificant),
@@ -773,7 +788,7 @@ fn new_context_after_a_judgment_blocks_completion_without_discarding_conditional
         line_count: NonZeroUsize::MIN,
     };
     let first = assessment
-        .source_context(request, 1, "policy", "discussion")
+        .source_context(request.clone(), 1, "policy", "discussion")
         .unwrap();
     assessment
         .validate("snapshot", "policy", "policy", "discussion")
@@ -786,15 +801,18 @@ fn new_context_after_a_judgment_blocks_completion_without_discarding_conditional
         "policy",
         "discussion",
     );
+    let saved = serde_json::to_value(&assessment).unwrap();
+    assert!(saved["decisions"].get(&id).is_none());
+    assert_eq!(
+        saved["decisions"][&other_id],
+        serde_json::to_value(judgment(&other_id, Disposition::Insignificant)).unwrap()
+    );
+    assert!(saved["cumulative"].is_null());
+    assessment = serde_json::from_value(saved).unwrap();
     assessment
-        .record(
-            &id,
-            judgment(&id, Disposition::Significant),
-            None,
-            "policy",
-            "discussion",
-        )
-        .unwrap_err();
+        .validate("snapshot", "policy", "policy", "discussion")
+        .unwrap();
+    assessment.finish("policy", "discussion").unwrap_err();
     assessment
         .record(
             &id,
@@ -803,7 +821,44 @@ fn new_context_after_a_judgment_blocks_completion_without_discarding_conditional
             "policy",
             "discussion",
         )
+        .unwrap_err();
+    assessment
+        .record(
+            &id,
+            judgment(&id, Disposition::Significant),
+            None,
+            "policy",
+            "discussion",
+        )
         .unwrap();
+    assessment
+        .record(
+            "cumulative",
+            judgment("cumulative", Disposition::Significant),
+            Some(&cumulative_digest),
+            "policy",
+            "discussion",
+        )
+        .unwrap_err();
+    assessment
+        .record(
+            "cumulative",
+            judgment("cumulative", Disposition::Significant),
+            None,
+            "policy",
+            "discussion",
+        )
+        .unwrap();
+    assessment
+        .source_context(request, 1, "policy", "discussion")
+        .unwrap();
+    let summary = assessment.summary(0, 10, "policy", "discussion").unwrap();
+    assert_eq!(summary["cumulative"]["disposition"], "significant");
+    assert_eq!(summary["changes"][1]["decisionDigest"], other_digest);
+    assert_eq!(
+        summary["changes"][0]["decision"]["disposition"],
+        "significant"
+    );
     assessment.finish("policy", "discussion").unwrap();
     assert_eq!(assessment.status(false), "needsReview");
 }

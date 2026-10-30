@@ -175,7 +175,7 @@ impl DiscoveryRecord {
     }
 
     fn validate(&self) -> Result<(), AppError> {
-        if self.schema_version != 10
+        if self.schema_version != 11
             || Uuid::parse_str(&self.run_id).is_err()
             || self.repository_id.trim().is_empty()
             || self.account_id.trim().is_empty()
@@ -428,8 +428,8 @@ impl DiscoveryRecord {
                 error,
             )
         })?;
-        // Read offsets and judgments cannot be reinterpreted under another discussion contract.
-        if document.get("schemaVersion") != Some(&json!(10)) {
+        // Earlier contracts cannot establish that judgments considered all requested context.
+        if document.get("schemaVersion") != Some(&json!(11)) {
             return Err(fail(
                 "invalidState",
                 "Unsupported discovery schema; use the original utility for retained effects or start a fresh run",
@@ -895,7 +895,7 @@ pub(crate) fn discover(
         run
     } else {
         DiscoveryRecord {
-            schema_version: 10,
+            schema_version: 11,
             run_id: Uuid::new_v4().to_string(),
             repository_url: input.repository.web_url.clone(),
             repository_id,

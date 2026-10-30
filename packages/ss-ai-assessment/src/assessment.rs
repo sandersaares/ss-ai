@@ -387,6 +387,9 @@ impl Assessment {
             if self.complete {
                 return Err(error::ImmutableAssessment::classified());
             }
+            // Newly required evidence must be considered by both affected conclusions.
+            self.decisions.remove(&context.request.change_id);
+            self.cumulative = None;
             self.contexts.insert(reference.clone(), context);
         }
         self.read(&reference, 0, limit, policy, discussion)
