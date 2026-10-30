@@ -90,6 +90,18 @@ with explicit medium reasoning and regular context. That worker owns preparation
 bounded evidence reads, judgments, and completion. It returns scalar results and
 a concise reason, not source or discussion text, and cannot publish.
 
+A returned synchronous worker cannot receive a continuation message. After
+native results confirm an unfinished assessment, the skill permits one fresh
+replacement per PR and snapshot, with no overlapping workers. The replacement
+uses the original run and snapshot, reads native inventory and judgment progress,
+and acquires its own evidence rather than inheriting the earlier worker's
+conclusions. Repeating preparation preserves progress; evidence reads permit
+replay from zero and judgments use conditional digests for deliberate replacement.
+This bounds recovery from a premature return without weakening native coverage
+or treating it as staleness. A second incomplete worker leaves explicit
+unfinished work. Stale evidence retains its separate refresh budget, and
+unrelated tooling failures remain failures.
+
 ## Material evidence
 
 Freshness checks compare potentially material changes, not complete provider JSON.

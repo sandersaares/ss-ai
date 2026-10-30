@@ -122,6 +122,9 @@ discussion, expose bounded source reads, and require exact per-change and
 cumulative judgments. The skill assigns each PR's semantic assessment to a fresh
 GPT 6.1 Sol worker with medium reasoning and regular context. The orchestrator
 receives decisions rather than source or discussion evidence.
+If a worker ends before completing an assessment, the orchestrator permits one
+replacement on the same snapshot. Repeated incomplete work remains an explicit
+incomplete result, not a significance judgment or approval.
 Only complete insignificant work can become a live
 publication; dry runs end without remote writes. Unknown content and
 insufficient evidence cannot become success-shaped empty work. The policy permits

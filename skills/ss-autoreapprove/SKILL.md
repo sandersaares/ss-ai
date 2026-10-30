@@ -138,9 +138,28 @@ an orchestrator-generated semantic conclusion. Do not reuse a worker for another
 PR, load source or discussion in the orchestrator, or dispatch a full review.
 
 Wait for the worker and verify its returned completion status and digest using
-native `results`. An interrupted worker leaves unfinished work, not permission;
-stop it before dispatching a replacement on the same snapshot. Workers cannot
-publish, ask human decision questions, or delegate further.
+native `results`. A delivered tool result is not command success; inspect the
+native exit status and diagnostics. Workers cannot publish, ask human decision
+questions, or delegate further.
+
+An interrupted or prematurely returned worker leaves unfinished work, not
+permission. A returned synchronous task has ended; do not use `write_agent` to resume it.
+If native `results` still reports `assessmentRequired` with a null
+`assessmentDigest`, and the worker ended before completing required reads or
+judgments, dispatch at most one replacement worker per PR and snapshot.
+This permits recovery from premature termination without an unbounded retry loop.
+Confirm the previous worker has ended or stop it before replacement; never
+overlap workers for the same PR. Give the fresh worker the same run path and snapshot digest,
+the original assignment, and the incomplete-work diagnostic. It must inspect
+persisted progress through native commands and acquire its own evidence.
+Do not pass the previous worker's semantic conclusions or assess source in the
+orchestrator. Use the same explicit model and context configuration, including replacements.
+If the replacement also returns incomplete, report the PR as incomplete and
+retain the run and diagnostic. Do not use `refresh`, a new run, or a needs-review notice to recover
+unfinished assessment work. Staleness follows the separate recovery procedure;
+unrelated tooling failures remain explicit failures, not permission to replace
+workers repeatedly. A completed significant or uncertain assessment is not
+unfinished work and follows stage 4.
 
 # Stage 4: publish or retain the dry-run result
 

@@ -56,6 +56,38 @@ Describe 'Automatic reapproval repository scope instructions' {
         $assignment | Should -Match 'Do not return source text, discussion transcripts'
     }
 
+    It 'recovers an ended incomplete worker on the same snapshot without resuming a synchronous task' {
+        $script:Prompt | Should -Match 'A returned synchronous task has ended; do not use `write_agent` to resume it'
+        $script:Prompt | Should -Match 'native `results` still reports `assessmentRequired` with a null\s+`assessmentDigest`'
+        $script:Prompt | Should -Match 'at most one replacement worker per PR and snapshot'
+        $script:Prompt | Should -Match 'same run path and snapshot digest'
+        $script:Prompt | Should -Match 'including replacements'
+        $script:Prompt | Should -Match 'Do not pass the previous worker''s semantic conclusions'
+        $script:Prompt | Should -Match 'If the replacement also returns incomplete, report the PR as incomplete'
+        $script:Prompt | Should -Match 'Do not use `refresh`, a new run, or a needs-review notice to recover\s+unfinished assessment work'
+        $script:Prompt | Should -Match 'Staleness follows the separate recovery procedure'
+        $script:Prompt | Should -Match 'unrelated tooling failures remain explicit failures'
+    }
+
+    It 'requires coverage repair rather than using complete as a probe or ending on its rejection' {
+        $assignment = Get-Content -LiteralPath (Join-Path $skill 'assessment.md') -Raw
+        $assignment | Should -Match 'Record each change judgment after reading its evidence'
+        $assignment | Should -Match 'Before calling `complete`, verify that every inventory page has been visited'
+        $assignment | Should -Match 'every change has a judgment, and the cumulative judgment is recorded'
+        $assignment | Should -Match 'Do not use `complete` as a probe'
+        $assignment | Should -Match 'If completion rejects missing coverage or reads, continue the missing work'
+        $assignment | Should -Match 'A delivered tool result is not command success'
+        $assignment | Should -Match 'nonzero native exit'
+    }
+
+    It 'resumes persisted progress without treating retained reads as the replacement worker''s knowledge' {
+        $script:Recipes | Should -Match 'Repeating `prepare` on the same snapshot preserves recorded reads and judgments'
+        $script:Recipes | Should -Match 'Reread evidence needed for your own judgment'
+        $script:Recipes | Should -Match 'Native read coverage does not establish that a replacement worker has seen the evidence'
+        $script:Recipes | Should -Match 'retain existing judgments unless deliberately replacing them'
+        $script:Recipes | Should -Match 'with their current digests'
+    }
+
     It 'reports every in-range result with linked identity and service approval time' {
         $script:Prompt | Should -Match 'final report MUST include a Markdown table with one row for every in-range\s+candidate returned across all final `results` pages'
         $script:Prompt | Should -Match 'retained decisions,\s+already-valid approvals, no-prior-approval and ineligible outcomes, and failures'

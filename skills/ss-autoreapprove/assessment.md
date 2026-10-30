@@ -33,8 +33,18 @@ empty content; insufficient evidence requires uncertainty.
 Apply the captured significance policy to every change and the cumulative
 difference. Cite returned evidence references. Assess significant design changes,
 likely performance regressions, and likely correctness regressions; behavioral
-or structural edits do not automatically fail. Record a judgment for every
-change and then the cumulative judgment, including for an empty inventory.
+or structural edits do not automatically fail. Record each change judgment after reading its evidence
+so durable progress does not depend on retaining the entire source inventory
+in context. Record a judgment for every change and then the cumulative judgment,
+including for an empty inventory.
+
+Before calling `complete`, verify that every inventory page has been visited,
+required evidence reads are complete, every change has a judgment, and the cumulative judgment is recorded.
+Do not use `complete` as a probe for unfinished work. If completion rejects missing coverage or reads, continue the missing work
+on this snapshot rather than returning that rejection as the assessment result.
+A delivered tool result is not command success; a nonzero native exit must be
+handled according to its diagnostic. Staleness and unrelated tooling failures
+still return explicitly to the orchestrator.
 
 Complete through the utility, which enforces exact coverage, evidence reads,
 and policy/snapshot bindings. Return only the PR ID, snapshot digest, completion
