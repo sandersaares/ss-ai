@@ -56,6 +56,15 @@ responses contain `text`, `complete`, and `nextOffset`; consume contiguous
 pages until complete. A side without readable text cannot support an
 insignificant decision. Do not substitute an arbitrary checkout or target tip.
 
+Repeating `prepare` on the same snapshot preserves recorded reads and judgments.
+A replacement worker follows the inventory from the first page, checking each
+`decision` and `decisionDigest` and the `cumulative` judgment. Reread evidence needed for your own judgment
+from offset zero and follow its returned offsets; overlapping reads are allowed.
+Native read coverage does not establish that a replacement worker has seen the evidence.
+Finish missing work and retain existing judgments unless deliberately replacing them
+with their current digests. Never edit the run JSON or recreate the assessment
+to resume it.
+
 # Stage 3: judgments and completion
 
 ```powershell
