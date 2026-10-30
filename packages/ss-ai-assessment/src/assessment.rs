@@ -224,8 +224,8 @@ impl Assessment {
             if *reference != context.reference()? {
                 return Err(error::InvalidContextBinding::classified());
             }
-            self.validate_checkpoints(policy_content, discussion)?;
         }
+        self.validate_checkpoints(policy_content, discussion)?;
         for (id, decision) in &self.decisions {
             self.validate_judgment(id, decision)?;
             self.judgment_reads(id, policy_content, discussion, false)?;
@@ -372,7 +372,8 @@ impl Assessment {
         let result = json!({"snapshotDigest": self.snapshot_digest, "reference": reference, "offset": offset,
             "text": text, "totalCharacters": total, "complete": end == total,
             "context": self.contexts.get(reference),
-            "unit": reference.strip_prefix("unit:").and_then(|id| self.checkpoints.units.iter().find(|unit| unit.id == id)),
+            "unit": reference.strip_prefix("unit:").and_then(|id| self.checkpoints.units.iter().find(|unit| unit.id == id))
+                .map(|unit| json!({"id": unit.id, "bindingReference": unit.binding_reference()})),
             "nextOffset": if end < total { Some(end) } else { None }});
         check_response(&result)?;
         self.reads.insert(reference.to_owned(), previous.max(end));
@@ -687,9 +688,16 @@ impl Assessment {
             return Ok(());
         }
         if reference == "discussion-note"
-            || ["unit:", "note:", "judgment:", "check:", "resolution:"]
-                .iter()
-                .any(|prefix| reference.starts_with(prefix))
+            || [
+                "unit:",
+                "binding:",
+                "note:",
+                "judgment:",
+                "check:",
+                "resolution:",
+            ]
+            .iter()
+            .any(|prefix| reference.starts_with(prefix))
         {
             // Existence and binding are checked by the content reader, not prefix acceptance.
             self.checkpoint_content(reference, "", "")?;

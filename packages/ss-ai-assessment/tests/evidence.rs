@@ -187,6 +187,12 @@ impl FixtureJudgment for Assessment {
                     }
                     let unit = item["reference"].as_str().unwrap();
                     deliver(self, unit, policy, discussion)?;
+                    deliver(
+                        self,
+                        item["bindingReference"].as_str().unwrap(),
+                        policy,
+                        discussion,
+                    )?;
                     if item["completed"] != true {
                         self.note(
                             item["unit"]["id"].as_str().unwrap(),

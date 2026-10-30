@@ -143,9 +143,10 @@ Additional placeholders:
 | `CHECK` | Native concern or interaction ID returned by `checks`. |
 
 Other placeholders retain their definitions above/below. Follow each returned
-`nextOffset`. Unit metadata contains parent identity, original reference,
-bindings, exact half-open scalar ranges and digests. Read returned `unit:ID`
-references, then record notes citing that exact unit and any context used.
+`nextOffset`. Unit metadata contains a stable parent identifier, original reference,
+binding references, exact half-open scalar ranges and digests. Read returned
+`unit:ID` and `binding:ID` references completely, then record notes citing
+that exact unit and any context used.
 Every unit requires a note even when the complete original document was read.
 Use `note:ID`, `judgment:CHANGE_ID`, `discussion-note`, `check:ID`, and
 `resolution:ID` through the same bounded `read` command. Metadata includes

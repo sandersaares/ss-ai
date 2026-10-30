@@ -122,7 +122,9 @@ An immutable evidence-unit manifest partitions every required patch and the
 complete discussion into bounded exact ranges. It prefers complete hunks,
 threads, and review bodies, groups interleaved replies by their retained parent,
 and splits oversized records or single lines without omission. Each unit retains
-its original reference, scalar ranges, content digests, and source/thread bindings.
+its original reference, scalar ranges, content digests, and a reference to
+source/thread bindings. Workers read those bindings in bounded pages before
+recording a unit note.
 Sharing excerpt text never merges its referencing threads.
 
 Workers record typed unit notes with observations, interfaces/invariants,
@@ -235,7 +237,7 @@ or forgets such effects.
 An existing publication receipt also requires retained host evidence of a
 preflight-only operation; missing host history is not proof that no write occurred.
 
-`discovery.rs` owns the schema-11 run, recovery record, and result metadata.
+`discovery.rs` owns the schema-12 run, recovery record, and result metadata.
 Incompatible run schemas require a fresh run; retained effects require
 reconciliation with their original utility version.
 Discovery discards draft PRs before recency checks. Valid older records drop

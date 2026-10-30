@@ -115,7 +115,8 @@ impl Assessment {
             .filter(|unit| reference.is_none_or(|reference| reference == unit.reference))
             .map(|unit| {
                 Ok(json!({
-                    "unit": unit, "reference": unit.reference(),
+                    "unit": unit.metadata(), "reference": unit.reference(),
+                    "bindingReference": unit.binding_reference(),
                     "noteReference": format!("note:{}", unit.id),
                     "noteDigest": self.checkpoints.notes.get(&unit.id).map(hash).transpose()?,
                     "readOffset": self.reads.get(&unit.reference()),
@@ -479,6 +480,12 @@ impl Assessment {
                 return Err(error::MissingExactEvidence::classified());
             }
             self.bind_read(&unit.reference(), &mut dependencies, policy, discussion)?;
+            self.bind_read(
+                &unit.binding_reference(),
+                &mut dependencies,
+                policy,
+                discussion,
+            )?;
         }
         Ok(dependencies)
     }
@@ -502,6 +509,15 @@ impl Assessment {
                 policy,
                 discussion,
             )?)));
+        }
+        if let Some(id) = reference.strip_prefix("binding:") {
+            let unit = self
+                .checkpoints
+                .units
+                .iter()
+                .find(|unit| unit.id == id)
+                .ok_or_else(error::UnknownUnit::classified)?;
+            return Ok(Some(serde_json::to_string(&unit.bindings)?));
         }
         if let Some(id) = reference.strip_prefix("note:") {
             return Ok(Some(serde_json::to_string(
@@ -688,6 +704,7 @@ impl Assessment {
         self.cumulative = None;
         self.checkpoints.aggregates.remove("cumulative");
         let mut removed = BTreeSet::from([reference.to_owned()]);
+        let original_checks = self.check_records()?;
         // Each iteration removes a persisted node. No recursive summarization or retry is involved.
         loop {
             let before = removed.len();
@@ -732,6 +749,11 @@ impl Assessment {
             .into_iter()
             .map(|check| check.id)
             .collect::<BTreeSet<_>>();
+        for check in original_checks {
+            if removed.contains(&check.origin) || !checks.contains(&check.id) {
+                removed.insert(format!("check:{}", check.id));
+            }
+        }
         self.checkpoints.resolutions.retain(|id, bound| {
             checks.contains(id) && !bound.dependencies.keys().any(|key| removed.contains(key))
         });

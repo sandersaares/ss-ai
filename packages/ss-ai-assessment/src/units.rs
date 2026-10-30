@@ -10,6 +10,8 @@ use crate::error::{self, AssessmentError};
 
 /// Leaves most of the worker budget available for policy, context, and reasoning.
 pub(crate) const UNIT_CHARACTERS: usize = 16_384;
+/// Reserve most of a metadata response for the unit identity and pagination.
+const UNIT_RANGES: usize = 8;
 
 /// An immutable work item names original evidence, never a summary of that evidence.
 #[derive(Debug, Deserialize, Serialize, PartialEq, Eq)]
@@ -59,6 +61,21 @@ impl EvidenceUnit {
     pub(crate) fn reference(&self) -> String {
         format!("unit:{}", self.id)
     }
+
+    /// Binding metadata can be larger than any one response.
+    pub(crate) fn binding_reference(&self) -> String {
+        format!("binding:{}", self.id)
+    }
+
+    /// Unit lists expose ranges separately from potentially large bindings.
+    pub(crate) fn metadata(&self) -> Value {
+        json!({
+            "id": self.id, "snapshotDigest": self.snapshot_digest,
+            "parent": self.parent, "reference": self.reference,
+            "ranges": self.ranges, "totalCharacters": self.total_characters,
+            "contentDigest": self.content_digest
+        })
+    }
 }
 
 /// Structural grouping is a preference; every original character remains covered once.
@@ -78,7 +95,7 @@ pub(crate) fn partition(
     }
     let mut units = Vec::new();
     for (identity, segments) in groups {
-        let parent = format!("{parent}{identity}");
+        let parent = format!("{parent}/{}", hash(&identity)?);
         let mut unit = new_unit(snapshot, &parent, reference);
         for segment in segments {
             let mut remaining = document
@@ -92,7 +109,8 @@ pub(crate) fn partition(
             let length = remaining.chars().count();
             // Do not split a complete ordinary hunk/thread record merely to fill a unit.
             if !unit.ranges.is_empty()
-                && unit.total_characters.saturating_add(length) > UNIT_CHARACTERS
+                && (unit.total_characters.saturating_add(length) > UNIT_CHARACTERS
+                    || unit.ranges.len() >= UNIT_RANGES)
             {
                 finish_unit(&mut units, unit, document)?;
                 unit = new_unit(snapshot, &parent, reference);
@@ -109,7 +127,10 @@ pub(crate) fn partition(
                     content_digest: document_digest(text),
                 });
                 unit.total_characters = unit.total_characters.saturating_add(text.chars().count());
-                unit.bindings.push(segment.binding.clone());
+                unit.bindings.push(json!({
+                    "identity": segment.identity,
+                    "record": segment.binding
+                }));
                 if bytes == remaining.len() {
                     break;
                 }

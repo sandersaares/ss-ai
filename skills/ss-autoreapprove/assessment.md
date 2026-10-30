@@ -49,8 +49,9 @@ Use `units` to page the immutable manifest, starting at native
 `progress.nextUnitOffset` for missing unit work rather than replaying completed
 metadata pages. Omit `--reference` when using that unfiltered offset.
 Each unit names its original
-document, parent change/thread/review, exact half-open Unicode scalar ranges,
-content digest, and source bindings. Whole hunks and threads are preferred;
+document, parent identifier, exact half-open Unicode scalar ranges,
+content digest, and a binding reference. Read the binding reference completely
+before recording the unit note. Whole hunks and threads are preferred;
 oversized records and single lines use lossless ranges. A boundary is not a
 semantic boundary: inspect its bindings and reacquire neighboring units or exact
 source when needed. Shared historical excerpts retain separate referencing

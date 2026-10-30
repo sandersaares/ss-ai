@@ -168,6 +168,13 @@ fn unit_operation(assessment: &mut Assessment, selector: usize, discussion: &str
     {
         assert!(result["nextOffset"].as_u64().unwrap() > u64::try_from(offset).unwrap());
     }
+    let _binding = assessment.read(
+        unit["bindingReference"].as_str().unwrap(),
+        0,
+        selector.saturating_add(1),
+        "",
+        discussion,
+    );
     let previous = unit["noteDigest"].as_str();
     let _note = assessment.note(
         unit["unit"]["id"].as_str().unwrap(),

@@ -1122,6 +1122,14 @@ fn fixture_checkpoint_inputs(
             }
             let unit_reference = item["reference"].as_str().unwrap();
             read_evidence(root, provider, snapshot, unit_reference, None, None);
+            read_evidence(
+                root,
+                provider,
+                snapshot,
+                item["bindingReference"].as_str().unwrap(),
+                None,
+                None,
+            );
             if item["completed"] != true {
                 work(
                     root,
@@ -1334,9 +1342,16 @@ fn evidence_length(root: &Path, provider: &Provider, snapshot: &str, reference: 
     if reference.ends_with(":patch")
         || reference.contains(":context:")
         || reference == "discussion-note"
-        || ["unit:", "note:", "judgment:", "check:", "resolution:"]
-            .iter()
-            .any(|prefix| reference.starts_with(prefix))
+        || [
+            "unit:",
+            "binding:",
+            "note:",
+            "judgment:",
+            "check:",
+            "resolution:",
+        ]
+        .iter()
+        .any(|prefix| reference.starts_with(prefix))
     {
         let first = work(
             root,

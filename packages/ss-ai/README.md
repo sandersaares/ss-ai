@@ -218,7 +218,7 @@ The producer and consumer validate the full record, including excluded PRs.
 
 | Record | Fields |
 | --- | --- |
-| Run | `schemaVersion: 11`; UUID `runId`; canonical `repositoryUrl`; nonempty string `repositoryId`, `accountId`, `utilityVersion`; `platform` (`gitHub` or `azureDevOps`); nullable string `tenant`; `policy`; Boolean `dryRun`, `enumerationComplete`; `state`; `inventory`; nullable `error` and positive integer `errorPullRequestId`. A PR-bound publication failure records its originating PR; only that PR's owned operation can recover the failed run. |
+| Run | `schemaVersion: 12`; UUID `runId`; canonical `repositoryUrl`; nonempty string `repositoryId`, `accountId`, `utilityVersion`; `platform` (`gitHub` or `azureDevOps`); nullable string `tenant`; `policy`; Boolean `dryRun`, `enumerationComplete`; `state`; `inventory`; nullable `error` and positive integer `errorPullRequestId`. A PR-bound publication failure records its originating PR; only that PR's owned operation can recover the failed run. |
 | Policy | Absolute UTF-8 `sourcePath`; nonempty UTF-8 `content`; lowercase hexadecimal `sha256` of the captured content bytes. |
 | Inventory entry | Unique positive integer `pullRequestId`; canonical `url`; nonempty `title`; `draft: false`; `recency`; `recovery`; nullable `inspection`, `assessment`, `executionError`, `publication`, `reviewNotice`, and `automaticApproval`. Entries are in ascending PR order. |
 | Recovery | `attemptIds`: ordered distinct UUIDs, at most the recovery limit, excluding the run ID; nullable `stale` (`staleEvidence`) and `error` (`retryExhausted`, only at the limit). The last attempt ID selects the current PR's host-journal `runId`; the initial attempt uses the enclosing run ID. |
@@ -348,21 +348,23 @@ policy records remain in native authority evidence, not this discussion document
 
 `units` accepts `--after`, `--limit`, and optional `--reference discussion|CHANGE_ID:patch`.
 It returns bounded `items` and `nextOffset` over the selected immutable unit
-list. Each item supplies its `unit`, raw `reference`, `noteReference`,
+list. Each item supplies its `unit`, raw `reference`, `bindingReference`, `noteReference`,
 nullable `noteDigest`, nullable `readOffset`, and Boolean `completed`.
 `nextUnitOffset` addresses the unfiltered list, allowing workers to resume
 without replaying completed metadata pages. Filtered lists have separate offsets.
-Read every returned `unit:ID` through the ordinary reader. Units cover each
+Read every returned `unit:ID` and `binding:ID` through the ordinary reader. Units cover each
 original document exactly once through half-open scalar ranges; their text
-concatenates those ranges in order. Parent identity and bindings distinguish
-source changes, review bodies, threads, and shared historical excerpts.
+concatenates those ranges in order. The stable parent identifier groups a source
+change or discussion record; separately paged bindings retain its exact identity
+and distinguish threads and shared historical excerpts.
 Complete unit coverage also satisfies the original document's required read.
 
 `note` takes `--unit-id`, `--observations`, `--interfaces`, repeated `--evidence`,
 optional repeated `--concern` and `--interaction`, and optional
 `--previous-digest`. A unit note cites its raw unit and requires complete
 delivery of its evidence and applicable requested context. Notes have no
-disposition. `--unit-id discussion` records the single discussion aggregate
+disposition. Each unit note requires a complete read of its binding reference.
+`--unit-id discussion` records the single discussion aggregate
 after all discussion unit notes and relevant exact evidence have been read.
 Notes accept at most 8,192 serialized UTF-8 bytes before dependency bindings.
 New notes return `noteDigest`; replacements require the current digest.
