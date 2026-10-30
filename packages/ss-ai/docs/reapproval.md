@@ -80,7 +80,10 @@ excluded PRs as counts. The window limits candidates, not approval history.
 
 Isolated Git-object access supplies exact paths, modes and content without executing
 reviewed code. Typed, snapshot-bound judgments cover every change and the cumulative
-result. Present sides must be readable and fully read for an insignificant outcome;
+result. Every judgment requires the policy and all readable sides of its change;
+the cumulative judgment requires complete policy and discussion reads.
+Every completed outcome requires all readable evidence, not just favorable outcomes.
+Opaque source still prevents an insignificant outcome;
 absent sides represent additions or deletions, not missing evidence. Structural or
 behavioral edits are not automatically significant. Mixed significant or uncertain
 judgments prevent approval. See the package command contract for schemas and bounds.
@@ -89,6 +92,32 @@ The orchestrator dispatches a fresh GPT 6.1 Sol assessment worker per eligible P
 with explicit medium reasoning and regular context. That worker owns preparation,
 bounded evidence reads, judgments, and completion. It returns scalar results and
 a concise reason, not source or discussion text, and cannot publish.
+
+Evidence and metadata responses have a serialized UTF-8 byte budget, including
+JSON escaping and pretty formatting, so a character-count bound cannot hide
+tool truncation. Metadata pages shrink at complete change boundaries and return
+their actual next offset; a single oversized item fails explicitly. Evidence
+pages advance only through returned characters and expose total length.
+Native read progress distinguishes unread empty text from an explicitly read
+empty document and distinguishes opaque content from pending text delivery.
+Read receipts track native delivery, not model comprehension; a truncated tool
+response must be replayed with a smaller limit.
+
+Each worker examines a small source unit and records its judgments before
+returning a planned checkpoint. The orchestrator verifies increased native
+judgment counts on the unchanged snapshot before starting a fresh worker.
+Each checkpoint adds at least one judgment, bounding source handoffs by the
+inventory size rather than a retry loop. Workers do not overlap. The final
+worker reads durable judgment pages and complete discussion, reacquiring source
+needed for cross-change reasoning. Individual favorable judgments do not
+replace a cumulative semantic assessment. Native scalar progress avoids
+loading source or per-change rationales into the orchestrator.
+
+Tool-output, context, and worker limits are incomplete evidence, not substantive
+uncertainty. They neither freeze a semantic refusal nor authorize a notice.
+Judgment recording rejects unread readable source for every disposition, and
+completion independently checks the same boundary. Actual semantic uncertainty
+and intrinsically opaque source remain fail-closed review outcomes.
 
 A returned synchronous worker cannot receive a continuation message. After
 native results confirm an unfinished assessment, the skill permits one fresh

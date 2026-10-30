@@ -1124,6 +1124,18 @@ fn assess_as(
     work(root, provider, "complete", snapshot, &[]).unwrap();
 }
 
+/// Acquires readable evidence for structural fixtures without treating opaque sides as empty.
+fn read_available_source(root: &Path, provider: &Provider, snapshot: &str, changes: &[Value]) {
+    for change in changes {
+        for side in ["old", "new"] {
+            if change[side]["content"]["kind"] == "text" {
+                let reference = format!("{}:{side}", change["id"].as_str().unwrap());
+                read_evidence(root, provider, snapshot, &reference, None, None);
+            }
+        }
+    }
+}
+
 /// Uses actual persisted read commands without retesting tiny pages in every matrix.
 fn read_evidence(
     root: &Path,
@@ -1136,14 +1148,13 @@ fn read_evidence(
     // Match Command::Read's ordinary default and Assessment::read's response cap.
     let page_limit = limit.map_or(4096, NonZeroUsize::get).min(16_384);
     let length = evidence_length(root, provider.number, reference);
-    let expected_pages = length.div_ceil(page_limit).max(1);
     let mut offset = 0;
     let mut pages = 0;
     let mut total_chars = 0;
 
     loop {
         assert!(
-            pages < expected_pages,
+            pages < length.max(1),
             "Evidence exceeded its captured length"
         );
         let mut arguments = vec![
@@ -1157,6 +1168,7 @@ fn read_evidence(
         }
 
         let read = work(root, provider, "read", snapshot, &arguments).unwrap();
+        assert!(serde_json::to_vec_pretty(&read).unwrap().len() < 16_384);
         assert_eq!(read["snapshotDigest"], snapshot);
         assert_eq!(read["reference"], reference);
         assert_eq!(read["offset"], offset);
@@ -1175,15 +1187,14 @@ fn read_evidence(
             break;
         }
 
-        // Full nonterminal pages and exact advancement prevent loops and skipped evidence.
-        assert_eq!(length, page_limit);
+        // Serialized byte bounds may shorten a Unicode/escaped page below the requested characters.
+        assert!(length > 0);
         let next = read["nextOffset"].as_u64().unwrap();
         assert_eq!(next, offset + u64::try_from(length).unwrap());
         assert!(next > offset);
         offset = next;
     }
 
-    assert_eq!(pages, expected_pages);
     assert_eq!(total_chars, length);
 }
 
@@ -2660,26 +2671,24 @@ fn pagination_requires_complete_contiguous_snapshot_bound_unicode_evidence() {
         for reference in references {
             arguments.extend(["--evidence".into(), reference]);
         }
+        if change == id {
+            let error = work(&root, &provider, "judge", &snapshot, &arguments).unwrap_err();
+            assert!(error.to_string().contains("readable changed-source reads"));
+            work(&root, &provider, "complete", &snapshot, &[]).unwrap_err();
+            publish(&root, &provider, &snapshot).unwrap_err();
+            text.clear();
+            read_evidence(
+                &root,
+                &provider,
+                &snapshot,
+                &reference,
+                Some(NonZeroUsize::new(page_limit).unwrap()),
+                Some(&mut text),
+            );
+            assert_eq!(text, new_text);
+        }
         work(&root, &provider, "judge", &snapshot, &arguments).unwrap();
     }
-
-    let error = work(&root, &provider, "complete", &snapshot, &[]).unwrap_err();
-    assert!(
-        error
-            .to_string()
-            .contains("complete policy, discussion, and changed-source reads")
-    );
-    publish(&root, &provider, &snapshot).unwrap_err();
-    text.clear();
-    read_evidence(
-        &root,
-        &provider,
-        &snapshot,
-        &reference,
-        Some(NonZeroUsize::new(page_limit).unwrap()),
-        Some(&mut text),
-    );
-    assert_eq!(text, new_text);
     assert_eq!(
         work(&root, &provider, "complete", &snapshot, &[]).unwrap()["status"],
         "wouldReapprove"
@@ -3096,6 +3105,14 @@ fn risk_judgments_and_uncertainty_prevent_publication(repository: &Sources) {
         let provider = repository.provider(false);
         let (snapshot, prepared) = prepare(&root, &provider, false);
         let id = prepared["changes"][0]["id"].as_str().unwrap();
+        for reference in [
+            "policy".into(),
+            "discussion".into(),
+            format!("{id}:old"),
+            format!("{id}:new"),
+        ] {
+            read_evidence(&root, &provider, &snapshot, &reference, None, None);
+        }
         work(
             &root,
             &provider,
@@ -3144,6 +3161,62 @@ fn risk_judgments_and_uncertainty_prevent_publication(repository: &Sources) {
         }
         publish(&root, &provider, &snapshot).unwrap_err();
         assert_eq!(provider.writes.get(), 0);
+    }
+}
+
+/// Unexamined readable content cannot freeze a semantic refusal or authorize a notice.
+#[test]
+fn incomplete_evidence_does_not_authorize_approval_or_needs_review_publication() {
+    let _guard = PROCESS_TEST_LOCK
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner);
+    let sources = Sources::new();
+    for ado in [false, true] {
+        let scope = TempDir::new().unwrap();
+        let provider = sources.provider(ado);
+        let (snapshot, prepared) = prepare(scope.path(), &provider, false);
+        let id = prepared["changes"][0]["id"].as_str().unwrap();
+        read_evidence(scope.path(), &provider, &snapshot, "policy", None, None);
+        for disposition in ["uncertain", "significant", "insignificant"] {
+            let before = fs::read(scope.path().join("run.json")).unwrap();
+            work(
+                scope.path(),
+                &provider,
+                "judge",
+                &snapshot,
+                &[
+                    "--change-id".into(),
+                    id.into(),
+                    "--disposition".into(),
+                    disposition.into(),
+                    "--rationale".into(),
+                    "The source has not been examined.".into(),
+                    "--evidence".into(),
+                    format!("{id}:new"),
+                ],
+            )
+            .unwrap_err();
+            work(scope.path(), &provider, "complete", &snapshot, &[]).unwrap_err();
+            assert_eq!(fs::read(scope.path().join("run.json")).unwrap(), before);
+            notify(scope.path(), &provider, &snapshot).unwrap_err();
+            publish(scope.path(), &provider, &snapshot).unwrap_err();
+            let result = invoke(scope.path(), &provider, "results", &[]).unwrap();
+            assert_eq!(result["items"][0]["status"], "assessmentRequired");
+            assert!(result["items"][0]["assessmentDigest"].is_null());
+            assert_eq!(
+                result["items"][0]["assessmentProgress"]["judgedChangeCount"],
+                0
+            );
+            assert_eq!(provider.writes.get(), 0);
+        }
+        // Actual uncertainty after examination still has its ordinary fail-closed notice path.
+        assess_as(scope.path(), &provider, &snapshot, &prepared, "uncertain");
+        let result = notify(scope.path(), &provider, &snapshot).unwrap();
+        assert_eq!(result["items"][0]["status"], "failed");
+        assert!(result["items"][0]["reviewNotice"]["commentId"].is_string());
+        assert_eq!(provider.writes.get(), 1);
+        publish(scope.path(), &provider, &snapshot).unwrap_err();
+        assert_eq!(provider.writes.get(), 1);
     }
 }
 
@@ -3381,6 +3454,10 @@ fn force_push_inventory_preserves_every_path_kind_and_rejects_missing_objects() 
     let changes = state["inventory"][0]["assessment"]["inventory"]["changes"]
         .as_array()
         .unwrap();
+    for reference in ["policy", "discussion"] {
+        read_evidence(&root, &provider, &snapshot, reference, None, None);
+    }
+    read_available_source(&root, &provider, &snapshot, changes);
     for (path, kind, content) in [
         ("removed.txt", "D", "text"),
         ("renamed.txt", "R", "text"),
@@ -3562,7 +3639,7 @@ fn empty_source_diff_and_corrupted_assessments_never_bypass_discussion_or_covera
             "discussion".into(),
         ],
     )
-    .unwrap();
+    .unwrap_err();
     work(&root, &provider, "complete", &snapshot, &[]).unwrap_err();
     assess(&root, &provider, &snapshot, &prepared);
     let path = root.join("run.json");

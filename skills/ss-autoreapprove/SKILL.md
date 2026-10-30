@@ -142,6 +142,19 @@ native `results`. A delivered tool result is not command success; inspect the
 native exit status and diagnostics. Workers cannot publish, ask human decision
 questions, or delegate further.
 
+Workers process bounded source units rather than loading the full comparison
+into one context. A planned `checkpoint` is not a completed assessment or a
+premature worker failure. Read native `results` and verify that
+`assessmentProgress.judgedChangeCount` increased, the snapshot is unchanged,
+and `assessmentDigest` is still null before dispatching the next fresh worker.
+Pass the original assignment and scalar progress, not the previous worker's
+conclusions. The final worker reads durable judgments and discussion and owns
+the cumulative judgment. The orchestrator never synthesizes semantic results.
+Only one worker may be active for a PR. Since each source checkpoint must add
+at least one judgment, allow no more source handoffs than the native
+`assessmentProgress.changeCount`; the final cumulative worker is separate.
+Use the same explicit model and context configuration for every unit.
+
 An interrupted or prematurely returned worker leaves unfinished work, not
 permission. A returned synchronous task has ended; do not use `write_agent` to resume it.
 If native `results` still reports `assessmentRequired` with a null
