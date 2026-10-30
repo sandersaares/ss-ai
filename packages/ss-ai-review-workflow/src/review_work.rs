@@ -16,9 +16,10 @@ use std::path::{Component, Path, PathBuf};
 use ohno::AppError;
 use serde_json::{Map, Value, json};
 use ss_ai_review_context::{bytes_hash, powershell_json};
-use ss_ai_runtime::{Clock, FileTransaction, caused_by, fail, read_bytes};
+use ss_ai_runtime::{Clock, FileTransaction, LockMode, ResourceLock, caused_by, fail, read_bytes};
 
 use crate::findings;
+use crate::focus_area_generation;
 use crate::workflow_plan::parse_json;
 
 /// Keeps manifest validation attached to data crossing workflow module boundaries.
@@ -81,17 +82,149 @@ pub fn create(
     artifact_directory: Option<&Path>,
     clock: &dyn Clock,
 ) -> Result<Value, AppError> {
+    create_internal(
+        inventory,
+        groups,
+        focus_areas,
+        output,
+        repository_root,
+        artifact_directory,
+        None,
+        clock,
+    )
+}
+
+/// Binds review preparation to the validated source and artifact generation.
+#[derive(Debug)]
+#[expect(
+    clippy::exhaustive_structs,
+    reason = "The internal CLI supplies both required binding fields"
+)]
+pub struct PreparationBinding<'a> {
+    /// Real review session that owns the preparation transaction.
+    pub session: &'a Path,
+    /// Identity returned by the caller's cache restore.
+    pub identity: &'a str,
+}
+
+/// Creates review work from the caller's validated focus-area generation.
+///
+/// # Errors
+///
+/// Returns an error when the identity is stale, the artifacts changed, or
+/// review-work preparation fails.
+#[expect(
+    clippy::too_many_arguments,
+    reason = "The binding extends the existing complete review preparation operation"
+)]
+pub fn create_with_preparation(
+    inventory: &Path,
+    groups: &Path,
+    focus_areas: &Path,
+    output: &Path,
+    repository_root: Option<&Path>,
+    artifact_directory: Option<&Path>,
+    preparation: &PreparationBinding<'_>,
+    clock: &dyn Clock,
+) -> Result<Value, AppError> {
+    create_internal(
+        inventory,
+        groups,
+        focus_areas,
+        output,
+        repository_root,
+        artifact_directory,
+        Some(preparation),
+        clock,
+    )
+}
+
+/// Keeps identity verification, artifact reads, and work publication in one transaction.
+#[expect(
+    clippy::too_many_arguments,
+    reason = "Both entry points retain the same explicit preparation inputs"
+)]
+fn create_internal(
+    inventory: &Path,
+    groups: &Path,
+    focus_areas: &Path,
+    output: &Path,
+    repository_root: Option<&Path>,
+    artifact_directory: Option<&Path>,
+    preparation: Option<&PreparationBinding<'_>>,
+    clock: &dyn Clock,
+) -> Result<Value, AppError> {
     if repository_root.is_some() != artifact_directory.is_some() {
         return Err(invalid(
             "Applicability preparation requires repository and artifact directories",
         ));
     }
     let focus_path = full_path(focus_areas)?;
-    let _focus_lock = FileTransaction::open(&focus_path, clock)?;
+    let legacy_focus = if preparation.is_none() {
+        Some(
+            fs::canonicalize(&focus_path)
+                .map_err(|error| caused_by("io", "Cannot resolve focus areas", error))?,
+        )
+    } else {
+        None
+    };
+    let session = if let Some(preparation) = preparation {
+        fs::canonicalize(preparation.session)
+            .map_err(|error| caused_by("io", "Cannot resolve review session", error))?
+    } else {
+        legacy_focus
+            .as_ref()
+            .and_then(|path| path.parent())
+            .ok_or_else(|| invalid("Focus areas require a parent directory"))?
+            .to_path_buf()
+    };
+    let _operation_lock = ResourceLock::open(
+        &session.join("focus-area-cache-operation"),
+        LockMode::Shared,
+        clock,
+    )?;
+    let canonical_focus = fs::canonicalize(&focus_path)
+        .map_err(|error| caused_by("io", "Cannot resolve focus areas", error))?;
+    if legacy_focus.is_some_and(|path| path != canonical_focus) {
+        return Err(invalid("Focus-area directory changed"));
+    }
+    let is_session_focus = if preparation.is_some() {
+        if canonical_focus.parent() != Some(session.as_path())
+            || fs::canonicalize(session.join("focus-areas"))? != canonical_focus
+        {
+            return Err(invalid("Focus areas do not belong to the review session"));
+        }
+        true
+    } else {
+        match fs::canonicalize(session.join("focus-areas")) {
+            Ok(path) => path == canonical_focus,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => false,
+            Err(error) => {
+                return Err(caused_by("io", "Cannot resolve session focus areas", error).into());
+            }
+        }
+    };
+    let _focus_lock = FileTransaction::open(&canonical_focus, clock)?;
+    if preparation.is_none()
+        && is_session_focus
+        && focus_area_generation::is_managed_locked(&session, clock)?
+    {
+        return Err(invalid(
+            "Focus-area generation requires a preparation identity",
+        ));
+    }
+    if let Some(preparation) = preparation
+        && !focus_area_generation::verify_ready_locked(&session, preparation.identity, clock)?
+    {
+        return Err(fail(
+            "staleGeneration",
+            "Focus-area preparation is not ready",
+        ));
+    }
     let files = read_inventory(inventory, clock)?;
     let groups = read_groups(groups, &files, clock)?;
     let mut areas = Vec::new();
-    for entry in fs::read_dir(&focus_path)
+    for entry in fs::read_dir(&canonical_focus)
         .map_err(|error| caused_by("io", "Cannot read focus areas", error))?
     {
         let entry =
@@ -139,6 +272,34 @@ pub fn create(
     )]
     fs::create_dir(&root)
         .map_err(|error| caused_by("io", "Cannot create new review-work directory", error))?;
+    if preparation.is_some() {
+        let destination = root.join("focus-areas");
+        #[expect(
+            clippy::create_dir,
+            reason = "A new review-work directory cannot already contain snapshots"
+        )]
+        fs::create_dir(&destination)
+            .map_err(|error| caused_by("io", "Cannot create focus-area snapshots", error))?;
+        for (area, text) in &mut areas {
+            let name = area
+                .file_name()
+                .ok_or_else(|| invalid("Focus-area file has no name"))?;
+            let snapshot = destination.join(name);
+            let transaction = FileTransaction::open(&snapshot, clock)?;
+            if transaction.read_bytes()?.is_some() {
+                return Err(invalid("Focus-area snapshot already exists"));
+            }
+            transaction.write_bytes(text.as_bytes())?;
+            *area = snapshot;
+        }
+    } else {
+        for (area, _) in &mut areas {
+            let name = area
+                .file_name()
+                .ok_or_else(|| invalid("Focus-area file has no name"))?;
+            *area = focus_path.join(name);
+        }
+    }
     let inventory_path = root.join("file-inventory.json");
     let groups_path = root.join("file-inventory-grouped.json");
     let queue_path = root.join("focus-areas.json");

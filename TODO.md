@@ -15,9 +15,6 @@ Improvement ideas to revisit when the repo matures.
 - **Bash startup test output.** Isolate the interactive-shell assertion in
   `tests/BashEnvironment.Tests.ps1` from distribution startup banners, which
   can precede the environment value being checked.
-- **Portable schema-error assertions.** Make the diagnostic assertion in
-  `tests/SsReviewWorkflowData.Tests.ps1` independent of PowerShell's
-  console-width line wrapping.
 - **Evaluation cache/task publication.** Assess shared access to
   `dev/ss-cargo-deps-tidy/evals/Generate-FoloFullTask.ps1` and add transaction
   protection where needed; use disposable checkouts for standalone preparation.
@@ -25,9 +22,9 @@ Improvement ideas to revisit when the repo matures.
 ## Skill design
 
 - **Migrate ss-review command families to Rust.** Replace the remaining complete
-  families in order: instruction preparation and cache; provider capture;
-  report tooling; overview publication; final review publication; and trackers.
-  Local context, finding, audit, rendering, coverage, and worker-input commands
+  families in order: provider capture; report tooling; overview publication;
+  final review publication; and trackers. Local context, finding, audit,
+  rendering, coverage, worker-input, instruction preparation, and cache commands
   use native operations through PowerShell adapters. Retire the adapters after
   their callers migrate while preserving the hybrid workflow's records,
   transaction boundaries and authority gates.

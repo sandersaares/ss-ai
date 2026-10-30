@@ -321,7 +321,9 @@ Describe 'Expansion graph and completeness' {
         )
         $run.exitCode | Should -Not -Be 0
         $run.output | Should -BeNullOrEmpty
-        $run.error | Should -Match 'not valid with the schema'
+        # Console diagnostics can add ANSI styling and wrap text behind a line gutter.
+        $diagnostic = $run.error -replace '\x1b\[[0-9;]*m', ''
+        $diagnostic | Should -Match 'Direct[ \t\r\n|]+referrer[ \t\r\n|]+must[ \t\r\n|]+name[ \t\r\n|]+a[ \t\r\n|]+materialized[ \t\r\n|]+source'
         [IO.File]::ReadAllText($script:ExpansionPath) | Should -BeExactly $before
     }
 

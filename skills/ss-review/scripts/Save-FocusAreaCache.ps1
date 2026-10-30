@@ -2,15 +2,6 @@
 
 # Publishes the session's focus-area set to the cache (docs/design.md, "Focus-area reuse").
 #
-# Stage 3 of prepare-focus-areas.md runs this once the artifacts are generated and validated. The
-# review agent drives the cache by running commands and parsing their output rather than by
-# dot-sourcing PowerShell, which is why each cache operation is its own executable over the shared
-# library in lib\FocusAreaCache.ps1.
-#
-# The only thing written to stdout is a single compressed JSON object, because the caller parses it;
-# any stray output would corrupt that result. Diagnostics go to a file and errors to the error
-# stream.
-
 [CmdletBinding(PositionalBinding = $false)]
 param(
     [Parameter(Mandatory)]
@@ -18,6 +9,9 @@ param(
 
     [Parameter(Mandatory)]
     [string] $InputDirectory,
+
+    [Parameter(Mandatory)]
+    [string] $PreparationIdentity,
 
     # Defaults to the skill's own recipe, which is the document that defines how focus areas are
     # generated. It is hashed into the cache key, so editing it invalidates prior entries.
@@ -42,39 +36,20 @@ Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 $PSNativeCommandUseErrorActionPreference = $true
 
-. "$PSScriptRoot\lib\FocusAreaCache.ps1"
-. "$PSScriptRoot\lib\FocusAreaCacheDiagnostics.ps1"
-. "$PSScriptRoot\lib\JsonValue.ps1"
-. "$PSScriptRoot\lib\PullRequestModel.ps1"
-. "$PSScriptRoot\lib\WorkflowData.ps1"
-. "$PSScriptRoot\lib\FocusAreaPreparation.ps1"
-. "$PSScriptRoot\lib\FocusAreaExpansion.ps1"
-
-$transactionLock = Open-PullRequestFileLock -Path (Join-Path $SessionStateDirectory 'focus-area-cache-operation')
-try {
-    $expansion = Read-WorkflowData -Kind expansion -Path (Join-Path $SessionStateDirectory 'focus-area-expansion-status.json')
-    Assert-FocusAreaExpansion -Document $expansion -SessionStateDirectory $SessionStateDirectory -RequireFinal
-    $InputState = $expansion['state']
-
-    if (-not $CacheDirectory) {
-        $CacheDirectory = Get-DefaultFocusAreaCacheDirectory
-    }
-
-    $result = Save-FocusAreaCache `
-        -SessionStateDirectory $SessionStateDirectory `
-        -InputDirectory $InputDirectory `
-        -RecipePath $RecipePath `
-        -CacheDirectory $CacheDirectory `
-        -GeneratorProfile $GeneratorProfile `
-        -FreshnessDays $FreshnessDays `
-        -NowUtc $NowUtc `
-        -InputState $InputState
-
-    # The store extends the record the restore left behind, and occupies distinct fields, so the summary
-    # can state both what was reused and what was contributed back - independent facts about the session.
-    Write-FocusAreaCacheDiagnostics `
-        -SessionStateDirectory $SessionStateDirectory `
-        -Merge -Diagnostics @{ inputState = $InputState; store = $result.status; storeReason = $result.reason }
-
-    $result | ConvertTo-Json -Compress
-} finally { $transactionLock.Dispose() }
+. "$PSScriptRoot\lib\NativeWorkflowBridge.ps1"
+if (-not $CacheDirectory) {
+    $CacheDirectory = Join-Path ([Environment]::GetFolderPath([Environment+SpecialFolder]::UserProfile)) '.copilot\cache\ss-review\focus-areas\v1'
+}
+$resolve = { param($Path) $ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath($Path) }
+Invoke-NativeReviewWorkflow -Arguments @(
+    'save-focus-area-cache',
+    "--session-state=$(& $resolve $SessionStateDirectory)",
+    "--input-directory=$(& $resolve $InputDirectory)",
+    "--preparation-identity=$PreparationIdentity",
+    "--skill-root=$(Split-Path -Parent $PSScriptRoot)",
+    "--recipe-path=$(& $resolve $RecipePath)",
+    "--cache-directory=$(& $resolve $CacheDirectory)",
+    "--generator-profile=$GeneratorProfile",
+    "--freshness-days=$FreshnessDays",
+    "--now-utc=$($NowUtc.ToUniversalTime().ToString('o', [Globalization.CultureInfo]::InvariantCulture))"
+)

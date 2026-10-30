@@ -26,6 +26,8 @@ use crate::{Clock, Failure, fail};
 const CONTENTION_ATTEMPTS: u32 = 6_000;
 /// Avoids busy polling while concurrent operations wait for the same lock.
 const CONTENTION_INTERVAL: Duration = Duration::from_millis(50);
+/// Matches the shared workflow lock budget documented by the review skill.
+const RESOURCE_CONTENTION_ATTEMPTS: u32 = 600;
 
 /// Holds a file transaction across an operation's complete read-modify-write.
 ///
@@ -39,38 +41,142 @@ pub struct FileTransaction<'a> {
     /// Publication destination; staging files stay beside it for atomic replacement.
     path: PathBuf,
     /// Retained handle makes exclusion last as long as this transaction owner.
-    _lock: File,
+    _lock: ResourceLock,
     /// Shares the invocation's wait policy for bounded filesystem contention.
     clock: &'a dyn Clock,
+}
+
+/// Selects whether a resource permits other readers while it is held.
+#[derive(Clone, Copy, Debug)]
+#[non_exhaustive]
+pub enum LockMode {
+    /// Allows concurrent readers but excludes writers.
+    Shared,
+    /// Excludes all other owners.
+    Exclusive,
+}
+
+/// Coordinates a multi-file resource using the retained sibling lock.
+///
+/// The lock is released on drop; its file remains available to other owners.
+#[derive(Debug)]
+pub struct ResourceLock {
+    _file: File,
+}
+
+impl ResourceLock {
+    /// Acquires a resource lock, waiting only for bounded contention.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the path is invalid or the lock cannot be acquired.
+    pub fn open(path: &Path, mode: LockMode, clock: &dyn Clock) -> Result<Self, AppError> {
+        Self::open_with_attempts(path, mode, clock, RESOURCE_CONTENTION_ATTEMPTS)
+    }
+
+    /// Retains the caller's existing contention budget for file transactions.
+    fn open_with_attempts(
+        path: &Path,
+        mode: LockMode,
+        clock: &dyn Clock,
+        attempts: u32,
+    ) -> Result<Self, AppError> {
+        let lock_path = lock_path(path)?;
+        let file = retry_with_attempts(clock, attempts, || acquire(&lock_path, mode))?;
+        Ok(Self { _file: file })
+    }
+
+    /// Attempts a resource lock without waiting for another owner.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for failures other than lock contention.
+    pub fn try_open(path: &Path, mode: LockMode) -> Result<Option<Self>, AppError> {
+        let lock_path = lock_path(path)?;
+        match acquire(&lock_path, mode) {
+            Ok(file) => Ok(Some(Self { _file: file })),
+            Err(error) if contention(&error) => Ok(None),
+            Err(error) => Err(Failure::caused_by(
+                "io",
+                format!("Cannot acquire {}", lock_path.display()),
+                error,
+            )
+            .into()),
+        }
+    }
+}
+
+/// Resolves the shared lock name and prepares its parent without replacing it.
+fn lock_path(path: &Path) -> Result<PathBuf, AppError> {
+    if !path.is_absolute() {
+        return Err(fail("invalidInput", "File path must be absolute"));
+    }
+    let parent = path
+        .parent()
+        .ok_or_else(|| fail("invalidInput", "File path requires a parent directory"))?;
+    fs::create_dir_all(parent).map_err(|error| {
+        Failure::caused_by("io", format!("Cannot create {}", parent.display()), error)
+    })?;
+    let mut lock_path = path.as_os_str().to_owned();
+    lock_path.push(".lock");
+    Ok(lock_path.into())
+}
+
+/// Uses the same sharing convention as PowerShell's retained sibling lock.
+fn acquire(path: &Path, mode: LockMode) -> io::Result<File> {
+    let mut options = OpenOptions::new();
+    // Creating the lock requires write access on Unix. On Windows shared owners
+    // must open read-only so FileShare.Read remains compatible with .NET readers.
+    #[cfg(not(windows))]
+    options.read(true).write(true).create(true).truncate(false);
+    #[cfg(windows)]
+    match mode {
+        LockMode::Shared => {
+            options.read(true).share_mode(FILE_SHARE_READ);
+            match options.open(path) {
+                Ok(file) => return Ok(file),
+                Err(error) if error.kind() == io::ErrorKind::NotFound => {
+                    // Competing creators leave the same retained lock in place.
+                    match OpenOptions::new().write(true).create_new(true).open(path) {
+                        Ok(file) => drop(file),
+                        Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {}
+                        Err(error) => return Err(error),
+                    }
+                }
+                Err(error) => return Err(error),
+            }
+        }
+        LockMode::Exclusive => {
+            options
+                .read(true)
+                .write(true)
+                .create(true)
+                .truncate(false)
+                .share_mode(0);
+        }
+    }
+    let file = options.open(path)?;
+    #[cfg(not(windows))]
+    match mode {
+        LockMode::Shared => file.try_lock_shared(),
+        LockMode::Exclusive => file.try_lock(),
+    }
+    .map_err(|error| match error {
+        fs::TryLockError::WouldBlock => io::Error::from(io::ErrorKind::WouldBlock),
+        fs::TryLockError::Error(error) => error,
+    })?;
+    Ok(file)
 }
 
 impl<'a> FileTransaction<'a> {
     /// Acquires the transaction before testing for an existing file.
     pub fn open(path: &Path, clock: &'a dyn Clock) -> Result<Self, AppError> {
-        if !path.is_absolute() {
-            return Err(fail("invalidInput", "File path must be absolute"));
-        }
-        let parent = path
-            .parent()
-            .ok_or_else(|| fail("invalidInput", "File path requires a parent directory"))?;
-        fs::create_dir_all(parent).map_err(|error| {
-            Failure::caused_by("io", format!("Cannot create {}", parent.display()), error)
-        })?;
-        let mut lock_path = path.as_os_str().to_owned();
-        lock_path.push(".lock");
-        let lock = retry(clock, || {
-            let mut options = OpenOptions::new();
-            options.read(true).write(true).create(true).truncate(false);
-            #[cfg(windows)]
-            options.share_mode(0);
-            let file = options.open(&lock_path)?;
-            #[cfg(not(windows))]
-            file.try_lock().map_err(|error| match error {
-                fs::TryLockError::WouldBlock => io::Error::from(io::ErrorKind::WouldBlock),
-                fs::TryLockError::Error(error) => error,
-            })?;
-            Ok(file)
-        })?;
+        let lock = ResourceLock::open_with_attempts(
+            path,
+            LockMode::Exclusive,
+            clock,
+            CONTENTION_ATTEMPTS,
+        )?;
         Ok(Self {
             path: path.to_owned(),
             _lock: lock,
@@ -128,16 +234,22 @@ pub fn read_bytes(path: &Path, clock: &dyn Clock) -> Result<Option<Vec<u8>>, App
 }
 
 /// Retries only an uncommitted file operation, never the enclosing transaction.
-fn retry<T>(
+fn retry<T>(clock: &dyn Clock, operation: impl FnMut() -> io::Result<T>) -> Result<T, AppError> {
+    retry_with_attempts(clock, CONTENTION_ATTEMPTS, operation)
+}
+
+/// Keeps resource and provider transaction retry budgets independent.
+fn retry_with_attempts<T>(
     clock: &dyn Clock,
+    attempts: u32,
     mut operation: impl FnMut() -> io::Result<T>,
 ) -> Result<T, AppError> {
     // Provider work retains the transaction lock, so retries must allow siblings to queue.
-    for attempt in 0..CONTENTION_ATTEMPTS {
+    for attempt in 0..attempts {
         match operation() {
             Ok(value) => return Ok(value),
             Err(error) if contention(&error) => {
-                if attempt == CONTENTION_ATTEMPTS - 1 {
+                if attempt == attempts.saturating_sub(1) {
                     return Err(Failure::caused_by(
                         "contention",
                         "Shared file remains busy after bounded contention retries".to_owned(),
@@ -228,7 +340,10 @@ mod tests {
 
     use crate::Clock;
 
-    use super::{CONTENTION_ATTEMPTS, CONTENTION_INTERVAL, FileTransaction, retry};
+    use super::{
+        CONTENTION_ATTEMPTS, CONTENTION_INTERVAL, FileTransaction, RESOURCE_CONTENTION_ATTEMPTS,
+        retry, retry_with_attempts,
+    };
 
     /// Counts requested waits without sleeping or accessing the filesystem.
     #[derive(Default)]
@@ -299,6 +414,20 @@ mod tests {
                 .checked_sub(CONTENTION_INTERVAL)
                 .unwrap()
         );
+    }
+
+    #[test]
+    fn resource_contention_uses_the_review_workflow_budget() {
+        let clock = RetryClock::default();
+        let mut attempts = 0;
+        let error = retry_with_attempts::<()>(&clock, RESOURCE_CONTENTION_ATTEMPTS, || {
+            attempts += 1;
+            Err(busy())
+        })
+        .unwrap_err();
+        assert_eq!(crate::classification(&error), "contention");
+        assert_eq!(attempts, RESOURCE_CONTENTION_ATTEMPTS);
+        assert_eq!(clock.waits.get(), RESOURCE_CONTENTION_ATTEMPTS - 1);
     }
 
     #[test]

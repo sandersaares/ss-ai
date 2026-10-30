@@ -1,7 +1,11 @@
+#Requires -Version 7.6
+
 BeforeAll {
+    Set-StrictMode -Version Latest
+    $ErrorActionPreference = 'Stop'
+    $PSNativeCommandUseErrorActionPreference = $true
     $script:Skill = Join-Path (Split-Path -Parent $PSScriptRoot) 'skills\ss-review'
-    . "$script:Skill\scripts\lib\InstructionSources.ps1"
-    . "$script:Skill\scripts\lib\FocusAreaCache.ps1"
+    $script:Native = (Get-Command ss-ai -CommandType Application -ErrorAction Stop | Select-Object -First 1).Source
 
     # Supplies arbitrary instruction names and exact bytes independently of personal guidance.
     function New-InstructionFixture {
@@ -12,11 +16,50 @@ BeforeAll {
         $path
     }
 
-    # Each call exercises the same producer boundary without modifying the process environment.
+    # Isolate each producer's environment and working directory from the test process.
     function Copy-TestInstructions {
-        param([AllowNull()][AllowEmptyString()][string] $Directories)
-        Copy-ReviewInstructionSources -SessionStateDirectory $script:Session `
-            -SkillRoot $script:Skill -DirectoryList $Directories -BaseDirectory $script:Base
+        param(
+            [AllowNull()][AllowEmptyString()] $Directories,
+            [string] $SkillRoot = $script:Skill,
+            [string] $RepositoryRoot,
+            [string[]] $RepositoryInstruction
+        )
+        $start = [Diagnostics.ProcessStartInfo]::new($script:Native)
+        $start.WorkingDirectory = $script:Base
+        $start.UseShellExecute = $false
+        $start.RedirectStandardOutput = $true
+        $start.RedirectStandardError = $true
+        if ($null -eq $Directories) {
+            [void]$start.Environment.Remove('COPILOT_CUSTOM_INSTRUCTIONS_DIRS')
+        } else {
+            $start.Environment['COPILOT_CUSTOM_INSTRUCTIONS_DIRS'] = $Directories
+        }
+        foreach ($argument in @('workflow', 'snapshot-instructions', "--session-state=$script:Session", "--skill-root=$SkillRoot")) {
+            $start.ArgumentList.Add($argument)
+        }
+        if ($RepositoryRoot) { $start.ArgumentList.Add("--repository-root=$RepositoryRoot") }
+        foreach ($path in $RepositoryInstruction) { $start.ArgumentList.Add("--repository-instruction=$path") }
+        $process = [Diagnostics.Process]::Start($start)
+        try {
+            $stdout = $process.StandardOutput.ReadToEndAsync()
+            $stderr = $process.StandardError.ReadToEndAsync()
+            $process.WaitForExit()
+            $output = $stdout.GetAwaiter().GetResult()
+            $errorText = $stderr.GetAwaiter().GetResult()
+            if ($process.ExitCode -ne 0) { throw "Instruction snapshot failed: $errorText" }
+            $output | ConvertFrom-Json
+        } finally { $process.Dispose() }
+    }
+
+    # Exercise the actual cache consumer with an isolated cache and fixed freshness bucket.
+    function Get-TestCacheResult {
+        param([Parameter(Mandatory)] $Snapshot)
+        $json = & "$script:Skill\scripts\Restore-FocusAreaCache.ps1" `
+            -SessionStateDirectory $script:Session -InputDirectory $Snapshot.sourceDirectory `
+            -SnapshotIdentity $Snapshot.snapshotIdentity `
+            -CacheDirectory (Join-Path $TestDrive 'cache') -GeneratorProfile 'test' `
+            -FreshnessDays 7 -NowUtc ([DateTimeOffset]'2026-10-29T00:00:00Z')
+        $json | ConvertFrom-Json
     }
 
     # Captures the complete corpus so failed refreshes cannot discard or rewrite prior guidance.
@@ -46,6 +89,7 @@ Describe 'ss-review configured instruction discovery' {
         $result.schemaVersion | Should -Be 1
         $result.roots.Count | Should -Be 0
         $result.externalFileCount | Should -Be 0
+        $result.snapshotIdentity | Should -Not -BeNullOrEmpty
         @(Get-ChildItem -LiteralPath $result.sourceDirectory -Recurse -File).Count | Should -Be 1
         [IO.File]::ReadAllBytes((Join-Path $result.sourceDirectory 'skill\focus-areas.md')) |
             Should -Be ([IO.File]::ReadAllBytes((Join-Path $script:Skill 'focus-areas.md')))
@@ -136,12 +180,40 @@ Describe 'ss-review configured instruction discovery' {
         $first = Copy-TestInstructions -Directories $script:Base
         $before = @(Get-TestInstructionSnapshot -Directory $first.sourceDirectory)
         [IO.File]::WriteAllText($source, 'Replacement guidance must not replace the prior corpus on failure.')
-        $locked = [IO.File]::Open($source, [IO.FileMode]::Open, [IO.FileAccess]::Write, [IO.FileShare]::None)
+        $locked = $null
+        $mode = $null
         try {
+            if ($IsWindows) {
+                $locked = [IO.File]::Open($source, [IO.FileMode]::Open, [IO.FileAccess]::Write, [IO.FileShare]::None)
+            } else {
+                # Unix sharing modes do not prevent an independent native reader.
+                $mode = [IO.File]::GetUnixFileMode($source)
+                [IO.File]::SetUnixFileMode($source, [IO.UnixFileMode]::None)
+                try {
+                    $probe = [IO.File]::OpenRead($source)
+                    $probe.Dispose()
+                    Set-ItResult -Skipped -Because 'The current account can read a file without read permissions.'
+                    return
+                } catch [UnauthorizedAccessException] {}
+            }
             { Copy-TestInstructions -Directories $script:Base } | Should -Throw
             @(Get-TestInstructionSnapshot -Directory $first.sourceDirectory) | Should -BeExactly $before
-        } finally { $locked.Dispose() }
+        } finally {
+            if ($null -ne $locked) { $locked.Dispose() }
+            if ($null -ne $mode) { [IO.File]::SetUnixFileMode($source, $mode) }
+        }
         @(Get-ChildItem -LiteralPath $script:Session -Filter '*.tmp').Count | Should -Be 0
+    }
+
+    It 'preserves the prior snapshot if staging cannot read the built-in source' {
+        New-InstructionFixture -Root $script:Base -Relative 'a.instructions.md' | Out-Null
+        $first = Copy-TestInstructions -Directories $script:Base
+        $before = @(Get-TestInstructionSnapshot -Directory $first.sourceDirectory)
+        $missingSkill = Join-Path $TestDrive 'missing-skill'
+        [void][IO.Directory]::CreateDirectory($missingSkill)
+        { Copy-TestInstructions -Directories $script:Base -SkillRoot $missingSkill } | Should -Throw
+        @(Get-TestInstructionSnapshot -Directory $first.sourceDirectory) | Should -BeExactly $before
+        @(Get-ChildItem -LiteralPath $script:Session -Force -Filter '*.tmp').Count | Should -Be 0
     }
 
     It 'follows installed linked instruction directories' {
@@ -182,7 +254,7 @@ Describe 'ss-review configured instruction discovery' {
         New-Item -ItemType $kind -Path $link -Target $target | Out-Null
         [IO.Directory]::Delete($target)
         try {
-            { Copy-TestInstructions -Directories $script:Base } | Should -Throw '*missing*link target*'
+            { Copy-TestInstructions -Directories $script:Base } | Should -Throw '*link target*'
             @(Get-TestInstructionSnapshot -Directory $previous.sourceDirectory) | Should -BeExactly $before
         } finally {
             if ($IsWindows) { [IO.Directory]::Delete($link) } else { [IO.File]::Delete($link) }
@@ -193,20 +265,18 @@ Describe 'ss-review configured instruction discovery' {
         $script:Session = Join-Path $script:Base 'session'
         [void][IO.Directory]::CreateDirectory($script:Session)
         $source = New-InstructionFixture -Root $script:Base -Relative 'custom.instructions.md'
-        (Copy-TestInstructions -Directories $script:Base).externalFileCount | Should -Be 1
-        $arguments = @{
-            InputDirectory = Join-Path $script:Session 'instruction-set-source'
-            RecipePath = Join-Path $script:Skill 'prepare-focus-areas.md'
-            GeneratorProfile = 'test'
-            FreshnessDays = 7
-            NowUtc = [DateTimeOffset]'2026-10-29T00:00:00Z'
-        }
-        $key = (Get-FocusAreaCacheDescriptor @arguments).Key
-        (Copy-TestInstructions -Directories $script:Base).externalFileCount | Should -Be 1
-        (Get-FocusAreaCacheDescriptor @arguments).Key | Should -BeExactly $key
+        $first = Copy-TestInstructions -Directories $script:Base
+        $first.externalFileCount | Should -Be 1
+        $inputDirectory = Join-Path $script:Session 'instruction-set-source'
+        $key = (Get-TestCacheResult -Snapshot $first).key
+        $second = Copy-TestInstructions -Directories $script:Base
+        $second.externalFileCount | Should -Be 1
+        $second.snapshotIdentity | Should -Not -BeExactly $first.snapshotIdentity
+        { Get-TestCacheResult -Snapshot $first } | Should -Throw '*snapshot identity*'
+        (Get-TestCacheResult -Snapshot $second).key | Should -BeExactly $key
         Remove-Item -LiteralPath $source
         (Copy-TestInstructions -Directories $script:Base).externalFileCount | Should -Be 0
-        @(Get-ChildItem -LiteralPath $arguments.InputDirectory -Recurse -Filter '*.instructions.md').Count | Should -Be 0
+        @(Get-ChildItem -LiteralPath $inputDirectory -Recurse -Filter '*.instructions.md').Count | Should -Be 0
     }
 
     It 'excludes links directly into generated session subtrees' {
@@ -257,24 +327,82 @@ Describe 'ss-review configured instruction discovery' {
     It 'binds the configured instruction bytes and root identity into cache keys' {
         $file = New-InstructionFixture -Root $script:Base -Relative 'custom.instructions.md'
         $result = Copy-TestInstructions -Directories $script:Base
-        $arguments = @{
-            InputDirectory = $result.sourceDirectory
-            RecipePath = Join-Path $script:Skill 'prepare-focus-areas.md'
-            GeneratorProfile = 'test'
-            FreshnessDays = 7
-            NowUtc = [DateTimeOffset]'2026-10-29T00:00:00Z'
-        }
-        $original = (Get-FocusAreaCacheDescriptor @arguments).Key
+        $originalResult = Get-TestCacheResult -Snapshot $result
+        $originalResult.userInstructionFileCount | Should -Be 1
+        $original = $originalResult.key
         [IO.File]::AppendAllText($file, 'Changed guidance')
-        Copy-TestInstructions -Directories $script:Base | Out-Null
-        $changed = (Get-FocusAreaCacheDescriptor @arguments).Key
+        $result = Copy-TestInstructions -Directories $script:Base
+        $changed = (Get-TestCacheResult -Snapshot $result).key
         $changed | Should -Not -BeExactly $original
         $other = Join-Path $TestDrive ([guid]::NewGuid().ToString('N'))
         New-InstructionFixture -Root $other -Relative 'custom.instructions.md' -Bytes ([IO.File]::ReadAllBytes($file)) | Out-Null
-        Copy-TestInstructions -Directories $other | Out-Null
-        (Get-FocusAreaCacheDescriptor @arguments).Key | Should -Not -BeExactly $changed
-        Copy-TestInstructions -Directories '' | Out-Null
-        (Get-FocusAreaCacheDescriptor @arguments).Key | Should -Not -BeExactly $original
+        $result = Copy-TestInstructions -Directories $other
+        (Get-TestCacheResult -Snapshot $result).key | Should -Not -BeExactly $changed
+        $result = Copy-TestInstructions -Directories ''
+        $empty = Get-TestCacheResult -Snapshot $result
+        $empty.userInstructionFileCount | Should -Be 0
+        $empty.key | Should -Not -BeExactly $original
+    }
+
+    It 'includes only explicitly selected repository instructions and passes them to the cache consumer' {
+        $repository = Join-Path $TestDrive 'reviewed repository'
+        $firstFile = New-InstructionFixture -Root $repository -Relative 'AGENTS.md' `
+            -Bytes @(239, 187, 191, 35, 32, 195, 164, 13, 10)
+        $secondFile = New-InstructionFixture -Root $repository -Relative 'nested\other.instructions.md'
+        New-InstructionFixture -Root $repository -Relative 'nested\unselected.instructions.md' | Out-Null
+
+        $without = Copy-TestInstructions -Directories ''
+        Test-Path -LiteralPath (Join-Path $without.sourceDirectory 'review-repository') | Should -BeFalse
+        $withoutCache = Get-TestCacheResult -Snapshot $without
+        $withoutCache.userInstructionFileCount | Should -Be 0
+
+        $selected = Copy-TestInstructions -Directories '' -RepositoryRoot $repository `
+            -RepositoryInstruction @('AGENTS.md', 'nested/other.instructions.md')
+        $selected.snapshotIdentity | Should -Not -BeExactly $without.snapshotIdentity
+        $selected.externalFileCount | Should -Be 0
+        $selected.roots.Count | Should -Be 0
+        [IO.File]::ReadAllBytes((Join-Path $selected.sourceDirectory 'review-repository\AGENTS.md')) |
+            Should -Be ([IO.File]::ReadAllBytes($firstFile))
+        [IO.File]::ReadAllBytes((Join-Path $selected.sourceDirectory 'review-repository\nested\other.instructions.md')) |
+            Should -Be ([IO.File]::ReadAllBytes($secondFile))
+        Test-Path -LiteralPath (Join-Path $selected.sourceDirectory 'review-repository\nested\unselected.instructions.md') |
+            Should -BeFalse
+        $selectedCache = Get-TestCacheResult -Snapshot $selected
+        $selectedCache.userInstructionFileCount | Should -Be 0
+        $selectedCache.key | Should -Not -BeExactly $withoutCache.key
+
+        $withoutAgain = Copy-TestInstructions -Directories ''
+        Test-Path -LiteralPath (Join-Path $withoutAgain.sourceDirectory 'review-repository') | Should -BeFalse
+        (Get-TestCacheResult -Snapshot $withoutAgain).key | Should -BeExactly $withoutCache.key
+    }
+
+    It 'rejects invalid repository selections and invalidates the previous identity' {
+        $repository = Join-Path $TestDrive 'reviewed repository'
+        New-InstructionFixture -Root $repository -Relative 'AGENTS.md' | Out-Null
+        $previous = Copy-TestInstructions -Directories '' -RepositoryRoot $repository -RepositoryInstruction @('AGENTS.md')
+        $before = @(Get-TestInstructionSnapshot -Directory $previous.sourceDirectory)
+        { Copy-TestInstructions -Directories '' -RepositoryRoot $repository -RepositoryInstruction @('../outside.instructions.md') } |
+            Should -Throw
+        @(Get-TestInstructionSnapshot -Directory $previous.sourceDirectory) | Should -BeExactly $before
+        { Get-TestCacheResult -Snapshot $previous } | Should -Throw '*snapshot identity*'
+        { Copy-TestInstructions -Directories '' -RepositoryRoot $repository -RepositoryInstruction @('AGENTS.md', 'AGENTS.md') } |
+            Should -Throw
+        { Copy-TestInstructions -Directories '' -RepositoryRoot $repository } | Should -Throw
+        { Copy-TestInstructions -Directories '' -RepositoryInstruction @('AGENTS.md') } | Should -Throw
+    }
+
+    It 'rejects a selected repository instruction reached through an escaping directory link' {
+        $repository = Join-Path $TestDrive 'linked repository'
+        $outside = Join-Path $TestDrive 'outside repository'
+        [void][IO.Directory]::CreateDirectory($repository)
+        New-InstructionFixture -Root $outside -Relative 'secret.instructions.md' | Out-Null
+        $link = Join-Path $repository 'outside'
+        $kind = if ($IsWindows) { 'Junction' } else { 'SymbolicLink' }
+        New-Item -ItemType $kind -Path $link -Target $outside | Out-Null
+        try {
+            { Copy-TestInstructions -Directories '' -RepositoryRoot $repository `
+                -RepositoryInstruction @('outside/secret.instructions.md') } | Should -Throw
+        } finally { [IO.Directory]::Delete($link) }
     }
 
     It 'runs the snapshot executable against the child environment with <Count> user files' -ForEach @(
@@ -284,12 +412,20 @@ Describe 'ss-review configured instruction discovery' {
         New-InstructionFixture -Root $script:Base -Relative 'own.instructions.md' | Out-Null
         $start = [Diagnostics.ProcessStartInfo]::new((Get-Process -Id $PID).Path)
         $start.UseShellExecute = $false
+        $start.WorkingDirectory = $script:Base
         $start.RedirectStandardOutput = $true
         $start.RedirectStandardError = $true
-        $start.Environment['COPILOT_CUSTOM_INSTRUCTIONS_DIRS'] = if ($Count -eq 0) { '' } else { $script:Base }
+        $start.Environment['COPILOT_CUSTOM_INSTRUCTIONS_DIRS'] = if ($Count -eq 0) { '' } else { '.' }
+        $repository = Join-Path $TestDrive 'wrapper repository'
+        New-InstructionFixture -Root $repository -Relative 'chosen\AGENTS.md' | Out-Null
         foreach ($argument in @('-NoProfile', '-NonInteractive', '-File',
             "$script:Skill\scripts\Copy-ReviewInstructionSources.ps1", '-SessionStateDirectory', $script:Session)) {
             $start.ArgumentList.Add($argument)
+        }
+        if ($Count -gt 0) {
+            foreach ($argument in @('-RepositoryRoot', $repository, '-RepositoryInstruction', 'chosen/AGENTS.md')) {
+                $start.ArgumentList.Add($argument)
+            }
         }
         $process = [Diagnostics.Process]::Start($start)
         try {
@@ -301,6 +437,10 @@ Describe 'ss-review configured instruction discovery' {
             $result.schemaVersion | Should -Be 1
             $result.externalFileCount | Should -Be $Count
             $result.roots.Count | Should -Be $Count
+            $result.snapshotIdentity | Should -Not -BeNullOrEmpty
+            if ($Count -gt 0) { $result.roots[0].path | Should -BeExactly $script:Base }
+            (Test-Path -LiteralPath (Join-Path $result.sourceDirectory 'review-repository\chosen\AGENTS.md')) |
+                Should -Be ($Count -gt 0)
         } finally { $process.Dispose() }
     }
 }

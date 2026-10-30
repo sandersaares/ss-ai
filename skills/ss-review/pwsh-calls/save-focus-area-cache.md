@@ -1,14 +1,25 @@
 ```powershell
-pwsh -NoProfile -NonInteractive -File "{{SKILL_ROOT}}/scripts/Save-FocusAreaCache.ps1" `
-  -SessionStateDirectory "{{SESSION_STATE}}" `
-  -InputDirectory "{{SESSION_STATE}}/instruction-set-source"
+#Requires -Version 7.6
+
+Set-StrictMode -Version Latest
+$ErrorActionPreference = 'Stop'
+$PSNativeCommandUseErrorActionPreference = $true
+
+$cacheDirectory = Join-Path ([Environment]::GetFolderPath([Environment+SpecialFolder]::UserProfile)) '.copilot/cache/ss-review/focus-areas/v1'
+ss-ai workflow save-focus-area-cache --session-state "{{SESSION_STATE}}" `
+  --input-directory "{{SOURCE_DIRECTORY}}" --preparation-identity "{{PREPARATION_IDENTITY}}" --skill-root "{{SKILL_ROOT}}" `
+  --recipe-path "{{SKILL_ROOT}}/prepare-focus-areas.md" --cache-directory $cacheDirectory `
+  --generator-profile "gpt-6-luna" --freshness-days 7
 ```
 
 | Placeholder | Value |
 | --- | --- |
 | `SKILL_ROOT` | Absolute skill directory. |
 | `SESSION_STATE` | Absolute session-state directory with a finalized expansion manifest. |
+| `SOURCE_DIRECTORY` | `sourceDirectory` returned by this invocation's instruction snapshot. |
+| `PREPARATION_IDENTITY` | Exact `preparationIdentity` returned by this invocation's cache restore. |
 
-The command derives completeness from the manifest. Stored/Existing means a
+Run only after publishing this generation and validating its artifacts. The
+command checks the generation receipt and derives completeness from the manifest. Stored/Existing means a
 complete set is cached; Bypassed reports why storage was skipped. On validation
 failure, repair the manifest or source preparation before retrying.

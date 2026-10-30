@@ -174,6 +174,9 @@ ss-ai workflow plan-initialize --kind updates --path "{{PLAN_PATH}}"
 
 The `workflow --help` output lists the finding lifecycle, audit, projection,
 rendering, validation, index, candidate, consolidation, and plan commands.
+For generation-managed focus areas, `workflow create-review-work` requires
+`--session-state` and the exact `--preparation-identity` returned by restore.
+It validates readiness and captures focus-area snapshots for the review workers.
 Authored finding content, feedback, and plan items are supplied in UTF-8 files.
 Use the
 [finding structure](../../skills/ss-review/review.md#finding-structure) for
@@ -183,7 +186,42 @@ manifest-based coverage. The [audit guide](../../skills/ss-review/data-guides/au
 describes decision and feedback records. Policy classification does not grant
 user or merge approval, and rendering does not publish or approve findings.
 
+## Focus-area preparation
+
+The focus-area workflow records reference expansion and agent-authored maps
+without interpreting applicability on the agent's behalf. Snapshot commands
+return a `snapshotIdentity`; restore requires it and returns a distinct
+`preparationIdentity`. On a cache miss, `begin-focus-area-generation` requires
+that preparation identity and returns the isolated preparation `sessionState`
+and `generationId`. Supply this preparation path and authored input paths
+explicitly to the map and expansion commands. `update-focus-area-expansion`
+supports `initialize`, `register`, `complete`, `fail`, `read`, and `finalize`;
+register and outcome operations require a typed JSON input file. A read may
+select a reference using `--reference-id`. `update-focus-area-map` supports
+`append`, `replace`, and `regroup`, accepting a map input or category arguments.
+`validate-focus-area-map` checks a worker map; `--complete` also requires
+complete coverage. `assemble-focus-areas` validates finalized expansion and the complete map before
+rendering documents within the preparation directory. After semantic verification,
+`publish-focus-area-generation` requires the real session and generation ID,
+validates and publishes the active generation, and records its receipt.
+Artifact validation and cache storage require the original preparation identity;
+storage also requires the publication receipt. A cache hit needs no generation,
+but artifact validation still requires the restore identity. Each command emits
+a JSON result or fails without falling back to another implementation.
+The [focus-area guide](../../skills/ss-review/data-guides/focus-areas.md)
+defines the authored record formats.
+
 ## Worker inputs
+
+`ss-ai workflow snapshot-instructions` snapshots the active skill's built-in
+guidance and user instructions using the session directory and `--skill-root`.
+The `COPILOT_CUSTOM_INSTRUCTIONS_DIRS` environment variable is a comma-separated
+list; relative directories resolve against the caller's working directory. The
+JSON result identifies the source directory, the discovered file count, and
+each original root's snapshot prefix. When repository instructions are
+authorized, callers can supply `--repository-root` with repeated
+`--repository-instruction` repository-relative paths to include them in the
+same coordinated snapshot.
 
 `ss-ai workflow worker-assignment` prepares an immutable assignment using the
 active skill directory supplied with `--skill-root`. Its result contains the

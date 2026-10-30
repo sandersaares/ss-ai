@@ -1,10 +1,157 @@
 //! Exercises local workflow commands through the installed executable boundary.
 
 use std::fs;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 
-use serde_json::Value;
+use serde_json::{Value, json};
+use ss_ai_review_workflow::{focus_area_expansion, focus_area_generation, focus_area_map};
+use ss_ai_runtime::{LockMode, ResourceLock, SystemClock};
 use tempfile::Builder;
+
+/// Keeps review initialization fixtures inside the active checkout.
+struct ReviewFixture(PathBuf);
+
+impl ReviewFixture {
+    fn new() -> Self {
+        let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join(format!(".review-init-cli-{}", std::process::id()));
+        #[expect(
+            clippy::create_dir,
+            reason = "The fixture must not reuse existing state"
+        )]
+        fs::create_dir(&path).unwrap();
+        Self(path)
+    }
+}
+
+impl Drop for ReviewFixture {
+    fn drop(&mut self) {
+        fs::remove_dir_all(&self.0).unwrap();
+    }
+}
+
+/// CLI callers must supply the caller-held identity and receive private focus snapshots.
+#[test]
+#[cfg_attr(miri, ignore = "requires a native subprocess")]
+fn review_initialization_cli_binds_the_preparation_identity() {
+    let fixture = ReviewFixture::new();
+    let session = &fixture.0;
+    let clock = SystemClock::default();
+    let source = session.join("instruction-set-source");
+    fs::create_dir_all(&source).unwrap();
+    fs::write(source.join("guide.md"), "# Rule\nKeep it.\n").unwrap();
+    let identity = {
+        let _operation = ResourceLock::open(
+            &session.join("focus-area-cache-operation"),
+            LockMode::Exclusive,
+            &clock,
+        )
+        .unwrap();
+        focus_area_generation::invalidate_locked(session, &clock).unwrap();
+        focus_area_generation::invalidate_snapshot_locked(session, &clock).unwrap();
+        focus_area_generation::bind_snapshot_locked(session, &clock).unwrap();
+        focus_area_generation::bind_restore_locked(session, &source, &clock).unwrap()
+    };
+    let generation = focus_area_generation::begin(session, &identity, &clock).unwrap();
+    let preparation = Path::new(&generation.session_state);
+    focus_area_expansion::update(
+        preparation,
+        focus_area_expansion::Operation::Initialize,
+        &clock,
+    )
+    .unwrap();
+    focus_area_expansion::update(
+        preparation,
+        focus_area_expansion::Operation::Finalize,
+        &clock,
+    )
+    .unwrap();
+    let span = |root| json!({"root":root,"path":"guide.md","startLine":1,"endLine":2});
+    let map = json!({"schemaVersion":1,"categories":[{"id":"rules","title":"Rules"}],
+        "chapters":[{"id":"rule","categoryId":"rules","content":span("instruction-set-raw"),
+            "sources":[span("instruction-set-source")],"applicability":[{
+                "effectiveScope":"No explicit restriction; interpret the guideline in context.",
+                "declarations":[],"origins":[],"uncertainties":[]}]}]});
+    let map_path = preparation.join("focus-area-map.json");
+    focus_area_map::update(
+        preparation,
+        &map_path,
+        focus_area_map::MapOperation::Append(serde_json::to_vec(&map).unwrap()),
+        &clock,
+    )
+    .unwrap();
+    focus_area_map::assemble(preparation, &map_path, &clock).unwrap();
+    focus_area_generation::publish(session, &generation.generation_id, &clock).unwrap();
+
+    let files = json!([{"path":session.join("file.rs"),"sizeBytes":1,"change":"modified"}]);
+    let inventory = session.join("inventory.json");
+    let groups = session.join("groups.json");
+    fs::write(&inventory, serde_json::to_vec(&files).unwrap()).unwrap();
+    fs::write(
+        &groups,
+        serde_json::to_vec(&json!([{"groupId":"group-1","files":files}])).unwrap(),
+    )
+    .unwrap();
+    let output = session.join("work");
+    let run = |session_arg: bool, identity_arg: Option<&str>| {
+        let mut command = Command::new(env!("CARGO_BIN_EXE_ss-ai"));
+        command
+            .args(["workflow", "create-review-work", "--inventory-path"])
+            .arg(&inventory)
+            .arg("--file-groups-path")
+            .arg(&groups)
+            .arg("--focus-area-directory")
+            .arg(session.join("focus-areas"))
+            .arg("--output-directory")
+            .arg(&output);
+        if session_arg {
+            command.arg("--session-state").arg(session);
+        }
+        if let Some(identity) = identity_arg {
+            command.arg("--preparation-identity").arg(identity);
+        }
+        command.output().unwrap()
+    };
+    for (has_session, token) in [
+        (false, None),
+        (true, None),
+        (false, Some(identity.as_str())),
+        (true, Some("stale")),
+    ] {
+        let result = run(has_session, token);
+        assert!(!result.status.success());
+        assert!(result.stdout.is_empty());
+        assert!(!output.exists());
+    }
+    let result = run(true, Some(&identity));
+    assert!(
+        result.status.success(),
+        "{}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    let result: Value = serde_json::from_slice(&result.stdout).unwrap();
+    let manifest: Value = serde_json::from_slice(
+        &fs::read(result.get("manifestPath").unwrap().as_str().unwrap()).unwrap(),
+    )
+    .unwrap();
+    let snapshot = Path::new(
+        manifest
+            .get("reviewers")
+            .unwrap()
+            .get(0)
+            .unwrap()
+            .get("focusArea")
+            .unwrap()
+            .as_str()
+            .unwrap(),
+    );
+    assert!(snapshot.starts_with(output));
+    assert_eq!(
+        fs::read(snapshot).unwrap(),
+        fs::read(session.join("focus-areas/focus-rules.md")).unwrap()
+    );
+}
 
 /// Local finding plans must not require provider authentication or executables.
 #[test]

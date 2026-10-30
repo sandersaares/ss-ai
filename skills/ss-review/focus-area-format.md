@@ -2,9 +2,13 @@
 
 Categorization workers and the preparation agent exchange JSON, not Markdown.
 `schemas/focus-area-map.schema.json` defines the versioned wire format.
-`Test-FocusAreaMap.ps1` validates worker maps; `New-FocusAreaArtifacts.ps1`
-validates the complete merged map and renders the category catalog and focus areas.
+`ss-ai workflow validate-focus-area-map` validates worker maps;
+`ss-ai workflow assemble-focus-areas` validates the complete merged map and
+renders the category catalog and focus areas.
 Do not write an assembly script or edit generated Markdown.
+The preparation agent supplies the generation-specific preparation directory;
+workers use it for source spans, map drafts, and generated artifacts. The
+review session receives those artifacts only after successful publication.
 
 ## Document
 
@@ -34,6 +38,8 @@ values, not chapter content, provenance, or applicability.
 A span has `root`, `path`, `startLine`, and `endLine`. Roots are exactly
 `instruction-set-source` or `instruction-set-raw`; paths are relative to that
 named root, with exact source spelling. Both path separators are accepted.
+Roots resolve under the assigned preparation directory, not the real review
+session.
 Absolute paths, traversal components, and symbolic links are not accepted.
 Line numbers are one-based and inclusive. The files must remain unchanged from
 categorization through assembly. A changed source requires renewed categorization

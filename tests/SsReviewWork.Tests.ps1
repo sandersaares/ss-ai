@@ -135,6 +135,107 @@ Describe 'Review work initialization' {
         (ConvertFrom-JsonVerbatim -Text ([IO.File]::ReadAllText($result.manifestPath))).reviewers.Count | Should -Be 2
     }
 
+    It 'forwards preparation binding and never falls back when native initialization fails' {
+        $arguments = @(
+            '-InventoryPath', $script:Inventory,
+            '-FileGroupsPath', $script:GroupedInventory,
+            '-FocusAreaDirectory', $script:Areas,
+            '-OutputDirectory', $script:Work
+        )
+        $partial = Invoke-WorkScript -Name 'New-ReviewWork.ps1' -ArgumentList (
+            $arguments + @('-SessionStateDirectory', $script:Root)
+        )
+        $partial.exitCode | Should -Not -Be 0
+        $partial.output | Should -BeNullOrEmpty
+        $partial.errors | Should -Match 'must be supplied together'
+        Test-Path -LiteralPath $script:Work | Should -BeFalse
+
+        $unready = Invoke-WorkScript -Name 'New-ReviewWork.ps1' -ArgumentList (
+            $arguments + @('-SessionStateDirectory', $script:Root, '-PreparationIdentity', 'not-ready')
+        )
+        $unready.exitCode | Should -Not -Be 0
+        $unready.output | Should -BeNullOrEmpty
+        Test-Path -LiteralPath $script:Work | Should -BeFalse
+
+        $legacy = Invoke-WorkScript -Name 'New-ReviewWork.ps1' -ArgumentList $arguments
+        $legacy.exitCode | Should -Be 0 -Because $legacy.errors
+        ($legacy.output | ConvertFrom-Json).reviewerCount | Should -Be 2
+    }
+
+    It 'initializes review work from the validated generation through the wrapper' {
+        $previousInstructions = $env:COPILOT_CUSTOM_INSTRUCTIONS_DIRS
+        $env:COPILOT_CUSTOM_INSTRUCTIONS_DIRS = ''
+        try {
+            $snapshot = Invoke-WorkScript -Name 'Copy-ReviewInstructionSources.ps1' -ArgumentList @(
+                '-SessionStateDirectory', $script:Root
+            )
+            $snapshot.exitCode | Should -Be 0 -Because $snapshot.errors
+            $source = $snapshot.output | ConvertFrom-Json
+            # Use an isolated cache and fixed clock so the fixture does not depend on user state.
+            $restore = Invoke-WorkScript -Name 'Restore-FocusAreaCache.ps1' -ArgumentList @(
+                '-SessionStateDirectory', $script:Root, '-InputDirectory', $source.sourceDirectory,
+                '-SnapshotIdentity', $source.snapshotIdentity, '-CacheDirectory', (Join-Path $script:Root 'cache'),
+                '-GeneratorProfile', 'review-work-test', '-NowUtc', '2026-10-06T12:00:00Z'
+            )
+            $restore.exitCode | Should -Be 0 -Because $restore.errors
+            $identity = ($restore.output | ConvertFrom-Json).preparationIdentity
+            $generation = (& ss-ai workflow begin-focus-area-generation "--session-state=$($script:Root)" "--preparation-identity=$identity") | ConvertFrom-Json
+            $stage = $generation.sessionState
+            foreach ($operation in @('Initialize', 'Finalize')) {
+                $expansion = Invoke-WorkScript -Name 'Update-FocusAreaExpansion.ps1' -ArgumentList @(
+                    '-SessionStateDirectory', $stage, '-Operation', $operation
+                )
+                $expansion.exitCode | Should -Be 0 -Because $expansion.errors
+            }
+            $raw = Join-Path $stage 'instruction-set-raw'
+            $chapters = @()
+            foreach ($file in Get-ChildItem -LiteralPath $raw -Recurse -File) {
+                $lines = [IO.File]::ReadAllLines($file.FullName)
+                if (-not ($lines | Where-Object { -not [string]::IsNullOrWhiteSpace($_) })) { continue }
+                $relative = [IO.Path]::GetRelativePath($raw, $file.FullName)
+                $chapters += @{
+                    id = "chapter-$($chapters.Count)"; categoryId = 'all'
+                    content = @{ root = 'instruction-set-raw'; path = $relative; startLine = 1; endLine = $lines.Count }
+                    sources = @(@{ root = 'instruction-set-source'; path = $relative; startLine = 1; endLine = $lines.Count })
+                    applicability = @(@{ effectiveScope = 'No explicit restriction; interpret in context.'; declarations = @(); origins = @(); uncertainties = @() })
+                }
+            }
+            $draft = Join-Path $stage 'map-draft.json'
+            $map = Join-Path $stage 'focus-area-map.json'
+            Write-WorkJson -Path $draft -Value @{ schemaVersion = 1; categories = @(@{ id = 'all'; title = 'All' }); chapters = $chapters }
+            $append = Invoke-WorkScript -Name 'Update-FocusAreaMap.ps1' -ArgumentList @(
+                '-SessionStateDirectory', $stage, '-Path', $map, '-Operation', 'Append', '-InputPath', $draft
+            )
+            $append.exitCode | Should -Be 0 -Because $append.errors
+            $assembly = Invoke-WorkScript -Name 'New-FocusAreaArtifacts.ps1' -ArgumentList @(
+                '-SessionStateDirectory', $stage, '-MapPath', $map
+            )
+            $assembly.exitCode | Should -Be 0 -Because $assembly.errors
+            $publication = (& ss-ai workflow publish-focus-area-generation "--session-state=$($script:Root)" "--generation-id=$($generation.generationId)") | ConvertFrom-Json
+            $publication.status | Should -Be 'Published'
+            $validation = Invoke-WorkScript -Name 'Test-FocusAreaArtifacts.ps1' -ArgumentList @(
+                '-SessionStateDirectory', $script:Root, '-PreparationIdentity', $identity
+            )
+            $validation.exitCode | Should -Be 0 -Because $validation.errors
+            ($validation.output | ConvertFrom-Json).status | Should -Be 'Valid'
+            $arguments = @(
+                '-InventoryPath', $script:Inventory, '-FileGroupsPath', $script:GroupedInventory,
+                '-FocusAreaDirectory', $script:Areas, '-OutputDirectory', $script:Work,
+                '-SessionStateDirectory', $script:Root, '-PreparationIdentity', $identity
+            )
+            $result = Invoke-WorkScript -Name 'New-ReviewWork.ps1' -ArgumentList $arguments
+            $result.exitCode | Should -Be 0 -Because $result.errors
+            $manifestPath = ($result.output | ConvertFrom-Json).manifestPath
+            $reviewer = (Get-Content -LiteralPath $manifestPath -Raw | ConvertFrom-Json).reviewers[0]
+            $original = [IO.File]::ReadAllText($reviewer.focusArea)
+            [IO.File]::WriteAllText((Join-Path $script:Areas 'focus-all.md'), 'replacement')
+            [IO.File]::ReadAllText($reviewer.focusArea) | Should -BeExactly $original
+            $reviewer.focusArea | Should -Match ([regex]::Escape($script:Work))
+        } finally {
+            $env:COPILOT_CUSTOM_INSTRUCTIONS_DIRS = $previousInstructions
+        }
+    }
+
     It 'refuses reinitialization without resetting the consumed focus-area queue' {
         $result = New-ReviewWork @script:WorkArguments
         Get-NextReviewWorkItem -QueuePath $result.focusAreaQueuePath | Out-Null

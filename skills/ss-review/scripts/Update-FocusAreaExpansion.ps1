@@ -1,6 +1,6 @@
 #Requires -Version 7.6
 
-# Maintains expansion outcomes and reference inheritance; agents supply only typed registrations.
+# Bridges reference expansion transactions to the native workflow.
 [CmdletBinding(PositionalBinding = $false)]
 param(
     [Parameter(Mandatory)][string] $SessionStateDirectory,
@@ -11,27 +11,10 @@ param(
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 $PSNativeCommandUseErrorActionPreference = $true
-. "$PSScriptRoot\lib\JsonValue.ps1"
-. "$PSScriptRoot\lib\PullRequestModel.ps1"
-. "$PSScriptRoot\lib\WorkflowData.ps1"
-. "$PSScriptRoot\lib\FocusAreaPreparation.ps1"
-. "$PSScriptRoot\lib\FocusAreaExpansion.ps1"
-$inputRecord = $null
-$outputs = @()
-$failure = ''
-if ($Operation -in @('Register', 'Complete', 'Fail') -and -not $InputPath) { throw "$Operation requires -InputPath." }
-if ($Operation -ceq 'Register') { $inputRecord = Read-WorkflowData -Kind referenceInput -Path $InputPath }
-if ($Operation -in @('Complete', 'Fail')) {
-    $result = Read-WorkflowData -Kind referenceResult -Path $InputPath
-    $ReferenceId = $result['referenceId']
-    $outputs = $result['outputs']
-    $failure = $result['error']
-    if ($Operation -ceq 'Complete' -and $null -ne $failure) { throw 'Successful expansion must not carry an error.' }
-    if ($Operation -ceq 'Fail' -and $outputs.Count -ne 0) { throw 'Failed expansion must not claim outputs.' }
-}
-$sourceLock = Open-PullRequestFileLock -Path (Join-Path $SessionStateDirectory 'focus-area-cache-operation') -Shared
-try {
-    Update-FocusAreaExpansion -Path (Join-Path $SessionStateDirectory 'focus-area-expansion-status.json') `
-        -SessionStateDirectory $SessionStateDirectory -Operation $Operation -InputRecord $inputRecord `
-        -ReferenceId $ReferenceId -OutputPath $outputs -Failure $failure | ConvertTo-Json -Depth 32 -Compress
-} finally { $sourceLock.Dispose() }
+. "$PSScriptRoot\lib\NativeWorkflowBridge.ps1"
+
+$arguments = @('update-focus-area-expansion', "--session-state=$SessionStateDirectory", "--operation=$($Operation.ToLowerInvariant())")
+if ($InputPath) { $arguments += "--input-path=$InputPath" }
+# Completed and failed results select their own reference, as in the original wrapper.
+if ($ReferenceId -and $Operation -notin @('Complete', 'Fail')) { $arguments += "--reference-id=$ReferenceId" }
+Invoke-NativeReviewWorkflow -Arguments $arguments

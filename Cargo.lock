@@ -1575,6 +1575,7 @@ dependencies = [
  "ohno",
  "serde",
  "serde_json",
+ "sha2",
  "ss-ai-git",
  "ss-ai-review-context",
  "ss-ai-runtime",

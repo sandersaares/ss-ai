@@ -9,7 +9,7 @@ use std::time::Duration;
 
 use jiff::Timestamp;
 use ohno::AppError;
-use ss_ai_runtime::{Clock, FileTransaction};
+use ss_ai_runtime::{Clock, FileTransaction, LockMode, ResourceLock};
 use tempfile::{NamedTempFile, TempPath};
 
 /// Keeps each test's file and sibling lock within the checkout.
@@ -172,6 +172,44 @@ fn native_owner_blocks_powershell_lock() {
         contender.expect("acquired");
         contender.finish();
     }
+}
+
+/// Confirms shared ownership interoperates and a nonblocking writer sees contention.
+#[test]
+#[cfg_attr(miri, ignore = "requires PowerShell subprocesses and real file locks")]
+fn shared_owners_coexist_and_exclude_writers() {
+    let file = TestFile::new();
+    let mut owner = PowerShell::start(&file.path, "shared-owner");
+    owner.expect("held");
+    let reader = ResourceLock::open(&file.path, LockMode::Shared, &NoWaitClock).unwrap();
+    assert!(
+        ResourceLock::try_open(&file.path, LockMode::Exclusive)
+            .unwrap()
+            .is_none()
+    );
+    owner.send("release");
+    owner.expect("released");
+    owner.finish();
+
+    // Start the child before taking another lock so no lock descriptor is inherited.
+    drop(reader);
+    let mut contender = PowerShell::start(&file.path, "shared-after-signal");
+    contender.expect("ready");
+    let reader = ResourceLock::open(&file.path, LockMode::Shared, &NoWaitClock).unwrap();
+    contender.send("acquire");
+    contender.expect("acquired");
+    contender.finish();
+    assert!(
+        ResourceLock::try_open(&file.path, LockMode::Exclusive)
+            .unwrap()
+            .is_none()
+    );
+    drop(reader);
+    assert!(
+        ResourceLock::try_open(&file.path, LockMode::Exclusive)
+            .unwrap()
+            .is_some()
+    );
 }
 
 /// Checks opened snapshots and whole-file publications across both implementations.

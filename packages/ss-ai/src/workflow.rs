@@ -5,12 +5,14 @@ use std::path::{PathBuf, absolute};
 use std::time::Duration;
 
 use clap::error::ErrorKind;
-use clap::{Parser, Subcommand, ValueEnum};
+use clap::{Args, Parser, Subcommand, ValueEnum};
 use jiff::Timestamp;
 use ohno::AppError;
 use serde_json::json;
 use ss_ai_review_workflow::{
-    anchors, approved, audit, findings, markdown, review_work, worker_input, workflow_plan,
+    anchors, approved, audit, findings, focus_area_expansion, focus_area_generation,
+    focus_area_map, focus_cache, instruction_sources, markdown, review_work, worker_input,
+    workflow_plan,
 };
 use ss_ai_runtime::{Clock, Process, caused_by, fail, read_bytes};
 
@@ -25,6 +27,98 @@ struct WorkflowCli {
 /// Selects an operation and its file-based inputs.
 #[derive(Debug, Subcommand)]
 enum WorkflowCommand {
+    /// Restore a complete focus-area set or report a cache miss.
+    RestoreFocusAreaCache {
+        #[command(flatten)]
+        options: CacheArguments,
+        #[arg(long)]
+        snapshot_identity: String,
+        #[arg(long)]
+        refresh: bool,
+    },
+    /// Begin an isolated preparation bound to a successful restore.
+    BeginFocusAreaGeneration {
+        #[arg(long)]
+        session_state: PathBuf,
+        #[arg(long)]
+        preparation_identity: String,
+    },
+    /// Publish an active, verified preparation and its receipt.
+    PublishFocusAreaGeneration {
+        #[arg(long)]
+        session_state: PathBuf,
+        #[arg(long)]
+        generation_id: String,
+    },
+    /// Save a finalized, validated focus-area set for reuse.
+    SaveFocusAreaCache {
+        #[command(flatten)]
+        options: CacheArguments,
+        #[arg(long)]
+        preparation_identity: String,
+    },
+    /// Validate the complete focus-area artifact set.
+    ValidateFocusAreaArtifacts {
+        #[arg(long)]
+        session_state: PathBuf,
+        #[arg(long)]
+        preparation_identity: String,
+    },
+    /// Maintain the reference-expansion manifest.
+    UpdateFocusAreaExpansion {
+        #[arg(long)]
+        session_state: PathBuf,
+        #[arg(long, value_enum)]
+        operation: ExpansionOperation,
+        #[arg(long)]
+        input_path: Option<PathBuf>,
+        #[arg(long)]
+        reference_id: Option<String>,
+    },
+    /// Merge or regroup authored focus-area map contributions.
+    UpdateFocusAreaMap {
+        #[arg(long)]
+        session_state: PathBuf,
+        #[arg(long)]
+        path: PathBuf,
+        #[arg(long, value_enum)]
+        operation: MapOperation,
+        #[arg(long)]
+        input_path: Option<PathBuf>,
+        #[arg(long)]
+        category_id: Option<String>,
+        #[arg(long)]
+        new_category_id: Option<String>,
+        #[arg(long)]
+        title: Option<String>,
+    },
+    /// Validate a partial or complete focus-area map.
+    ValidateFocusAreaMap {
+        #[arg(long)]
+        session_state: PathBuf,
+        #[arg(long)]
+        map_path: PathBuf,
+        #[arg(long)]
+        complete: bool,
+    },
+    /// Publish focus-area documents from a complete map.
+    AssembleFocusAreas {
+        #[arg(long)]
+        session_state: PathBuf,
+        #[arg(long)]
+        map_path: PathBuf,
+    },
+    /// Snapshot built-in and user-configured instruction sources.
+    SnapshotInstructions {
+        #[arg(long)]
+        session_state: PathBuf,
+        #[arg(long)]
+        skill_root: PathBuf,
+        #[arg(long)]
+        repository_root: Option<PathBuf>,
+        #[arg(long)]
+        repository_instruction: Vec<PathBuf>,
+    },
     /// Validate and publish review inventory or file groups.
     SetReviewInput {
         #[arg(long)]
@@ -52,6 +146,10 @@ enum WorkflowCommand {
         repository_root: Option<PathBuf>,
         #[arg(long)]
         artifact_directory: Option<PathBuf>,
+        #[arg(long)]
+        session_state: Option<PathBuf>,
+        #[arg(long)]
+        preparation_identity: Option<String>,
     },
     /// Create or explicitly resume a file-group journal.
     InitializeReviewQueue {
@@ -348,6 +446,90 @@ enum WorkflowCommand {
     },
 }
 
+/// Inputs shared by focus-area cache transactions.
+#[derive(Debug, Args)]
+struct CacheArguments {
+    #[arg(long)]
+    session_state: PathBuf,
+    #[arg(long)]
+    input_directory: PathBuf,
+    #[arg(long)]
+    skill_root: PathBuf,
+    #[arg(long)]
+    recipe_path: PathBuf,
+    #[arg(long)]
+    cache_directory: PathBuf,
+    #[arg(long)]
+    generator_profile: String,
+    #[arg(long)]
+    freshness_days: u32,
+    #[arg(long)]
+    now_utc: Option<Timestamp>,
+}
+
+/// Keeps an explicitly supplied time fixed while retaining the caller's wait policy.
+struct CacheClock<'a> {
+    base: &'a dyn Clock,
+    now: Option<Timestamp>,
+}
+
+impl Clock for CacheClock<'_> {
+    fn now(&self) -> Timestamp {
+        self.now.unwrap_or_else(|| self.base.now())
+    }
+
+    fn wait(&self, duration: Duration) -> Result<(), AppError> {
+        self.base.wait(duration)
+    }
+}
+
+/// Selects which transaction consumes the cache inputs.
+enum CacheAction {
+    Restore {
+        refresh: bool,
+        snapshot_identity: String,
+    },
+    Save {
+        preparation_identity: String,
+    },
+}
+
+/// Resolves all filesystem inputs once before the complete cache transaction.
+fn run_focus_cache(
+    args: CacheArguments,
+    action: CacheAction,
+    clock: &dyn Clock,
+) -> Result<String, AppError> {
+    let session = absolute(args.session_state)?;
+    let input = absolute(args.input_directory)?;
+    let skill = absolute(args.skill_root)?;
+    let recipe = absolute(args.recipe_path)?;
+    let cache = absolute(args.cache_directory)?;
+    let options = focus_cache::CacheOptions {
+        session: &session,
+        input_directory: &input,
+        skill_root: &skill,
+        recipe: &recipe,
+        cache_directory: &cache,
+        generator_profile: &args.generator_profile,
+        freshness_days: args.freshness_days,
+    };
+    let clock = CacheClock {
+        base: clock,
+        now: args.now_utc,
+    };
+    let result = match action {
+        CacheAction::Restore {
+            refresh,
+            snapshot_identity,
+        } => focus_cache::restore(&options, refresh, &snapshot_identity, &clock)?,
+        CacheAction::Save {
+            preparation_identity,
+        } => focus_cache::store(&options, &preparation_identity, &clock)?,
+    };
+    Ok(serde_json::to_string(&result)?)
+}
+
 /// Selects a complete approved-set operation.
 #[derive(Debug, Subcommand)]
 enum ApprovedCommand {
@@ -426,6 +608,92 @@ enum ReviewInputKind {
     Groups,
 }
 
+/// Selects an expansion manifest transaction.
+#[derive(Clone, Copy, Debug, ValueEnum)]
+enum ExpansionOperation {
+    Initialize,
+    Register,
+    Complete,
+    Fail,
+    Finalize,
+    Read,
+}
+
+/// Selects a focus-area map transaction.
+#[derive(Clone, Copy, Debug, ValueEnum)]
+enum MapOperation {
+    Append,
+    Replace,
+    Regroup,
+}
+
+/// Loads an authored input before handing it to the native transaction.
+fn focus_input(path: Option<PathBuf>, clock: &dyn Clock) -> Result<Vec<u8>, AppError> {
+    let path = path.ok_or_else(|| fail("invalidInput", "Operation requires an input path"))?;
+    read_bytes(&absolute(path)?, clock)?
+        .ok_or_else(|| fail("invalidInput", "Focus-area input is missing"))
+}
+
+/// Decodes the Unicode encodings accepted by the PowerShell workflow reader.
+fn focus_json_text(bytes: &[u8]) -> Result<String, AppError> {
+    let invalid = || fail("invalidInput", "Invalid Unicode focus-area input");
+    let utf32 = bytes
+        .strip_prefix(&[0xff, 0xfe, 0, 0])
+        .map(|bytes| (bytes, true))
+        .or_else(|| {
+            bytes
+                .strip_prefix(&[0, 0, 0xfe, 0xff])
+                .map(|bytes| (bytes, false))
+        });
+    if let Some((bytes, little)) = utf32 {
+        let (words, remainder) = bytes.as_chunks::<4>();
+        if !remainder.is_empty() {
+            return Err(invalid());
+        }
+        return words
+            .iter()
+            .map(|word| {
+                let scalar = if little {
+                    u32::from_le_bytes(*word)
+                } else {
+                    u32::from_be_bytes(*word)
+                };
+                char::from_u32(scalar).ok_or_else(invalid)
+            })
+            .collect();
+    }
+    let utf16 = bytes
+        .strip_prefix(&[0xff, 0xfe])
+        .map(|bytes| (bytes, true))
+        .or_else(|| {
+            bytes
+                .strip_prefix(&[0xfe, 0xff])
+                .map(|bytes| (bytes, false))
+        });
+    if let Some((bytes, little)) = utf16 {
+        let (words, remainder) = bytes.as_chunks::<2>();
+        if !remainder.is_empty() {
+            return Err(invalid());
+        }
+        let words: Vec<_> = words
+            .iter()
+            .map(|word| {
+                if little {
+                    u16::from_le_bytes(*word)
+                } else {
+                    u16::from_be_bytes(*word)
+                }
+            })
+            .collect();
+        return String::from_utf16(&words).map_err(|error| {
+            caused_by("invalidInput", "Invalid UTF-16 focus-area input", error).into()
+        });
+    }
+    let bytes = bytes.strip_prefix(&[0xef, 0xbb, 0xbf]).unwrap_or(bytes);
+    String::from_utf8(bytes.to_vec())
+        .map_err(|error| caused_by("invalidInput", "Invalid UTF-8 focus-area input", error).into())
+}
+
 /// Runs a local workflow command using the supplied external boundaries.
 pub fn run<I, T>(arguments: I, process: &dyn Process, clock: &dyn Clock) -> Result<String, AppError>
 where
@@ -449,6 +717,187 @@ where
         }
     };
     match cli.command {
+        WorkflowCommand::RestoreFocusAreaCache {
+            options,
+            snapshot_identity,
+            refresh,
+        } => run_focus_cache(
+            options,
+            CacheAction::Restore {
+                refresh,
+                snapshot_identity,
+            },
+            clock,
+        ),
+        WorkflowCommand::BeginFocusAreaGeneration {
+            session_state,
+            preparation_identity,
+        } => Ok(serde_json::to_string(&focus_area_generation::begin(
+            &absolute(session_state)?,
+            &preparation_identity,
+            clock,
+        )?)?),
+        WorkflowCommand::PublishFocusAreaGeneration {
+            session_state,
+            generation_id,
+        } => Ok(serde_json::to_string(&focus_area_generation::publish(
+            &absolute(session_state)?,
+            &generation_id,
+            clock,
+        )?)?),
+        WorkflowCommand::SaveFocusAreaCache {
+            options,
+            preparation_identity,
+        } => run_focus_cache(
+            options,
+            CacheAction::Save {
+                preparation_identity,
+            },
+            clock,
+        ),
+        WorkflowCommand::ValidateFocusAreaArtifacts {
+            session_state,
+            preparation_identity,
+        } => Ok(serde_json::to_string(&focus_cache::validate_artifacts(
+            &absolute(session_state)?,
+            &preparation_identity,
+            clock,
+        )?)?),
+        WorkflowCommand::UpdateFocusAreaExpansion {
+            session_state,
+            operation,
+            input_path,
+            reference_id,
+        } => {
+            let operation = match operation {
+                ExpansionOperation::Initialize => focus_area_expansion::Operation::Initialize,
+                ExpansionOperation::Register => {
+                    let input = focus_input(input_path, clock)?;
+                    let input = serde_json::from_str::<focus_area_expansion::ReferenceInput>(
+                        &focus_json_text(&input)?,
+                    )
+                    .map_err(|error| caused_by("invalidInput", "Invalid reference input", error))?;
+                    focus_area_expansion::Operation::Register(input)
+                }
+                ExpansionOperation::Complete | ExpansionOperation::Fail => {
+                    let input = focus_input(input_path, clock)?;
+                    let result = serde_json::from_str::<focus_area_expansion::ReferenceResult>(
+                        &focus_json_text(&input)?,
+                    )
+                    .map_err(|error| {
+                        caused_by("invalidInput", "Invalid reference result", error)
+                    })?;
+                    if matches!(operation, ExpansionOperation::Complete) {
+                        focus_area_expansion::Operation::Complete(result)
+                    } else {
+                        focus_area_expansion::Operation::Fail(result)
+                    }
+                }
+                ExpansionOperation::Finalize => focus_area_expansion::Operation::Finalize,
+                ExpansionOperation::Read => {
+                    focus_area_expansion::Operation::Read(reference_id.clone())
+                }
+            };
+            Ok(serde_json::to_string(
+                &focus_area_expansion::update_with_reference(
+                    &absolute(session_state)?,
+                    operation,
+                    reference_id.as_deref(),
+                    clock,
+                )?,
+            )?)
+        }
+        WorkflowCommand::UpdateFocusAreaMap {
+            session_state,
+            path,
+            operation,
+            input_path,
+            category_id,
+            new_category_id,
+            title,
+        } => {
+            let operation = match operation {
+                MapOperation::Append => {
+                    focus_area_map::MapOperation::Append(focus_input(input_path, clock)?)
+                }
+                MapOperation::Replace => {
+                    focus_area_map::MapOperation::Replace(focus_input(input_path, clock)?)
+                }
+                MapOperation::Regroup => focus_area_map::MapOperation::Regroup {
+                    category_id: category_id
+                        .ok_or_else(|| fail("invalidInput", "Regroup requires category ID"))?,
+                    new_category_id: new_category_id
+                        .ok_or_else(|| fail("invalidInput", "Regroup requires new category ID"))?,
+                    title: title.ok_or_else(|| fail("invalidInput", "Regroup requires title"))?,
+                },
+            };
+            Ok(serde_json::to_string(&focus_area_map::update(
+                &absolute(session_state)?,
+                &absolute(path)?,
+                operation,
+                clock,
+            )?)?)
+        }
+        WorkflowCommand::ValidateFocusAreaMap {
+            session_state,
+            map_path,
+            complete,
+        } => Ok(serde_json::to_string(&focus_area_map::validate(
+            &absolute(session_state)?,
+            &absolute(map_path)?,
+            clock,
+            complete,
+        )?)?),
+        WorkflowCommand::AssembleFocusAreas {
+            session_state,
+            map_path,
+        } => Ok(serde_json::to_string(&focus_area_map::assemble(
+            &absolute(session_state)?,
+            &absolute(map_path)?,
+            clock,
+        )?)?),
+        WorkflowCommand::SnapshotInstructions {
+            session_state,
+            skill_root,
+            repository_root,
+            repository_instruction,
+        } => {
+            let directory_list = match std::env::var("COPILOT_CUSTOM_INSTRUCTIONS_DIRS") {
+                Ok(value) => Some(value),
+                Err(std::env::VarError::NotPresent) => None,
+                Err(error) => {
+                    return Err(caused_by(
+                        "invalidInput",
+                        "Instruction directories must be valid Unicode",
+                        error,
+                    )
+                    .into());
+                }
+            };
+            let repository_root = repository_root.map(absolute).transpose()?;
+            // Validate incomplete selections inside the snapshot transaction.
+            let missing_root = PathBuf::new();
+            let repository_sources =
+                if repository_root.is_some() || !repository_instruction.is_empty() {
+                    Some(instruction_sources::RepositoryInstructionSources {
+                        root: repository_root.as_deref().unwrap_or(&missing_root),
+                        paths: &repository_instruction,
+                    })
+                } else {
+                    None
+                };
+            let result = instruction_sources::snapshot_instruction_sources(
+                &instruction_sources::InstructionSourceOptions {
+                    session_state: &absolute(session_state)?,
+                    skill_root: &absolute(skill_root)?,
+                    directory_list: directory_list.as_deref(),
+                    base_directory: &std::env::current_dir()?,
+                    repository_sources,
+                },
+                clock,
+            )?;
+            Ok(serde_json::to_string(&result)?)
+        }
         WorkflowCommand::SetReviewInput {
             kind,
             input_path,
@@ -483,18 +932,44 @@ where
             output_directory,
             repository_root,
             artifact_directory,
+            session_state,
+            preparation_identity,
         } => {
             let repository_root = repository_root.map(absolute).transpose()?;
             let artifact_directory = artifact_directory.map(absolute).transpose()?;
-            Ok(serde_json::to_string(&review_work::create(
-                &absolute(inventory_path)?,
-                &absolute(file_groups_path)?,
-                &absolute(focus_area_directory)?,
-                &absolute(output_directory)?,
-                repository_root.as_deref(),
-                artifact_directory.as_deref(),
-                clock,
-            )?)?)
+            let inventory = absolute(inventory_path)?;
+            let groups = absolute(file_groups_path)?;
+            let focus_areas = absolute(focus_area_directory)?;
+            let output = absolute(output_directory)?;
+            let session_state = session_state.map(absolute).transpose()?;
+            let result = match (session_state.as_deref(), preparation_identity.as_deref()) {
+                (Some(session), Some(identity)) => review_work::create_with_preparation(
+                    &inventory,
+                    &groups,
+                    &focus_areas,
+                    &output,
+                    repository_root.as_deref(),
+                    artifact_directory.as_deref(),
+                    &review_work::PreparationBinding { session, identity },
+                    clock,
+                )?,
+                (None, None) => review_work::create(
+                    &inventory,
+                    &groups,
+                    &focus_areas,
+                    &output,
+                    repository_root.as_deref(),
+                    artifact_directory.as_deref(),
+                    clock,
+                )?,
+                _ => {
+                    return Err(fail(
+                        "invalidInput",
+                        "Review session and preparation identity must be supplied together",
+                    ));
+                }
+            };
+            Ok(serde_json::to_string(&result)?)
         }
         WorkflowCommand::InitializeReviewQueue {
             inventory_path,
