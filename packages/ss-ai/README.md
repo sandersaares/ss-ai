@@ -294,10 +294,21 @@ It does not read historical target tips, execute source, or initialize submodule
 
 `assessment` accepts nonnegative `--after` and positive `--limit` (default 10,
 maximum output 100 changes). `read` takes `--reference`, nonnegative `--offset`
-and positive `--limit` (default 4,096, maximum output 16,384 characters).
+and positive `--limit` (default 4,096, at most 16,384 characters).
+Metadata and evidence pages fit within 16 KiB of pretty-printed UTF-8 JSON
+including the trailing newline. Follow `nextOffset`; serialized byte limits
+can shorten either kind of page. A metadata item that cannot fit fails with
+`evidenceDelivery`, not a semantic refusal.
 Offsets are character offsets, not bytes, and must extend contiguous reads
 or replay an already read region. References are `policy`, `discussion`, and
 `CHANGE_ID:old` / `CHANGE_ID:new` for present source sides.
+Evidence pages include `totalCharacters`. Metadata includes `documentReads`
+for policy/discussion and `content` on each source side; text content exposes
+`progress`. Progress contains `reference`, `totalCharacters`, nullable
+`readOffset`, and `complete`. A null offset means no read, including for empty
+text. `pendingChangeCount` and nullable `nextChangeOffset` identify missing
+judgments. Results expose nullable `assessmentProgress` with `changeCount`,
+`judgedChangeCount`, and `nextChangeOffset` without source or per-change rationales.
 
 `judge` takes `--change-id` (an exact ID or `cumulative`), `--disposition`,
 `--rationale` and repeated `--evidence`. Judgments apply the installed policy's
@@ -305,9 +316,12 @@ significant-design-change and likely-performance/correctness-regression criteria
 without an edit-category allowlist. Replacing a judgment requires
 `--previous-digest` matching its current `decisionDigest` or `cumulativeDigest`
 from `assessment`. Identical retries are idempotent; conflicting writes fail.
-Completion requires every inventory
-entry and a cumulative judgment. Insignificant completion additionally
-requires complete policy, discussion, and changed-text reads. A significant
+Every change judgment requires complete policy and readable source-side reads.
+A cumulative judgment requires complete policy and discussion reads.
+Completion requires every inventory entry, a cumulative judgment, and complete
+policy, discussion, and readable changed-text reads for every disposition.
+Unexamined readable evidence remains incomplete work, not semantic uncertainty.
+Opaque source still permits a non-insignificant judgment. A significant
 or uncertain member cannot be hidden by a cumulative insignificant judgment.
 Completed judgments are immutable.
 `complete` returns `snapshotDigest`, `status`, `assessmentDigest`, and nullable

@@ -508,6 +508,7 @@ impl DiscoveryRecord {
                     "capturedAt": entry.inspection.as_ref().map(|inspection| &inspection.captured_at),
                     "snapshotDigest": entry.inspection.as_ref().and_then(|inspection| inspection.snapshot_digest.as_ref()),
                     "assessmentDigest": entry.assessment.as_ref().and_then(|assessment| assessment.digest.as_ref()),
+                    "assessmentProgress": entry.assessment.as_ref().map(Assessment::progress),
                     "publication": entry.publication,
                     "reviewNotice": entry.review_notice.as_ref().or(match decision {
                         Some(Decision::NeedsReview { notice }) => Some(notice),
@@ -1754,8 +1755,13 @@ pub(crate) fn work(
         .as_mut()
         .ok_or_else(|| fail("invalidState", "Prepare the source inventory first"))?;
     let result = match action {
-        WorkAction::Prepare => assessment.summary(0, 10)?,
-        WorkAction::View { after, limit } => assessment.summary(after, limit.get().min(100))?,
+        WorkAction::Prepare => assessment.summary(0, 10, &run.policy.content, &discussion)?,
+        WorkAction::View { after, limit } => assessment.summary(
+            after,
+            limit.get().min(100),
+            &run.policy.content,
+            &discussion,
+        )?,
         WorkAction::Read {
             reference,
             offset,
@@ -1772,7 +1778,13 @@ pub(crate) fn work(
             judgment,
             previous_digest,
         } => {
-            let digest = assessment.record(&id, judgment, previous_digest.as_deref())?;
+            let digest = assessment.record(
+                &id,
+                judgment,
+                previous_digest.as_deref(),
+                &run.policy.content,
+                &discussion,
+            )?;
             json!({"snapshotDigest": snapshot, "recorded": id, "judgmentDigest": digest})
         }
         WorkAction::Complete => {

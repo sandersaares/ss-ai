@@ -80,6 +80,32 @@ Describe 'Automatic reapproval repository scope instructions' {
         $assignment | Should -Match 'nonzero native exit'
     }
 
+    It 'uses progress-verified source handoffs without confusing them with failed workers' {
+        $assignment = Get-Content -LiteralPath (Join-Path $skill 'assessment.md') -Raw
+        $script:Prompt | Should -Match 'planned `checkpoint` is not a completed assessment'
+        $script:Prompt | Should -Match '`assessmentProgress.judgedChangeCount` increased'
+        $script:Prompt | Should -Match 'snapshot is unchanged'
+        $script:Prompt | Should -Match 'no more source handoffs than the native\s+`assessmentProgress.changeCount`'
+        $script:Prompt | Should -Match 'final cumulative worker is separate'
+        $assignment | Should -Match 'at most ten new changes or\s+65,536 source characters'
+        $assignment | Should -Match 'Do not record a cumulative judgment or call `complete` at a checkpoint'
+        $assignment | Should -Match 'When a fresh worker starts with no unjudged changes'
+        $assignment | Should -Match 'Do not infer the cumulative outcome\s+merely from individual dispositions'
+        $script:Recipes | Should -Match 'next worker starts at `nextChangeOffset`'
+    }
+
+    It 'keeps output and context limits separate from semantic uncertainty' {
+        $assignment = Get-Content -LiteralPath (Join-Path $skill 'assessment.md') -Raw
+        $assignment | Should -Match 'Read one evidence response per tool call'
+        $assignment | Should -Match 'Retry\s+that same reference and offset'
+        $assignment | Should -Match 'Never bulk-mark unexamined inventory entries uncertain'
+        $assignment | Should -Match 'not semantic uncertainty or a\s+completed refusal'
+        $script:Recipes | Should -Match 'including the final newline'
+        $script:Recipes | Should -Match 'JSON escaping and multibyte text can shorten'
+        $script:Recipes | Should -Match 'requires all readable evidence for every disposition'
+        $script:Recipes | Should -Match '`evidenceDelivery` diagnostic is a tooling failure'
+    }
+
     It 'resumes persisted progress without treating retained reads as the replacement worker''s knowledge' {
         $script:Recipes | Should -Match 'Repeating `prepare` on the same snapshot preserves recorded reads and judgments'
         $script:Recipes | Should -Match 'Reread evidence needed for your own judgment'

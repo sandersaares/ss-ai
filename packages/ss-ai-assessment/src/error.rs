@@ -70,7 +70,12 @@ classified_error!(
 classified_error!(
     IncompleteEvidenceReads,
     "invalidState",
-    "Insignificant assessment requires complete policy, discussion, and changed-source reads"
+    "Assessment requires complete policy, discussion, and readable changed-source reads; inspect assessment read progress and continue missing evidence, not semantic uncertainty"
+);
+classified_error!(
+    OversizedResponse,
+    "evidenceDelivery",
+    "Assessment metadata exceeds the bounded response budget; retain incomplete work without publishing a semantic refusal"
 );
 classified_error!(
     MissingJudgmentEvidence,

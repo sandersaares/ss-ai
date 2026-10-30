@@ -50,9 +50,23 @@ ss-ai autoreapprove read --state-path "{{RUN}}" --pull-request-id "{{PR}}" --sna
 ```
 
 Preparation returns the selected context and the first bounded metadata page.
-Follow `nextOffset` through the assessment inventory. Read the captured policy
+Follow `nextOffset` through the assessment inventory, even when a page contains
+fewer changes than requested. Native metadata and evidence responses fit within
+16 KiB of pretty-printed UTF-8 JSON, including the final newline. The read
+character limit is an upper bound; JSON escaping and multibyte text can shorten
+a page. Consume one response per tool call rather than printing concatenated
+pages or the retained run. If a tool truncates delivery, lower `--limit` and
+replay the same offset before continuing.
+
+`documentReads` reports `reference`, `totalCharacters`, nullable `readOffset`,
+and `complete` for policy and discussion. Each present source side exposes its
+`content.kind`; text includes the same `content.progress` fields. Null read
+offset means no receipt, including for an empty document. Use this progress
+to find missing work, not to infer another worker's knowledge.
+`pendingChangeCount` and `nextChangeOffset` locate unjudged source.
+Read the captured policy
 and discussion plus both readable sides of each changed source. Evidence
-responses contain `text`, `complete`, and `nextOffset`; consume contiguous
+responses contain `text`, `totalCharacters`, `complete`, and `nextOffset`; consume contiguous
 pages until complete. A side without readable text cannot support an
 insignificant decision. Do not substitute an arbitrary checkout or target tip.
 
@@ -64,6 +78,13 @@ Native read coverage does not establish that a replacement worker has seen the e
 Finish missing work and retain existing judgments unless deliberately replacing them
 with their current digests. Never edit the run JSON or recreate the assessment
 to resume it.
+For a planned source-unit handoff, the next worker starts at `nextChangeOffset`
+and reads only the missing changes it will judge. The final cumulative worker
+reads recorded judgments through every bounded page and acquires its own policy,
+discussion, and any source evidence needed for interactions. Native `results`
+exposes `assessmentProgress` with `changeCount`, `judgedChangeCount`, and nullable
+`nextChangeOffset`, without source content or change rationales, for orchestration
+to verify forward progress.
 
 # Stage 3: judgments and completion
 
@@ -74,9 +95,18 @@ ss-ai autoreapprove complete --state-path "{{RUN}}" --pull-request-id "{{PR}}" -
 
 Repeat `--evidence` for additional returned references. A change judgment must
 cite that change. The cumulative judgment must cite both `policy` and
-`discussion`. Omit `--previous-digest` for a new judgment; replacement requires
+`discussion`. Every change judgment requires a complete policy read and both
+readable source sides, regardless of disposition. A cumulative judgment requires
+complete policy and discussion reads. Opaque source can retain uncertainty, but
+unexamined readable content cannot become a completed semantic refusal.
+Omit `--previous-digest` for a new judgment; replacement requires
 the current digest from `assessment` and rejects conflicting updates.
 Missing work is not an empty successful assessment. Completion
+requires all readable evidence for every disposition. Delivery, context, and
+worker limits leave incomplete work; do not loop over the inventory to invent
+uncertain judgments. An `evidenceDelivery` diagnostic is a tooling failure,
+not a completed nonqualifying assessment.
+Completion
 returns `needsReview`, `failed`, `wouldReapprove`, or `readyToReapprove`;
 only the last permits publication.
 Completed significant or uncertain assessments in a live run require the orchestrator's native `notify` command;
