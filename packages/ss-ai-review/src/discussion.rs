@@ -1,6 +1,7 @@
 //! Model-visible discussion is separate from retained approval authority.
 
 use std::collections::BTreeMap;
+use std::num::NonZeroU64;
 
 use ohno::AppError;
 use serde::Serialize;
@@ -10,7 +11,7 @@ use sha2::{Digest, Sha256};
 use crate::ado_approval::Evidence as AdoEvidence;
 use crate::approval::Evidence;
 use crate::error::fail;
-use crate::github_approval::Evidence as GitHubEvidence;
+use crate::github_approval::{Evidence as GitHubEvidence, commit};
 use crate::json::{array, field, identifier, nullable_field, text};
 
 /// Binds the interpretation of discussion without exposing authority bookkeeping.
@@ -40,6 +41,8 @@ enum Discussion {
         pull_request: Map<String, Value>,
         #[serde(rename = "sourceCommit")]
         source_commit: String,
+        #[serde(rename = "iterationCommits")]
+        iteration_commits: BTreeMap<String, String>,
         threads: Vec<Map<String, Value>>,
     },
 }
@@ -57,9 +60,10 @@ pub(crate) fn render(evidence: &Evidence) -> Result<String, AppError> {
         Evidence::AzureDevOps(AdoEvidence::History {
             pull_request,
             source_commit,
+            iterations,
             threads,
             ..
-        }) => ado(pull_request, source_commit, threads)?,
+        }) => ado(pull_request, source_commit, iterations, threads)?,
         Evidence::GitHub(GitHubEvidence::State { .. })
         | Evidence::AzureDevOps(AdoEvidence::State { .. }) => {
             return Err(fail(
@@ -176,7 +180,12 @@ fn github_comments(
 }
 
 /// Thread context remains semantic evidence; vote/policy reconstruction does not.
-fn ado(pr: &Value, source: &str, threads: &[Value]) -> Result<Discussion, AppError> {
+fn ado(
+    pr: &Value,
+    source: &str,
+    iterations: &[Value],
+    threads: &[Value],
+) -> Result<Discussion, AppError> {
     let mut pull_request = project(
         pr,
         &[
@@ -228,16 +237,37 @@ fn ado(pr: &Value, source: &str, threads: &[Value]) -> Result<Discussion, AppErr
     Ok(Discussion::AzureDevOps {
         pull_request,
         source_commit: source.to_owned(),
+        iteration_commits: ado_iterations(iterations)?,
         threads,
     })
 }
 
+/// Resolves historical inline coordinates without exposing iteration bookkeeping.
+fn ado_iterations(iterations: &[Value]) -> Result<BTreeMap<String, String>, AppError> {
+    let mut commits = BTreeMap::new();
+    for iteration in iterations {
+        let id = field(iteration, "id")?
+            .as_u64()
+            .and_then(NonZeroU64::new)
+            .ok_or_else(|| fail("service", "Invalid discussion iteration identifier"))?;
+        let source = text(field(field(iteration, "sourceRefCommit")?, "commitId")?)?;
+        commit(source)?;
+        if commits.insert(id.to_string(), source.to_owned()).is_some() {
+            return Err(fail("service", "Repeated discussion iteration identifier"));
+        }
+    }
+    Ok(commits)
+}
+
 /// Preserves human replies even when they share a thread with a service event.
 fn ado_comment(comment: &Value, deleted_thread: bool) -> Result<Map<String, Value>, AppError> {
-    identifier(field(comment, "id")?)?;
-    let requires_content = !deleted_thread
-        && comment.get("isDeleted") != Some(&Value::Bool(true))
-        && comment.get("commentType").and_then(Value::as_str) != Some("system");
+    let deleted = deleted_thread || comment.get("isDeleted") == Some(&Value::Bool(true));
+    // Provider tombstones can omit removed identifiers as well as their bodies.
+    if !deleted {
+        identifier(field(comment, "id")?)?;
+    }
+    let requires_content =
+        !deleted && comment.get("commentType").and_then(Value::as_str) != Some("system");
     if requires_content {
         text(field(comment, "content")?)?;
     } else if let Some(content) = comment.get("content") {
@@ -325,11 +355,15 @@ mod tests {
         json!({
             "platform": "azureDevOps",
             "observation": {
-                "scope": "history", "sourceCommit": "a".repeat(40),
+                "scope": "history", "sourceCommit": "b".repeat(40),
                 "pullRequest": {"pullRequestId": 1, "title": "Requirements", "description": "Full description",
                     "createdBy": {"id": "author", "displayName": "profile"},
                     "sourceRefName": "refs/heads/topic", "repository": {"id": "authority-only"}},
-                "reviewers": [], "iterations": [], "policies": [], "evaluations": [],
+                "reviewers": [], "policies": [], "evaluations": [],
+                "iterations": [
+                    {"id": 1, "sourceRefCommit": {"commitId": "a".repeat(40)}, "createdDate": "earlier"},
+                    {"id": 2, "sourceRefCommit": {"commitId": "b".repeat(40)}, "createdDate": "later"}
+                ],
                 "threads": [{
                     "id": 1, "status": "pending", "isDeleted": false, "publishedDate": "captured-time",
                     "threadContext": {"filePath": "/src/file.rs", "rightFileStart": {"line": 8, "offset": 1}},
@@ -436,7 +470,11 @@ mod tests {
         let original = ado();
         let result = project(&original);
         assert_eq!(result["platform"], "azureDevOps");
-        assert_eq!(result["sourceCommit"], "a".repeat(40));
+        assert_eq!(result["sourceCommit"], "b".repeat(40));
+        assert_eq!(
+            result["iterationCommits"],
+            json!({"1": "a".repeat(40), "2": "b".repeat(40)})
+        );
         assert_eq!(result["pullRequest"]["description"], "Full description");
         for (thread, original) in result["threads"]
             .as_array()
@@ -475,6 +513,28 @@ mod tests {
     }
 
     #[test]
+    fn deleted_comment_tombstones_preserve_absent_identifiers() {
+        for deleted in [
+            json!({"id": "deleted-thread", "isDeleted": true,
+                "comments": [{"commentType": "system", "author": {"id": "author"}}]}),
+            json!({"id": "live-thread", "status": "pending",
+                "comments": [{"isDeleted": true, "commentType": "text"}]}),
+        ] {
+            let mut original = ado();
+            original["observation"]["threads"] = json!([deleted.clone()]);
+            let result = project(&original);
+            assert_eq!(result["threads"][0]["comments"], deleted["comments"]);
+            assert!(result["threads"][0]["comments"][0].get("id").is_none());
+        }
+        let mut original = ado();
+        original["observation"]["threads"][0]["comments"][1]
+            .as_object_mut()
+            .unwrap()
+            .remove("id");
+        render(&serde_json::from_value(original).unwrap()).unwrap_err();
+    }
+
+    #[test]
     fn malformed_or_incomplete_discussion_never_becomes_empty_evidence() {
         let mut missing = github();
         missing["observation"]
@@ -486,6 +546,12 @@ mod tests {
             (github(), "/observation/comments/0/body", json!(null)),
             (github(), "/observation/reviews/0/body", json!(42)),
             (ado(), "/observation/threads/0/comments", json!(null)),
+            (
+                ado(),
+                "/observation/iterations/0/sourceRefCommit/commitId",
+                json!(null),
+            ),
+            (ado(), "/observation/iterations/1/id", json!(1)),
             (
                 ado(),
                 "/observation/threads/0/comments/1/content",

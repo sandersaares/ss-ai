@@ -310,12 +310,15 @@ judgments. Results expose nullable `assessmentProgress` with `changeCount`,
 
 The `discussion` reference contains compact JSON with `schemaVersion: 1` and
 `platform`. GitHub supplies `pullRequest`, `reviews`, `comments`,
-`reviewComments`, and `hunks`; ADO supplies `pullRequest`, `sourceCommit`, and
-`threads`. Discussion records preserve provider field names, bodies, stable
+`reviewComments`, and `hunks`; ADO supplies `pullRequest`, `sourceCommit`,
+`iterationCommits`, and `threads`. `iterationCommits` maps iteration identifiers
+to source commits for interpreting historical inline coordinates.
+Discussion records preserve provider field names, bodies, stable
 authorship, reply relationships, available thread state, and source locations.
 GitHub comments reference exact shared excerpt text through `hunkReference`;
 `hunks` maps its SHA-256 reference to that text. A null reference preserves a
-null excerpt, and an absent reference preserves an absent excerpt. Read the
+null excerpt, and an absent reference preserves an absent excerpt. Deleted ADO
+comment tombstones preserve absent identifiers and bodies. Read the
 complete document, including all shared excerpts. Approval reconstruction and
 policy records remain in native authority evidence, not this discussion document.
 `discussionDigest` binds the document's exact UTF-8 bytes.
