@@ -14,7 +14,7 @@ use crate::{Content, ContextRequest, Inventory, Side};
 
 /// Keep pretty-printed JSON below the tool's output limit, including escaping and metadata.
 const RESPONSE_BYTES: usize = 16_384;
-/// Reserve room for snapshot identity, references, offsets, and JSON formatting.
+/// Bound the initial text candidate before accounting for its serialized metadata.
 const TEXT_BYTES: usize = 12_288;
 
 /// Native selection keeps unrelated full-review guides and repository instructions out of assignments.
@@ -366,16 +366,56 @@ impl Assessment {
                 bytes <= TEXT_BYTES
             })
             .collect::<String>();
-        let end = offset
-            .checked_add(text.chars().count())
-            .ok_or_else(error::ReadOffsetOverflow::classified)?;
-        let result = json!({"snapshotDigest": self.snapshot_digest, "reference": reference, "offset": offset,
-            "text": text, "totalCharacters": total, "complete": end == total,
-            "context": self.contexts.get(reference),
-            "unit": reference.strip_prefix("unit:").and_then(|id| self.checkpoints.units.iter().find(|unit| unit.id == id))
-                .map(|unit| json!({"id": unit.id, "bindingReference": unit.binding_reference()})),
-            "nextOffset": if end < total { Some(end) } else { None }});
+        let boundaries = text
+            .char_indices()
+            .map(|(index, _)| index)
+            .chain(std::iter::once(text.len()))
+            .collect::<Vec<_>>();
+        let page = |characters: usize| -> Result<Value, AssessmentError> {
+            let end = offset
+                .checked_add(characters)
+                .ok_or_else(error::ReadOffsetOverflow::classified)?;
+            let byte_end = *boundaries
+                .get(characters)
+                .ok_or_else(error::ReadOffsetOverflow::classified)?;
+            let page_text = text
+                .get(..byte_end)
+                .ok_or_else(error::ReadOffsetOverflow::classified)?;
+            Ok(
+                json!({"snapshotDigest": self.snapshot_digest, "reference": reference, "offset": offset,
+                "text": page_text, "totalCharacters": total, "complete": end == total,
+                "context": self.contexts.get(reference),
+                "unit": reference.strip_prefix("unit:").and_then(|id| self.checkpoints.units.iter().find(|unit| unit.id == id))
+                    .map(|unit| json!({"id": unit.id, "bindingReference": unit.binding_reference()})),
+                "nextOffset": if end < total { Some(end) } else { None }}),
+            )
+        };
+        let mut count = boundaries.len().saturating_sub(1);
+        let mut result = page(count)?;
+        if response_size(&result)? > RESPONSE_BYTES {
+            // Metadata varies with the captured path. Search complete character boundaries
+            // against the delivered JSON, including offsets and escaping, before recording a read.
+            check_response(&page(0)?)?;
+            let mut lower = 0_usize;
+            let mut upper = count;
+            while lower < upper {
+                let middle = lower.saturating_add(upper.saturating_sub(lower).div_ceil(2));
+                if response_size(&page(middle)?)? <= RESPONSE_BYTES {
+                    lower = middle;
+                } else {
+                    upper = middle.saturating_sub(1);
+                }
+            }
+            count = lower;
+            result = page(count)?;
+        }
+        if count == 0 && offset < total && limit > 0 {
+            return Err(error::OversizedResponse::classified());
+        }
         check_response(&result)?;
+        let end = offset
+            .checked_add(count)
+            .ok_or_else(error::ReadOffsetOverflow::classified)?;
         self.reads.insert(reference.to_owned(), previous.max(end));
         Ok(result)
     }
