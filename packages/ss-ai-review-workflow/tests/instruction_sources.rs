@@ -16,6 +16,9 @@ use std::sync::mpsc::{self, Receiver, Sender};
 use std::thread;
 use std::time::Duration;
 
+#[cfg(unix)]
+use std::os::unix::fs::symlink;
+
 use jiff::Timestamp;
 use ohno::AppError;
 use ss_ai_review_context::bytes_hash;
@@ -327,8 +330,6 @@ fn rejects_ambiguous_and_escaping_repository_paths() {
 #[cfg(unix)]
 #[test]
 fn rejects_repository_symlinks_outside_the_root() {
-    use std::os::unix::fs::symlink;
-
     let workspace = Workspace::new("repository-link-escape");
     workspace.put("repository/AGENTS.md", b"selected");
     symlink(
@@ -437,8 +438,6 @@ fn nested_session_is_excluded_across_repeated_snapshots() {
 #[cfg(unix)]
 #[test]
 fn follows_links_excludes_session_aliases_and_detects_cycles() {
-    use std::os::unix::fs::symlink;
-
     let workspace = Workspace::new("links");
     workspace.put("root/instructions/AGENTS.md", b"actual");
     fs::create_dir(workspace.0.join("external")).unwrap();
@@ -500,8 +499,6 @@ fn follows_links_excludes_session_aliases_and_detects_cycles() {
 #[cfg(unix)]
 #[test]
 fn follows_links_before_resolving_parent_components() {
-    use std::os::unix::fs::symlink;
-
     let workspace = Workspace::new("link-parent");
     workspace.put("outside/nested/placeholder", b"");
     workspace.put("outside/AGENTS.md", b"outside");
@@ -533,8 +530,6 @@ fn follows_links_before_resolving_parent_components() {
 #[cfg(unix)]
 #[test]
 fn reports_a_direct_link_cycle_without_waiting() {
-    use std::os::unix::fs::symlink;
-
     let workspace = Workspace::new("direct-cycle");
     fs::create_dir(workspace.0.join("root")).unwrap();
     symlink("cycle", workspace.0.join("root/cycle")).unwrap();
