@@ -5,6 +5,7 @@ BeforeAll {
     . "$script:Scripts\lib\WorkflowData.ps1"
     . "$script:Scripts\lib\FindingModel.ps1"
     . "$script:Scripts\lib\ReviewWork.ps1"
+    . "$script:Scripts\lib\NativeWorkflowBridge.ps1"
     . "$script:Scripts\lib\ReviewAuditState.ps1"
     . "$script:Scripts\lib\FocusAreaPreparation.ps1"
     . "$script:Scripts\lib\FocusAreaExpansion.ps1"

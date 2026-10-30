@@ -12,6 +12,7 @@ BeforeAll {
     . (Join-Path $script:LibraryRoot 'WorkflowData.ps1')
     . (Join-Path $script:LibraryRoot 'FindingModel.ps1')
     . (Join-Path $script:LibraryRoot 'GitDiff.ps1')
+    . (Join-Path $script:LibraryRoot 'NativeWorkflowBridge.ps1')
     . (Join-Path $script:LibraryRoot 'PullRequestAnchor.ps1')
     . (Join-Path $script:LibraryRoot 'PullRequestPlatform.ps1')
     . (Join-Path $script:LibraryRoot 'PullRequestPublication.ps1')

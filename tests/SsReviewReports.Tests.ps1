@@ -6,6 +6,7 @@ BeforeAll {
     . (Join-Path $lib 'PullRequestModel.ps1')
     . (Join-Path $lib 'PullRequestTarget.ps1')
     . (Join-Path $lib 'PullRequestTransportHost.ps1')
+    . (Join-Path $lib 'NativeWorkflowBridge.ps1')
     . (Join-Path $lib 'FindingMarkdown.ps1')
     . (Join-Path $lib 'ReportTools.ps1')
     . (Join-Path $lib 'ReviewHtml.ps1')

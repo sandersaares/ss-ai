@@ -4,7 +4,6 @@
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 $PSNativeCommandUseErrorActionPreference = $true
-. "$PSScriptRoot/NativeWorkflowBridge.ps1"
 
 # Keeps caller-provided prose and context out of process arguments.
 function New-ReviewAuditInputFile {

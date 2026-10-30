@@ -4,7 +4,6 @@
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 $PSNativeCommandUseErrorActionPreference = $true
-. "$PSScriptRoot\NativeWorkflowBridge.ps1"
 
 # Overview publication uses the same authorship marker as finding publication.
 $script:FindingMarkdownAuthorshipPrefix = '[Copilot speaking]'
