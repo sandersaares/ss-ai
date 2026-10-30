@@ -450,7 +450,10 @@ documents. It does not participate in authority or freshness comparisons.
 Provider-shaped locations retain missing and null distinctions, including
 outdated inline positions. Exact hunk text shares a SHA-256 reference while
 comments retain their own paths, authors, revisions, and reply relationships.
-Human replies in service threads remain present. Native validation and work
+ADO discussion retains a compact iteration-to-source-commit map so earlier
+inline coordinates remain interpretable. Deleted comment tombstones do not
+require removed identifiers or bodies. Human replies in service threads remain present.
+Native validation and work
 dispatch use the same renderer, and the assessment binds its exact document
 bytes and projection version through `discussionDigest`. Incompatible read
 offsets and judgments are not migrated to another projection.

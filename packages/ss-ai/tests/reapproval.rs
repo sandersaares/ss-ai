@@ -3243,6 +3243,12 @@ fn compact_discussion_is_snapshot_bound_and_keeps_objections_on_both_providers()
                     "comments": [{"id": 1, "commentType": "text", "content": "Human objection.",
                         "author": {"id": "other-reviewer"}, "publishedDate": "2026-01-02T00:00:00Z"}]
                 }));
+                evidence["threads"].as_array_mut().unwrap().extend([
+                    json!({"id": "deleted-thread", "isDeleted": true,
+                        "comments": [{"commentType": "system"}]}),
+                    json!({"id": "deleted-comment", "status": "pending",
+                        "comments": [{"isDeleted": true, "commentType": "text"}]}),
+                ]);
             } else {
                 evidence["pullRequest"]["body"] = json!("Description-only requirement.");
                 evidence["reviews"][0]["body"] = json!("Review-only objection.");
@@ -3273,6 +3279,17 @@ fn compact_discussion_is_snapshot_bound_and_keeps_objections_on_both_providers()
         if ado {
             assert!(document.get("reviewers").is_none());
             assert!(document.get("iterations").is_none());
+            assert_eq!(document["iterationCommits"]["1"], sources.old);
+            assert_eq!(document["iterationCommits"]["2"], sources.new);
+            for id in ["deleted-thread", "deleted-comment"] {
+                let thread = document["threads"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .find(|thread| thread["id"] == id)
+                    .unwrap();
+                assert!(thread["comments"][0].get("id").is_none());
+            }
         } else {
             assert!(discussion.contains("Review-only objection."));
             assert_eq!(document["hunks"].as_object().unwrap().len(), 1);
