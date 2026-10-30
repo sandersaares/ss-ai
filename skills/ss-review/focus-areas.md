@@ -123,3 +123,12 @@ are actually relevant to achieving the goals of the content you are reviewing. I
 This applies to both high-level concepts (design tenets, APIs) as well as individual fields in structs, layers of types in those fields
 (e.g. does something need to be wrapped in a mutex or smart pointer or can we simplify and do without). There are many opportunities,
 try finding them.
+
+# Look for unjustified duplication
+
+Examine the content for unexpected duplication - does the body of a function seem to match some arbitrary inline logic elsewhere?
+Are two parts of the app independently computing the same value? Do some other parts feel like the same thing expressed in two ways?
+
+Such duplication creates risk of accidental divergence when only one part gets updated as part of a future change - avoid such mutation risk.
+
+Sometimes duplication is unavoidable (e.g. an implementation often resembles the API contract it implements). Analyze each candidate duplication case by case to determine whether it is justified.
