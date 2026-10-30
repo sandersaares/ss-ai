@@ -179,6 +179,8 @@ fn exact_unicode_pages_and_native_dispatch() {
     reason = "The bounded fixture uses character boundaries and small positive counts"
 )]
 fn assert_largest_page(path: &Path, text: &str, offset: usize) {
+    // PowerShell emits its host newline when relaying the native result.
+    let newline_len = if cfg!(windows) { "\r\n" } else { "\n" }.len();
     let assignment: Value = serde_json::from_slice(&fs::read(path).unwrap()).unwrap();
     let document = assignment["documents"]
         .as_array()
@@ -211,7 +213,8 @@ fn assert_largest_page(path: &Path, text: &str, offset: usize) {
             "contentLength": length,
             "nextOffset": if complete { None } else { Some(next) }, "complete": complete
         });
-        if serde_json::to_vec(&envelope).unwrap().len() + encoded_content < 16 * 1024 {
+        if serde_json::to_vec(&envelope).unwrap().len() + encoded_content + newline_len <= 16 * 1024
+        {
             expected = Some((end, next, complete));
         }
         // The raw suffix already exceeds the entire output budget.
@@ -231,7 +234,7 @@ fn assert_largest_page(path: &Path, text: &str, offset: usize) {
         json!(if complete { None } else { Some(next) })
     );
     assert_eq!(page["complete"], complete);
-    assert!(serde_json::to_vec(&page).unwrap().len() < 16 * 1024);
+    assert!(serde_json::to_vec(&page).unwrap().len() + newline_len <= 16 * 1024);
 }
 
 #[test]
@@ -268,6 +271,8 @@ fn bounded_pages_match_the_largest_encoded_candidate() {
 )]
 fn exact_output_limit_includes_the_final_newline() {
     let workspace = Workspace::new("exact-limit");
+    // Match the platform newline used by the PowerShell compatibility executable.
+    let newline_len = if cfg!(windows) { "\r\n" } else { "\n" }.len();
     // Find the complete ASCII page whose JSON envelope leaves exactly the budget.
     let envelope = json!({
         "documentId": "scope", "sha256": "A".repeat(64), "contentOffset": 0,
@@ -275,14 +280,17 @@ fn exact_output_limit_includes_the_final_newline() {
     });
     let base = serde_json::to_vec(&envelope).unwrap().len();
     let length = (1..16 * 1024)
-        .find(|length| base + length + length.to_string().len() == 16 * 1024)
+        .find(|length| base + length + length.to_string().len() - 1 + newline_len == 16 * 1024)
         .unwrap();
     let text = "a".repeat(length);
     let scope = workspace.put("scope.md", &text);
     let result = create(&workspace, "references", &scope);
     let assignment = Path::new(result["assignmentPath"].as_str().unwrap());
     let page = read_document(assignment, "scope", 0, &TestClock).unwrap();
-    assert_eq!(serde_json::to_vec(&page).unwrap().len() + 1, 16 * 1024);
+    assert_eq!(
+        serde_json::to_vec(&page).unwrap().len() + newline_len,
+        16 * 1024
+    );
     assert_eq!(page["content"], text);
     assert_eq!(page["complete"], true);
     // The continuation metadata can make the penultimate page larger than completion.
@@ -290,7 +298,7 @@ fn exact_output_limit_includes_the_final_newline() {
     previous["content"] = json!(&text[..length - 1]);
     previous["nextOffset"] = json!(length - 1);
     previous["complete"] = json!(false);
-    assert!(serde_json::to_vec(&previous).unwrap().len() + 1 > 16 * 1024);
+    assert!(serde_json::to_vec(&previous).unwrap().len() + newline_len > 16 * 1024);
 }
 
 #[test]
