@@ -17,7 +17,7 @@ use std::time::Duration;
 use jiff::Timestamp;
 use ohno::AppError;
 use serde_json::{Value, json};
-use ss_ai_review_workflow::{findings, workflow_plan};
+use ss_ai_review_workflow::{findings, worker_input, workflow_plan};
 use ss_ai_runtime::{Clock, FileTransaction, SystemClock, fail};
 
 /// Keeps test files inside the checkout, including atomic staging files.
@@ -54,6 +54,7 @@ fn public_records_are_unwind_safe() {
     assert_traits::<findings::InitializationResult>();
     assert_traits::<findings::IndexResult>();
     assert_traits::<findings::ConsolidationResult>();
+    assert_traits::<worker_input::AssignmentOptions<'static>>();
     assert_traits::<workflow_plan::PlanKind>();
     assert_traits::<workflow_plan::Cluster>();
     assert_traits::<workflow_plan::Merge>();

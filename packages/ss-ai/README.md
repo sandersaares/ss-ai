@@ -189,7 +189,9 @@ user or merge approval, and rendering does not publish or approve findings.
 active skill directory supplied with `--skill-root`. Its result contains the
 assignment path and a dispatch prompt. The prompt includes recovery guidance
 and a ready-to-run `workflow worker-document` command for each registered
-shared Markdown document.
+shared Markdown document. The PowerShell command initializes its own version
+and error handling settings; copy the complete block for initial reads and
+reloads.
 
 The reader checks the registered bytes and emits an exact page, a UTF-16
 continuation offset, and an explicit completion flag. The complete encoded

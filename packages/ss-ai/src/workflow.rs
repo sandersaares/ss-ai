@@ -393,15 +393,6 @@ enum PlanKind {
     Decisions,
 }
 
-/// Selects the review preparation input schema.
-#[derive(Clone, Copy, Debug, ValueEnum)]
-enum ReviewInputKind {
-    /// Complete changed-file inventory.
-    Inventory,
-    /// File groups covering the inventory.
-    Groups,
-}
-
 impl PlanKind {
     /// Translates command names to the workflow schema selection.
     fn native(self) -> workflow_plan::PlanKind {
@@ -424,6 +415,15 @@ impl PlanKind {
             Self::Decisions => "decisions",
         }
     }
+}
+
+/// Selects the review preparation input schema.
+#[derive(Clone, Copy, Debug, ValueEnum)]
+enum ReviewInputKind {
+    /// Complete changed-file inventory.
+    Inventory,
+    /// File groups covering the inventory.
+    Groups,
 }
 
 /// Runs a local workflow command using the supplied external boundaries.

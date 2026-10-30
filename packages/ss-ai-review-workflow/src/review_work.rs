@@ -10,6 +10,7 @@
 
 use std::collections::{HashMap, HashSet};
 use std::fs;
+use std::mem;
 use std::path::{Component, Path, PathBuf};
 
 use ohno::AppError;
@@ -19,6 +20,16 @@ use ss_ai_runtime::{Clock, FileTransaction, caused_by, fail, read_bytes};
 
 use crate::findings;
 use crate::workflow_plan::parse_json;
+
+/// Keeps manifest validation attached to data crossing workflow module boundaries.
+pub(crate) struct ValidatedManifest(Value);
+
+impl ValidatedManifest {
+    /// Exposes the immutable record after its schema and assignments are checked.
+    pub(crate) fn as_value(&self) -> &Value {
+        &self.0
+    }
+}
 
 /// Publishes a validated inventory without replacing existing input by default.
 ///
@@ -215,6 +226,7 @@ pub fn validate(
     clock: &dyn Clock,
 ) -> Result<Value, AppError> {
     let manifest = read_manifest(manifest, clock)?;
+    let manifest = manifest.as_value();
     let inventory_path = Path::new(nonblank(manifest.get("inventoryPath"), "inventoryPath")?);
     let groups_path = Path::new(nonblank(manifest.get("fileGroupsPath"), "fileGroupsPath")?);
     let inputs = read_inputs(inventory_path, groups_path, clock)?;
@@ -252,7 +264,7 @@ pub fn validate(
         let found = artifacts
             .iter()
             .find(|artifact| artifact["reviewerId"] == id);
-        let issue = validate_reviewer(reviewer, found, &manifest, &inputs, clock);
+        let issue = validate_reviewer(reviewer, found, manifest, &inputs, clock);
         match issue {
             Ok(Some(reason)) => {
                 failed.push(json!(id));
@@ -472,37 +484,7 @@ fn validate_applicability_map(map: &Value) -> Result<(), AppError> {
             )?;
             nonblank(context.get("effectiveScope"), "effectiveScope")?;
             if let Some(scope) = context.get("pathScope").filter(|scope| !scope.is_null()) {
-                let scope = object(scope, &["base", "include"])?;
-                let base = nonblank(scope.get("base"), "base")?;
-                if base != "."
-                    && (base.split('/').any(|part| {
-                        part.is_empty()
-                            || !part.bytes().all(|byte| {
-                                byte.is_ascii_alphanumeric()
-                                    || matches!(byte, b'_' | b'.' | b' ' | b'-')
-                            })
-                    }))
-                {
-                    return Err(invalid("Invalid path-scope base"));
-                }
-                let include = array(scope.get("include"), "include")?;
-                let mut unique = HashSet::new();
-                if include.is_empty() {
-                    return Err(invalid("Missing path alternatives"));
-                }
-                for pattern in include {
-                    let pattern = pattern
-                        .as_str()
-                        .filter(|pattern| !pattern.is_empty())
-                        .ok_or_else(|| invalid("Invalid path alternative"))?;
-                    if !pattern.bytes().all(|byte| {
-                        byte.is_ascii_alphanumeric()
-                            || matches!(byte, b'_' | b'.' | b'*' | b'?' | b' ' | b'/' | b'-')
-                    }) || !unique.insert(pattern)
-                    {
-                        return Err(invalid("Invalid path alternative"));
-                    }
-                }
+                validate_path_scope(scope)?;
             }
             for declaration in array(context.get("declarations"), "declarations")? {
                 validate_span(Some(declaration))?;
@@ -521,6 +503,41 @@ fn validate_applicability_map(map: &Value) -> Result<(), AppError> {
                     validate_span(Some(span))?;
                 }
             }
+        }
+    }
+    Ok(())
+}
+
+/// Validates the path language used as applicability evidence.
+fn validate_path_scope(scope: &Value) -> Result<(), AppError> {
+    let scope = object(scope, &["base", "include"])?;
+    let base = nonblank(scope.get("base"), "base")?;
+    if base != "."
+        && (base.split('/').any(|part| {
+            part.is_empty()
+                || !part.bytes().all(|byte| {
+                    byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'.' | b' ' | b'-')
+                })
+        }))
+    {
+        return Err(invalid("Invalid path-scope base"));
+    }
+    let include = array(scope.get("include"), "include")?;
+    let mut unique = HashSet::new();
+    if include.is_empty() {
+        return Err(invalid("Missing path alternatives"));
+    }
+    for pattern in include {
+        let pattern = pattern
+            .as_str()
+            .filter(|pattern| !pattern.is_empty())
+            .ok_or_else(|| invalid("Invalid path alternative"))?;
+        if !pattern.bytes().all(|byte| {
+            byte.is_ascii_alphanumeric()
+                || matches!(byte, b'_' | b'.' | b'*' | b'?' | b' ' | b'/' | b'-')
+        }) || !unique.insert(pattern)
+        {
+            return Err(invalid("Invalid path alternative"));
         }
     }
     Ok(())
@@ -701,9 +718,10 @@ fn scope_matches(scope: &Value, path: &str) -> Result<bool, AppError> {
 /// Matches segments with a dynamic table so globstars always make progress.
 fn match_segments(pattern: &[&str], path: &[&str]) -> bool {
     let mut previous = vec![false; path.len() + 1];
+    let mut next = vec![false; path.len() + 1];
     previous[0] = true;
     for segment in pattern {
-        let mut next = vec![false; path.len() + 1];
+        next.fill(false);
         if *segment == "**" {
             next[0] = previous[0];
             for index in 1..=path.len() {
@@ -714,7 +732,7 @@ fn match_segments(pattern: &[&str], path: &[&str]) -> bool {
                 next[index] = previous[index - 1] && match_segment(segment, path[index - 1]);
             }
         }
-        previous = next;
+        mem::swap(&mut previous, &mut next);
     }
     previous[path.len()]
 }
@@ -723,9 +741,10 @@ fn match_segments(pattern: &[&str], path: &[&str]) -> bool {
 fn match_segment(pattern: &str, path: &str) -> bool {
     let chars: Vec<_> = path.chars().flat_map(char::to_lowercase).collect();
     let mut previous = vec![false; chars.len() + 1];
+    let mut next = vec![false; chars.len() + 1];
     previous[0] = true;
     for token in pattern.chars().flat_map(char::to_lowercase) {
-        let mut next = vec![false; chars.len() + 1];
+        next.fill(false);
         if token == '*' {
             next[0] = previous[0];
             for index in 1..=chars.len() {
@@ -736,7 +755,7 @@ fn match_segment(pattern: &str, path: &str) -> bool {
                 next[index] = previous[index - 1] && (token == '?' || token == chars[index - 1]);
             }
         }
-        previous = next;
+        mem::swap(&mut previous, &mut next);
     }
     previous[chars.len()]
 }
@@ -842,6 +861,7 @@ fn validate_groups(groups: &Value, files: &Value) -> Result<(), AppError> {
         }
         let members = array(group.get("files"), "files")?;
         // These bounds preserve space for guidance during review compaction.
+        // Ref: skills/ss-review/docs/design.md, "Review coverage".
         if members.is_empty() || members.len() > 20 {
             return Err(invalid("Invalid group file count"));
         }
@@ -866,6 +886,7 @@ fn validate_groups(groups: &Value, files: &Value) -> Result<(), AppError> {
             );
         }
         // Oversized individual files remain reviewable as singleton groups.
+        // Ref: skills/ss-review/docs/design.md, "Review coverage".
         if members.len() > 1 && bytes > 100_000 {
             return Err(invalid("Group exceeds byte limit"));
         }
@@ -1522,7 +1543,7 @@ fn publish(transaction: &FileTransaction<'_>, value: &Value) -> Result<(), AppEr
     transaction.write_bytes(powershell_json(value)?.as_bytes())
 }
 
-/// Reads one complete text version with the predecessor's BOM handling.
+/// Reads complete workflow text using byte-order-mark-aware decoding.
 fn read_text(path: &Path, clock: &dyn Clock) -> Result<String, AppError> {
     let bytes = read_bytes(path, clock)?.ok_or_else(|| invalid("Required input is missing"))?;
     decode_text(&bytes)
@@ -1586,13 +1607,13 @@ fn same_lock(first: &Path, second: &Path) -> bool {
 }
 
 /// Reads the complete manifest before another operation relies on its assignments.
-pub(crate) fn read_manifest(path: &Path, clock: &dyn Clock) -> Result<Value, AppError> {
-    let bytes = read_bytes(path, clock)?
+pub(crate) fn read_manifest(path: &Path, clock: &dyn Clock) -> Result<ValidatedManifest, AppError> {
+    let manifest = read_bytes(path, clock)?
         .ok_or_else(|| fail("invalidInput", "Review-work manifest is missing"))?;
-    let text = decode_text(&bytes)?;
-    let manifest = parse_json(text.as_bytes())?;
+    let manifest = decode_text(&manifest)?;
+    let manifest = parse_json(manifest.as_bytes())?;
     validate_manifest(&manifest)?;
-    Ok(manifest)
+    Ok(ValidatedManifest(manifest))
 }
 
 /// Applies the manifest schema and assignment uniqueness checks.
@@ -1800,12 +1821,16 @@ fn invalid(message: &str) -> AppError {
 }
 
 #[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
     use std::collections::HashMap;
 
     use serde_json::{Value, json};
 
-    use super::{batch_hash, decode_text, match_segments, validate_manifest};
+    use super::{
+        batch_hash, decode_text, match_segment, match_segments, validate_manifest,
+        validate_path_scope,
+    };
 
     /// Supplies a manifest with no applicability assignment.
     fn manifest() -> Value {
@@ -1897,5 +1922,65 @@ mod tests {
         ));
         assert!(match_segments(&["src", "**", "*.rs"], &["src", "LIB.RS"]));
         assert!(!match_segments(&["src", "**", "*.rs"], &["docs", "lib.rs"]));
+    }
+
+    #[test]
+    fn reusable_match_rows_do_not_retain_prior_matches() {
+        for (pattern, path, expected) in [
+            ("", "", true),
+            ("*", "", true),
+            ("*a", "", false),
+            ("*a*", "bbb", false),
+            ("*a*b", "acb", true),
+            ("*a*b", "ac", false),
+            ("?*.RS", "A.rs", true),
+            ("?", "", false),
+            ("Ä?", "äX", true),
+        ] {
+            assert_eq!(
+                match_segment(pattern, path),
+                expected,
+                "{pattern:?} {path:?}"
+            );
+        }
+
+        for (pattern, path, expected) in [
+            (&[][..], &[][..], true),
+            (&["**"][..], &[][..], true),
+            (&["**", "src"][..], &[][..], false),
+            (&["**", "src", "**"][..], &["docs", "lib"][..], false),
+            (&["**", "src", "**"][..], &["src"][..], true),
+            (
+                &["**", "src", "**", "*.rs"][..],
+                &["root", "src", "inner", "file.rs"][..],
+                true,
+            ),
+            (
+                &["**", "src", "**", "*.rs"][..],
+                &["root", "src", "inner", "file.txt"][..],
+                false,
+            ),
+        ] {
+            assert_eq!(
+                match_segments(pattern, path),
+                expected,
+                "{pattern:?} {path:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn validates_path_scope_alternatives() {
+        validate_path_scope(&json!({"base": ".", "include": ["src/**/*.rs", "*.md"]})).unwrap();
+        for scope in [
+            json!({"base": "src//lib", "include": ["*.rs"]}),
+            json!({"base": "src", "include": []}),
+            json!({"base": "src", "include": [""]}),
+            json!({"base": "src", "include": ["*.rs", "*.rs"]}),
+            json!({"base": "src", "include": ["[a].rs"]}),
+            json!({"base": ".", "include": ["*.rs"], "unknown": true}),
+        ] {
+            assert!(validate_path_scope(&scope).is_err(), "{scope}");
+        }
     }
 }

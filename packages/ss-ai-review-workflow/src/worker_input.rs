@@ -1,7 +1,7 @@
 //! Preparation and bounded reading of worker guidance.
 
 use std::collections::{BTreeMap, HashSet};
-use std::num::NonZeroU32;
+use std::num::{NonZeroU32, NonZeroUsize};
 use std::path::{Path, absolute};
 
 use ohno::AppError;
@@ -12,7 +12,7 @@ use ss_ai_runtime::{Clock, FileTransaction, fail, read_bytes};
 
 use crate::review_work;
 
-/// Matches the shared reader's complete encoded stdout limit.
+/// Matches the complete encoded stdout limit in packages/ss-ai/README.md, Worker inputs.
 const OUTPUT_LIMIT: usize = 16 * 1024;
 
 /// Inputs selected by the primary session for one worker attempt.
@@ -70,6 +70,18 @@ struct Document {
     line_count: usize,
 }
 
+/// Marks an assignment whose envelope, document roles, and metadata were checked.
+struct ValidatedAssignment<'a> {
+    documents: Vec<ValidatedDocument<'a>>,
+}
+
+/// Carries positive document counts beyond the assignment validation boundary.
+struct ValidatedDocument<'a> {
+    raw: &'a Document,
+    size_bytes: NonZeroUsize,
+    line_count: NonZeroUsize,
+}
+
 /// Requires the nullable context field to be present in persisted assignments.
 fn present_context<'de, D: Deserializer<'de>>(deserializer: D) -> Result<Option<String>, D::Error> {
     Option::<String>::deserialize(deserializer)
@@ -121,6 +133,7 @@ pub fn create_assignment(
                 .ok_or_else(|| invalid("Review requires a manifest"))?,
             clock,
         )?;
+        let manifest = manifest.as_value();
         let reviewer_id = options
             .reviewer_id
             .filter(|id| !id.is_empty())
@@ -149,8 +162,8 @@ pub fn create_assignment(
         }
         field(reviewer, "focusArea")?.clone_into(&mut focus);
         field(reviewer, "fileGroupQueuePath")?.clone_into(&mut queue);
-        field(&manifest, "inventoryPath")?.clone_into(&mut inventory);
-        field(&manifest, "fileGroupsPath")?.clone_into(&mut groups);
+        field(manifest, "inventoryPath")?.clone_into(&mut inventory);
+        field(manifest, "fileGroupsPath")?.clone_into(&mut groups);
     }
     let context = options.context_path.map(absolute).transpose()?;
     if let Some(path) = &context {
@@ -280,7 +293,14 @@ pub fn create_assignment(
         dispatch.push("Follow the Calling shell contract in the assigned queryRecipe, including for any permitted nested worker.".to_owned());
     }
     dispatch.extend([
+        "```powershell".to_owned(),
+        "#Requires -Version 7.6".to_owned(),
+        "if ($PSVersionTable.PSVersion -lt [version]'7.6') { throw 'PowerShell 7.6 or later is required.' }".to_owned(),
+        "Set-StrictMode -Version Latest".to_owned(),
+        "$ErrorActionPreference = 'Stop'".to_owned(),
+        "$PSNativeCommandUseErrorActionPreference = $true".to_owned(),
         format!("ss-ai workflow worker-document --assignment-path '{literal}' --document-id '{{{{DOCUMENT_ID}}}}' --offset 0"),
+        "```".to_owned(),
         "| Placeholder | Replacement |".to_owned(),
         "| --- | --- |".to_owned(),
         "| DOCUMENT_ID | One ID from the list below. |".to_owned(),
@@ -315,14 +335,16 @@ pub fn read_document(
     offset: usize,
     clock: &dyn Clock,
 ) -> Result<Value, AppError> {
-    let bytes = required_bytes(&absolute(assignment_path)?, clock)?;
-    let bytes = bytes.strip_prefix(&[0xef, 0xbb, 0xbf]).unwrap_or(&bytes);
-    let assignment: Assignment = serde_json::from_slice(bytes)
+    let assignment = required_bytes(&absolute(assignment_path)?, clock)?;
+    let assignment = assignment
+        .strip_prefix(&[0xef, 0xbb, 0xbf])
+        .unwrap_or(&assignment);
+    let assignment: Assignment = serde_json::from_slice(assignment)
         .map_err(|error| invalid(format!("Invalid worker assignment: {error}")))?;
-    validate(&assignment)?;
+    let validated = validate(&assignment)?;
     let diagnostics = Path::new(&assignment.diagnostics_path);
     increment(diagnostics, "documentReadCalls", clock)?;
-    let result = read_page(&assignment, document_id, offset, clock);
+    let result = read_page(&validated, document_id, offset, clock);
     if let Err(read_error) = &result
         && offset == 0
     {
@@ -344,7 +366,7 @@ pub fn read_document(
     reason = "Positions come from char_indices; binary-search bounds stay within that vector"
 )]
 fn read_page(
-    assignment: &Assignment,
+    assignment: &ValidatedAssignment<'_>,
     id: &str,
     offset: usize,
     clock: &dyn Clock,
@@ -352,14 +374,14 @@ fn read_page(
     let document = assignment
         .documents
         .iter()
-        .find(|document| document.id == id)
+        .find(|document| document.raw.id == id)
         .ok_or_else(|| invalid(format!("Expected one shared document '{id}'")))?;
-    let bytes = required_bytes(Path::new(&document.path), clock)?;
+    let bytes = required_bytes(Path::new(&document.raw.path), clock)?;
     let text = std::str::from_utf8(&bytes)
         .map_err(|error| invalid(format!("Invalid UTF-8 shared document: {error}")))?;
-    if bytes_hash(&bytes) != document.sha256
-        || bytes.len() != document.size_bytes
-        || line_count(text) != document.line_count
+    if bytes_hash(&bytes) != document.raw.sha256
+        || bytes.len() != document.size_bytes.get()
+        || line_count(text) != document.line_count.get()
     {
         return Err(invalid(format!(
             "Shared document '{id}' changed; rebuild the assignment explicitly"
@@ -375,21 +397,36 @@ fn read_page(
         units = units
             .checked_add(character.len_utf16())
             .ok_or_else(|| invalid("Document length overflow"))?;
-        if start.is_some() {
+        if start.is_some_and(|start| index + character.len_utf8() - start <= OUTPUT_LIMIT) {
             positions.push((index + character.len_utf8(), units));
         }
     }
     let start = start.ok_or_else(|| invalid("Invalid shared-document offset"))?;
+    // Completion removes the numeric continuation offset and may make the final
+    // candidate smaller than its predecessor, so check it before binary search.
+    if let Some(&(end, next)) = positions.last()
+        && next == units
+    {
+        let page = json!({
+            "documentId": id, "sha256": document.raw.sha256, "contentOffset": offset,
+            "content": &text[start..end], "contentLength": units,
+            "nextOffset": null, "complete": true
+        });
+        if serde_json::to_vec(&page)?.len() < OUTPUT_LIMIT {
+            return Ok(page);
+        }
+    }
     let mut low = 0;
     let mut high = positions.len();
     let mut best = None;
     // The limit includes the complete compact JSON object and the CLI's newline.
     while low < high {
+        let previous_width = high - low;
         let middle = low + (high - low) / 2;
         let (end, next) = positions[middle];
         let complete = next == units;
         let page = json!({
-            "documentId": id, "sha256": document.sha256, "contentOffset": offset,
+            "documentId": id, "sha256": document.raw.sha256, "contentOffset": offset,
             "content": &text[start..end], "contentLength": units,
             "nextOffset": if complete { None } else { Some(next) }, "complete": complete
         });
@@ -399,6 +436,10 @@ fn read_page(
         } else {
             high = middle;
         }
+        assert!(
+            high - low < previous_width,
+            "Page search must shrink its interval"
+        );
     }
     best.ok_or_else(|| invalid("Shared document cannot make progress within the output budget"))
 }
@@ -416,7 +457,7 @@ fn phase_files(phase: &str) -> Result<(&'static str, Option<&'static str>), AppE
 }
 
 /// Enforces the exact phase-dependent roles and immutable record shape.
-fn validate(assignment: &Assignment) -> Result<(), AppError> {
+fn validate(assignment: &Assignment) -> Result<ValidatedAssignment<'_>, AppError> {
     let (_, guide) = phase_files(&assignment.phase)?;
     if assignment.schema_version != 1
         || !Path::new(&assignment.diagnostics_path).is_absolute()
@@ -442,13 +483,18 @@ fn validate(assignment: &Assignment) -> Result<(), AppError> {
     if assignment.context_path.is_some() {
         expected.insert("queryRecipe");
     }
+    let mut documents = Vec::with_capacity(assignment.documents.len());
     for document in &assignment.documents {
         let path = Path::new(&document.path);
+        let (Some(size_bytes), Some(line_count)) = (
+            NonZeroUsize::new(document.size_bytes),
+            NonZeroUsize::new(document.line_count),
+        ) else {
+            return Err(invalid("Invalid shared document or required phase inputs"));
+        };
         if !path.is_absolute()
             || path.extension().and_then(|value| value.to_str()) != Some("md")
             || !expected.remove(document.id.as_str())
-            || document.size_bytes == 0
-            || document.line_count == 0
             || document.sha256.len() != 64
             || !document
                 .sha256
@@ -457,13 +503,18 @@ fn validate(assignment: &Assignment) -> Result<(), AppError> {
         {
             return Err(invalid("Invalid shared document or required phase inputs"));
         }
+        documents.push(ValidatedDocument {
+            raw: document,
+            size_bytes,
+            line_count,
+        });
     }
     if !expected.is_empty() {
         return Err(invalid(
             "Shared documents do not match required phase inputs",
         ));
     }
-    Ok(())
+    Ok(ValidatedAssignment { documents })
 }
 
 /// Registers only exact nonempty UTF-8 Markdown bytes.

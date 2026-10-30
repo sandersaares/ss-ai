@@ -11,6 +11,7 @@ use std::fs;
 use std::io::{self, BufRead, BufReader, Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
+use std::sync::Mutex;
 use std::sync::mpsc::{self, Receiver, Sender};
 use std::time::Duration;
 
@@ -19,6 +20,12 @@ use ohno::AppError;
 use serde_json::{Value, json};
 use ss_ai_review_workflow::{findings, review_work};
 use ss_ai_runtime::{Clock, FileTransaction, SystemClock, caused_by, fail};
+
+/// Excludes process creation while a test requires releasing the only lock handle.
+///
+/// A Unix child inherits other threads' lock descriptors until exec, even when
+/// those descriptors are close-on-exec.
+static PROCESS_CREATION_AND_CONTROLLED_LOCK: Mutex<()> = Mutex::new(());
 
 /// Keeps each test's journal and staging files inside the checkout.
 struct Workspace(PathBuf);
@@ -485,6 +492,7 @@ fn receipt_checks_active_and_removed_findings() {
 struct GateClock {
     contended: Sender<()>,
     release: Receiver<()>,
+    waited: Cell<bool>,
 }
 
 impl Clock for GateClock {
@@ -493,6 +501,9 @@ impl Clock for GateClock {
     }
 
     fn wait(&self, _: Duration) -> Result<(), AppError> {
+        if self.waited.replace(true) {
+            return Err(fail("contention", "Unexpected repeated lock contention"));
+        }
         self.contended.send(()).unwrap();
         self.release.recv().unwrap();
         Ok(())
@@ -544,6 +555,9 @@ fn native_review_work_lock_interop_helper() {
 #[test]
 #[cfg_attr(miri, ignore = "requires subprocesses and file locks")]
 fn native_review_work_helper_reports_real_contention() {
+    let _process_exclusion = PROCESS_CREATION_AND_CONTROLLED_LOCK
+        .lock()
+        .expect("Another test panicked while excluding process creation");
     let workspace = Workspace::new("interop");
     let clock = SystemClock::default();
     let (inventory, groups, _) = inputs(&workspace);
@@ -584,6 +598,9 @@ fn native_review_work_helper_reports_real_contention() {
 
 #[test]
 fn claim_waits_for_an_existing_transaction() {
+    let _process_exclusion = PROCESS_CREATION_AND_CONTROLLED_LOCK
+        .lock()
+        .expect("Another test panicked while excluding process creation");
     let workspace = Workspace::new("contention");
     let clock = SystemClock::default();
     let (inventory, groups, _) = inputs(&workspace);
@@ -592,17 +609,21 @@ fn claim_waits_for_an_existing_transaction() {
     let held = FileTransaction::open(&queue, &clock).unwrap();
     let (contended_tx, contended_rx) = mpsc::channel();
     let (release_tx, release_rx) = mpsc::channel();
-    std::thread::scope(|scope| {
-        let worker = scope.spawn(|| {
+    // Own the endpoints inside the scope so failures disconnect the worker before
+    // scope cleanup joins it. One retry permission must not leave a second wait blocked.
+    std::thread::scope(move |scope| {
+        let worker = scope.spawn(move || {
             let clock = GateClock {
                 contended: contended_tx,
                 release: release_rx,
+                waited: Cell::new(false),
             };
             review_work::next(&queue, &clock).unwrap()
         });
         contended_rx.recv().unwrap();
         drop(held);
         release_tx.send(()).unwrap();
+        drop(release_tx);
         assert_eq!(worker.join().unwrap()["item"]["groupId"], "group-1");
     });
 }

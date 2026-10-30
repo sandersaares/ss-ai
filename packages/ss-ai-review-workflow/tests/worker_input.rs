@@ -145,6 +145,14 @@ fn exact_unicode_pages_and_native_dispatch() {
     );
     assert!(dispatch.lines().any(|line| line == command));
     assert!(command.contains("O''Brien"));
+    assert!(dispatch.contains(concat!(
+        "```powershell\n",
+        "#Requires -Version 7.6\n",
+        "if ($PSVersionTable.PSVersion -lt [version]'7.6') { throw 'PowerShell 7.6 or later is required.' }\n",
+        "Set-StrictMode -Version Latest\n",
+        "$ErrorActionPreference = 'Stop'\n",
+        "$PSNativeCommandUseErrorActionPreference = $true\n"
+    )));
     assert!(
         dispatch.find("Apply this recovery policy").unwrap()
             < dispatch.find("ss-ai workflow worker-document").unwrap()
@@ -162,6 +170,151 @@ fn exact_unicode_pages_and_native_dispatch() {
     let prompt = collect(assignment_path, "prompt");
     assert!(prompt.contains("Primary orchestration, publication, and every human decision gate"));
     assert!(!prompt.contains("{{SKILL_ROOT}}"));
+}
+
+/// Computes the largest fitting page directly, independently of the search.
+#[expect(
+    clippy::arithmetic_side_effects,
+    clippy::string_slice,
+    reason = "The bounded fixture uses character boundaries and small positive counts"
+)]
+fn assert_largest_page(path: &Path, text: &str, offset: usize) {
+    let assignment: Value = serde_json::from_slice(&fs::read(path).unwrap()).unwrap();
+    let document = assignment["documents"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|document| document["id"] == "scope")
+        .unwrap();
+    let length = text.encode_utf16().count();
+    let start = text
+        .char_indices()
+        .scan(0, |units, (index, character)| {
+            let current = *units;
+            *units += character.len_utf16();
+            Some((current, index))
+        })
+        .find(|(units, _)| *units == offset)
+        .unwrap()
+        .1;
+    let mut next = offset;
+    let mut expected = None;
+    let mut encoded_content = 0;
+    for (index, character) in text[start..].char_indices() {
+        next += character.len_utf16();
+        let end = start + index + character.len_utf8();
+        let complete = next == length;
+        encoded_content += serde_json::to_string(&character).unwrap().len() - 2;
+        let envelope = json!({
+            "documentId": "scope", "sha256": document["sha256"],
+            "contentOffset": offset, "content": "",
+            "contentLength": length,
+            "nextOffset": if complete { None } else { Some(next) }, "complete": complete
+        });
+        if serde_json::to_vec(&envelope).unwrap().len() + encoded_content < 16 * 1024 {
+            expected = Some((end, next, complete));
+        }
+        // The raw suffix already exceeds the entire output budget.
+        if end - start > 16 * 1024 {
+            break;
+        }
+    }
+    let page = read_document(path, "scope", offset, &TestClock).unwrap();
+    let (end, next, complete) = expected.unwrap();
+    assert_eq!(page["documentId"], "scope");
+    assert_eq!(page["sha256"], document["sha256"]);
+    assert_eq!(page["contentOffset"], offset);
+    assert_eq!(page["content"], &text[start..end]);
+    assert_eq!(page["contentLength"], length);
+    assert_eq!(
+        page["nextOffset"],
+        json!(if complete { None } else { Some(next) })
+    );
+    assert_eq!(page["complete"], complete);
+    assert!(serde_json::to_vec(&page).unwrap().len() < 16 * 1024);
+}
+
+#[test]
+fn bounded_pages_match_the_largest_encoded_candidate() {
+    let workspace = Workspace::new("largest-pages");
+    let text = format!(
+        "{}🙂{}{}",
+        "a".repeat(17_000),
+        "\"\\\n".repeat(10_000),
+        "z".repeat(1_000_000)
+    );
+    let scope = workspace.put("scope.md", &text);
+    let result = create(&workspace, "references", &scope);
+    let assignment = Path::new(result["assignmentPath"].as_str().unwrap());
+    for offset in [
+        0,
+        16_999,
+        17_000,
+        17_002,
+        47_002,
+        text.encode_utf16().count() - 1,
+    ] {
+        assert_largest_page(assignment, &text, offset);
+    }
+    assert!(read_document(assignment, "scope", 17_001, &TestClock).is_err());
+    assert!(read_document(assignment, "scope", text.encode_utf16().count(), &TestClock).is_err());
+    assert!(read_document(assignment, "scope", usize::MAX, &TestClock).is_err());
+}
+
+#[test]
+#[expect(
+    clippy::string_slice,
+    reason = "The boundary fixture contains only ASCII characters"
+)]
+fn exact_output_limit_includes_the_final_newline() {
+    let workspace = Workspace::new("exact-limit");
+    // Find the complete ASCII page whose JSON envelope leaves exactly the budget.
+    let envelope = json!({
+        "documentId": "scope", "sha256": "A".repeat(64), "contentOffset": 0,
+        "content": "", "contentLength": 0, "nextOffset": null, "complete": true
+    });
+    let base = serde_json::to_vec(&envelope).unwrap().len();
+    let length = (1..16 * 1024)
+        .find(|length| base + length + length.to_string().len() == 16 * 1024)
+        .unwrap();
+    let text = "a".repeat(length);
+    let scope = workspace.put("scope.md", &text);
+    let result = create(&workspace, "references", &scope);
+    let assignment = Path::new(result["assignmentPath"].as_str().unwrap());
+    let page = read_document(assignment, "scope", 0, &TestClock).unwrap();
+    assert_eq!(serde_json::to_vec(&page).unwrap().len() + 1, 16 * 1024);
+    assert_eq!(page["content"], text);
+    assert_eq!(page["complete"], true);
+    // The continuation metadata can make the penultimate page larger than completion.
+    let mut previous = page;
+    previous["content"] = json!(&text[..length - 1]);
+    previous["nextOffset"] = json!(length - 1);
+    previous["complete"] = json!(false);
+    assert!(serde_json::to_vec(&previous).unwrap().len() + 1 > 16 * 1024);
+}
+
+#[test]
+fn invalid_document_counts_are_rejected_without_changing_the_wire_format() {
+    let workspace = Workspace::new("metadata");
+    let scope = workspace.put("scope.md", "one\ntwo");
+    let result = create(&workspace, "references", &scope);
+    let assignment = Path::new(result["assignmentPath"].as_str().unwrap());
+    let record: Value = serde_json::from_slice(&fs::read(assignment).unwrap()).unwrap();
+    assert_eq!(record["documents"][1]["sizeBytes"], 7);
+    assert_eq!(record["documents"][1]["lineCount"], 2);
+    for key in ["sizeBytes", "lineCount"] {
+        for invalid in [json!(0), json!(-1), json!(null), json!("1")] {
+            let mut modified = record.clone();
+            modified["documents"][1][key] = invalid;
+            fs::write(assignment, serde_json::to_vec(&modified).unwrap()).unwrap();
+            assert!(
+                read_document(assignment, "scope", 0, &TestClock).is_err(),
+                "{key}"
+            );
+        }
+    }
+    fs::write(assignment, serde_json::to_vec(&record).unwrap()).unwrap();
+    assert_eq!(collect(assignment, "scope"), "one\ntwo");
 }
 
 #[test]

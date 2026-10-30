@@ -151,20 +151,39 @@ Describe 'Prepared bounded worker inputs' {
                 -QueuePath $reviewer.fileGroupQueuePath -Resume:$assignment.resume | ConvertFrom-Json -AsHashtable
             $queue.queuePath | Should -BeExactly $reviewer.fileGroupQueuePath
             [IO.File]::ReadAllText($reviewer.fileGroupQueuePath) | Should -BeExactly $journalBefore
-            $readCommand = ($result.dispatchPrompt -split "`n" | Where-Object { $_.StartsWith('ss-ai workflow worker-document ') } | Select-Object -First 1)
+            $readBlock = [regex]::Match($result.dispatchPrompt, '(?s)```powershell\n(.*?)\n```').Groups[1].Value
+            $readBlock | Should -Not -BeNullOrEmpty
+            $readCommand = ($readBlock -split "`n" | Where-Object { $_.StartsWith('ss-ai workflow worker-document ') } | Select-Object -First 1)
             $quotedPath = $result.assignmentPath.Replace("'", "''")
             $readCommand | Should -BeExactly "ss-ai workflow worker-document --assignment-path '$quotedPath' --document-id '{{DOCUMENT_ID}}' --offset 0"
+            $readBlock | Should -Match ([regex]::Escape("if (`$PSVersionTable.PSVersion -lt [version]'7.6')"))
+            $readBlock | Should -Match ([regex]::Escape('Set-StrictMode -Version Latest'))
+            $readBlock | Should -Match ([regex]::Escape("`$ErrorActionPreference = 'Stop'"))
+            $readBlock | Should -Match ([regex]::Escape('$PSNativeCommandUseErrorActionPreference = $true'))
             $tokens = $null
             $parseErrors = $null
-            $ast = [System.Management.Automation.Language.Parser]::ParseInput($readCommand, [ref]$tokens, [ref]$parseErrors)
+            $null = [System.Management.Automation.Language.Parser]::ParseInput($readBlock, [ref]$tokens, [ref]$parseErrors)
             @($parseErrors).Count | Should -Be 0
+            $ast = [System.Management.Automation.Language.Parser]::ParseInput($readCommand, [ref]$tokens, [ref]$parseErrors)
             $elements = @($ast.EndBlock.Statements[0].PipelineElements[0].CommandElements)
             $elements.Count | Should -Be 9
             $elements[4].Value | Should -BeExactly $result.assignmentPath
             $elements[6].Value | Should -BeExactly '{{DOCUMENT_ID}}'
-            $program = Get-Command ss-ai -CommandType Application -ErrorAction Stop | Select-Object -First 1
-            $first = & $program.Source workflow worker-document --assignment-path $elements[4].Value --document-id overview --offset 0 |
-                ConvertFrom-Json -AsHashtable
+            $start = [Diagnostics.ProcessStartInfo]::new((Get-Process -Id $PID).Path)
+            $start.UseShellExecute = $false
+            $start.RedirectStandardOutput = $true
+            $start.RedirectStandardError = $true
+            foreach ($argument in @('-NoProfile', '-NonInteractive', '-Command', $readBlock.Replace('{{DOCUMENT_ID}}', 'overview'))) {
+                $start.ArgumentList.Add($argument)
+            }
+            $process = [Diagnostics.Process]::Start($start)
+            try {
+                $output = $process.StandardOutput.ReadToEndAsync()
+                $errors = $process.StandardError.ReadToEndAsync()
+                $process.WaitForExit()
+                $process.ExitCode | Should -Be 0 -Because $errors.GetAwaiter().GetResult()
+                $first = $output.GetAwaiter().GetResult() | ConvertFrom-Json -AsHashtable
+            } finally { $process.Dispose() }
             $first.contentOffset | Should -Be 0
             $first.complete | Should -BeFalse
         }
@@ -172,6 +191,30 @@ Describe 'Prepared bounded worker inputs' {
         $counts.firstReadFailures | Should -Be 0
         $counts.setupCalls | Should -Be 2
         $counts.documentReadCalls | Should -Be 2
+    }
+
+    It 'stops dependent commands when the copied reader fails' {
+        $result = & (Join-Path $script:Scripts 'New-ReviewWorkerAssignment.ps1') -Phase references `
+            -SessionState $script:State -ScopePath $script:Scope -OutputDirectory (Join-Path $script:State 'failure') |
+            ConvertFrom-Json -AsHashtable
+        $readBlock = [regex]::Match($result.dispatchPrompt, '(?s)```powershell\n(.*?)\n```').Groups[1].Value
+        $command = $readBlock.Replace('{{DOCUMENT_ID}}', 'missing') + "`nWrite-Output 'DEPENDENT COMMAND RAN'"
+        $start = [Diagnostics.ProcessStartInfo]::new((Get-Process -Id $PID).Path)
+        $start.UseShellExecute = $false
+        $start.RedirectStandardOutput = $true
+        $start.RedirectStandardError = $true
+        foreach ($argument in @('-NoProfile', '-NonInteractive', '-Command', $command)) {
+            $start.ArgumentList.Add($argument)
+        }
+        $process = [Diagnostics.Process]::Start($start)
+        try {
+            $output = $process.StandardOutput.ReadToEndAsync()
+            $errors = $process.StandardError.ReadToEndAsync()
+            $process.WaitForExit()
+            $process.ExitCode | Should -Not -Be 0
+            $output.GetAwaiter().GetResult() | Should -Not -Match 'DEPENDENT COMMAND RAN'
+            $errors.GetAwaiter().GetResult() | Should -Not -BeNullOrEmpty
+        } finally { $process.Dispose() }
     }
 
     It 'reads Unicode long lines with UTF-16 offsets through the prepared command' {
