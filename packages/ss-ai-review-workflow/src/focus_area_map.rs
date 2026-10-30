@@ -1348,11 +1348,8 @@ mod tests {
         storage.fail_once("remove-artifact", "/session/focus-areas");
         let error =
             publish_with_storage(Path::new("/session"), &documents(), &storage).unwrap_err();
-        assert!(
-            error
-                .to_string()
-                .contains("/session/.focus-area-assembly-test")
-        );
+        let staging = Path::new("/session").join(".focus-area-assembly-test");
+        assert!(error.to_string().contains(&staging.display().to_string()));
         let entries = storage.entries.borrow();
         assert_eq!(
             entries
@@ -1385,11 +1382,8 @@ mod tests {
         );
         let error =
             publish_with_storage(Path::new("/session"), &documents(), &storage).unwrap_err();
-        assert!(
-            error
-                .to_string()
-                .contains("/session/.focus-area-assembly-test")
-        );
+        let staging = Path::new("/session").join(".focus-area-assembly-test");
+        assert!(error.to_string().contains(&staging.display().to_string()));
         let entries = storage.entries.borrow();
         assert_eq!(
             entries

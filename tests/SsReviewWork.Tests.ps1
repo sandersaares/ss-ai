@@ -147,7 +147,9 @@ Describe 'Review work initialization' {
         )
         $partial.exitCode | Should -Not -Be 0
         $partial.output | Should -BeNullOrEmpty
-        $partial.errors | Should -Match 'must be supplied together'
+        # Console diagnostics can add ANSI styling and wrap text behind a line gutter.
+        $diagnostic = $partial.errors -replace '\x1b\[[0-9;]*m', ''
+        $diagnostic | Should -Match 'must[ \t\r\n|]+be[ \t\r\n|]+supplied[ \t\r\n|]+together'
         Test-Path -LiteralPath $script:Work | Should -BeFalse
 
         $unready = Invoke-WorkScript -Name 'New-ReviewWork.ps1' -ArgumentList (

@@ -16,8 +16,16 @@ use std::sync::mpsc::{self, Receiver, Sender};
 use std::thread;
 use std::time::Duration;
 
+#[cfg(windows)]
+use std::io;
 #[cfg(unix)]
 use std::os::unix::fs::symlink;
+#[cfg(windows)]
+use std::os::windows::fs::OpenOptionsExt;
+#[cfg(windows)]
+use std::os::windows::process::CommandExt;
+#[cfg(windows)]
+use std::process::Command;
 
 use jiff::Timestamp;
 use ohno::AppError;
@@ -432,6 +440,181 @@ fn nested_session_is_excluded_across_repeated_snapshots() {
     assert_eq!(
         workspace.snapshot(Some(".")).unwrap().external_file_count,
         0
+    );
+}
+
+/// Creates directory links without requiring Windows symbolic-link privileges.
+#[cfg(any(unix, windows))]
+fn link_directory(target: &Path, link: &Path) {
+    #[cfg(unix)]
+    symlink(target, link).unwrap();
+    #[cfg(windows)]
+    {
+        // Environment expansion keeps paths with spaces and shell metacharacters
+        // inside quotes without interpreting their contents as command syntax.
+        let output = Command::new("cmd")
+            .args(["/D", "/S", "/V:OFF", "/C"])
+            .env("SS_AI_TEST_LINK", link)
+            .env("SS_AI_TEST_TARGET", target)
+            .raw_arg("\"mklink /J \"%SS_AI_TEST_LINK%\" \"%SS_AI_TEST_TARGET%\"\"")
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "Cannot create junction: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+}
+
+/// Removes the link itself without deleting its target.
+#[cfg(any(unix, windows))]
+fn remove_directory_link(link: &Path) {
+    #[cfg(unix)]
+    fs::remove_file(link).unwrap();
+    #[cfg(windows)]
+    fs::remove_dir(link).unwrap();
+}
+
+#[cfg(any(unix, windows))]
+#[test]
+fn follows_filesystem_root_links_and_preserves_configured_aliases() {
+    let workspace = Workspace::new("root-links");
+    workspace.put("root/AGENTS.md", b"root bytes");
+    workspace.put("outside/nested.instructions.md", b"linked bytes");
+    fs::create_dir(workspace.0.join("session")).unwrap();
+
+    let filesystem_root: PathBuf = workspace
+        .0
+        .components()
+        .take_while(|part| {
+            matches!(
+                part,
+                std::path::Component::Prefix(_) | std::path::Component::RootDir
+            )
+        })
+        .collect();
+    assert!(filesystem_root.is_absolute());
+    let root_link = workspace.0.join("filesystem-root");
+    link_directory(&filesystem_root, &root_link);
+    let alias = root_link.join(workspace.0.strip_prefix(&filesystem_root).unwrap());
+    let configured = alias.join("root");
+    let outside_link = workspace.0.join("root/linked");
+    let session_link = workspace.0.join("root/session-alias");
+    link_directory(&workspace.0.join("outside"), &outside_link);
+    link_directory(&workspace.0.join("session"), &session_link);
+
+    let configured_text = configured.to_str().unwrap();
+    let first = workspace.snapshot(Some(configured_text)).unwrap();
+    assert_eq!(first.roots[0].path, configured_text);
+    assert_eq!(first.external_file_count, 2);
+    let snapshot = Path::new(&first.source_directory).join(&first.roots[0].prefix);
+    assert_eq!(fs::read(snapshot.join("AGENTS.md")).unwrap(), b"root bytes");
+    assert_eq!(
+        fs::read(snapshot.join("linked/nested.instructions.md")).unwrap(),
+        b"linked bytes"
+    );
+    assert_eq!(
+        workspace
+            .snapshot(Some(configured_text))
+            .unwrap()
+            .external_file_count,
+        2
+    );
+
+    let cycle = workspace.0.join("root/cycle");
+    link_directory(&workspace.0.join("root"), &cycle);
+    assert!(
+        workspace
+            .snapshot(Some(configured_text))
+            .unwrap_err()
+            .to_string()
+            .contains("cycle")
+    );
+    remove_directory_link(&cycle);
+    remove_directory_link(&session_link);
+    remove_directory_link(&outside_link);
+    remove_directory_link(&root_link);
+}
+
+#[cfg(windows)]
+#[test]
+fn snapshots_verbatim_drive_paths_without_losing_root_spelling() {
+    let workspace = Workspace::new("verbatim-drive");
+    workspace.put("root/AGENTS.md", b"verbatim bytes");
+    let configured = fs::canonicalize(workspace.0.join("root")).unwrap();
+    assert!(matches!(
+        configured.components().next(),
+        Some(std::path::Component::Prefix(prefix))
+            if matches!(prefix.kind(), std::path::Prefix::VerbatimDisk(_))
+    ));
+    let text = configured.to_str().unwrap();
+    let result = workspace.snapshot(Some(text)).unwrap();
+    assert_eq!(result.roots[0].path, text);
+    assert_eq!(result.external_file_count, 1);
+    assert_eq!(
+        fs::read(
+            Path::new(&result.source_directory)
+                .join(&result.roots[0].prefix)
+                .join("AGENTS.md")
+        )
+        .unwrap(),
+        b"verbatim bytes"
+    );
+}
+
+/// Exercises bounded retries without waiting for real time to pass.
+#[cfg(windows)]
+struct ImmediateClock;
+
+#[cfg(windows)]
+impl Clock for ImmediateClock {
+    fn now(&self) -> Timestamp {
+        panic!("Snapshot discovery must not read the clock")
+    }
+
+    fn wait(&self, _: Duration) -> Result<(), AppError> {
+        Ok(())
+    }
+}
+
+#[cfg(windows)]
+#[test]
+fn locked_source_reaches_bounded_read_retry_without_replacing_snapshot() {
+    let workspace = Workspace::new("locked-source");
+    let source = workspace.put("root/AGENTS.md", b"original");
+    let previous = workspace.snapshot(Some("root")).unwrap();
+    let locked = fs::OpenOptions::new()
+        .write(true)
+        .share_mode(0)
+        .open(&source)
+        .unwrap();
+    let error = snapshot_instruction_sources(
+        &InstructionSourceOptions {
+            session_state: &workspace.0.join("session"),
+            skill_root: &workspace.0.join("skill"),
+            directory_list: Some("root"),
+            base_directory: &workspace.0,
+            repository_sources: None,
+        },
+        &ImmediateClock,
+    )
+    .unwrap_err();
+    assert_eq!(classification(&error), "contention");
+    // The exclusive Windows handle causes ERROR_SHARING_VIOLATION.
+    assert_eq!(
+        error.find_source::<io::Error>().unwrap().raw_os_error(),
+        Some(32)
+    );
+    drop(locked);
+    assert_eq!(
+        fs::read(
+            Path::new(&previous.source_directory)
+                .join(&previous.roots[0].prefix)
+                .join("AGENTS.md")
+        )
+        .unwrap(),
+        b"original"
     );
 }
 

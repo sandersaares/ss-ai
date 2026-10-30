@@ -515,8 +515,10 @@ fn resolve_components(path: &Path, links: &mut HashSet<PathBuf>) -> Result<PathB
             continue;
         }
         resolved.push(part.as_os_str());
-        // A Windows volume prefix is not an absolute path until its root follows.
-        if !resolved.is_absolute() {
+        // Prefixes and roots anchor traversal; neither is a directory entry to
+        // inspect. In particular, a verbatim Windows drive prefix can appear
+        // absolute before its root separator has been appended.
+        if matches!(part, Component::Prefix(_) | Component::RootDir) || !resolved.is_absolute() {
             continue;
         }
         match fs::symlink_metadata(&resolved) {
@@ -546,6 +548,14 @@ fn resolve_components(path: &Path, links: &mut HashSet<PathBuf>) -> Result<PathB
                 let target = resolve_components(&target, links);
                 links.remove(&resolved);
                 resolved = target?;
+                // Root-only targets were already checked by canonicalize. Asking
+                // for link metadata on a volume root is not supported everywhere.
+                if resolved
+                    .components()
+                    .all(|part| matches!(part, Component::Prefix(_) | Component::RootDir))
+                {
+                    continue;
+                }
                 match fs::symlink_metadata(&resolved) {
                     Ok(_) => {}
                     Err(error) if error.kind() == io::ErrorKind::NotFound => {

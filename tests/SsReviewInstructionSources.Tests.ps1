@@ -180,11 +180,28 @@ Describe 'ss-review configured instruction discovery' {
         $first = Copy-TestInstructions -Directories $script:Base
         $before = @(Get-TestInstructionSnapshot -Directory $first.sourceDirectory)
         [IO.File]::WriteAllText($source, 'Replacement guidance must not replace the prior corpus on failure.')
-        $locked = $null
+        $originalAcl = $null
         $mode = $null
         try {
             if ($IsWindows) {
-                $locked = [IO.File]::Open($source, [IO.FileMode]::Open, [IO.FileAccess]::Write, [IO.FileShare]::None)
+                # Access denial exercises a source read failure without waiting for contention retries.
+                $originalAcl = Get-Acl -LiteralPath $source
+                $deniedAcl = Get-Acl -LiteralPath $source
+                $identity = [Security.Principal.WindowsIdentity]::GetCurrent()
+                try {
+                    $rule = [Security.AccessControl.FileSystemAccessRule]::new(
+                        $identity.User,
+                        [Security.AccessControl.FileSystemRights]::ReadData,
+                        [Security.AccessControl.AccessControlType]::Deny
+                    )
+                    $deniedAcl.AddAccessRule($rule)
+                    Set-Acl -LiteralPath $source -AclObject $deniedAcl
+                } finally { $identity.Dispose() }
+                try {
+                    $probe = [IO.File]::OpenRead($source)
+                    $probe.Dispose()
+                    throw 'The current account can read the denied source.'
+                } catch [UnauthorizedAccessException] {}
             } else {
                 # Unix sharing modes do not prevent an independent native reader.
                 $mode = [IO.File]::GetUnixFileMode($source)
@@ -199,7 +216,7 @@ Describe 'ss-review configured instruction discovery' {
             { Copy-TestInstructions -Directories $script:Base } | Should -Throw
             @(Get-TestInstructionSnapshot -Directory $first.sourceDirectory) | Should -BeExactly $before
         } finally {
-            if ($null -ne $locked) { $locked.Dispose() }
+            if ($null -ne $originalAcl) { Set-Acl -LiteralPath $source -AclObject $originalAcl }
             if ($null -ne $mode) { [IO.File]::SetUnixFileMode($source, $mode) }
         }
         @(Get-ChildItem -LiteralPath $script:Session -Filter '*.tmp').Count | Should -Be 0
@@ -321,7 +338,11 @@ Describe 'ss-review configured instruction discovery' {
         Remove-Item -LiteralPath $file
         $second = Copy-TestInstructions -Directories ''
         @(Get-ChildItem -LiteralPath $second.sourceDirectory -Recurse -File).Count | Should -Be 1
-        @(Get-ChildItem -LiteralPath $script:Session -Directory).Count | Should -Be 1
+        # Reserved generation identities remain beside the current snapshot; staging directories do not.
+        $directories = @(Get-ChildItem -LiteralPath $script:Session -Directory -Force)
+        $directories.Count | Should -Be 2
+        $directories.Name | Should -Contain '.focus-area-generations'
+        $directories.Name | Should -Contain (Split-Path -Leaf $second.sourceDirectory)
     }
 
     It 'binds the configured instruction bytes and root identity into cache keys' {
