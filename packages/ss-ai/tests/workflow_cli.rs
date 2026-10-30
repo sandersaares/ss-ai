@@ -1,5 +1,6 @@
 //! Exercises local workflow commands through the installed executable boundary.
 
+use std::collections::BTreeSet;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -151,6 +152,686 @@ fn review_initialization_cli_binds_the_preparation_identity() {
         fs::read(snapshot).unwrap(),
         fs::read(session.join("focus-areas/focus-rules.md")).unwrap()
     );
+}
+
+/// Builds the normal CLI invocation with a restricted Linux process stack.
+///
+/// The limit is below the ungrouped debug parser's frame and leaves room for
+/// startup and command execution; other platforms exercise their native limit.
+fn workflow_command() -> Command {
+    #[cfg(target_os = "linux")]
+    {
+        let mut command = Command::new("sh");
+        command.args([
+            "-c",
+            "ulimit -c 0; ulimit -s 768; exec \"$@\"",
+            "sh",
+            env!("CARGO_BIN_EXE_ss-ai"),
+        ]);
+        command
+    }
+
+    #[cfg(not(target_os = "linux"))]
+    {
+        Command::new(env!("CARGO_BIN_EXE_ss-ai"))
+    }
+}
+
+/// Every command reaches its operation without exhausting the parser stack.
+#[test]
+#[cfg_attr(miri, ignore = "requires a native subprocess")]
+fn all_workflow_commands_dispatch_with_a_bounded_stack() {
+    let directory = Builder::new()
+        .prefix(".workflow-stack-")
+        .tempdir_in(env!("CARGO_MANIFEST_DIR"))
+        .unwrap();
+    let cases: &[(&[&str], bool)] = &[
+        (
+            &[
+                "restore-focus-area-cache",
+                "--session-state",
+                "missing",
+                "--input-directory",
+                "missing",
+                "--skill-root",
+                "missing",
+                "--recipe-path",
+                "missing",
+                "--cache-directory",
+                "missing",
+                "--generator-profile",
+                "profile",
+                "--freshness-days",
+                "1",
+                "--now-utc",
+                "2024-05-06T07:08:09Z",
+                "--snapshot-identity",
+                "snapshot",
+                "--refresh",
+            ],
+            false,
+        ),
+        (
+            &[
+                "begin-focus-area-generation",
+                "--session-state",
+                "missing",
+                "--preparation-identity",
+                "identity",
+            ],
+            false,
+        ),
+        (
+            &[
+                "publish-focus-area-generation",
+                "--session-state",
+                "missing",
+                "--generation-id",
+                "generation",
+            ],
+            false,
+        ),
+        (
+            &[
+                "save-focus-area-cache",
+                "--session-state",
+                "missing",
+                "--input-directory",
+                "missing",
+                "--skill-root",
+                "missing",
+                "--recipe-path",
+                "missing",
+                "--cache-directory",
+                "missing",
+                "--generator-profile",
+                "profile",
+                "--freshness-days",
+                "1",
+                "--now-utc",
+                "2024-05-06T07:08:09Z",
+                "--preparation-identity",
+                "identity",
+            ],
+            false,
+        ),
+        (
+            &[
+                "validate-focus-area-artifacts",
+                "--session-state",
+                "missing",
+                "--preparation-identity",
+                "identity",
+            ],
+            false,
+        ),
+        (
+            &[
+                "update-focus-area-expansion",
+                "--session-state",
+                "missing",
+                "--operation",
+                "register",
+                "--input-path",
+                "missing",
+                "--reference-id",
+                "reference",
+            ],
+            false,
+        ),
+        (
+            &[
+                "update-focus-area-map",
+                "--session-state",
+                "missing",
+                "--path",
+                "missing",
+                "--operation",
+                "regroup",
+                "--input-path",
+                "missing",
+                "--category-id",
+                "old",
+                "--new-category-id",
+                "new",
+                "--title",
+                "Title",
+            ],
+            false,
+        ),
+        (
+            &[
+                "validate-focus-area-map",
+                "--session-state",
+                "missing",
+                "--map-path",
+                "missing",
+                "--complete",
+            ],
+            false,
+        ),
+        (
+            &[
+                "assemble-focus-areas",
+                "--session-state",
+                "missing",
+                "--map-path",
+                "missing",
+            ],
+            false,
+        ),
+        (
+            &[
+                "snapshot-instructions",
+                "--session-state",
+                "missing",
+                "--skill-root",
+                "missing",
+                "--repository-root",
+                "missing",
+                "--repository-instruction",
+                "missing",
+            ],
+            false,
+        ),
+        (
+            &[
+                "set-review-input",
+                "--kind",
+                "inventory",
+                "--input-path",
+                "missing",
+                "--path",
+                "output",
+            ],
+            false,
+        ),
+        (
+            &[
+                "create-review-work",
+                "--inventory-path",
+                "missing",
+                "--file-groups-path",
+                "missing",
+                "--focus-area-directory",
+                "missing",
+                "--output-directory",
+                "output",
+                "--session-state",
+                "missing",
+                "--preparation-identity",
+                "identity",
+            ],
+            false,
+        ),
+        (
+            &[
+                "initialize-review-queue",
+                "--inventory-path",
+                "missing",
+                "--file-groups-path",
+                "missing",
+                "--queue-path",
+                "missing",
+            ],
+            false,
+        ),
+        (&["next-review-item", "--queue-path", "missing"], false),
+        (
+            &[
+                "complete-review-group",
+                "--queue-path",
+                "missing",
+                "--group-id",
+                "group",
+            ],
+            false,
+        ),
+        (
+            &[
+                "set-review-assessment",
+                "--queue-path",
+                "missing",
+                "--inventory-path",
+                "missing",
+                "--file-groups-path",
+                "missing",
+                "--assessment-path",
+                "missing",
+            ],
+            false,
+        ),
+        (
+            &[
+                "complete-review-batch",
+                "--queue-path",
+                "missing",
+                "--inventory-path",
+                "missing",
+                "--file-groups-path",
+                "missing",
+                "--artifact-path",
+                "missing",
+                "--batch-path",
+                "missing",
+            ],
+            false,
+        ),
+        (
+            &[
+                "fail-review-worker",
+                "--queue-path",
+                "missing",
+                "--reason",
+                "failure",
+            ],
+            false,
+        ),
+        (
+            &[
+                "validate-review-work",
+                "--manifest-path",
+                "missing",
+                "--artifact-directory",
+                "missing",
+            ],
+            false,
+        ),
+        (
+            &[
+                "worker-assignment",
+                "--phase",
+                "review",
+                "--session-state",
+                "missing",
+                "--scope-path",
+                "missing",
+                "--output-directory",
+                "output",
+                "--skill-root",
+                "missing",
+            ],
+            false,
+        ),
+        (
+            &[
+                "worker-document",
+                "--assignment-path",
+                "missing",
+                "--document-id",
+                "document",
+            ],
+            false,
+        ),
+        (&["render", "--request-path", "missing"], false),
+        (
+            &["render-markdown-files", "--request-path", "missing"],
+            false,
+        ),
+        (&["resolve-anchor", "--request-path", "missing"], false),
+        (
+            &[
+                "audit-add-decisions",
+                "--path",
+                "missing",
+                "--plan-path",
+                "missing",
+                "--recorded-utc",
+                "2024-05-06T07:08:09Z",
+            ],
+            false,
+        ),
+        (
+            &[
+                "audit-poll-classification",
+                "--artifact-path",
+                "missing",
+                "--decisions-path",
+                "missing",
+            ],
+            false,
+        ),
+        (
+            &[
+                "audit-add-feedback",
+                "--path",
+                "missing",
+                "--findings-path",
+                "missing",
+                "--response-id",
+                "response",
+                "--finding-id",
+                "finding",
+                "--text-path",
+                "missing",
+            ],
+            false,
+        ),
+        (
+            &[
+                "audit-get-feedback",
+                "--path",
+                "missing",
+                "--finding-id",
+                "finding",
+            ],
+            false,
+        ),
+        (
+            &[
+                "audit-test-merge-approval",
+                "--path",
+                "missing",
+                "--pull-request-url",
+                "https://example.com/p",
+                "--source-commit",
+                "abc",
+            ],
+            false,
+        ),
+        (
+            &[
+                "audit-set-merge-approval",
+                "--path",
+                "missing",
+                "--context-path",
+                "missing",
+            ],
+            false,
+        ),
+        (
+            &[
+                "audit-set-merge-approval-values",
+                "--path",
+                "missing",
+                "--context-path",
+                "missing",
+            ],
+            false,
+        ),
+        (
+            &[
+                "approved",
+                "build",
+                "--path",
+                "missing",
+                "--decisions-path",
+                "missing",
+                "--output-path",
+                "output",
+            ],
+            false,
+        ),
+        (&["approved", "check", "--path", "missing"], false),
+        (
+            &["approved", "check-request", "--request-path", "missing"],
+            false,
+        ),
+        (
+            &[
+                "plan-initialize",
+                "--kind",
+                "updates",
+                "--path",
+                "plan.json",
+            ],
+            true,
+        ),
+        (
+            &[
+                "plan-append",
+                "--kind",
+                "updates",
+                "--path",
+                "missing",
+                "--item-path",
+                "missing",
+            ],
+            false,
+        ),
+        (
+            &[
+                "initialize-finding",
+                "--output-directory",
+                ".",
+                "--reviewer-id",
+                "reviewer",
+                "--focus-area",
+                "correctness",
+            ],
+            true,
+        ),
+        (
+            &[
+                "add-finding",
+                "--artifact-path",
+                "missing",
+                "--finding-path",
+                "missing",
+                "--origin",
+                "reviewer",
+            ],
+            false,
+        ),
+        (
+            &[
+                "complete-finding",
+                "--artifact-path",
+                "missing",
+                "--queue-path",
+                "missing",
+            ],
+            false,
+        ),
+        (
+            &[
+                "validate-candidates",
+                "--path",
+                "missing",
+                "--index-path",
+                "missing",
+            ],
+            false,
+        ),
+        (
+            &[
+                "validate-findings",
+                "--path",
+                "missing",
+                "--reviewer-id",
+                "reviewer",
+            ],
+            true,
+        ),
+        (
+            &[
+                "finding-index",
+                "--reviewer-directory",
+                "missing",
+                "--output-path",
+                "output",
+            ],
+            false,
+        ),
+        (
+            &[
+                "consolidate-findings",
+                "--reviewer-directory",
+                "missing",
+                "--output-path",
+                "output",
+            ],
+            false,
+        ),
+        (
+            &[
+                "update-finding",
+                "--artifact-path",
+                "missing",
+                "--plan-path",
+                "missing",
+            ],
+            false,
+        ),
+        (
+            &[
+                "remove-finding",
+                "--artifact-path",
+                "missing",
+                "--plan-path",
+                "missing",
+                "--now-utc",
+                "2024-05-06T07:08:09Z",
+            ],
+            false,
+        ),
+    ];
+
+    let help = workflow_command()
+        .current_dir(directory.path())
+        .args(["workflow", "--help"])
+        .output()
+        .unwrap();
+    assert!(
+        help.status.success(),
+        "{}",
+        String::from_utf8_lossy(&help.stderr)
+    );
+    let help = String::from_utf8(help.stdout).unwrap();
+    let listed: BTreeSet<_> = help
+        .lines()
+        .skip_while(|line| *line != "Commands:")
+        .skip(1)
+        .take_while(|line| !line.is_empty())
+        .filter_map(|line| line.split_whitespace().next())
+        .filter(|name| *name != "help")
+        .collect();
+    let covered: BTreeSet<_> = cases
+        .iter()
+        .map(|(arguments, _)| *arguments.first().unwrap())
+        .collect();
+    assert_eq!(covered, listed);
+
+    for (command, required) in [
+        (
+            "worker-document",
+            &["--assignment-path", "--document-id"][..],
+        ),
+        ("restore-focus-area-cache", &["--snapshot-identity"][..]),
+        (
+            "begin-focus-area-generation",
+            &["--preparation-identity"][..],
+        ),
+        ("publish-focus-area-generation", &["--generation-id"][..]),
+        ("save-focus-area-cache", &["--preparation-identity"][..]),
+        (
+            "validate-focus-area-artifacts",
+            &["--preparation-identity"][..],
+        ),
+        ("update-focus-area-expansion", &["--operation"][..]),
+        ("update-focus-area-map", &["--operation", "--path"][..]),
+        ("validate-focus-area-map", &["--map-path"][..]),
+        ("assemble-focus-areas", &["--map-path"][..]),
+        ("snapshot-instructions", &["--skill-root"][..]),
+    ] {
+        let invalid = workflow_command()
+            .current_dir(directory.path())
+            .args(["workflow", command])
+            .output()
+            .unwrap();
+        assert_eq!(invalid.status.code(), Some(1));
+        assert!(invalid.stdout.is_empty());
+        let diagnostic = String::from_utf8_lossy(&invalid.stderr);
+        assert!(
+            diagnostic.contains("Invalid command arguments"),
+            "{diagnostic}"
+        );
+        for argument in required {
+            assert!(diagnostic.contains(argument), "{command}: {diagnostic}");
+        }
+    }
+
+    for (arguments, succeeds) in cases {
+        let output = workflow_command()
+            .current_dir(directory.path())
+            .arg("workflow")
+            .args(*arguments)
+            .output()
+            .unwrap();
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert_eq!(
+            output.status.code(),
+            Some(if *succeeds { 0 } else { 1 }),
+            "{arguments:?}: {stderr}"
+        );
+        if *succeeds {
+            let result: Value = serde_json::from_slice(&output.stdout).unwrap();
+            if arguments.first() == Some(&"validate-findings") {
+                assert_eq!(result.get("isValid"), Some(&Value::Bool(false)));
+            }
+        } else {
+            assert!(output.stdout.is_empty(), "{arguments:?}: unexpected stdout");
+            assert!(
+                !stderr.contains("Invalid command arguments"),
+                "{arguments:?}: {stderr}"
+            );
+            assert!(!stderr.is_empty(), "{arguments:?}: missing diagnostic");
+        }
+    }
+}
+
+/// Worker commands retain their file-based handoff at the executable boundary.
+#[test]
+#[cfg_attr(miri, ignore = "requires a native subprocess")]
+fn worker_assignment_and_document_run_with_a_bounded_stack() {
+    let directory = Builder::new()
+        .prefix(".workflow-worker-")
+        .tempdir_in(env!("CARGO_MANIFEST_DIR"))
+        .unwrap();
+    let scope = directory.path().join("scope.md");
+    fs::write(&scope, "Review scope\n").unwrap();
+    let skill = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../skills/ss-review");
+    let output = workflow_command()
+        .args(["workflow", "worker-assignment", "--phase", "fileGroups"])
+        .arg("--session-state")
+        .arg(directory.path())
+        .arg("--scope-path")
+        .arg(&scope)
+        .arg("--output-directory")
+        .arg(directory.path().join("assignment"))
+        .arg("--skill-root")
+        .arg(skill)
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let assignment: Value = serde_json::from_slice(&output.stdout).unwrap();
+    let path = assignment
+        .get("assignmentPath")
+        .and_then(Value::as_str)
+        .unwrap();
+    let output = workflow_command()
+        .args([
+            "workflow",
+            "worker-document",
+            "--assignment-path",
+            path,
+            "--document-id",
+            "scope",
+        ])
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let page: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(page.get("content"), Some(&Value::from("Review scope\n")));
+    assert_eq!(page.get("complete"), Some(&Value::Bool(true)));
 }
 
 /// Local finding plans must not require provider authentication or executables.

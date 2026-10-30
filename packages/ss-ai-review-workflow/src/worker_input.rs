@@ -15,6 +15,9 @@ use crate::review_work;
 /// Matches the complete encoded stdout limit in packages/ss-ai/README.md, Worker inputs.
 const OUTPUT_LIMIT: usize = 16 * 1024;
 
+/// Accommodates both the native CLI and PowerShell's platform-specific newline.
+const OUTPUT_NEWLINE: &str = if cfg!(windows) { "\r\n" } else { "\n" };
+
 /// Inputs selected by the primary session for one worker attempt.
 #[derive(Debug)]
 #[expect(
@@ -357,14 +360,7 @@ pub fn read_document(
     result
 }
 
-/// Builds the largest complete-character page within the encoded output budget.
-#[expect(
-    clippy::arithmetic_side_effects,
-    clippy::integer_division,
-    clippy::indexing_slicing,
-    clippy::string_slice,
-    reason = "Positions come from char_indices; binary-search bounds stay within that vector"
-)]
+/// Checks the assigned document before selecting its next page.
 fn read_page(
     assignment: &ValidatedAssignment<'_>,
     id: &str,
@@ -387,6 +383,25 @@ fn read_page(
             "Shared document '{id}' changed; rebuild the assignment explicitly"
         )));
     }
+    select_page(text, id, &document.raw.sha256, offset, OUTPUT_NEWLINE)
+}
+
+/// Builds the largest complete-character page within the encoded output budget.
+#[expect(
+    clippy::arithmetic_side_effects,
+    clippy::integer_division,
+    clippy::indexing_slicing,
+    clippy::string_slice,
+    reason = "Positions come from char_indices; binary-search bounds stay within that vector"
+)]
+fn select_page(
+    text: &str,
+    id: &str,
+    sha256: &str,
+    offset: usize,
+    newline: &str,
+) -> Result<Value, AppError> {
+    let json_limit = OUTPUT_LIMIT.saturating_sub(newline.len());
     let mut positions = Vec::new();
     let mut units = 0_usize;
     let mut start = None;
@@ -408,29 +423,29 @@ fn read_page(
         && next == units
     {
         let page = json!({
-            "documentId": id, "sha256": document.raw.sha256, "contentOffset": offset,
+            "documentId": id, "sha256": sha256, "contentOffset": offset,
             "content": &text[start..end], "contentLength": units,
             "nextOffset": null, "complete": true
         });
-        if serde_json::to_vec(&page)?.len() < OUTPUT_LIMIT {
+        if serde_json::to_vec(&page)?.len() <= json_limit {
             return Ok(page);
         }
     }
     let mut low = 0;
     let mut high = positions.len();
     let mut best = None;
-    // The limit includes the complete compact JSON object and the CLI's newline.
+    // PowerShell can emit CRLF even though the native CLI emits LF.
     while low < high {
         let previous_width = high - low;
         let middle = low + (high - low) / 2;
         let (end, next) = positions[middle];
         let complete = next == units;
         let page = json!({
-            "documentId": id, "sha256": document.raw.sha256, "contentOffset": offset,
+            "documentId": id, "sha256": sha256, "contentOffset": offset,
             "content": &text[start..end], "contentLength": units,
             "nextOffset": if complete { None } else { Some(next) }, "complete": complete
         });
-        if serde_json::to_vec(&page)?.len() < OUTPUT_LIMIT {
+        if serde_json::to_vec(&page)?.len() <= json_limit {
             best = Some(page);
             low = middle + 1;
         } else {
@@ -633,4 +648,46 @@ fn increment(path: &Path, name: &str, clock: &dyn Clock) -> Result<(), AppError>
 /// Uses the shared application error classification.
 fn invalid(message: impl Into<String>) -> AppError {
     fail("invalidInput", message.into())
+}
+
+#[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
+mod tests {
+    use super::{OUTPUT_LIMIT, select_page};
+
+    #[test]
+    fn pages_fit_and_fill_both_console_newline_budgets() {
+        let text = format!("{}🙂{}", "a".repeat(16_000), "b".repeat(16_000));
+        let mut first_offsets = Vec::new();
+        for newline in ["\n", "\r\n"] {
+            let mut offset = 0;
+            let mut reconstructed = String::new();
+            loop {
+                let page = select_page(&text, "scope", &"A".repeat(64), offset, newline).unwrap();
+                let content = page.get("content").unwrap().as_str().unwrap();
+                reconstructed.push_str(content);
+                let output_bytes = serde_json::to_vec(&page).unwrap().len() + newline.len();
+                assert!(output_bytes <= OUTPUT_LIMIT);
+                if page.get("complete").unwrap() == true {
+                    break;
+                }
+                // ASCII content at the first boundary lets either output fill its budget exactly.
+                if offset == 0 {
+                    assert_eq!(output_bytes, OUTPUT_LIMIT);
+                }
+                let next =
+                    usize::try_from(page.get("nextOffset").unwrap().as_u64().unwrap()).unwrap();
+                if offset == 0 {
+                    first_offsets.push(next);
+                }
+                assert!(next > offset);
+                offset = next;
+            }
+            assert_eq!(reconstructed, text);
+        }
+        assert_eq!(
+            first_offsets.first().unwrap(),
+            &(first_offsets.last().unwrap() + 1)
+        );
+    }
 }

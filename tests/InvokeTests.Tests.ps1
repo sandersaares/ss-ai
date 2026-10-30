@@ -12,6 +12,7 @@ BeforeAll {
             [switch] $FailClippy,
             [switch] $FailPrepare,
             [switch] $FailNativePester,
+            [switch] $FailHelper,
             [switch] $NativePrerequisiteSucceeds,
             [string] $NativePesterName = 'SsReviewGitDiff.Tests.ps1',
             [int] $PreviousExit = 0,
@@ -58,13 +59,18 @@ BeforeAll {
 
 Describe 'prepared helper' {
     It 'receives the prebuilt test executable' {
-        $env:SS_AI_FINDING_TEST_EXECUTABLE | Should -Not -BeNullOrEmpty
-        Test-Path -LiteralPath $env:SS_AI_FINDING_TEST_EXECUTABLE -PathType Leaf | Should -BeTrue
-        $env:SS_AI_AUDIT_TEST_EXECUTABLE | Should -Not -BeNullOrEmpty
-        Test-Path -LiteralPath $env:SS_AI_AUDIT_TEST_EXECUTABLE -PathType Leaf | Should -BeTrue
+        foreach ($name in @(__HELPER_NAMES__)) {
+            $helper = [Environment]::GetEnvironmentVariable($name)
+            $helper | Should -Not -BeNullOrEmpty
+            Test-Path -LiteralPath $helper -PathType Leaf | Should -BeTrue
+        }
     }
 }
-'@)
+'@.Replace('__HELPER_NAMES__', $(if ($NativePesterName -eq 'SsReviewWorkerInput.Tests.ps1') {
+                    "'SS_AI_WORKER_INPUT_TEST_EXECUTABLE'"
+                } else {
+                    "'SS_AI_FINDING_TEST_EXECUTABLE', 'SS_AI_AUDIT_TEST_EXECUTABLE', 'SS_AI_REVIEW_WORK_TEST_EXECUTABLE'"
+                })))
         }
         $testPath = if ($FailNativePester -or $NativePrerequisiteSucceeds) { $root } else { $test }
         $suiteArgument = if ($Suite) { " -Suite $Suite" } else { '' }
@@ -72,6 +78,15 @@ Describe 'prepared helper' {
         # Distinct nonzero statuses identify which command boundary supplied a failure.
         $clippyExit = if ($FailClippy) { 19 } else { 0 }
         $code = @'
+#Requires -Version 7.6
+
+Set-StrictMode -Version Latest
+$ErrorActionPreference = 'Stop'
+$PSNativeCommandUseErrorActionPreference = $true
+if ($PSVersionTable.PSVersion -lt [version]'7.6') {
+    throw 'PowerShell 7.6 or later is required.'
+}
+
 # Supply Cargo discovery without depending on an installed native toolchain.
 function Get-Command {
     param($Name, $CommandType, $ErrorAction)
@@ -98,9 +113,12 @@ function cargo {
         $global:LASTEXITCODE = 0
         return (@{ target_directory = '__ROOT__' } | ConvertTo-Json -Compress)
     }
-    if ($args[0] -eq 'test' -and $args -contains 'finding_plans') {
-        $global:LASTEXITCODE = 0
-        foreach ($target in @('finding_plans', 'audit')) {
+    if ($args[0] -eq 'test' -and $args -contains '--test') {
+        $global:LASTEXITCODE = if (__FAIL_HELPER__) { 31 } else { 0 }
+        if (__FAIL_HELPER__) { return }
+        for ($index = 0; $index -lt $args.Count; $index++) {
+            if ($args[$index] -ne '--test') { continue }
+            $target = $args[$index + 1]
             $executable = Join-Path '__ROOT__' "$target-helper"
             [IO.File]::WriteAllText($executable, 'fixture')
             @{
@@ -152,6 +170,7 @@ exit $LASTEXITCODE
             Replace('__SUITE__', $suiteArgument).Replace('__PREVIOUS_EXIT__', [string]$PreviousExit).
             Replace('__ROOT__', $root.Replace("'", "''")).
             Replace('__NATIVE_SUCCEEDS__', $(if ($NativePrerequisiteSucceeds) { '$true' } else { '$false' })).
+            Replace('__FAIL_HELPER__', $(if ($FailHelper) { '$true' } else { '$false' })).
             Replace('__FAIL_PREPARE__', $(if ($FailPrepare) { '$true' } else { '$false' }))
 
         $start = [Diagnostics.ProcessStartInfo]::new((Get-Process -Id $PID).Path)
@@ -232,11 +251,26 @@ Describe 'Repository test entry point' {
         $result.output | Should -Not -Match 'A blocked native consumer must not run'
     }
 
-    It 'prepares a private concurrency helper before running shared-file tests' {
-        $result = Invoke-TestRunnerFixture -NativePrerequisiteSucceeds -NativePesterName 'SsReviewSharedFiles.Tests.ps1'
+    It 'prepares private concurrency helpers for <Name>' -ForEach @(
+        @{ Name = 'SsReviewSharedFiles.Tests.ps1' }
+        @{ Name = 'SsReviewWorkerInput.Tests.ps1' }
+    ) {
+        $result = Invoke-TestRunnerFixture -NativePrerequisiteSucceeds -NativePesterName $Name
         $result.code | Should -Be 0 -Because $result.output
         $result.calls | Should -Be @('build', 'metadata', 'test') -Because $result.output
         $result.output | Should -Match 'receives the prebuilt test executable'
+    }
+
+    It 'blocks only <Name> when its helper preparation fails' -ForEach @(
+        @{ Name = 'SsReviewSharedFiles.Tests.ps1' }
+        @{ Name = 'SsReviewWorkerInput.Tests.ps1' }
+    ) {
+        $result = Invoke-TestRunnerFixture -NativePrerequisiteSucceeds -FailHelper -NativePesterName $Name
+        $result.code | Should -Not -Be 0
+        $result.calls | Should -Be @('build', 'metadata', 'test') -Because $result.output
+        $result.output | Should -Match 'Building the concurrency test prerequisites failed'
+        $result.output | Should -Match 'reports the requested outcome'
+        $result.output | Should -Not -Match 'receives the prebuilt test executable'
     }
 
     It 'rejects combining Rust-only selection with Pester paths' {

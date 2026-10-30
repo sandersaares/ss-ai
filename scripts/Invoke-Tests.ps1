@@ -111,7 +111,8 @@ if ($Suite -in @('All', 'Pester')) {
             }
         } catch {
             Write-Host "Pester prerequisite failed: $_"
-            $blockedPesterPaths += @($sharedFileTests.FullName) + @($workerInputTests.FullName)
+            $blockedPesterPaths += @($sharedFileTests | ForEach-Object FullName) +
+                @($workerInputTests | ForEach-Object FullName)
             $failed = $true
         } finally {
             Pop-Location
