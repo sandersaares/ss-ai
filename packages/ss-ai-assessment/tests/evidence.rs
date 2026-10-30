@@ -99,7 +99,7 @@ fn read_all(
 fn escaped_and_unicode_evidence_is_delivered_exactly_with_a_serialized_byte_bound() {
     // Escaping expands control characters; multibyte text distinguishes byte and character offsets.
     let text = "\0\u{1}\n\t\"\\\u{1f600}".repeat(8192);
-    let mut assessment = Assessment::new(inventory(Vec::new()), "snapshot", "policy").unwrap();
+    let mut assessment = Assessment::new(inventory(Vec::new()), "snapshot", "policy", "").unwrap();
     assessment.read("policy", 1, 100, &text, "").unwrap_err();
     read_all(&mut assessment, "policy", &text, &text, "");
     // Replayed reads must not reduce retained coverage.
@@ -123,8 +123,13 @@ fn unread_source_cannot_be_bulk_judged_uncertain_or_completed_as_a_refusal() {
         Disposition::Significant,
         Disposition::Uncertain,
     ] {
-        let mut assessment =
-            Assessment::new(inventory(vec![change_copy(&change)]), "snapshot", "policy").unwrap();
+        let mut assessment = Assessment::new(
+            inventory(vec![change_copy(&change)]),
+            "snapshot",
+            "policy",
+            "discussion",
+        )
+        .unwrap();
         read_all(&mut assessment, "policy", "policy", "policy", "discussion");
         assessment
             .record(
@@ -218,7 +223,8 @@ fn opaque_source_still_requires_semantic_uncertainty_without_reading_nonexistent
     change.kind = "T".into();
     change.id = change_id("T", change.old.as_ref(), change.new.as_ref()).unwrap();
     let id = change.id.clone();
-    let mut assessment = Assessment::new(inventory(vec![change]), "snapshot", "policy").unwrap();
+    let mut assessment =
+        Assessment::new(inventory(vec![change]), "snapshot", "policy", "").unwrap();
     read_all(&mut assessment, "policy", "", "", "");
     read_all(&mut assessment, "discussion", "", "", "");
     assessment
@@ -256,7 +262,8 @@ fn large_exact_comparison_can_be_examined_incrementally_without_a_whole_inventor
             )
         })
         .collect();
-    let mut assessment = Assessment::new(inventory(changes), "snapshot", "policy").unwrap();
+    let mut assessment =
+        Assessment::new(inventory(changes), "snapshot", "policy", &discussion).unwrap();
     read_all(&mut assessment, "policy", "policy", "policy", &discussion);
     read_all(
         &mut assessment,
@@ -363,7 +370,7 @@ fn metadata_pages_shrink_without_skipping_judgments_or_repeating_an_unbounded_cu
             )
         })
         .collect();
-    let assessment = Assessment::new(inventory(changes), "snapshot", "policy").unwrap();
+    let assessment = Assessment::new(inventory(changes), "snapshot", "policy", "").unwrap();
     let page = assessment.summary(0, 100, "", "").unwrap();
     assert_bounded(&page);
     let count = page["changes"].as_array().unwrap().len();
@@ -375,4 +382,43 @@ fn metadata_pages_shrink_without_skipping_judgments_or_repeating_an_unbounded_cu
     );
     let next = assessment.summary(count, 100, "", "").unwrap();
     assert_ne!(page["changes"][0]["id"], next["changes"][0]["id"]);
+}
+
+#[test]
+fn discussion_binding_rejects_replaced_text_even_when_read_lengths_match() {
+    let mut assessment =
+        Assessment::new(inventory(Vec::new()), "snapshot", "policy", "original").unwrap();
+    read_all(&mut assessment, "policy", "policy", "policy", "original");
+    read_all(
+        &mut assessment,
+        "discussion",
+        "original",
+        "policy",
+        "original",
+    );
+    assessment
+        .record(
+            "cumulative",
+            judgment("cumulative", Disposition::Insignificant),
+            None,
+            "policy",
+            "original",
+        )
+        .unwrap();
+    assessment.finish("policy", "original").unwrap();
+    assessment
+        .validate("snapshot", "policy", "policy", "original")
+        .unwrap();
+    assessment
+        .validate("snapshot", "policy", "policy", "replaced")
+        .unwrap_err();
+    let mut record = serde_json::to_value(&assessment).unwrap();
+    record["discussionDigest"] = json!("0".repeat(64));
+    let corrupt: Assessment = serde_json::from_value(record).unwrap();
+    corrupt
+        .validate("snapshot", "policy", "policy", "original")
+        .unwrap_err();
+    let mut record = serde_json::to_value(&assessment).unwrap();
+    record.as_object_mut().unwrap().remove("discussionDigest");
+    serde_json::from_value::<Assessment>(record).unwrap_err();
 }

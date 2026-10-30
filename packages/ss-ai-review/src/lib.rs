@@ -11,6 +11,7 @@ mod assessment {
 mod clock;
 mod command;
 mod discovery;
+mod discussion;
 mod github_approval;
 mod identity;
 mod journal;

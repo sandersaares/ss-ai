@@ -119,7 +119,11 @@ eligibility or assessment.
 
 Native commands select the installed policy, assessment contract, and
 discussion, expose bounded source reads, and require exact per-change and
-cumulative judgments. The skill assigns each PR's semantic assessment to a fresh
+cumulative judgments. Model-visible discussion retains descriptions, review and
+comment bodies, authorship, threading, and source locations. Identical inline
+excerpts share one text entry without merging their comments or revision bindings.
+Approval history reconstruction stays in native evidence rather than consuming
+the assessor's context. The skill assigns each PR's semantic assessment to a fresh
 GPT 6.1 Sol worker with medium reasoning and regular context. The orchestrator
 receives decisions rather than source or discussion evidence.
 Workers process bounded source units and persist individual judgments before
