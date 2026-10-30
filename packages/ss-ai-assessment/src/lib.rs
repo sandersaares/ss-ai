@@ -8,6 +8,7 @@
 )]
 
 pub use assessment::{Assessment, Disposition, Judgment};
+pub use checkpoint::Note;
 pub use error::AssessmentError;
 pub use objects::{Change, Content, Inventory, Side, change_id, commit};
 pub use source::{ContextRequest, SourceSide};
@@ -24,6 +25,8 @@ where
 }
 
 mod assessment;
+mod checkpoint;
 mod error;
 mod objects;
 mod source;
+mod units;

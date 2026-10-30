@@ -24,7 +24,7 @@ use crate::selection::{self, State, valid_session};
 use crate::target::{Platform, Target, escape};
 use crate::transport::Transport;
 use crate::{Clock, Http, Process};
-use ss_ai_assessment::{ContextRequest, SourceSide};
+use ss_ai_assessment::{ContextRequest, Note, SourceSide};
 
 /// Named-input command hierarchy used by the installed skills.
 ///
@@ -104,6 +104,62 @@ enum Autoreapprove {
         #[arg(long, default_value = "10")]
         limit: NonZeroUsize,
     },
+    /// Page immutable evidence units without their text.
+    Units {
+        #[command(flatten)]
+        input: WorkInput,
+        #[arg(long)]
+        reference: Option<String>,
+        #[arg(long, default_value = "0")]
+        after: usize,
+        #[arg(long, default_value = "10")]
+        limit: NonZeroUsize,
+    },
+    /// Page recorded concern and interaction references.
+    Checks {
+        #[command(flatten)]
+        input: WorkInput,
+        #[arg(long, default_value = "0")]
+        after: usize,
+        #[arg(long, default_value = "10")]
+        limit: NonZeroUsize,
+    },
+    /// Record unit observations or the discussion aggregate, never approval authority.
+    Note {
+        #[command(flatten)]
+        input: WorkInput,
+        #[arg(long)]
+        unit_id: String,
+        #[arg(long)]
+        observations: String,
+        #[arg(long)]
+        interfaces: String,
+        #[arg(long)]
+        concern: Vec<String>,
+        #[arg(long)]
+        interaction: Vec<String>,
+        #[arg(long, required = true)]
+        evidence: Vec<String>,
+        #[arg(long)]
+        previous_digest: Option<String>,
+    },
+    /// Give an evidence-backed disposition to a recorded concern or interaction.
+    Resolve {
+        #[command(flatten)]
+        input: WorkInput,
+        #[arg(long)]
+        check_id: String,
+        #[arg(long)]
+        disposition: Disposition,
+        #[arg(long)]
+        rationale: String,
+        #[arg(long, required = true)]
+        evidence: Vec<String>,
+        #[arg(long)]
+        previous_digest: Option<String>,
+    },
+    /// Accept a planned handoff only after newly completed immutable work.
+    Checkpoint(WorkInput),
     /// Read contiguous bounded policy, discussion, or changed-source text.
     Read {
         #[command(flatten)]
@@ -142,6 +198,10 @@ enum Autoreapprove {
         rationale: String,
         #[arg(long, required = true)]
         evidence: Vec<String>,
+        #[arg(long)]
+        concern: Vec<String>,
+        #[arg(long)]
+        interaction: Vec<String>,
         #[arg(long)]
         previous_digest: Option<String>,
     },
@@ -449,6 +509,11 @@ fn execute(
             }
             action @ (Autoreapprove::Prepare(_)
             | Autoreapprove::Assessment { .. }
+            | Autoreapprove::Units { .. }
+            | Autoreapprove::Checks { .. }
+            | Autoreapprove::Note { .. }
+            | Autoreapprove::Resolve { .. }
+            | Autoreapprove::Checkpoint(_)
             | Autoreapprove::Read { .. }
             | Autoreapprove::SourceContext { .. }
             | Autoreapprove::Judge { .. }
@@ -598,6 +663,69 @@ fn work(
             after,
             limit,
         } => (input, WorkAction::View { after, limit }),
+        Autoreapprove::Units {
+            input,
+            reference,
+            after,
+            limit,
+        } => (
+            input,
+            WorkAction::Units {
+                reference,
+                after,
+                limit,
+            },
+        ),
+        Autoreapprove::Checks {
+            input,
+            after,
+            limit,
+        } => (input, WorkAction::Checks { after, limit }),
+        Autoreapprove::Checkpoint(input) => (input, WorkAction::Checkpoint),
+        Autoreapprove::Note {
+            input,
+            unit_id,
+            observations,
+            interfaces,
+            concern,
+            interaction,
+            evidence,
+            previous_digest,
+        } => (
+            input,
+            WorkAction::Note {
+                id: unit_id,
+                note: Note {
+                    observations,
+                    interfaces,
+                    concerns: concern,
+                    interactions: interaction,
+                    evidence,
+                },
+                previous_digest,
+            },
+        ),
+        Autoreapprove::Resolve {
+            input,
+            check_id,
+            disposition,
+            rationale,
+            evidence,
+            previous_digest,
+        } => (
+            input,
+            WorkAction::Resolve {
+                id: check_id,
+                judgment: Judgment {
+                    disposition,
+                    rationale,
+                    evidence,
+                    concerns: Vec::new(),
+                    interactions: Vec::new(),
+                },
+                previous_digest,
+            },
+        ),
         Autoreapprove::Read {
             input,
             reference,
@@ -636,6 +764,8 @@ fn work(
             disposition,
             rationale,
             evidence,
+            concern,
+            interaction,
             previous_digest,
         } => (
             input,
@@ -646,6 +776,8 @@ fn work(
                     disposition,
                     rationale,
                     evidence,
+                    concerns: concern,
+                    interactions: interaction,
                 },
             },
         ),

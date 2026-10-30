@@ -165,6 +165,61 @@ just test-skill ss-cargo-deps-tidy -FullNameFilter '*Get-SectionInfo*'
 
 # Evaluations
 
+## Synthetic reapproval checkpoint evaluation
+
+The `ss-ai-assessment` example `synthetic_assessment` drives the production
+evidence, note, aggregation, and completion methods without provider access.
+It cannot publish approvals or notices. Its fixture schema contains `files`
+(path to an `old`/`new` text pair) and a complete compact `discussion` object.
+It accepts no expected-outcome fields. Native source reconstruction and
+assessment validation run at both input and persisted-state boundaries.
+The driver records delivered text characters, serialized response bytes, and
+response counts, including replay. It does not measure model tokens or prove
+that a worker understood the evidence.
+
+Build and initialize a synthetic state from the active checkout:
+
+```powershell
+#Requires -Version 7.6
+Set-StrictMode -Version Latest
+$ErrorActionPreference = 'Stop'
+$PSNativeCommandUseErrorActionPreference = $true
+
+$artifacts = cargo build -p ss-ai-assessment --example synthetic_assessment --message-format=json |
+    ForEach-Object { $_ | ConvertFrom-Json }
+$executable = $artifacts |
+    Where-Object { $_.reason -eq 'compiler-artifact' -and $_.target.name -eq 'synthetic_assessment' } |
+    Select-Object -ExpandProperty executable
+& $executable --operation init --state-path "{{STATE}}" --fixture-path "{{FIXTURE}}" --policy-path "{{POLICY}}"
+& $executable --operation assessment --state-path "{{STATE}}" --after 0 --limit 10
+```
+
+| Placeholder | Value |
+| --- | --- |
+| `STATE` | New absolute path for this synthetic arm's state. |
+| `FIXTURE` | Absolute path to synthetic source/discussion input without expected answers. |
+| `POLICY` | Absolute path to this checkout's `skills/ss-autoreapprove/significance.md`. |
+
+Use the returned references with the driver's named `--operation read`, `units`,
+`note`, `judge`, `checks`, `resolve`, `checkpoint`, `complete`, and `results`
+operations. Their assessment arguments match the skill's native recipes; the
+driver replaces provider/run selection with its isolated `--state-path`.
+State writes use retained sibling locks and atomic replacement. Do not edit
+the state JSON to bypass a missing read, stale dependency, or semantic obligation.
+
+Model execution requires explicit authorization. A bounded paired evaluation
+uses the same policy and synthetic inputs in both arms. The full-evidence arm
+reads every captured side and discussion body. The checkpointed arm uses
+separate fresh unit-note, aggregation, and cumulative workers with the skill's
+configured model, reasoning, and regular context. Keep expected outcomes and
+other arms' answers out of assessor inputs. Compare retained objections,
+cross-file interactions, historical context, untrusted discussion handling,
+and an equivalent-refactor qualifying control, not outcome labels alone.
+This driver exercises assessment semantics, not provider capture or the
+public command parser; the native reapproval integration suite covers those
+boundaries. Small synthetic cases do not establish summary equivalence for
+arbitrary large PRs.
+
 Skills are evaluated end-to-end with [Waza](https://microsoft.github.io/waza/).
 Eval specs live under `evals/<skill-name>/<lane>.eval.yaml` (one file per
 cost lane, e.g. `trigger.eval.yaml`, `workflow.eval.yaml`) with task

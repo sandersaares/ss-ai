@@ -32,7 +32,7 @@ that same reference and offset; a native receipt does not prove that the model
 saw the text. Inspect `documentReads`, each change's `requiredPatch`, and
 `nextContextReference` for required-read progress. Read policy before judging source.
 
-Read each complete `CHANGE_ID:patch` document, including its endpoint paths,
+Cover each complete `CHANGE_ID:patch` document through its native units, including its endpoint paths,
 objects, modes, and all ordered hunks with three context lines. Metadata-only
 operations still require the document. Full captured `:old` and `:new` sides
 remain optional context, not mandatory reads solely because they exist.
@@ -45,29 +45,56 @@ Do not substitute historical discussion excerpts or arbitrary checkout files
 for endpoint source. Report needed context outside the captured sides as missing
 evidence; do not make a judgment without it.
 
-Work in bounded source units: examine and record at most ten new changes or
-65,536 source characters, whichever is reached first. These limits keep routine
-units small enough for regular context and leave room for policy and reasoning.
-Count all delivered patch, requested context, and deliberate full-side characters
-toward that budget, including replay. Finish a change already started before
-handing off; do not begin an additional change that would cross the character
-budget. A single larger change or its necessary context remains explicitly
-incomplete if it cannot fit. Do not summarize partial changes for another
-worker or retain the entire inventory or source tree in context.
+Use `units` to page the immutable manifest, starting at native
+`progress.nextUnitOffset` for missing unit work rather than replaying completed
+metadata pages. Omit `--reference` when using that unfiltered offset.
+Each unit names its original
+document, parent change/thread/review, exact half-open Unicode scalar ranges,
+content digest, and source bindings. Whole hunks and threads are preferred;
+oversized records and single lines use lossless ranges. A boundary is not a
+semantic boundary: inspect its bindings and reacquire neighboring units or exact
+source when needed. Shared historical excerpts retain separate referencing
+threads. No description, review, reply, or excerpt is irrelevant by default.
 
-After recording a source unit, return `checkpoint` with
-the PR ID, snapshot digest, `judgedChangeCount`, and `nextChangeOffset`.
+Work on at most ten new units or final changes and 65,536 delivered evidence
+characters per worker, whichever is reached first. Count policy, discussion,
+metadata, notes, context, full sides, and replay toward the character budget.
+Do not begin work that cannot fit. Complete an individual unit's reads and
+record its native `note` before handoff; partial reads alone are not progress.
+Notes contain behavioral observations, relevant interfaces/invariants, explicit
+possible interactions and concerns, and exact evidence references. They are
+not approval judgments. Do not omit an objection because it is resolved,
+outdated, repeated, agent-authored, or inconvenient. Do not recursively summarize
+notes to make an arbitrary amount of work fit.
+
+Once every unit for a change has a note, a change-aggregation worker reads all
+those notes using their native references and reacquires relevant exact source.
+Record one final judgment for the exact changed-path record, never one judgment
+per hunk. Carry possible interactions and concerns as explicit native fields,
+not only prose. `units --reference CHANGE_ID:patch` selects a change's units.
+
+After adding a unit note or final change judgment, call native `checkpoint`.
+Return its scalar progress with the PR ID and snapshot digest, including
+`completedWorkCount`, `completedUnitCount`, `judgedChangeCount`, and `nextUnitId`.
 Do not record a cumulative judgment or call `complete` at a checkpoint. The
 orchestrator verifies progress and dispatches a fresh worker on the same
-snapshot; you never delegate. Read and judge only your own unit's missing work,
-not source already covered by durable judgments.
+snapshot; you never delegate. Replays and replacement records earn no new
+checkpoint credit. Do not hand off only a discussion aggregate or replayed reads.
 
-When a fresh worker starts with no unjudged changes, perform the cumulative assessment: read policy,
-all discussion pages, and every recorded change judgment through bounded
-inventory pages. Reacquire relevant exact source when evaluating cross-change
-interactions or a discussion objection. Do not infer the cumulative outcome
-merely from individual dispositions. Native receipts from earlier workers are
-not your knowledge of evidence needed for your own judgment.
+When a fresh worker starts with no unjudged changes and all unit notes complete,
+perform the cumulative assessment. Read policy, every final change judgment,
+all discussion observations, and every explicit concern/interaction and its
+disposition through native references. If the discussion aggregate is missing,
+read every discussion unit note and relevant exact bodies/excerpts, then use
+`note --unit-id discussion` to record it. Do not recursively summarize the
+judgment or concern set. Reacquire relevant exact patch, body, historical hunk,
+or captured-source context to independently examine combined effects.
+Do not infer the cumulative outcome merely from individual dispositions.
+Native receipts from earlier workers are not your knowledge of evidence needed
+for your own judgment.
+Use explicit `read` calls for `judgment:CHANGE_ID`, `discussion-note`,
+`check:ID`, and `resolution:ID`. A judgment displayed in metadata does not
+satisfy its dedicated read receipt.
 
 Discussion includes all description, review, and comment bodies. Shared
 `hunkReference` values point to exact excerpts in its `hunks` table, not a
@@ -85,6 +112,17 @@ completed refusal.
 
 # Stage 2: judge and complete
 
+Use `checks` and `read` to inspect every recorded concern and interaction,
+including resolved checks. Use `resolve` with exact evidence and a rationale
+to record each disposition. An insignificant disposition means the concern
+does not establish significance under the policy, not that it was ignored.
+Significant or uncertain changes and check dispositions prevent renewal even
+when the final cumulative label is favorable. Note replacement invalidates
+dependent aggregates; inspect fresh progress and reacquire affected inputs.
+If cumulative examination identifies a new concern, add it to the relevant
+unit note or final change judgment with conditional replacement, then rebuild
+its dependents and resolve it. Do not hide a new concern in cumulative prose.
+
 Apply the captured significance policy to your changes and the cumulative
 difference. Cite each change's required patch reference and any other evidence
 used. Assess significant design changes,
@@ -98,7 +136,9 @@ The final worker records the cumulative judgment after every change has a
 durable judgment, including for an empty inventory.
 
 Before calling `complete`, verify that every inventory page has been visited,
-required evidence reads are complete, every change has a judgment, and the cumulative judgment is recorded.
+all raw unit ranges and requested context are delivered, all unit notes and
+discussion aggregation are present, every check has an evidence-backed disposition,
+every change has a judgment, and the cumulative judgment is recorded.
 Do not use `complete` as a probe for unfinished work. If completion rejects missing coverage or reads, continue the missing work
 on this snapshot rather than returning that rejection as the assessment result.
 A delivered tool result is not command success; a nonzero native exit must be
@@ -106,7 +146,11 @@ handled according to its diagnostic. Staleness and unrelated tooling failures
 still return explicitly to the orchestrator.
 
 Complete through the utility, which enforces exact coverage, evidence reads,
-and policy/snapshot bindings. Return only the PR ID, snapshot digest, completion
+and policy/snapshot bindings. Coverage proves delivery, not comprehension or
+that summaries preserved every implication. Missing evidence, context exhaustion,
+or inability to examine the complete judgment/check set remains explicitly
+incomplete; never manufacture uncertainty or a notice to end the workflow.
+Return only the PR ID, snapshot digest, completion
 status, assessment digest, concise cumulative rationale, and any diagnostic.
 Do not return source text, discussion transcripts, or an approval instruction.
 If the orchestrator replaces this snapshot after staleness, stop; its fresh

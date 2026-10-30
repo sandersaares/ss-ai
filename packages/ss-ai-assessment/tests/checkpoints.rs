@@ -1,0 +1,674 @@
+//! Synthetic checkpoint contracts exercise production records without providers or clocks.
+#![allow(
+    clippy::indexing_slicing,
+    clippy::arithmetic_side_effects,
+    reason = "Bounded synthetic fixture indices and counters"
+)]
+
+use std::collections::BTreeMap;
+
+use serde_json::{Value, json};
+use ss_ai_assessment::{
+    Assessment, Change, Content, Disposition, Inventory, Judgment, Note, Side, change_id,
+};
+
+/// Replacements retain exact CRLF and final-newline semantics without executing source.
+fn fixture(discussion: &str, old: &str, new: &str) -> Assessment {
+    let changes = if old == new {
+        Vec::new()
+    } else {
+        let old = Some(Side {
+            path: "file".into(),
+            object: "a".repeat(40),
+            mode: "100644".into(),
+            content: Content::Text { text: old.into() },
+        });
+        let new = Some(Side {
+            path: "file".into(),
+            object: "b".repeat(40),
+            mode: "100644".into(),
+            content: Content::Text { text: new.into() },
+        });
+        vec![Change {
+            id: change_id("M", old.as_ref(), new.as_ref()).unwrap(),
+            kind: "M".into(),
+            old,
+            new,
+        }]
+    };
+    let patches = if changes.is_empty() {
+        Vec::new()
+    } else {
+        let mut patch = format!(
+            "@@ -1,{} +1,{} @@\n",
+            old.lines().count(),
+            new.lines().count()
+        );
+        for (prefix, text) in [('-', old), ('+', new)] {
+            for line in text.split_inclusive('\n') {
+                patch.push(prefix);
+                patch.push_str(line);
+                if !line.ends_with('\n') {
+                    patch.push_str("\n\\ No newline at end of file\n");
+                }
+            }
+        }
+        vec![patch]
+    };
+    Assessment::new(
+        Inventory {
+            old_commit: "a".repeat(40),
+            new_commit: "b".repeat(40),
+            old_tree: "c".repeat(40),
+            new_tree: if changes.is_empty() { "c" } else { "d" }.repeat(40),
+            changes,
+            complete: true,
+        },
+        &patches,
+        "snapshot",
+        "policy",
+        discussion,
+    )
+    .unwrap()
+}
+
+/// Every delivered response is bounded and advances by its exact returned scalar count.
+fn read(assessment: &mut Assessment, reference: &str, discussion: &str) -> String {
+    let mut offset = 0;
+    let mut text = String::new();
+    loop {
+        let page = assessment
+            .read(reference, offset, usize::MAX, "policy", discussion)
+            .unwrap();
+        assert!(serde_json::to_vec_pretty(&page).unwrap().len() < 16_384);
+        let part = page["text"].as_str().unwrap();
+        text.push_str(part);
+        if page["complete"] == true {
+            break;
+        }
+        let next = usize::try_from(page["nextOffset"].as_u64().unwrap()).unwrap();
+        assert!(next > offset);
+        assert_eq!(next, offset + part.chars().count());
+        assert!(next <= usize::try_from(page["totalCharacters"].as_u64().unwrap()).unwrap());
+        offset = next;
+    }
+    text
+}
+
+fn units(assessment: &Assessment) -> Vec<Value> {
+    let mut after = 0;
+    let mut units = Vec::new();
+    loop {
+        let page = assessment.units(after, 100).unwrap();
+        assert!(serde_json::to_vec_pretty(&page).unwrap().len() < 16_384);
+        units.extend(page["items"].as_array().unwrap().iter().cloned());
+        let Some(next) = page["nextOffset"].as_u64() else {
+            break;
+        };
+        let next = usize::try_from(next).unwrap();
+        assert!(next > after);
+        after = next;
+    }
+    units
+}
+
+fn note(reference: &str) -> Note {
+    Note {
+        observations: "Observed the exact synthetic behavior.".into(),
+        interfaces: "The synthetic contract remains explicit.".into(),
+        concerns: Vec::new(),
+        interactions: Vec::new(),
+        evidence: vec![reference.into()],
+    }
+}
+
+fn judgment(id: &str, disposition: Disposition) -> Judgment {
+    Judgment {
+        disposition,
+        rationale: "Examined the complete synthetic effect.".into(),
+        evidence: if id == "cumulative" {
+            vec!["policy".into(), "discussion".into()]
+        } else {
+            vec![format!("{id}:patch")]
+        },
+        concerns: Vec::new(),
+        interactions: Vec::new(),
+    }
+}
+
+fn note_units(assessment: &mut Assessment, discussion: &str) {
+    read(assessment, "policy", discussion);
+    for unit in units(assessment) {
+        let reference = unit["reference"].as_str().unwrap();
+        read(assessment, reference, discussion);
+        assessment
+            .note(
+                unit["unit"]["id"].as_str().unwrap(),
+                note(reference),
+                None,
+                "policy",
+                discussion,
+            )
+            .unwrap();
+        read(
+            assessment,
+            unit["noteReference"].as_str().unwrap(),
+            discussion,
+        );
+    }
+}
+
+fn aggregate(assessment: &mut Assessment, discussion: &str) {
+    let ids = assessment
+        .inventory
+        .changes
+        .iter()
+        .map(|change| change.id.clone())
+        .collect::<Vec<_>>();
+    for id in ids {
+        assessment
+            .record(
+                &id,
+                judgment(&id, Disposition::Insignificant),
+                None,
+                "policy",
+                discussion,
+            )
+            .unwrap();
+        read(assessment, &format!("judgment:{id}"), discussion);
+    }
+    assessment
+        .note("discussion", note("discussion"), None, "policy", discussion)
+        .unwrap();
+    read(assessment, "discussion-note", discussion);
+    assessment
+        .record(
+            "cumulative",
+            judgment("cumulative", Disposition::Insignificant),
+            None,
+            "policy",
+            discussion,
+        )
+        .unwrap();
+}
+
+#[test]
+fn lossless_unicode_crlf_oversized_lines_and_interleaved_threads_have_exact_coverage() {
+    let body = format!("first\r\n{}\u{1f916}\0last", "x".repeat(40_000));
+    let discussion = json!({"schemaVersion":1, "platform":"gitHub", "pullRequest":{"body":body},
+        "reviews":[{"id":7,"body":"Review-only objection"}],
+        "reviewComments":[
+            {"id":1,"body":"first thread","path":"a","hunkReference":"shared"},
+            {"id":2,"body":"second thread","path":"b","hunkReference":"shared"},
+            {"id":3,"in_reply_to_id":1,"body":"human reply","commit_id":"historical"}
+        ], "comments":[], "hunks":{"shared":"@@ -1 +1 @@\n-old\n+new\n"}})
+    .to_string();
+    let mut assessment = fixture(&discussion, "old\r\n", &body);
+    let all = units(&assessment);
+    assert!(
+        all.iter()
+            .any(|unit| unit["unit"]["ranges"].as_array().unwrap().len() > 1)
+    );
+    let mut documents = BTreeMap::<String, Vec<(usize, usize, String)>>::new();
+    for unit in all {
+        let data = &unit["unit"];
+        assert!(data["totalCharacters"].as_u64().unwrap() <= 16_384);
+        let text = read(
+            &mut assessment,
+            unit["reference"].as_str().unwrap(),
+            &discussion,
+        );
+        let mut offset = 0;
+        for range in data["ranges"].as_array().unwrap() {
+            let start = usize::try_from(range["startCharacter"].as_u64().unwrap()).unwrap();
+            let end = usize::try_from(range["endCharacter"].as_u64().unwrap()).unwrap();
+            let part = text
+                .chars()
+                .skip(offset)
+                .take(end - start)
+                .collect::<String>();
+            offset += end - start;
+            documents
+                .entry(data["reference"].as_str().unwrap().into())
+                .or_default()
+                .push((start, end, part));
+        }
+        assert_eq!(offset, text.chars().count());
+    }
+    for (reference, mut ranges) in documents {
+        ranges.sort_by_key(|range| range.0);
+        let mut offset = 0;
+        let mut reconstructed = String::new();
+        for (start, end, text) in ranges {
+            assert_eq!(start, offset);
+            assert!(end >= start);
+            offset = end;
+            reconstructed.push_str(&text);
+        }
+        assert_eq!(
+            reconstructed,
+            read(&mut assessment, &reference, &discussion)
+        );
+    }
+    assessment
+        .validate("snapshot", "policy", "policy", &discussion)
+        .unwrap();
+}
+
+#[test]
+fn missing_units_block_all_dispositions_even_after_raw_delivery() {
+    let discussion = "discussion".repeat(5000);
+    for disposition in [
+        Disposition::Insignificant,
+        Disposition::Significant,
+        Disposition::Uncertain,
+    ] {
+        let mut assessment = fixture(&discussion, "old", &"new".repeat(12_000));
+        let id = assessment.inventory.changes[0].id.clone();
+        read(&mut assessment, "policy", &discussion);
+        read(&mut assessment, &format!("{id}:patch"), &discussion);
+        read(&mut assessment, "discussion", &discussion);
+        for document in [format!("{id}:patch"), "discussion".to_owned()] {
+            let selected = units(&assessment)
+                .into_iter()
+                .filter(|unit| unit["unit"]["reference"] == document)
+                .collect::<Vec<_>>();
+            assert!(selected.len() > 1);
+            for (index, unit) in selected.into_iter().enumerate() {
+                if index == 1 {
+                    continue;
+                }
+                let reference = unit["reference"].as_str().unwrap();
+                read(&mut assessment, reference, &discussion);
+                assessment
+                    .note(
+                        unit["unit"]["id"].as_str().unwrap(),
+                        note(reference),
+                        None,
+                        "policy",
+                        &discussion,
+                    )
+                    .unwrap();
+                read(
+                    &mut assessment,
+                    unit["noteReference"].as_str().unwrap(),
+                    &discussion,
+                );
+            }
+        }
+        assert!(
+            assessment.progress()["completedUnitCount"]
+                .as_u64()
+                .unwrap()
+                > 0
+        );
+        assessment
+            .record(&id, judgment(&id, disposition), None, "policy", &discussion)
+            .unwrap_err();
+        assessment
+            .note(
+                "discussion",
+                note("discussion"),
+                None,
+                "policy",
+                &discussion,
+            )
+            .unwrap_err();
+        assessment
+            .record(
+                "cumulative",
+                judgment("cumulative", disposition),
+                None,
+                "policy",
+                &discussion,
+            )
+            .unwrap_err();
+        assessment.finish("policy", &discussion).unwrap_err();
+        assert!(!assessment.needs_review());
+    }
+}
+
+#[test]
+fn checkpoint_replay_and_replacement_do_not_create_progress() {
+    let mut assessment = fixture("discussion", "old", "new");
+    assessment.checkpoint().unwrap_err();
+    read(&mut assessment, "policy", "discussion");
+    let unit = units(&assessment).remove(0);
+    let id = unit["unit"]["id"].as_str().unwrap();
+    let reference = unit["reference"].as_str().unwrap();
+    read(&mut assessment, reference, "discussion");
+    assessment.checkpoint().unwrap_err();
+    let digest = assessment
+        .note(id, note(reference), None, "policy", "discussion")
+        .unwrap();
+    assessment.checkpoint().unwrap();
+    read(&mut assessment, reference, "discussion");
+    assessment
+        .note(id, note(reference), None, "policy", "discussion")
+        .unwrap();
+    assessment.checkpoint().unwrap_err();
+    let mut changed = note(reference);
+    changed.observations.push_str(" More precise.");
+    assessment
+        .note(id, changed, Some(&digest), "policy", "discussion")
+        .unwrap();
+    assessment.checkpoint().unwrap_err();
+    assessment
+        .validate("snapshot", "policy", "policy", "discussion")
+        .unwrap();
+}
+
+#[test]
+fn replacing_notes_invalidates_dependent_aggregates_and_requires_conditional_digest() {
+    let mut assessment = fixture("discussion", "old", "new");
+    note_units(&mut assessment, "discussion");
+    aggregate(&mut assessment, "discussion");
+    let all = units(&assessment);
+    let unit = all
+        .iter()
+        .find(|unit| unit["unit"]["reference"] != "discussion")
+        .unwrap();
+    let id = unit["unit"]["id"].as_str().unwrap();
+    let reference = unit["reference"].as_str().unwrap();
+    let mut discussion_note = note("discussion");
+    discussion_note
+        .evidence
+        .push(unit["noteReference"].as_str().unwrap().to_owned());
+    let previous_discussion =
+        assessment.summary(0, 1, "policy", "discussion").unwrap()["discussionNoteDigest"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+    assessment
+        .note(
+            "discussion",
+            discussion_note,
+            Some(&previous_discussion),
+            "policy",
+            "discussion",
+        )
+        .unwrap();
+    read(&mut assessment, "discussion-note", "discussion");
+    assessment
+        .record(
+            "cumulative",
+            judgment("cumulative", Disposition::Insignificant),
+            None,
+            "policy",
+            "discussion",
+        )
+        .unwrap();
+    let mut replacement = note(reference);
+    replacement
+        .concerns
+        .push("A material objection was overlooked.".into());
+    assessment
+        .note(id, note(reference), Some("wrong"), "policy", "discussion")
+        .unwrap();
+    // Idempotent replay does not replace anything; a changed payload must compare its digest.
+    assessment
+        .note(id, replacement, Some("wrong"), "policy", "discussion")
+        .unwrap_err();
+    let mut replacement = note(reference);
+    replacement
+        .concerns
+        .push("A material objection was overlooked.".into());
+    assessment
+        .note(
+            id,
+            replacement,
+            unit["noteDigest"].as_str(),
+            "policy",
+            "discussion",
+        )
+        .unwrap();
+    assert_eq!(assessment.progress()["judgedChangeCount"], 0);
+    assert!(
+        assessment.summary(0, 1, "policy", "discussion").unwrap()["discussionNoteDigest"].is_null()
+    );
+    assessment.finish("policy", "discussion").unwrap_err();
+    assessment
+        .validate("snapshot", "policy", "policy", "discussion")
+        .unwrap();
+    assert!(!assessment.needs_review());
+}
+
+#[test]
+fn recorded_concerns_require_exact_dispositions_and_cannot_be_erased_by_favorable_aggregate() {
+    let mut assessment = fixture("Historical objection.", "old", "new");
+    note_units(&mut assessment, "Historical objection.");
+    let unit = units(&assessment)
+        .into_iter()
+        .find(|unit| unit["unit"]["reference"] == "discussion")
+        .unwrap();
+    let reference = unit["reference"].as_str().unwrap();
+    let mut objection = note(reference);
+    objection
+        .concerns
+        .push("The historical body identifies changed behavior.".into());
+    assessment
+        .note(
+            unit["unit"]["id"].as_str().unwrap(),
+            objection,
+            unit["noteDigest"].as_str(),
+            "policy",
+            "Historical objection.",
+        )
+        .unwrap();
+    read(
+        &mut assessment,
+        unit["noteReference"].as_str().unwrap(),
+        "Historical objection.",
+    );
+    let id = assessment.inventory.changes[0].id.clone();
+    assessment
+        .record(
+            &id,
+            judgment(&id, Disposition::Insignificant),
+            None,
+            "policy",
+            "Historical objection.",
+        )
+        .unwrap();
+    read(
+        &mut assessment,
+        &format!("judgment:{id}"),
+        "Historical objection.",
+    );
+    assessment
+        .note(
+            "discussion",
+            note("discussion"),
+            None,
+            "policy",
+            "Historical objection.",
+        )
+        .unwrap();
+    read(&mut assessment, "discussion-note", "Historical objection.");
+    assessment
+        .record(
+            "cumulative",
+            judgment("cumulative", Disposition::Insignificant),
+            None,
+            "policy",
+            "Historical objection.",
+        )
+        .unwrap_err();
+    let check = assessment.checks(0, 100).unwrap()["items"][0].clone();
+    read(
+        &mut assessment,
+        check["reference"].as_str().unwrap(),
+        "Historical objection.",
+    );
+    let mut resolution = judgment("cumulative", Disposition::Significant);
+    resolution.evidence = vec!["missing:reference".into()];
+    assessment
+        .resolve(
+            check["id"].as_str().unwrap(),
+            resolution,
+            None,
+            "policy",
+            "Historical objection.",
+        )
+        .unwrap_err();
+    assessment
+        .resolve(
+            check["id"].as_str().unwrap(),
+            judgment("cumulative", Disposition::Significant),
+            None,
+            "policy",
+            "Historical objection.",
+        )
+        .unwrap();
+    read(
+        &mut assessment,
+        check["resolutionReference"].as_str().unwrap(),
+        "Historical objection.",
+    );
+    assessment
+        .record(
+            "cumulative",
+            judgment("cumulative", Disposition::Insignificant),
+            None,
+            "policy",
+            "Historical objection.",
+        )
+        .unwrap();
+    assessment
+        .finish("policy", "Historical objection.")
+        .unwrap();
+    assert_eq!(assessment.status(true), "needsReview");
+}
+
+#[test]
+fn empty_inventory_still_requires_discussion_notes_and_independent_cumulative_work() {
+    let mut assessment = fixture("", "", "");
+    assert_eq!(assessment.progress()["unitCount"], 1);
+    note_units(&mut assessment, "");
+    assessment.finish("policy", "").unwrap_err();
+    aggregate(&mut assessment, "");
+    assessment.finish("policy", "").unwrap();
+    assessment
+        .validate("snapshot", "policy", "policy", "")
+        .unwrap();
+    assert_eq!(assessment.status(true), "wouldReapprove");
+    let mut corrupt = serde_json::to_value(&assessment).unwrap();
+    corrupt["checkpoints"]["units"][0]["contentDigest"] = json!("changed");
+    let corrupt: Assessment = serde_json::from_value(corrupt).unwrap();
+    corrupt
+        .validate("snapshot", "policy", "policy", "")
+        .unwrap_err();
+}
+
+#[test]
+fn tampered_note_evidence_and_dependency_records_are_rejected_at_load() {
+    let mut assessment = fixture("discussion", "old", "new");
+    note_units(&mut assessment, "discussion");
+    let unit = units(&assessment).remove(0);
+    let id = unit["unit"]["id"].as_str().unwrap();
+    let original = serde_json::to_value(&assessment).unwrap();
+    for field in ["value", "dependencies"] {
+        let mut document = original.clone();
+        if field == "value" {
+            document["checkpoints"]["notes"][id]["value"]["evidence"] = json!(["policy"]);
+        } else {
+            document["checkpoints"]["notes"][id]["dependencies"] = json!({});
+        }
+
+        let corrupt: Assessment = serde_json::from_value(document).unwrap();
+        corrupt
+            .validate("snapshot", "policy", "policy", "discussion")
+            .unwrap_err();
+    }
+}
+
+#[test]
+fn literal_escaped_hunk_headers_do_not_split_complete_small_hunks() {
+    let assessment = fixture("", "old", "let example = \"\\n@@ -1 +1 @@\";");
+    let id = &assessment.inventory.changes[0].id;
+    let units = assessment
+        .units_for(Some(&format!("{id}:patch")), 0, 100)
+        .unwrap();
+    assert_eq!(units["items"].as_array().unwrap().len(), 1);
+}
+
+#[test]
+fn complete_small_hunks_keep_independent_exact_units() {
+    let original = fixture("", "old\nmiddle\nlast\n", "new\nmiddle\nend\n");
+    let mut assessment = Assessment::new(
+        original.inventory,
+        &["@@ -1 +1 @@\n-old\n+new\n@@ -3 +3 @@\n-last\n+end\n".into()],
+        "snapshot",
+        "policy",
+        "",
+    )
+    .unwrap();
+    let id = assessment.inventory.changes[0].id.clone();
+    let units = assessment
+        .units_for(Some(&format!("{id}:patch")), 0, 100)
+        .unwrap();
+    assert_eq!(units["items"].as_array().unwrap().len(), 2);
+    let mut reconstructed = String::new();
+    for unit in units["items"].as_array().unwrap() {
+        reconstructed.push_str(&read(
+            &mut assessment,
+            unit["reference"].as_str().unwrap(),
+            "",
+        ));
+    }
+    assert_eq!(
+        reconstructed,
+        read(&mut assessment, &format!("{id}:patch"), "")
+    );
+}
+
+#[test]
+fn recursive_judgment_and_resolution_citations_fail_before_replacing_state() {
+    let mut assessment = fixture("discussion", "old", "new");
+    note_units(&mut assessment, "discussion");
+    let id = assessment.inventory.changes[0].id.clone();
+    let mut source = judgment(&id, Disposition::Significant);
+    source.concerns.push("Synthetic changed behavior.".into());
+    let digest = assessment
+        .record(&id, source, None, "policy", "discussion")
+        .unwrap();
+    read(&mut assessment, &format!("judgment:{id}"), "discussion");
+    let mut recursive = judgment(&id, Disposition::Significant);
+    recursive.evidence.push(format!("judgment:{id}"));
+    let before = serde_json::to_value(&assessment).unwrap();
+    assessment
+        .record(&id, recursive, Some(&digest), "policy", "discussion")
+        .unwrap_err();
+    assert_eq!(serde_json::to_value(&assessment).unwrap(), before);
+
+    let check = assessment.checks(0, 1).unwrap()["items"][0].clone();
+    let check_id = check["id"].as_str().unwrap();
+    read(
+        &mut assessment,
+        check["reference"].as_str().unwrap(),
+        "discussion",
+    );
+    let digest = assessment
+        .resolve(
+            check_id,
+            judgment("cumulative", Disposition::Significant),
+            None,
+            "policy",
+            "discussion",
+        )
+        .unwrap();
+    read(
+        &mut assessment,
+        check["resolutionReference"].as_str().unwrap(),
+        "discussion",
+    );
+    let mut recursive = judgment("cumulative", Disposition::Significant);
+    recursive
+        .evidence
+        .push(check["resolutionReference"].as_str().unwrap().to_owned());
+    let before = serde_json::to_value(&assessment).unwrap();
+    assessment
+        .resolve(check_id, recursive, Some(&digest), "policy", "discussion")
+        .unwrap_err();
+    assert_eq!(serde_json::to_value(&assessment).unwrap(), before);
+}

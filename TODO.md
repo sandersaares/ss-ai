@@ -27,14 +27,6 @@ Improvement ideas to revisit when the repo matures.
 
 ## Skill design
 
-- **Checkpoint large reapproval evidence.** Design separately approved native
-  source/discussion units and snapshot-bound notes for cases that cannot fit a
-  regular-context worker. Preserve every raw body and changed-text range,
-  require independent cumulative interaction checks, and evaluate lost-objection
-  risks with synthetic semantic scenarios before enabling summary-based
-  completion. Until then, context exhaustion remains incomplete work, not a
-  semantic refusal or permission to publish. See
-  [assessment responsibilities](packages/ss-ai/docs/reapproval.md#implementation-responsibilities).
 - **Deduplicate the workspace-flag exception list** (`std`, `alloc`,
   `clap/default`, `argh/default`, ...). Currently described twice in
   [`skills/ss-cargo-deps-tidy/SKILL.md`](skills/ss-cargo-deps-tidy/SKILL.md)
