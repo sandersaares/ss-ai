@@ -5,14 +5,15 @@ use std::fs;
 use std::num::NonZeroU32;
 use std::path::{Path, PathBuf};
 
+use crate::{Http, Process};
 use clap::builder::OsStringValueParser;
 use clap::error::ErrorKind;
 use clap::{Args, Parser, Subcommand};
 use ohno::AppError;
 use serde_json::{Value, json};
 use ss_ai_review_context::{
-    increment_diagnostic, normalize_options, prepare, prepare_failure, query, read_capture,
-    read_diagnostics, read_saved,
+    increment_diagnostic, normalize_options, prepare, prepare_capture, prepare_failure, query,
+    read_capture, read_diagnostics, read_saved, write_comment_authorship,
 };
 use ss_ai_runtime::{Clock, caused_by, fail};
 
@@ -27,6 +28,52 @@ struct ContextCli {
 /// Exposes direct and saved queries, preparation, and diagnostic records.
 #[derive(Debug, Subcommand)]
 enum ContextCommand {
+    /// Capture provider evidence into a new immutable local document.
+    Create {
+        #[arg(long)]
+        url: Option<String>,
+        #[arg(long)]
+        platform: Option<String>,
+        #[arg(long)]
+        organization: Option<String>,
+        #[arg(long)]
+        project: Option<String>,
+        #[arg(long)]
+        repository: Option<String>,
+        #[arg(long)]
+        pull_request_id: Option<u32>,
+        #[arg(long)]
+        collection_url: Option<String>,
+        #[arg(long)]
+        output_directory: PathBuf,
+        #[arg(long, default_value = "")]
+        output_prefix: String,
+        #[arg(long)]
+        compare_path: Option<PathBuf>,
+        #[arg(long)]
+        tenant: Option<String>,
+        #[arg(long)]
+        now_utc: Option<String>,
+    },
+    /// Record classifications for an unchanged reading snapshot.
+    SetAuthorship {
+        #[arg(long)]
+        path: PathBuf,
+        #[arg(long)]
+        snapshot_id: String,
+        #[arg(
+            long,
+            conflicts_with = "classification_path",
+            required_unless_present = "classification_path"
+        )]
+        classification: Option<String>,
+        #[arg(
+            long,
+            conflicts_with = "classification",
+            required_unless_present = "classification"
+        )]
+        classification_path: Option<PathBuf>,
+    },
     /// Read a page directly from a capture.
     Read {
         #[arg(long)]
@@ -130,6 +177,33 @@ where
     I: IntoIterator<Item = T>,
     T: Into<OsString> + Clone,
 {
+    run_inner(arguments, clock, None)
+}
+
+/// Routes capture creation with injected provider effects.
+pub(crate) fn run_with_providers<I, T>(
+    arguments: I,
+    clock: &dyn Clock,
+    process: &dyn Process,
+    http: &dyn Http,
+) -> Result<String, AppError>
+where
+    I: IntoIterator<Item = T>,
+    T: Into<OsString> + Clone,
+{
+    run_inner(arguments, clock, Some((process, http)))
+}
+
+/// Keeps local context commands usable without initializing provider effects.
+fn run_inner<I, T>(
+    arguments: I,
+    clock: &dyn Clock,
+    providers: Option<(&dyn Process, &dyn Http)>,
+) -> Result<String, AppError>
+where
+    I: IntoIterator<Item = T>,
+    T: Into<OsString> + Clone,
+{
     let cli =
         match ContextCli::try_parse_from(crate::command::namespace_arguments(arguments, "context"))
         {
@@ -147,6 +221,70 @@ where
             }
         };
     match cli.command {
+        ContextCommand::Create {
+            url,
+            platform,
+            organization,
+            project,
+            repository,
+            pull_request_id,
+            collection_url,
+            output_directory,
+            output_prefix,
+            compare_path,
+            tenant,
+            now_utc,
+        } => {
+            let (process, http) = providers
+                .ok_or_else(|| fail("invalidInput", "Capture requires provider boundaries"))?;
+            let input = json!({"url":url,"platform":platform,"organization":organization,"project":project,"repository":repository,"pullRequestId":pull_request_id,"collectionUrl":collection_url});
+            let mut input = input;
+            if pull_request_id.is_none() {
+                input
+                    .as_object_mut()
+                    .expect("input is an object")
+                    .shift_remove("pullRequestId");
+            }
+            let target = ss_ai_review::capture_target(&input)?;
+            let output = output_directory.join(format!("{output_prefix}pr-context.json"));
+            let url = target
+                .get("webUrl")
+                .and_then(Value::as_str)
+                .ok_or_else(|| fail("invalidInput", "Capture target requires a URL"))?;
+            let time = now_utc
+                .as_deref()
+                .map(str::parse::<jiff::Timestamp>)
+                .transpose()?
+                .unwrap_or_else(|| clock.now());
+            let fetched = capture_timestamp(time);
+            let prepared = prepare_capture(&output, compare_path.as_deref(), url, clock)?;
+            let context =
+                ss_ai_review::collect_capture(&target, tenant.as_deref(), process, http, clock)?;
+            Ok(serde_json::to_string(
+                &prepared.publish(&context, &fetched)?,
+            )?)
+        }
+        ContextCommand::SetAuthorship {
+            path,
+            snapshot_id,
+            classification,
+            classification_path,
+        } => {
+            let text = match classification_path {
+                Some(path) => read_utf8(&path)?,
+                None => classification.unwrap_or_default(),
+            };
+            let value: Value = serde_json::from_str(&text)?;
+            if !value.is_array() {
+                return Err(fail("invalidInput", "Classifications must be a JSON array"));
+            }
+            Ok(serde_json::to_string(&write_comment_authorship(
+                &path,
+                &snapshot_id,
+                &value,
+                clock,
+            )?)?)
+        }
         ContextCommand::Read {
             path,
             options,
@@ -247,6 +385,19 @@ where
             Ok(serde_json::to_string(&value)?)
         }
     }
+}
+
+/// Matches the seven-digit fractional precision of PowerShell's UTC format.
+#[expect(
+    clippy::integer_division,
+    reason = "The capture truncates nanoseconds to the PowerShell tick precision"
+)]
+fn capture_timestamp(time: jiff::Timestamp) -> String {
+    format!(
+        "{}.{:07}Z",
+        time.strftime("%Y-%m-%dT%H:%M:%S"),
+        time.subsec_nanosecond() / 100
+    )
 }
 
 /// Rejects empty explicit selectors instead of silently widening a query.

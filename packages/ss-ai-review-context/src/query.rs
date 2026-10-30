@@ -742,6 +742,49 @@ fn changes<'a>(previous: &'a Value, current: &'a Value) -> Result<Vec<Record<'a>
     Ok(result)
 }
 
+/// Summarizes the same changes exposed by bounded queries without returning bodies.
+pub(crate) fn capture_delta(previous: &Value, current: &Value) -> Result<Value, AppError> {
+    let records = changes(previous, current)?;
+    let mut result = Map::new();
+    for name in [
+        "threadsAdded",
+        "threadsRemoved",
+        "commentsAdded",
+        "commentsRemoved",
+        "commentsEdited",
+        "resolutionChanged",
+    ] {
+        let count = records
+            .iter()
+            .filter(|record| record.data.get("change").and_then(Value::as_str) == Some(name))
+            .count();
+        result.insert(format!("{name}Count"), json!(count));
+    }
+    let old = property(previous, "pullRequest");
+    let new = property(current, "pullRequest");
+    let mut commit_changed = false;
+    for key in ["reviewedSourceCommit", "reviewedMergeBaseCommit"] {
+        let before = property(&old, key);
+        let after = property(&new, key);
+        let changed = !case_insensitive_equal(&before, &after)?;
+        commit_changed |= changed;
+        result.insert(format!("{key}Changed"), json!(changed));
+        let previous_key = match key {
+            "reviewedSourceCommit" => "previousReviewedSourceCommit",
+            _ => "previousReviewedMergeBaseCommit",
+        };
+        result.insert(previous_key.to_owned(), before);
+        result.insert(key.to_owned(), after);
+    }
+    let evidence_changed = evidence_hash(previous)? != evidence_hash(current)?;
+    result.insert("evidenceChanged".to_owned(), json!(evidence_changed));
+    result.insert(
+        "hasChanges".to_owned(),
+        json!(evidence_changed || commit_changed),
+    );
+    Ok(Value::Object(result))
+}
+
 /// Indexes identifiers in capture order, retaining the last value for duplicates.
 fn indexed(values: &[Value]) -> Vec<&Value> {
     let mut positions = HashMap::new();

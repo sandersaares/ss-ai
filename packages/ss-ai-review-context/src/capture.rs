@@ -13,9 +13,9 @@ use crate::{
 };
 
 // These versions bind the native implementation to the PowerShell model.
-const CAPTURE_VERSION: i64 = 3;
-const POLICY_VERSION: &str = "2";
-const CLASSIFICATION_EVIDENCE: &str = "classification:reviewed";
+pub(crate) const CAPTURE_VERSION: i64 = 3;
+pub(crate) const POLICY_VERSION: &str = "2";
+pub(crate) const CLASSIFICATION_EVIDENCE: &str = "classification:reviewed";
 
 /// Reads a local capture and applies its validated semantic decisions.
 ///
@@ -36,7 +36,13 @@ pub fn read_capture(path: &Path, clock: &dyn Clock) -> Result<Value, AppError> {
     if !document.is_object()
         || document.get("schemaVersion").and_then(Value::as_i64) != Some(CAPTURE_VERSION)
     {
-        return Err(fail("invalidInput", "Unsupported capture schema version"));
+        return Err(fail(
+            "invalidInput",
+            format!(
+                "Unsupported capture schema version {}. Capture the pull request again.",
+                property(&document, "schemaVersion")
+            ),
+        ));
     }
     validate_capture_structure(&document)?;
 
@@ -220,7 +226,7 @@ fn validate_fields(value: &Value, fields: &[&str]) -> Result<(), AppError> {
 }
 
 /// Checks evidence that canonical capture producers always include.
-fn validate_capture_structure(document: &Value) -> Result<(), AppError> {
+pub(crate) fn validate_capture_structure(document: &Value) -> Result<(), AppError> {
     for name in ["platform", "repositoryUrl", "pullRequestUrl"] {
         if !nonempty(document.get(name)) {
             return Err(fail("invalidInput", format!("Capture requires {name}")));
@@ -402,7 +408,7 @@ fn valid_identifier(value: &Value) -> bool {
 }
 
 /// Loads the encodings recognized by the shared PowerShell stream reader.
-fn parse_file(bytes: &[u8]) -> Result<Value, AppError> {
+pub(crate) fn parse_file(bytes: &[u8]) -> Result<Value, AppError> {
     let text = if let Some(bytes) = bytes.strip_prefix(&[0xef, 0xbb, 0xbf]) {
         String::from_utf8_lossy(bytes).into_owned()
     } else if let Some(bytes) = bytes.strip_prefix(&[0xff, 0xfe, 0x00, 0x00]) {
@@ -461,7 +467,7 @@ fn decode_utf32(bytes: &[u8], little: bool) -> String {
 }
 
 /// Enforces the sidecar schema before consulting any decision.
-fn validate_decisions(value: &Value) -> Result<(), AppError> {
+pub(crate) fn validate_decisions(value: &Value) -> Result<(), AppError> {
     let invalid = || fail("invalidInput", "Invalid comment authorship record");
     let object = value.as_object().ok_or_else(invalid)?;
     if object.len() != 4
@@ -508,7 +514,7 @@ fn validate_decisions(value: &Value) -> Result<(), AppError> {
 }
 
 /// Applies only decisions for the current capture, policy and exact inputs.
-fn apply_decisions(document: &mut Value, sidecar: &Value) -> Result<(), AppError> {
+pub(crate) fn apply_decisions(document: &mut Value, sidecar: &Value) -> Result<(), AppError> {
     validate_decisions(sidecar)?;
     if property(sidecar, "captureHash").as_str() != Some(&document_hash(document)?) {
         return Err(fail(
@@ -566,7 +572,7 @@ fn apply_decisions(document: &mut Value, sidecar: &Value) -> Result<(), AppError
 }
 
 /// Locates the last matching identifier in either a scalar or an array.
-fn last_matching(value: &Value, id: &str) -> Option<(bool, usize)> {
+pub(crate) fn last_matching(value: &Value, id: &str) -> Option<(bool, usize)> {
     match value {
         Value::Null => None,
         Value::Array(values) => values
@@ -579,22 +585,22 @@ fn last_matching(value: &Value, id: &str) -> Option<(bool, usize)> {
 }
 
 /// Recovers a value after locating its coordinate without changing its shape.
-fn selected(value: &Value, array: bool, index: usize) -> &Value {
+pub(crate) fn selected(value: &Value, array: bool, index: usize) -> &Value {
     if array { &value[index] } else { value }
 }
 
 /// Recovers the exclusive reference corresponding to a validated coordinate.
-fn selected_mut(value: &mut Value, array: bool, index: usize) -> &mut Value {
+pub(crate) fn selected_mut(value: &mut Value, array: bool, index: usize) -> &mut Value {
     if array { &mut value[index] } else { value }
 }
 
 /// Reads missing properties as null, matching the capture model.
-fn property<'a>(value: &'a Value, name: &str) -> &'a Value {
+pub(crate) fn property<'a>(value: &'a Value, name: &str) -> &'a Value {
     value.get(name).unwrap_or(&Value::Null)
 }
 
 /// Treats a scalar as a singleton list, as the PowerShell model does.
-fn array_property(value: &Value, name: &str) -> Vec<Value> {
+pub(crate) fn array_property(value: &Value, name: &str) -> Vec<Value> {
     match property(value, name) {
         Value::Null => Vec::new(),
         Value::Array(values) => values.clone(),
@@ -616,7 +622,7 @@ fn filtered_evidence(value: &Value) -> Vec<Value> {
 }
 
 /// Converts provider identifiers using PowerShell's scalar string conversion.
-fn string_id(value: &Value) -> String {
+pub(crate) fn string_id(value: &Value) -> String {
     match value {
         Value::Null => String::new(),
         Value::String(value) => value.clone(),

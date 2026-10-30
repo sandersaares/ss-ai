@@ -172,6 +172,11 @@ of deciding whether a finding falls within those ranges.
 
 ## Local review context
 
+Capture creation reads provider evidence into an immutable document and a
+separate authorship sidecar. A refresh validates its comparison before provider
+access and reuses classifications only when their evidence still matches.
+Creation reports bounded counts and does not change remote review state.
+
 Local context commands read captured pull request evidence without contacting
 the provider. They select bounded pages of metadata, discussion, search
 results, or changes between captures. Saved requests bind their selectors and

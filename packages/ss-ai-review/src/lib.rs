@@ -2,16 +2,19 @@
 #![cfg_attr(docsrs, feature(doc_cfg))]
 
 mod ado_approval;
+mod ado_capture;
 mod ado_publication;
 mod api;
 mod approval;
 mod assessment {
     pub(crate) use ss_ai_assessment::{Assessment, Disposition, Judgment};
 }
+mod capture;
 mod clock;
 mod command;
 mod discovery;
 mod github_approval;
+mod github_capture;
 mod identity;
 mod journal;
 mod json;
@@ -27,6 +30,7 @@ mod error {
     pub(crate) use ss_ai_runtime::{caused_by, classification, fail};
 }
 
+pub use capture::{capture_target, collect_capture};
 pub use command::{run, run_in};
 pub use ss_ai_runtime::{
     Clock, NativeProcess, Process, ProcessOutput, SystemClock, classification,

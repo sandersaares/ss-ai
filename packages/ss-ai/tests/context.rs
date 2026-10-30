@@ -68,23 +68,15 @@ impl Fixture {
         let scripts = repository().join("skills/ss-review/scripts");
         let mut command = Command::new("pwsh");
         command.args(["-NoProfile", "-NonInteractive"]);
-        if script == "Set-CommentAuthorship.ps1" {
-            command
-                .args(["-File"])
-                .arg(scripts.join(script))
-                .args(arguments);
-        } else {
-            // The executable adapters now forward to native code; invoke the
-            // retained PowerShell model directly to test a real language handoff.
-            command
-                .args(["-Command", Self::POWERSHELL_MODEL])
-                .env("CONTEXT_LIB", scripts.join("lib"))
-                .env("CONTEXT_OPERATION", script)
-                .env(
-                    "CONTEXT_ARGUMENTS",
-                    serde_json::to_string(arguments).unwrap(),
-                );
-        }
+        // Invoke the retained model rather than its native executable adapter.
+        command
+            .args(["-Command", Self::POWERSHELL_MODEL])
+            .env("CONTEXT_LIB", scripts.join("lib"))
+            .env("CONTEXT_OPERATION", script)
+            .env(
+                "CONTEXT_ARGUMENTS",
+                serde_json::to_string(arguments).unwrap(),
+            );
         command.current_dir(&self.root).output().unwrap()
     }
 
@@ -143,6 +135,14 @@ impl Fixture {
             'Get-ReviewInputDiagnostics.ps1' {
                 $record = Read-WorkflowData -Kind inputDiagnostics -Path $values.Path
                 [Console]::WriteLine((ConvertTo-Json -InputObject $record -Depth 10 -Compress))
+            }
+            'Set-CommentAuthorship.ps1' {
+                $entries = ConvertFrom-JsonVerbatim -Text $values.Classification
+                $lock = Open-WorkflowDataLock -Path ($values.Path + '.authorship.json')
+                try {
+                    $summary = Save-CommentAuthorship -Path $values.Path -SnapshotId $values.SnapshotId -Classification $entries
+                } finally { $lock.Dispose() }
+                [Console]::WriteLine((ConvertTo-Json -Compress -InputObject $summary -Depth 32))
             }
             default { throw 'Unsupported PowerShell model operation' }
         }

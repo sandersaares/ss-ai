@@ -121,6 +121,17 @@ automatic-reapproval assessment.
 
 ## Local review context
 
+`ss-ai context create` collects a pull request from its URL or explicit
+coordinates and writes an immutable capture and authorship sidecar under the
+requested output directory and prefix. A comparison path binds the refresh to
+the same pull request and reuses matching classification decisions. The JSON
+result contains bounded counts and change summaries. Creation does not publish
+comments or change approvals.
+
+`ss-ai context set-authorship` records a classification batch against a reading
+snapshot, using either `--classification` or `--classification-path`. It leaves
+the capture itself unchanged.
+
 ```powershell
 #Requires -Version 7.6
 
@@ -141,7 +152,7 @@ ss-ai context read-saved --request-path "{{REQUEST_PATH}}"
 
 Saved reads replay the last page unless `--next` explicitly advances it.
 `--restart` binds the same selectors to current evidence after a capture changes.
-The commands do not contact a provider. Their pages contain at most 16 KiB of
+The read and preparation commands do not contact a provider. Their pages contain at most 16 KiB of
 serialized UTF-8 output including the final newline; long text continues at
 UTF-16 code-unit offsets. Literal search uses Unicode simple case folding,
 without normalization or multi-character expansion. The skill's

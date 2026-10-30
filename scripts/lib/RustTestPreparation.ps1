@@ -241,7 +241,7 @@ function New-RustTestPreparation {
         $providerSource = Join-Path $RepositoryRoot 'packages/ss-ai/tests/support/provider.rs'
         $provider = Join-Path $owned $(if ($IsWindows) { 'provider.exe' } else { 'provider' })
         $providerFailure = $null
-        $requiresProvider = -not $TestTarget -or $TestTarget -contains 'native'
+        $requiresProvider = -not $TestTarget -or $TestTarget -contains 'native' -or $TestTarget -contains 'capture_parity'
         if ($requiresProvider) {
             try {
                 Invoke-TestPhase -Name 'prepare provider (compilerInvocations=1)' -Action {
@@ -380,7 +380,7 @@ function Read-RustTestPreparation {
         }
     }
 
-    $requiresProvider = -not $TestTarget -or $TestTarget -contains 'native'
+    $requiresProvider = -not $TestTarget -or $TestTarget -contains 'native' -or $TestTarget -contains 'capture_parity'
     if ($record.status -ceq 'providerFailed') {
         if (-not $requiresProvider -or $null -ne $record.provider -or
             $record.providerFailure -isnot [string] -or [string]::IsNullOrWhiteSpace($record.providerFailure)) {
@@ -518,13 +518,13 @@ function Invoke-PreparedRustTests {
 
             $TestTarget = @($metadata.packages |
                 Where-Object id -In $metadata.workspace_members |
-                ForEach-Object targets | Where-Object { $_.kind -contains 'test' -and $_.name -ne 'native' } |
+                ForEach-Object targets | Where-Object { $_.kind -contains 'test' -and $_.name -notin @('native', 'capture_parity') } |
                 Select-Object -ExpandProperty name -Unique)
             $selection += @('--lib', '--bins')
             # Explicit target selectors omit doctests, so run those separately below.
             $includeDoctests = $true
         } else {
-            $TestTarget = @($TestTarget | Where-Object { $_ -ne 'native' })
+            $TestTarget = @($TestTarget | Where-Object { $_ -notin @('native', 'capture_parity') })
             if (-not $TestTarget) {
                 throw 'All selected Rust tests are blocked by provider preparation failure.'
             }
