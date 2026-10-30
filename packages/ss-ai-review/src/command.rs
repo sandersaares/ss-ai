@@ -24,6 +24,7 @@ use crate::selection::{self, State, valid_session};
 use crate::target::{Platform, Target, escape};
 use crate::transport::Transport;
 use crate::{Clock, Http, Process};
+use ss_ai_assessment::{ContextRequest, SourceSide};
 
 /// Named-input command hierarchy used by the installed skills.
 ///
@@ -111,6 +112,21 @@ enum Autoreapprove {
         reference: String,
         #[arg(long, default_value = "0")]
         offset: usize,
+        #[arg(long, default_value = "4096")]
+        limit: NonZeroUsize,
+    },
+    /// Register required captured-source context and return its first bounded page.
+    SourceContext {
+        #[command(flatten)]
+        input: WorkInput,
+        #[arg(long)]
+        change_id: String,
+        #[arg(long)]
+        side: SourceSide,
+        #[arg(long)]
+        start_line: NonZeroUsize,
+        #[arg(long)]
+        line_count: NonZeroUsize,
         #[arg(long, default_value = "4096")]
         limit: NonZeroUsize,
     },
@@ -434,6 +450,7 @@ fn execute(
             action @ (Autoreapprove::Prepare(_)
             | Autoreapprove::Assessment { .. }
             | Autoreapprove::Read { .. }
+            | Autoreapprove::SourceContext { .. }
             | Autoreapprove::Judge { .. }
             | Autoreapprove::Complete(_)) => work(action, process, clock)?,
             Autoreapprove::Discover {
@@ -591,6 +608,25 @@ fn work(
             WorkAction::Read {
                 reference,
                 offset,
+                limit,
+            },
+        ),
+        Autoreapprove::SourceContext {
+            input,
+            change_id,
+            side,
+            start_line,
+            line_count,
+            limit,
+        } => (
+            input,
+            WorkAction::SourceContext {
+                request: ContextRequest {
+                    change_id,
+                    side,
+                    start_line,
+                    line_count,
+                },
                 limit,
             },
         ),

@@ -38,6 +38,37 @@ classified_error!(
     "Assessment binding, context selection, or completion is invalid"
 );
 classified_error!(
+    InvalidSourceEvidence,
+    "invalidState",
+    "Source evidence does not match the captured inventory"
+);
+classified_error!(
+    InvalidContextRange,
+    "invalidInput",
+    "Context range must contain complete existing captured-source lines"
+);
+classified_error!(
+    InvalidContextBinding,
+    "invalidState",
+    "Source context binding changed"
+);
+
+/// Reconstruction failures keep their parser diagnostic without becoming opaque evidence.
+#[ohno::error]
+pub(crate) struct InvalidSourcePatch;
+
+impl InvalidSourcePatch {
+    pub(crate) fn from_error(error: &ohno::AppError) -> AssessmentError {
+        AssessmentError::caused_by(Self::caused_by(
+            ss_ai_runtime::fail(
+                "invalidState",
+                format!("Invalid exact source patch: {error}"),
+            )
+            .into_std_error(),
+        ))
+    }
+}
+classified_error!(
     ReadBeyondEvidence,
     "invalidState",
     "Evidence read exceeds captured content"
@@ -70,7 +101,7 @@ classified_error!(
 classified_error!(
     IncompleteEvidenceReads,
     "invalidState",
-    "Assessment requires complete policy, discussion, and readable changed-source reads; inspect assessment read progress and continue missing evidence, not semantic uncertainty"
+    "Assessment requires complete policy, discussion, required patch, and requested context reads; inspect read progress and continue missing evidence, not semantic uncertainty"
 );
 classified_error!(
     OversizedResponse,
@@ -96,7 +127,7 @@ classified_error!(UnknownChange, "invalidInput", "Unknown change identifier");
 classified_error!(
     UncitedChange,
     "invalidState",
-    "Change judgment must cite that change"
+    "Change judgment must cite its required patch reference"
 );
 classified_error!(
     UnavailableSource,
@@ -122,7 +153,7 @@ classified_error!(UnknownEvidenceSide, "invalidInput", "Unknown evidence side");
 classified_error!(
     UnreadableEvidence,
     "invalidInput",
-    "This evidence side has no readable text; record a non-insignificant judgment"
+    "This captured source side has no readable text"
 );
 classified_error!(
     IncompleteInventory,
@@ -216,7 +247,7 @@ mod tests {
     #[test]
     fn assessment_failures_keep_distinct_types_and_categories() {
         let mut assessment =
-            Assessment::new(inventory(), "snapshot", "policy", "discussion").unwrap();
+            Assessment::new(inventory(), &[], "snapshot", "policy", "discussion").unwrap();
         assert_failure::<IncompleteCoverage>(
             assessment.finish("policy", "discussion").unwrap_err(),
             "invalidState",

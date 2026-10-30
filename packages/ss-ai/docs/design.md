@@ -119,7 +119,14 @@ eligibility or assessment.
 
 Native commands select the installed policy, assessment contract, and
 discussion, expose bounded source reads, and require exact per-change and
-cumulative judgments. Model-visible discussion retains descriptions, review and
+cumulative judgments. Required source documents contain every changed hunk and
+operation, with exact endpoint bindings and initial surrounding lines. Complete
+captured sides remain available; an assessor requests exact line ranges when
+the initial patch does not establish behavior or interactions. Every requested
+range becomes required evidence. This reduces unchanged input without removing
+paths, merge-derived changes, or force-push removals from the comparison.
+Selecting enough context remains the assessor's responsibility; native coverage
+proves complete delivery, not semantic sufficiency. Model-visible discussion retains descriptions, review and
 comment bodies, authorship, threading, and source locations. Identical inline
 excerpts share one text entry without merging their comments or revision bindings.
 Approval history reconstruction stays in native evidence rather than consuming

@@ -125,6 +125,23 @@ Describe 'Automatic reapproval repository scope instructions' {
         $script:Prompt | Should -Match 'compact presentation does not reduce coverage'
     }
 
+    It 'requires exact patches and requested captured context without partial semantic handoffs' {
+        $assignment = Get-Content -LiteralPath (Join-Path $skill 'assessment.md') -Raw
+        $assignment | Should -Match 'Read each complete `CHANGE_ID:patch` document'
+        $assignment | Should -Match 'Full captured `:old` and `:new` sides\s+remain optional context'
+        $assignment | Should -Match 'Every requested range\s+becomes required evidence'
+        $assignment | Should -Match 'Do not summarize partial changes'
+        $assignment | Should -Match 'including replay'
+        $script:Recipes | Should -Match '`sourceEvidenceDigest` binds the manifest'
+        $script:Recipes | Should -Match 'never\s+a three-dot PR diff'
+        $script:Recipes | Should -Match 'complete policy, required patch,\s+and applicable requested context reads, regardless of disposition'
+        $help = & ss-ai autoreapprove source-context --help | Out-String
+        $LASTEXITCODE | Should -Be 0
+        foreach ($argument in @('change-id', 'side', 'start-line', 'line-count', 'limit', 'snapshot-digest')) {
+            $help | Should -Match "\-\-$argument"
+        }
+    }
+
     It 'reports every in-range result with linked identity and service approval time' {
         $script:Prompt | Should -Match 'final report MUST include a Markdown table with one row for every in-range\s+candidate returned across all final `results` pages'
         $script:Prompt | Should -Match 'retained decisions,\s+already-valid approvals, no-prior-approval and ineligible outcomes, and failures'
@@ -177,7 +194,7 @@ Describe 'Automatic reapproval provider fixtures' {
         $recipes = Get-Content -LiteralPath (Join-Path $skill 'commands.md') -Raw
         $help = & ss-ai autoreapprove --help | Out-String
         $LASTEXITCODE | Should -Be 0
-        foreach ($command in @('discover', 'results', 'inspect', 'refresh', 'prepare', 'assessment', 'read', 'judge', 'complete', 'publish', 'notify')) {
+        foreach ($command in @('discover', 'results', 'inspect', 'refresh', 'prepare', 'assessment', 'read', 'source-context', 'judge', 'complete', 'publish', 'notify')) {
             $recipes | Should -Match "(?m)^ss-ai autoreapprove $command "
             $help | Should -Match "(?m)^\s+$command\s"
         }
