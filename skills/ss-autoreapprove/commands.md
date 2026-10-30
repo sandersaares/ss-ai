@@ -94,6 +94,9 @@ exact `context` binding. Continue through `read` using that reference and
 `requestedContextCount` and `nextContextReference` at assessment and change level
 to resume required context. Full `:old` / `:new` reads remain available as
 optional context. All offsets count Unicode scalar values, not UTF-8 bytes.
+Registering a new range removes that change's unit notes and judgment, their
+dependents, the discussion aggregate, all check dispositions, and the cumulative
+judgment. After reading the range, rebuild the missing records.
 Invalid or unavailable requested context is a retained incomplete-evidence
 failure, never a reason to publish a needs-review notice. Finalized assessments
 allow replay of existing evidence but no new ranges.

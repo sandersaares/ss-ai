@@ -3712,6 +3712,87 @@ fn source_context_missing_delivery_and_failed_acquisition_cannot_authorize_effec
     }
 }
 
+/// A later required range makes earlier conclusions incomplete across journal reloads.
+#[test]
+fn newly_requested_context_requires_new_judgments_on_both_providers() {
+    let _guard = PROCESS_TEST_LOCK
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner);
+    let sources = Sources::new();
+    for ado in [false, true] {
+        let scope = TempDir::new().unwrap();
+        let provider = sources.provider(ado);
+        let (snapshot, prepared) = prepare(scope.path(), &provider, true);
+        let id = prepared["changes"][0]["id"].as_str().unwrap();
+        for reference in ["policy".into(), "discussion".into(), format!("{id}:patch")] {
+            read_evidence(scope.path(), &provider, &snapshot, &reference, None, None);
+        }
+        let judgment = |id: &str, evidence: String| {
+            vec![
+                "--change-id".into(),
+                id.into(),
+                "--disposition".into(),
+                "insignificant".into(),
+                "--rationale".into(),
+                "The examined evidence is editorial.".into(),
+                "--evidence".into(),
+                evidence,
+                "--evidence".into(),
+                "policy".into(),
+            ]
+        };
+        let change_judgment = judgment(id, format!("{id}:patch"));
+        let cumulative = judgment("cumulative", "discussion".into());
+        work(
+            scope.path(),
+            &provider,
+            "judge",
+            &snapshot,
+            &change_judgment,
+        )
+        .unwrap();
+        work(scope.path(), &provider, "judge", &snapshot, &cumulative).unwrap();
+        let context = work(
+            scope.path(),
+            &provider,
+            "source-context",
+            &snapshot,
+            &[
+                "--change-id".into(),
+                id.into(),
+                "--side".into(),
+                "new".into(),
+                "--start-line".into(),
+                "1".into(),
+                "--line-count".into(),
+                "1".into(),
+            ],
+        )
+        .unwrap();
+        let reference = context["reference"].as_str().unwrap();
+        read_evidence(scope.path(), &provider, &snapshot, reference, None, None);
+        let resumed = work(scope.path(), &provider, "prepare", &snapshot, &[]).unwrap();
+        assert!(resumed["changes"][0]["decision"].is_null());
+        assert!(resumed["cumulative"].is_null());
+        work(scope.path(), &provider, "complete", &snapshot, &[]).unwrap_err();
+        work(
+            scope.path(),
+            &provider,
+            "judge",
+            &snapshot,
+            &change_judgment,
+        )
+        .unwrap();
+        work(scope.path(), &provider, "complete", &snapshot, &[]).unwrap_err();
+        work(scope.path(), &provider, "judge", &snapshot, &cumulative).unwrap();
+        assert_eq!(
+            work(scope.path(), &provider, "complete", &snapshot, &[]).unwrap()["status"],
+            "wouldReapprove"
+        );
+        assert_eq!(provider.writes.get(), 0);
+    }
+}
+
 /// Contending commands advance only when the test releases the previous transaction.
 struct ContextClock {
     worker: usize,

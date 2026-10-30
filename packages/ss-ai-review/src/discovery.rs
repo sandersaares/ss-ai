@@ -27,7 +27,7 @@ use crate::{Clock, Process};
 use ss_ai_assessment::{ContextRequest, Note};
 
 /// Checkpoint notes and dependency-bound aggregates require a fresh assessment contract.
-const RUN_SCHEMA: u32 = 13;
+const RUN_SCHEMA: u32 = 14;
 
 /// Durable metadata-only stage; recent candidates still require approval assessment.
 #[derive(Debug, Deserialize, Serialize)]
@@ -431,7 +431,7 @@ impl DiscoveryRecord {
                 error,
             )
         })?;
-        // Read offsets and judgments cannot be reinterpreted under another discussion contract.
+        // Earlier contracts cannot establish that judgments considered all requested context.
         if document.get("schemaVersion") != Some(&json!(RUN_SCHEMA)) {
             return Err(fail(
                 "invalidState",

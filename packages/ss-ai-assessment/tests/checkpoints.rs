@@ -6,10 +6,12 @@
 )]
 
 use std::collections::BTreeMap;
+use std::num::NonZeroUsize;
 
 use serde_json::{Value, json};
 use ss_ai_assessment::{
-    Assessment, Change, Content, Disposition, Inventory, Judgment, Note, Side, change_id,
+    Assessment, Change, Content, ContextRequest, Disposition, Inventory, Judgment, Note, Side,
+    SourceSide, change_id,
 };
 
 /// Replacements retain exact CRLF and final-newline semantics without executing source.
@@ -962,6 +964,134 @@ fn replacing_change_judgment_invalidates_resolutions_citing_its_check() {
             .unwrap()["resolutionDigest"]
             .is_null()
     );
+}
+
+#[test]
+fn new_context_invalidates_affected_notes_aggregates_and_all_check_dispositions() {
+    let mut assessment = fixture("discussion", "old", "new");
+    note_units(&mut assessment, "discussion");
+    let all = units(&assessment);
+    for unit in &all {
+        let mut observation = note(unit["reference"].as_str().unwrap());
+        observation.concerns.push("Synthetic concern".into());
+        assessment
+            .note(
+                unit["unit"]["id"].as_str().unwrap(),
+                observation,
+                unit["noteDigest"].as_str(),
+                "policy",
+                "discussion",
+            )
+            .unwrap();
+        read(
+            &mut assessment,
+            unit["noteReference"].as_str().unwrap(),
+            "discussion",
+        );
+    }
+    let id = assessment.inventory.changes[0].id.clone();
+    assessment
+        .record(
+            &id,
+            judgment(&id, Disposition::Insignificant),
+            None,
+            "policy",
+            "discussion",
+        )
+        .unwrap();
+    read(&mut assessment, &format!("judgment:{id}"), "discussion");
+    assessment
+        .note(
+            "discussion",
+            note("discussion"),
+            None,
+            "policy",
+            "discussion",
+        )
+        .unwrap();
+    read(&mut assessment, "discussion-note", "discussion");
+    let checks = assessment.checks(0, 100).unwrap()["items"]
+        .as_array()
+        .unwrap()
+        .clone();
+    for check in &checks {
+        read(
+            &mut assessment,
+            check["reference"].as_str().unwrap(),
+            "discussion",
+        );
+        assessment
+            .resolve(
+                check["id"].as_str().unwrap(),
+                judgment("cumulative", Disposition::Insignificant),
+                None,
+                "policy",
+                "discussion",
+            )
+            .unwrap();
+        read(
+            &mut assessment,
+            check["resolutionReference"].as_str().unwrap(),
+            "discussion",
+        );
+    }
+    assessment
+        .record(
+            "cumulative",
+            judgment("cumulative", Disposition::Insignificant),
+            None,
+            "policy",
+            "discussion",
+        )
+        .unwrap();
+    let request = ContextRequest {
+        change_id: id.clone(),
+        side: SourceSide::New,
+        start_line: NonZeroUsize::MIN,
+        line_count: NonZeroUsize::MIN,
+    };
+    let first = assessment
+        .source_context(request, 1, "policy", "discussion")
+        .unwrap();
+    assessment
+        .validate("snapshot", "policy", "policy", "discussion")
+        .unwrap();
+    let current = units(&assessment);
+    for unit in &current {
+        assert_eq!(unit["completed"], unit["unit"]["reference"] == "discussion");
+    }
+    let remaining = assessment.checks(0, 100).unwrap();
+    let remaining = remaining["items"].as_array().unwrap();
+    assert!(!remaining.is_empty());
+    assert!(
+        remaining
+            .iter()
+            .all(|check| check["resolutionDigest"].is_null())
+    );
+    assert!(remaining.iter().all(|check| {
+        !checks.iter().any(|old| {
+            old["id"] == check["id"] && old["origin"].as_str().unwrap().starts_with("judgment:")
+        })
+    }));
+    let summary = assessment.summary(0, 10, "policy", "discussion").unwrap();
+    assert!(summary["changes"][0]["decision"].is_null());
+    assert!(summary["discussionNoteDigest"].is_null());
+    assert!(summary["cumulative"].is_null());
+    assessment.finish("policy", "discussion").unwrap_err();
+    read(
+        &mut assessment,
+        first["reference"].as_str().unwrap(),
+        "discussion",
+    );
+    assessment
+        .record(
+            &id,
+            judgment(&id, Disposition::Insignificant),
+            None,
+            "policy",
+            "discussion",
+        )
+        .unwrap_err();
 }
 
 #[test]

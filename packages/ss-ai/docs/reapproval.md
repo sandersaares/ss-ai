@@ -99,8 +99,12 @@ Patches retain all changed text with three surrounding lines. Complete captured
 readable sides remain available for deliberate context reads. Assessors request
 exact line ranges when hunks do not establish enclosing logic, interfaces,
 invariants, interactions, or an objection's relevance. Requested ranges become
-mandatory evidence. Native coverage cannot prove that the assessor chose enough
-context; needed evidence outside the captured sides remains explicitly missing.
+mandatory evidence. A newly registered range invalidates the affected change's
+unit notes and judgment, their dependents, the discussion aggregate, all check
+dispositions, and the cumulative judgment. Repeating an existing request leaves
+records intact. Native coverage cannot prove
+that the assessor chose enough context; needed evidence outside the captured
+sides remains explicitly missing.
 There is no filename, size, or edit-category exemption.
 
 The orchestrator dispatches a fresh GPT 6.1 Sol assessment worker per eligible PR
@@ -241,7 +245,7 @@ or forgets such effects.
 An existing publication receipt also requires retained host evidence of a
 preflight-only operation; missing host history is not proof that no write occurred.
 
-`discovery.rs` owns the schema-13 run, recovery record, and result metadata.
+`discovery.rs` owns the schema-14 run, recovery record, and result metadata.
 Incompatible run schemas require a fresh run; retained effects require
 reconciliation with their original utility version.
 Discovery discards draft PRs before recency checks. Valid older records drop
@@ -506,8 +510,9 @@ clock or retry timer.
 
 The required patch manifest has its own digest; completion also binds all
 requested ranges. Every command validates these against retained source.
-New context can block completion without erasing existing judgments; judgment
-replacement still requires the current digest. Failed context acquisition stays
+New context removes the affected change's unit notes and judgment, their
+dependents, the discussion aggregate, check dispositions, and the cumulative
+judgment. Unrelated change judgments remain intact. Failed context acquisition stays
 in the run as incomplete evidence, with no approval or notice authority.
 Incompatible run contracts require a new run rather than migrated read receipts.
 

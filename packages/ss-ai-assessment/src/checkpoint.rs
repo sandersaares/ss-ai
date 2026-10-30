@@ -693,6 +693,40 @@ impl Assessment {
         Ok(checks)
     }
 
+    /// A new mandatory range makes prior observations of that change incomplete.
+    pub(crate) fn invalidate_new_context(
+        &mut self,
+        change_id: &str,
+        policy: &str,
+        discussion: &str,
+    ) -> Result<(), AssessmentError> {
+        let notes = self
+            .checkpoints
+            .units
+            .iter()
+            .filter(|unit| unit.reference == format!("{change_id}:patch"))
+            .map(|unit| unit.id.clone())
+            .collect::<Vec<_>>();
+        for id in notes {
+            if self.checkpoints.notes.contains_key(&id) {
+                self.invalidate(&format!("note:{id}"), policy, discussion)?;
+                self.checkpoints.notes.remove(&id);
+            }
+        }
+        self.invalidate(&format!("judgment:{change_id}"), policy, discussion)?;
+        self.decisions.remove(change_id);
+        self.checkpoints.aggregates.remove(change_id);
+
+        // Discussion aggregation and check dispositions require every requested range.
+        if self.checkpoints.discussion.is_some() {
+            self.invalidate("discussion-note", policy, discussion)?;
+            self.checkpoints.discussion = None;
+        }
+        self.checkpoints.resolutions.clear();
+        self.remove_obsolete_reads(policy, discussion);
+        Ok(())
+    }
+
     /// Replacement removes every transitive dependent; unrelated notes remain reusable.
     pub(crate) fn invalidate(
         &mut self,

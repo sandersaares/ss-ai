@@ -434,6 +434,8 @@ impl Assessment {
             if self.complete {
                 return Err(error::ImmutableAssessment::classified());
             }
+            // Newly required evidence must be considered by affected notes and conclusions.
+            self.invalidate_new_context(&context.request.change_id, policy, discussion)?;
             self.contexts.insert(reference.clone(), context);
         }
         self.read(&reference, 0, limit, policy, discussion)
