@@ -1584,7 +1584,9 @@ dependencies = [
 name = "ss-ai-review-workflow-fuzz"
 version = "0.1.0"
 dependencies = [
+ "jiff",
  "libfuzzer-sys",
+ "ohno",
  "serde_json",
  "ss-ai-review-workflow",
  "ss-ai-runtime",

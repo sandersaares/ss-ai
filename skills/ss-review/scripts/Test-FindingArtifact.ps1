@@ -52,16 +52,10 @@ if ($PSCmdlet.ParameterSetName -eq 'Identifiers') {
     return
 }
 
-. "$PSScriptRoot\lib\JsonValue.ps1"
-. "$PSScriptRoot\lib\PullRequestModel.ps1"
-. "$PSScriptRoot\lib\WorkflowData.ps1"
-. "$PSScriptRoot\lib\FindingModel.ps1"
-. "$PSScriptRoot\lib\ReviewWork.ps1"
-
-$result = Get-ReviewWorkValidation -ManifestPath $ManifestPath -ArtifactDirectory $Path
-
-$result | ConvertTo-Json -Depth 32 -Compress
-
+. "$PSScriptRoot\lib\NativeWorkflowBridge.ps1"
+$output = Invoke-NativeReviewWorkflow -Arguments @('validate-review-work', "--manifest-path=$ManifestPath", "--artifact-directory=$Path")
+$result = ConvertFrom-Json -InputObject $output -AsHashtable
+Write-Output $output
 if (-not $result['isValid']) {
     exit 1
 }

@@ -42,7 +42,8 @@ if ($Suite -in @('All', 'Pester')) {
     $nativeConsumers = @(
         'Generate-Inventory.Tests.ps1', 'Graders.Tests.ps1',
         'SsAutoreapprove.Tests.ps1',
-        'SsReviewCoverageBatch.Tests.ps1', 'SsReviewFindingConsolidation.Tests.ps1',
+        'SsReviewCoverageBatch.Tests.ps1', 'SsReviewFocusAreaCache.Tests.ps1', 'SsReviewFocusAreaPreparation.Tests.ps1',
+        'SsReviewInstructionSources.Tests.ps1', 'SsReviewFindingConsolidation.Tests.ps1',
         'SsReviewFindingDecisions.Tests.ps1',
         'SsReviewFindingMarkdown.Tests.ps1', 'SsReviewFindingModel.Tests.ps1',
         'SsReviewGitDiff.Tests.ps1', 'SsReviewPublicationAzureDevOps.Tests.ps1',
@@ -83,15 +84,20 @@ if ($Suite -in @('All', 'Pester')) {
     }
 
     $sharedFileTests = @($selected | Where-Object Name -EQ 'SsReviewSharedFiles.Tests.ps1')
-    if ($nativeReady -and $sharedFileTests.Count -gt 0) {
+    $workerInputTests = @($selected | Where-Object Name -EQ 'SsReviewWorkerInput.Tests.ps1')
+    $concurrencyTargets = @()
+    if ($sharedFileTests.Count -gt 0) { $concurrencyTargets += @('finding_plans', 'audit', 'review_work') }
+    if ($workerInputTests.Count -gt 0) { $concurrencyTargets += 'worker_input' }
+    if ($nativeReady -and $concurrencyTargets.Count -gt 0) {
         Push-Location -LiteralPath (Split-Path -Parent $PSScriptRoot)
         try {
             # Prepare the process helper before tests acquire any shared locks.
-            $messages = @(& cargo test --package ss-ai-review-workflow --test finding_plans --test audit --no-run --locked --message-format json)
+            $targetArguments = @($concurrencyTargets | ForEach-Object { '--test'; $_ })
+            $messages = @(& cargo test --package ss-ai-review-workflow @targetArguments --no-run --locked --message-format json)
             if ($LASTEXITCODE -ne 0) {
                 throw 'Building the concurrency test prerequisites failed.'
             }
-            foreach ($target in @('finding_plans', 'audit')) {
+            foreach ($target in $concurrencyTargets) {
                 $executables = @($messages | ForEach-Object {
                     $message = $_ | ConvertFrom-Json
                     if ($message.reason -eq 'compiler-artifact' -and $message.target.name -eq $target -and $message.executable) {
@@ -105,7 +111,7 @@ if ($Suite -in @('All', 'Pester')) {
             }
         } catch {
             Write-Host "Pester prerequisite failed: $_"
-            $blockedPesterPaths += @($sharedFileTests.FullName)
+            $blockedPesterPaths += @($sharedFileTests.FullName) + @($workerInputTests.FullName)
             $failed = $true
         } finally {
             Pop-Location
@@ -136,6 +142,8 @@ if ($Suite -in @('All', 'Pester')) {
     $originalPath = $env:PATH
     $originalFindingTestExecutable = $env:SS_AI_FINDING_TEST_EXECUTABLE
     $originalAuditTestExecutable = $env:SS_AI_AUDIT_TEST_EXECUTABLE
+    $originalReviewWorkTestExecutable = $env:SS_AI_REVIEW_WORK_TEST_EXECUTABLE
+    $originalWorkerInputTestExecutable = $env:SS_AI_WORKER_INPUT_TEST_EXECUTABLE
     $sharedTestCopies = @{}
     try {
         if ($nativeReady) {
@@ -152,9 +160,13 @@ if ($Suite -in @('All', 'Pester')) {
                 [IO.File]::SetUnixFileMode($copy, [IO.File]::GetUnixFileMode($executable))
             }
         }
-        if ($sharedTestCopies.Count -gt 0) {
+        if ($sharedTestCopies.ContainsKey('finding_plans')) {
             $env:SS_AI_FINDING_TEST_EXECUTABLE = $sharedTestCopies['finding_plans']
             $env:SS_AI_AUDIT_TEST_EXECUTABLE = $sharedTestCopies['audit']
+            $env:SS_AI_REVIEW_WORK_TEST_EXECUTABLE = $sharedTestCopies['review_work']
+        }
+        if ($sharedTestCopies.ContainsKey('worker_input')) {
+            $env:SS_AI_WORKER_INPUT_TEST_EXECUTABLE = $sharedTestCopies['worker_input']
         }
 
         $result = Invoke-Pester -Configuration $configuration
@@ -162,6 +174,8 @@ if ($Suite -in @('All', 'Pester')) {
         $env:PATH = $originalPath
         $env:SS_AI_FINDING_TEST_EXECUTABLE = $originalFindingTestExecutable
         $env:SS_AI_AUDIT_TEST_EXECUTABLE = $originalAuditTestExecutable
+        $env:SS_AI_REVIEW_WORK_TEST_EXECUTABLE = $originalReviewWorkTestExecutable
+        $env:SS_AI_WORKER_INPUT_TEST_EXECUTABLE = $originalWorkerInputTestExecutable
         foreach ($copy in $sharedTestCopies.Values) {
             if ([IO.File]::Exists($copy)) { [IO.File]::Delete($copy) }
         }

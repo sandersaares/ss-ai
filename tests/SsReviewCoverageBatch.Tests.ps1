@@ -314,6 +314,54 @@ Describe 'Atomic assessment batches' {
         $result.assessmentCount | Should -Be 2
     }
 
+    It 'preserves a PowerShell journal through script failure, resume, batch retry and native artifact completion' {
+        $artifact = Read-FindingArtifact -Path $script:Artifact
+        $id = Add-FindingToArtifact -Document $artifact -Origin reviewer -Finding @{
+            title = 'Preserve data'; description = 'A concrete problem.'; reasoning = 'Evidence supports this.'
+            consequence = 'Data can be lost.'; recommendedAction = 'Retain data.'; anchor = @{ kind = 'file'; path = 'old.rs' }
+        }
+        Write-FindingArtifact -Path $script:Artifact -Document $artifact
+        $script:Batch.findingIds = @($id)
+        $draft = Join-Path $script:Root 'batch.json'
+        [IO.File]::WriteAllText($draft, (ConvertTo-JsonText -Value $script:Batch))
+
+        & "$script:Scripts\Set-ReviewWorkerFailure.ps1" -QueuePath $script:Queue -Reason 'Worker stopped.' | Out-Null
+        $failed = [IO.File]::ReadAllText($script:Queue)
+        { & "$script:Scripts\Get-NextReviewItem.ps1" -QueuePath $script:Queue } | Should -Throw
+        { & "$script:Scripts\Set-ReviewAssessmentBatch.ps1" @script:Arguments -ArtifactPath $script:Artifact -BatchPath $draft } | Should -Throw
+        [IO.File]::ReadAllText($script:Queue) | Should -BeExactly $failed
+
+        & "$script:Scripts\New-ReviewFileGroupQueue.ps1" @script:Arguments -Resume | Out-Null
+        $claim = & "$script:Scripts\Get-NextReviewItem.ps1" -QueuePath $script:Queue | ConvertFrom-Json -AsHashtable
+        $claim.item.groupId | Should -BeExactly 'rename'
+        $first = & "$script:Scripts\Set-ReviewAssessmentBatch.ps1" @script:Arguments -ArtifactPath $script:Artifact -BatchPath $draft |
+            ConvertFrom-Json -AsHashtable
+        $first.alreadyComplete | Should -BeFalse
+        & "$script:Scripts\Remove-Finding.ps1" -ArtifactPath $script:Artifact -FindingId $id `
+            -Reason 'The evidence does not support this finding.' -NowUtc ([DateTimeOffset] '2024-05-06T07:08:09Z') | Out-Null
+        $secondClaim = & "$script:Scripts\Get-NextReviewItem.ps1" -QueuePath $script:Queue | ConvertFrom-Json -AsHashtable
+        $secondClaim.item.groupId | Should -BeExactly 'other'
+        $secondDraft = Join-Path $script:Root 'second-batch.json'
+        [IO.File]::WriteAllText($secondDraft, (ConvertTo-JsonText -Value (New-TestBatch -Claim $secondClaim)))
+        & "$script:Scripts\Set-ReviewAssessmentBatch.ps1" @script:Arguments -ArtifactPath $script:Artifact -BatchPath $secondDraft | Out-Null
+
+        $beforeRetry = [IO.File]::ReadAllText($script:Queue)
+        $retry = & "$script:Scripts\Set-ReviewAssessmentBatch.ps1" @script:Arguments -ArtifactPath $script:Artifact -BatchPath $draft |
+            ConvertFrom-Json -AsHashtable
+        $retry.alreadyComplete | Should -BeTrue
+        [IO.File]::ReadAllText($script:Queue) | Should -BeExactly $beforeRetry
+        $journal = Read-ReviewQueueDocument -Path $script:Queue
+        @($journal.completedGroupIds).Count | Should -Be 2
+        @($journal.batchReceipts).Count | Should -Be 2
+        $result = & "$script:Scripts\Complete-FindingArtifact.ps1" -ArtifactPath $script:Artifact -FileGroupQueuePath $script:Queue |
+            ConvertFrom-Json -AsHashtable
+        $result.status | Should -BeExactly 'complete'
+        $result.findingCount | Should -Be 0
+        $completed = Read-FindingArtifact -Path $script:Artifact
+        $completed.removed[0].finding.id | Should -BeExactly $id
+        [IO.File]::ReadAllText($script:Queue) | Should -BeExactly $beforeRetry
+    }
+
     It 'preserves coverage across bounded randomized batch, retry and resume operations' {
         $seed = Get-Random
         Write-Information "Batch sequence seed: $seed" -InformationAction Continue

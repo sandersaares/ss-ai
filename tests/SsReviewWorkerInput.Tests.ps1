@@ -8,7 +8,6 @@ BeforeAll {
     . (Join-Path $script:Scripts 'lib\ReviewWork.ps1')
     . (Join-Path $script:Scripts 'lib\ReviewInput.ps1')
     . (Join-Path $script:Scripts 'lib\OverviewPublication.ps1')
-    . "$PSScriptRoot\lib\ConcurrentReviewCommand.ps1"
 
     # Exhausts a fixed fixture with an operation bound, checking exact reconstruction and the byte budget.
     function Read-AllSharedPages {
@@ -26,6 +25,31 @@ BeforeAll {
             $offset = $page.nextOffset
         }
         throw 'Fixture did not finish within its operation bound.'
+    }
+
+    # Capture the executable's console output as a caller in a separate process would.
+    function Invoke-WorkerRead {
+        param([string] $AssignmentPath, [string] $DocumentId, [int] $Offset)
+        $start = [Diagnostics.ProcessStartInfo]::new((Get-Process -Id $PID).Path)
+        $start.UseShellExecute = $false
+        $start.RedirectStandardOutput = $true
+        $start.RedirectStandardError = $true
+        foreach ($argument in @('-NoProfile', '-NonInteractive', '-File',
+            (Join-Path $script:Scripts 'Read-ReviewWorkerDocument.ps1'),
+            '-AssignmentPath', $AssignmentPath, '-DocumentId', $DocumentId, '-Offset', "$Offset")) {
+            $start.ArgumentList.Add($argument)
+        }
+        $process = [Diagnostics.Process]::Start($start)
+        try {
+            $output = $process.StandardOutput.ReadToEndAsync()
+            $errors = $process.StandardError.ReadToEndAsync()
+            $process.WaitForExit()
+            @{
+                exitCode = $process.ExitCode
+                output = $output.GetAwaiter().GetResult()
+                errors = $errors.GetAwaiter().GetResult()
+            }
+        } finally { $process.Dispose() }
     }
 }
 
@@ -78,7 +102,7 @@ Describe 'Prepared bounded worker inputs' {
             Replace("`r`n", "`n").TrimEnd()
         $policyOffset = $dispatch.IndexOf($recovery, [StringComparison]::Ordinal)
         $policyOffset | Should -BeGreaterOrEqual 0 -Because 'recovery must not depend on a successful shared read'
-        $policyOffset | Should -BeLessThan $dispatch.IndexOf('pwsh -NoProfile -NonInteractive', [StringComparison]::Ordinal)
+        $policyOffset | Should -BeLessThan $dispatch.IndexOf('ss-ai workflow worker-document', [StringComparison]::Ordinal)
         $dispatch | Should -Match 'Apply this recovery policy before initial shared reads and compaction reloads'
         $dispatch | Should -Match 'Keep this policy and the reader command in compaction notes'
         $dispatch | Should -Not -Match 'On errors stop and report'
@@ -127,8 +151,20 @@ Describe 'Prepared bounded worker inputs' {
                 -QueuePath $reviewer.fileGroupQueuePath -Resume:$assignment.resume | ConvertFrom-Json -AsHashtable
             $queue.queuePath | Should -BeExactly $reviewer.fileGroupQueuePath
             [IO.File]::ReadAllText($reviewer.fileGroupQueuePath) | Should -BeExactly $journalBefore
-            $readCommand = ($result.dispatchPrompt -split "`n" | Where-Object { $_.StartsWith('pwsh ') } | Select-Object -First 1)
-            $first = & ([scriptblock]::Create($readCommand.Replace('{{DOCUMENT_ID}}', 'overview'))) | ConvertFrom-Json -AsHashtable
+            $readCommand = ($result.dispatchPrompt -split "`n" | Where-Object { $_.StartsWith('ss-ai workflow worker-document ') } | Select-Object -First 1)
+            $quotedPath = $result.assignmentPath.Replace("'", "''")
+            $readCommand | Should -BeExactly "ss-ai workflow worker-document --assignment-path '$quotedPath' --document-id '{{DOCUMENT_ID}}' --offset 0"
+            $tokens = $null
+            $parseErrors = $null
+            $ast = [System.Management.Automation.Language.Parser]::ParseInput($readCommand, [ref]$tokens, [ref]$parseErrors)
+            @($parseErrors).Count | Should -Be 0
+            $elements = @($ast.EndBlock.Statements[0].PipelineElements[0].CommandElements)
+            $elements.Count | Should -Be 9
+            $elements[4].Value | Should -BeExactly $result.assignmentPath
+            $elements[6].Value | Should -BeExactly '{{DOCUMENT_ID}}'
+            $program = Get-Command ss-ai -CommandType Application -ErrorAction Stop | Select-Object -First 1
+            $first = & $program.Source workflow worker-document --assignment-path $elements[4].Value --document-id overview --offset 0 |
+                ConvertFrom-Json -AsHashtable
             $first.contentOffset | Should -Be 0
             $first.complete | Should -BeFalse
         }
@@ -136,6 +172,39 @@ Describe 'Prepared bounded worker inputs' {
         $counts.firstReadFailures | Should -Be 0
         $counts.setupCalls | Should -Be 2
         $counts.documentReadCalls | Should -Be 2
+    }
+
+    It 'reads Unicode long lines with UTF-16 offsets through the prepared command' {
+        $symbol = [char]::ConvertFromUtf32(0x1f642)
+        $text = ('a' * 16000) + $symbol + ('quoted "\' * 3000) + "`n" + ($symbol * 200)
+        [IO.File]::WriteAllText($script:Scope, $text, [Text.UTF8Encoding]::new($false))
+        $result = & (Join-Path $script:Scripts 'New-ReviewWorkerAssignment.ps1') -Phase fileGroups `
+            -SessionState $script:State -ScopePath $script:Scope -OutputDirectory (Join-Path $script:State 'unicode') |
+            ConvertFrom-Json -AsHashtable
+        $assignment = Read-WorkflowData -Kind workerAssignment -Path $result.assignmentPath
+        $reconstructed = [Text.StringBuilder]::new()
+        $offset = 0
+        for ($attempt = 0; $attempt -lt 100; $attempt++) {
+            $read = Invoke-WorkerRead -AssignmentPath $result.assignmentPath -DocumentId scope -Offset $offset
+            $read.exitCode | Should -Be 0 -Because $read.errors
+            [Text.Encoding]::UTF8.GetByteCount($read.output) | Should -BeLessOrEqual 16384
+            $page = ConvertFrom-JsonVerbatim -Text $read.output
+            Assert-WorkflowData -Kind sharedReadPage -Value $page
+            $page.contentOffset | Should -Be $offset
+            $page.contentLength | Should -Be $text.Length
+            $null = $reconstructed.Append($page.content)
+            if ($page.complete) { break }
+            $page.nextOffset | Should -BeGreaterThan $offset
+            [char]::IsLowSurrogate($text[$page.nextOffset]) | Should -BeFalse
+            $offset = $page.nextOffset
+        }
+        $page.complete | Should -BeTrue
+        $reconstructed.ToString() | Should -BeExactly $text
+        Read-AllSharedPages -Assignment $assignment -Id scope | Should -BeExactly $text
+        $lowSurrogateOffset = $text.IndexOf($symbol, [StringComparison]::Ordinal) + 1
+        $invalid = Invoke-WorkerRead -AssignmentPath $result.assignmentPath -DocumentId scope -Offset $lowSurrogateOffset
+        $invalid.exitCode | Should -Not -Be 0
+        $invalid.output | Should -BeNullOrEmpty
     }
 
     It 'loads only <Phase> preparation contracts without granting orchestration or human authority' -ForEach @(
@@ -206,25 +275,20 @@ Describe 'Prepared bounded worker inputs' {
         [IO.File]::Exists((Join-Path $output 'assignment.json')) | Should -BeFalse
     }
 
-    It 'preserves pages and exact counters for overlapping <_> document reads' -ForEach @('fileGroups', 'focusAreas') {
+    It 'preserves pages and exact counters for <_> document reads' -ForEach @('fileGroups', 'focusAreas') {
         $result = & (Join-Path $script:Scripts 'New-ReviewWorkerAssignment.ps1') -Phase $_ `
             -SessionState $script:State -ScopePath $script:Scope -OutputDirectory (Join-Path $script:State 'concurrent') |
             ConvertFrom-Json -AsHashtable
         $assignment = Read-WorkflowData -Kind workerAssignment -Path $result.assignmentPath
-        # Every real document and one failed read must contend before any can proceed.
         $ids = @($assignment.documents.id) + @('missing')
-        $commands = @(foreach ($id in $ids) {
-            @{
-                name = 'Read-ReviewWorkerDocument.ps1'
-                parameters = @{ AssignmentPath = $result.assignmentPath; DocumentId = $id }
-            }
+        $reads = @(foreach ($id in $ids) {
+            Invoke-WorkerRead -AssignmentPath $result.assignmentPath -DocumentId $id -Offset 0
         })
-        $reads = @(Invoke-ContendedReviewCommand -Path $assignment.diagnosticsPath -Command $commands)
         for ($index = 0; $index -lt $ids.Count; $index++) {
             $read = $reads[$index]
             if ($ids[$index] -eq 'missing') {
                 $read.exitCode | Should -Not -Be 0
-                $read.errors | Should -Match "Expected one shared document 'missing'"
+                $read.errors | Should -Match "(?s)Expected.*one shared document 'missing'"
                 $read.output | Should -BeNullOrEmpty
             } else {
                 $read.exitCode | Should -Be 0 -Because $read.errors
@@ -243,6 +307,18 @@ Describe 'Prepared bounded worker inputs' {
         $counts.malformedQueryFailures | Should -Be 0
         $counts.cursorRestarts | Should -Be 0
         [IO.File]::Exists("$($assignment.diagnosticsPath).lock") | Should -BeTrue
+    }
+
+    It 'preserves counters under controlled native reader contention' {
+        $executable = $env:SS_AI_WORKER_INPUT_TEST_EXECUTABLE
+        if ([string]::IsNullOrWhiteSpace($executable) -or -not [IO.File]::Exists($executable)) {
+            throw 'SS_AI_WORKER_INPUT_TEST_EXECUTABLE must name the prepared native worker input test executable.'
+        }
+        # The native fixture holds the diagnostics lock and signals each observed conflict
+        # before releasing contenders; the PowerShell wait mock cannot control native retries.
+        $output = & $executable concurrent_reads_preserve_diagnostics --exact
+        $LASTEXITCODE | Should -Be 0
+        ($output -join "`n") | Should -Match '1 passed'
     }
 
     It 'rejects repeated setup without overwriting the assignment or resetting work' {

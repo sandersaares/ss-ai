@@ -6,7 +6,66 @@ BeforeAll {
     . "$script:Scripts\lib\FindingModel.ps1"
     . "$script:Scripts\lib\ReviewWork.ps1"
     . "$script:Scripts\lib\FocusAreaCacheDiagnostics.ps1"
-    . "$PSScriptRoot\lib\ConcurrentReviewCommand.ps1"
+
+    # Holds the PowerShell lock until native claims have each observed contention.
+    function Invoke-ContendedNativeQueueClaims {
+        param([Parameter(Mandatory)][string] $Path, [Parameter(Mandatory)][int] $Count)
+        $executable = $env:SS_AI_REVIEW_WORK_TEST_EXECUTABLE
+        if ([string]::IsNullOrWhiteSpace($executable) -or -not [IO.File]::Exists($executable)) {
+            throw 'SS_AI_REVIEW_WORK_TEST_EXECUTABLE must name the prepared native review work test executable.'
+        }
+        $processes = [Collections.Generic.List[object]]::new()
+        $results = [Collections.Generic.List[object]]::new()
+        $lock = Open-PullRequestFileLock -Path $Path
+        try {
+            foreach ($index in 1..$Count) {
+                $start = [Diagnostics.ProcessStartInfo]::new($executable)
+                $start.WorkingDirectory = Split-Path -Parent $PSScriptRoot
+                $start.UseShellExecute = $false
+                $start.RedirectStandardInput = $true
+                $start.RedirectStandardOutput = $true
+                $start.RedirectStandardError = $true
+                foreach ($argument in @('native_review_work_lock_interop_helper', '--exact', '--nocapture')) {
+                    $start.ArgumentList.Add($argument)
+                }
+                $start.Environment['SS_AI_REVIEW_WORK_INTEROP_QUEUE'] = $Path
+                $process = [Diagnostics.Process]::Start($start)
+                $processes.Add(@{ process = $process; output = $process.StandardOutput.ReadToEndAsync() })
+            }
+            foreach ($item in $processes) {
+                $diagnostics = [Collections.Generic.List[string]]::new()
+                while ($null -ne ($line = $item.process.StandardError.ReadLine())) {
+                    if ($line -ceq 'lock-contended') { break }
+                    $diagnostics.Add($line)
+                }
+                if ($null -eq $line) {
+                    throw "Native child exited before lock contention: $($diagnostics -join [Environment]::NewLine)"
+                }
+            }
+            $lock.Dispose()
+            foreach ($item in $processes) {
+                $item.process.StandardInput.WriteLine('retry')
+                $item.process.StandardInput.Close()
+                $errors = $item.process.StandardError.ReadToEnd()
+                $item.process.WaitForExit()
+                $item.process.ExitCode | Should -Be 0 -Because "$errors $($item.output.GetAwaiter().GetResult())"
+                $matches = [regex]::Matches($errors, '(?m)^result-json:(.+)\r?$')
+                $matches.Count | Should -Be 1 -Because $errors
+                $results.Add((ConvertFrom-JsonVerbatim -Text $matches[0].Groups[1].Value))
+            }
+            $results.ToArray()
+        } finally {
+            $lock.Dispose()
+            foreach ($item in $processes) { $item.process.StandardInput.Close() }
+            foreach ($item in $processes) {
+                if (-not $item.process.HasExited) {
+                    try { $item.process.Kill($true) } catch [InvalidOperationException] { }
+                }
+                $item.process.WaitForExit()
+                $item.process.Dispose()
+            }
+        }
+    }
 
     # A native clock signals actual contention before the parent admits each retry.
     function Invoke-ContendedAuditOperation {
@@ -158,13 +217,8 @@ Describe 'Shared workflow file transactions' {
         $items = @(@{ reviewerId = 'a' }, @{ reviewerId = 'b' }, @{ reviewerId = 'c' })
         $queue = New-ReviewQueueDocument -Kind focusAreas -Item $items
         Write-PullRequestOutputFile -Path $path -Content (ConvertTo-JsonText -Value $queue)
-        $commands = @(1..4 | ForEach-Object { @{ name = 'Get-NextReviewItem.ps1'; parameters = @{ QueuePath = $path } } })
-        $results = @(Invoke-ContendedReviewCommand -Path $path -Command $commands)
-        $pages = @(foreach ($result in $results) {
-            $result.exitCode | Should -Be 0 -Because $result.errors
-            $result.output | ConvertFrom-Json -AsHashtable
-        })
-        @($pages | Where-Object { -not $_.exhausted } | ForEach-Object { $_.item.reviewerId }) | Should -Be @('a', 'b', 'c')
+        $pages = @(Invoke-ContendedNativeQueueClaims -Path $path -Count 4)
+        @($pages | Where-Object { -not $_.exhausted } | ForEach-Object { $_.item.reviewerId } | Sort-Object) | Should -Be @('a', 'b', 'c')
         @($pages | Where-Object exhausted).Count | Should -Be 1
         (Read-ReviewQueueDocument -Path $path).items.Count | Should -Be 0
     }

@@ -1,6 +1,6 @@
 #Requires -Version 7.6
 
-# Bounded first reads and reloads of shared worker guidance, independent of viewer defaults.
+# Preserves the existing script entry point for bounded native document reads.
 [CmdletBinding(PositionalBinding = $false)]
 param(
     [Parameter(Mandatory)][string] $AssignmentPath,
@@ -10,18 +10,8 @@ param(
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 $PSNativeCommandUseErrorActionPreference = $true
-. "$PSScriptRoot\lib\JsonValue.ps1"
-. "$PSScriptRoot\lib\PullRequestModel.ps1"
-. "$PSScriptRoot\lib\WorkflowData.ps1"
-. "$PSScriptRoot\lib\ReviewInput.ps1"
+. "$PSScriptRoot\lib\NativeWorkflowBridge.ps1"
 
-$assignment = Read-WorkflowData -Kind workerAssignment -Path $AssignmentPath
-Add-ReviewInputDiagnostic -Path $assignment['diagnosticsPath'] -Name documentReadCalls
-try {
-    $page = Read-ReviewSharedDocument -Assignment $assignment -DocumentId $DocumentId -Offset $Offset
-    [Console]::OutputEncoding = [Text.UTF8Encoding]::new($false)
-    [Console]::WriteLine((ConvertTo-Json -InputObject $page -Depth 100 -Compress))
-} catch {
-    if ($Offset -eq 0) { Add-ReviewInputDiagnostic -Path $assignment['diagnosticsPath'] -Name firstReadFailures }
-    throw
-}
+Invoke-NativeReviewWorkflow -Arguments @(
+    'worker-document', "--assignment-path=$AssignmentPath", "--document-id=$DocumentId", "--offset=$Offset"
+)

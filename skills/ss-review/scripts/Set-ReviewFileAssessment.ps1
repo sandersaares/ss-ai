@@ -11,10 +11,6 @@ param(
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 $PSNativeCommandUseErrorActionPreference = $true
-. "$PSScriptRoot\lib\JsonValue.ps1"
-. "$PSScriptRoot\lib\PullRequestModel.ps1"
-. "$PSScriptRoot\lib\WorkflowData.ps1"
-. "$PSScriptRoot\lib\ReviewWork.ps1"
-$assessment = Read-WorkflowData -Kind assessment -Path $AssessmentPath
-Set-ReviewFileAssessment -QueuePath $QueuePath -InventoryPath $InventoryPath -FileGroupsPath $FileGroupsPath -Assessment $assessment
-@{ status = 'Recorded'; path = $assessment['path']; disposition = $assessment['disposition'] } | ConvertTo-Json -Compress
+. "$PSScriptRoot\lib\NativeWorkflowBridge.ps1"
+Invoke-NativeReviewWorkflow -Arguments @('set-review-assessment', "--queue-path=$QueuePath",
+    "--inventory-path=$InventoryPath", "--file-groups-path=$FileGroupsPath", "--assessment-path=$AssessmentPath")

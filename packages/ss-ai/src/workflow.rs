@@ -9,7 +9,9 @@ use clap::{Parser, Subcommand, ValueEnum};
 use jiff::Timestamp;
 use ohno::AppError;
 use serde_json::json;
-use ss_ai_review_workflow::{anchors, approved, audit, findings, markdown, workflow_plan};
+use ss_ai_review_workflow::{
+    anchors, approved, audit, findings, markdown, review_work, worker_input, workflow_plan,
+};
 use ss_ai_runtime::{Clock, Process, caused_by, fail, read_bytes};
 
 /// Exposes local workflow operations without provider access.
@@ -23,6 +25,129 @@ struct WorkflowCli {
 /// Selects an operation and its file-based inputs.
 #[derive(Debug, Subcommand)]
 enum WorkflowCommand {
+    /// Validate and publish review inventory or file groups.
+    SetReviewInput {
+        #[arg(long)]
+        kind: ReviewInputKind,
+        #[arg(long)]
+        input_path: PathBuf,
+        #[arg(long)]
+        path: PathBuf,
+        #[arg(long)]
+        inventory_path: Option<PathBuf>,
+        #[arg(long)]
+        replace: bool,
+    },
+    /// Prepare immutable review work and its private journals.
+    CreateReviewWork {
+        #[arg(long)]
+        inventory_path: PathBuf,
+        #[arg(long)]
+        file_groups_path: PathBuf,
+        #[arg(long)]
+        focus_area_directory: PathBuf,
+        #[arg(long)]
+        output_directory: PathBuf,
+        #[arg(long)]
+        repository_root: Option<PathBuf>,
+        #[arg(long)]
+        artifact_directory: Option<PathBuf>,
+    },
+    /// Create or explicitly resume a file-group journal.
+    InitializeReviewQueue {
+        #[arg(long)]
+        inventory_path: PathBuf,
+        #[arg(long)]
+        file_groups_path: PathBuf,
+        #[arg(long)]
+        queue_path: PathBuf,
+        #[arg(long)]
+        resume: bool,
+    },
+    /// Dispatch the next focus area or claim a file group.
+    NextReviewItem {
+        #[arg(long)]
+        queue_path: PathBuf,
+    },
+    /// Complete a claimed file group.
+    CompleteReviewGroup {
+        #[arg(long)]
+        queue_path: PathBuf,
+        #[arg(long)]
+        group_id: String,
+    },
+    /// Record one file assessment.
+    SetReviewAssessment {
+        #[arg(long)]
+        queue_path: PathBuf,
+        #[arg(long)]
+        inventory_path: PathBuf,
+        #[arg(long)]
+        file_groups_path: PathBuf,
+        #[arg(long)]
+        assessment_path: PathBuf,
+    },
+    /// Commit a complete assessment batch and receipt.
+    CompleteReviewBatch {
+        #[arg(long)]
+        queue_path: PathBuf,
+        #[arg(long)]
+        inventory_path: PathBuf,
+        #[arg(long)]
+        file_groups_path: PathBuf,
+        #[arg(long)]
+        artifact_path: PathBuf,
+        #[arg(long)]
+        batch_path: PathBuf,
+    },
+    /// Block a failed reviewer until explicit resume.
+    FailReviewWorker {
+        #[arg(long)]
+        queue_path: PathBuf,
+        #[arg(long)]
+        reason: String,
+    },
+    /// Validate findings and coverage against the immutable manifest.
+    ValidateReviewWork {
+        #[arg(long)]
+        manifest_path: PathBuf,
+        #[arg(long)]
+        artifact_directory: PathBuf,
+    },
+    /// Prepare a bounded worker assignment from installed skill assets.
+    WorkerAssignment {
+        #[arg(long)]
+        phase: String,
+        #[arg(long)]
+        session_state: PathBuf,
+        #[arg(long)]
+        scope_path: PathBuf,
+        #[arg(long)]
+        output_directory: PathBuf,
+        #[arg(long)]
+        skill_root: PathBuf,
+        #[arg(long)]
+        manifest_path: Option<PathBuf>,
+        #[arg(long)]
+        reviewer_id: Option<String>,
+        #[arg(long)]
+        context_path: Option<PathBuf>,
+        #[arg(long)]
+        resume: bool,
+        #[arg(long)]
+        repository_instructions: bool,
+        #[arg(long)]
+        include_pre_existing: bool,
+    },
+    /// Read one bounded page of an assigned document.
+    WorkerDocument {
+        #[arg(long)]
+        assignment_path: PathBuf,
+        #[arg(long)]
+        document_id: String,
+        #[arg(long, default_value_t = 0)]
+        offset: usize,
+    },
     /// Render shared finding prose from a file-based request.
     Render {
         #[arg(long)]
@@ -268,6 +393,15 @@ enum PlanKind {
     Decisions,
 }
 
+/// Selects the review preparation input schema.
+#[derive(Clone, Copy, Debug, ValueEnum)]
+enum ReviewInputKind {
+    /// Complete changed-file inventory.
+    Inventory,
+    /// File groups covering the inventory.
+    Groups,
+}
+
 impl PlanKind {
     /// Translates command names to the workflow schema selection.
     fn native(self) -> workflow_plan::PlanKind {
@@ -315,6 +449,161 @@ where
         }
     };
     match cli.command {
+        WorkflowCommand::SetReviewInput {
+            kind,
+            input_path,
+            path,
+            inventory_path,
+            replace,
+        } => {
+            let input_path = absolute(input_path)?;
+            let path = absolute(path)?;
+            let result = match kind {
+                ReviewInputKind::Inventory => {
+                    review_work::set_input_inventory(&input_path, &path, replace, clock)?
+                }
+                ReviewInputKind::Groups => {
+                    let inventory = inventory_path
+                        .ok_or_else(|| fail("invalidInput", "Groups require an inventory path"))?;
+                    review_work::set_input_groups(
+                        &absolute(inventory)?,
+                        &input_path,
+                        &path,
+                        replace,
+                        clock,
+                    )?
+                }
+            };
+            Ok(serde_json::to_string(&result)?)
+        }
+        WorkflowCommand::CreateReviewWork {
+            inventory_path,
+            file_groups_path,
+            focus_area_directory,
+            output_directory,
+            repository_root,
+            artifact_directory,
+        } => {
+            let repository_root = repository_root.map(absolute).transpose()?;
+            let artifact_directory = artifact_directory.map(absolute).transpose()?;
+            Ok(serde_json::to_string(&review_work::create(
+                &absolute(inventory_path)?,
+                &absolute(file_groups_path)?,
+                &absolute(focus_area_directory)?,
+                &absolute(output_directory)?,
+                repository_root.as_deref(),
+                artifact_directory.as_deref(),
+                clock,
+            )?)?)
+        }
+        WorkflowCommand::InitializeReviewQueue {
+            inventory_path,
+            file_groups_path,
+            queue_path,
+            resume,
+        } => Ok(serde_json::to_string(&review_work::initialize_queue(
+            &absolute(inventory_path)?,
+            &absolute(file_groups_path)?,
+            &absolute(queue_path)?,
+            resume,
+            clock,
+        )?)?),
+        WorkflowCommand::NextReviewItem { queue_path } => Ok(serde_json::to_string(
+            &review_work::next(&absolute(queue_path)?, clock)?,
+        )?),
+        WorkflowCommand::CompleteReviewGroup {
+            queue_path,
+            group_id,
+        } => Ok(serde_json::to_string(&review_work::complete_group(
+            &absolute(queue_path)?,
+            &group_id,
+            clock,
+        )?)?),
+        WorkflowCommand::SetReviewAssessment {
+            queue_path,
+            inventory_path,
+            file_groups_path,
+            assessment_path,
+        } => Ok(serde_json::to_string(
+            &review_work::set_assessment_from_file(
+                &absolute(queue_path)?,
+                &absolute(inventory_path)?,
+                &absolute(file_groups_path)?,
+                &absolute(assessment_path)?,
+                clock,
+            )?,
+        )?),
+        WorkflowCommand::CompleteReviewBatch {
+            queue_path,
+            inventory_path,
+            file_groups_path,
+            artifact_path,
+            batch_path,
+        } => Ok(serde_json::to_string(
+            &review_work::complete_batch_from_file(
+                &absolute(queue_path)?,
+                &absolute(inventory_path)?,
+                &absolute(file_groups_path)?,
+                &absolute(artifact_path)?,
+                &absolute(batch_path)?,
+                clock,
+            )?,
+        )?),
+        WorkflowCommand::FailReviewWorker { queue_path, reason } => Ok(serde_json::to_string(
+            &review_work::set_failure(&absolute(queue_path)?, &reason, clock)?,
+        )?),
+        WorkflowCommand::ValidateReviewWork {
+            manifest_path,
+            artifact_directory,
+        } => Ok(serde_json::to_string(&review_work::validate(
+            &absolute(manifest_path)?,
+            &absolute(artifact_directory)?,
+            clock,
+        )?)?),
+        WorkflowCommand::WorkerAssignment {
+            phase,
+            session_state,
+            scope_path,
+            output_directory,
+            skill_root,
+            manifest_path,
+            reviewer_id,
+            context_path,
+            resume,
+            repository_instructions,
+            include_pre_existing,
+        } => {
+            let skill_root = absolute(skill_root)?;
+            let manifest_path = manifest_path.map(absolute).transpose()?;
+            let context_path = context_path.map(absolute).transpose()?;
+            let result = worker_input::create_assignment(
+                &worker_input::AssignmentOptions {
+                    phase: &phase,
+                    session_state: &absolute(session_state)?,
+                    scope_path: &absolute(scope_path)?,
+                    output_directory: &absolute(output_directory)?,
+                    skill_root: &skill_root,
+                    manifest_path: manifest_path.as_deref(),
+                    reviewer_id: reviewer_id.as_deref(),
+                    context_path: context_path.as_deref(),
+                    resume,
+                    repository_instructions,
+                    include_pre_existing,
+                },
+                clock,
+            )?;
+            Ok(serde_json::to_string(&result)?)
+        }
+        WorkflowCommand::WorkerDocument {
+            assignment_path,
+            document_id,
+            offset,
+        } => Ok(serde_json::to_string(&worker_input::read_document(
+            &absolute(assignment_path)?,
+            &document_id,
+            offset,
+            clock,
+        )?)?),
         WorkflowCommand::Render { request_path } => {
             let bytes = read_bytes(&absolute(request_path)?, clock)?
                 .ok_or_else(|| fail("invalidInput", "Rendering request is missing"))?;

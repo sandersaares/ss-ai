@@ -11,10 +11,6 @@ param(
 
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
-
-. "$PSScriptRoot\lib\JsonValue.ps1"
-. "$PSScriptRoot\lib\PullRequestModel.ps1"
-. "$PSScriptRoot\lib\WorkflowData.ps1"
-. "$PSScriptRoot\lib\ReviewWork.ps1"
-
-Complete-ReviewFileGroup -QueuePath $QueuePath -GroupId $GroupId | ConvertTo-Json -Depth 32 -Compress
+$PSNativeCommandUseErrorActionPreference = $true
+. "$PSScriptRoot\lib\NativeWorkflowBridge.ps1"
+Invoke-NativeReviewWorkflow -Arguments @('complete-review-group', "--queue-path=$QueuePath", "--group-id=$GroupId")

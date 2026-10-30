@@ -153,6 +153,10 @@ Describe 'ss-review focus-area cache' {
 
     It 'keys every schema, format and assembly-tool dependency' {
         $script:FocusAreaGenerationFiles | Should -Contain 'data-guides\focus-areas.md'
+        $script:FocusAreaGenerationFiles | Should -Contain 'scripts\New-ReviewWorkerAssignment.ps1'
+        $script:FocusAreaGenerationFiles | Should -Contain 'scripts\Read-ReviewWorkerDocument.ps1'
+        $script:FocusAreaGenerationFiles | Should -Contain 'scripts\lib\NativeWorkflowBridge.ps1'
+        $script:FocusAreaGenerationFiles | Should -Contain 'pwsh-calls\prepare-worker-assignment.md'
         $originalRoot = $script:FocusAreaGenerationRoot
         $isolatedRoot = Join-Path $script:CaseRoot 'generation'
         foreach ($relativePath in $script:FocusAreaGenerationFiles) {
@@ -178,6 +182,40 @@ Describe 'ss-review focus-area cache' {
             }
         } finally {
             $script:FocusAreaGenerationRoot = $originalRoot
+        }
+    }
+
+    It 'misses an existing entry when the native generator executable changes' {
+        $source = (Get-Command ss-ai -CommandType Application -ErrorAction Stop | Select-Object -First 1).Source
+        $bin = Join-Path $script:CaseRoot 'bin'
+        [void] [IO.Directory]::CreateDirectory($bin)
+        $executable = Join-Path $bin ([IO.Path]::GetFileName($source))
+        [IO.File]::Copy($source, $executable)
+        if (-not $IsWindows) {
+            [IO.File]::SetUnixFileMode($executable, [IO.File]::GetUnixFileMode($source))
+        }
+        $originalPath = $env:PATH
+        try {
+            $env:PATH = $bin + [IO.Path]::PathSeparator + $originalPath
+            $arguments = @{
+                SessionStateDirectory = $script:Session
+                InputDirectory = $script:Inputs
+                RecipePath = $script:Recipe
+                CacheDirectory = $script:Cache
+                GeneratorProfile = 'test'
+                FreshnessDays = 7
+                NowUtc = $script:Now
+            }
+            (Save-FocusAreaCache @arguments -InputState Complete).status | Should -Be 'Stored'
+            (Restore-FocusAreaCache @arguments).status | Should -Be 'Hit'
+            # The copy is only hashed; it is not launched after changing its bytes.
+            $stream = [IO.File]::Open($executable, [IO.FileMode]::Append, [IO.FileAccess]::Write)
+            try { $stream.WriteByte(0) } finally { $stream.Dispose() }
+            $result = Restore-FocusAreaCache @arguments
+            $result.status | Should -Be 'Miss'
+            $result.reason | Should -Be 'NotFound'
+        } finally {
+            $env:PATH = $originalPath
         }
     }
 
