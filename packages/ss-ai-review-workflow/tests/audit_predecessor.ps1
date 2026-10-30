@@ -20,6 +20,7 @@ $library = Join-Path $Root 'skills/ss-review/scripts/lib'
 . (Join-Path $library 'PullRequestModel.ps1')
 . (Join-Path $library 'WorkflowData.ps1')
 . (Join-Path $library 'FindingModel.ps1')
+. (Join-Path $library 'NativeWorkflowBridge.ps1')
 . (Join-Path $library 'ReviewAuditState.ps1')
 . (Join-Path $library 'GitDiff.ps1')
 . (Join-Path $library 'PullRequestAnchor.ps1')

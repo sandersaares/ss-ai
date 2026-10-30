@@ -9,6 +9,7 @@ BeforeAll {
     . (Join-Path $script:LibraryRoot 'PullRequestModel.ps1')
     . (Join-Path $script:LibraryRoot 'WorkflowData.ps1')
     . (Join-Path $script:LibraryRoot 'FindingModel.ps1')
+    . (Join-Path $script:LibraryRoot 'NativeWorkflowBridge.ps1')
     . (Join-Path $script:LibraryRoot 'FindingMarkdown.ps1')
     . (Join-Path $script:LibraryRoot 'FocusAreaCacheDiagnostics.ps1')
 

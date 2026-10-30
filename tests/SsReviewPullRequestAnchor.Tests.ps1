@@ -6,6 +6,7 @@ BeforeAll {
     . (Join-Path $script:LibraryRoot 'WorkflowData.ps1')
     . (Join-Path $script:LibraryRoot 'FindingModel.ps1')
     . (Join-Path $script:LibraryRoot 'GitDiff.ps1')
+    . (Join-Path $script:LibraryRoot 'NativeWorkflowBridge.ps1')
     . (Join-Path $script:LibraryRoot 'PullRequestAnchor.ps1')
 
     # The diff is parsed from recorded Git output, exactly as the composition root would parse the

@@ -44,8 +44,6 @@ Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 $PSNativeCommandUseErrorActionPreference = $true
 
-. "$PSScriptRoot\NativeWorkflowBridge.ps1"
-
 # The kinds of anchor a finding may carry. A line anchor addresses a range within a changed file; a
 # file anchor addresses the file as a whole.
 $script:PullRequestAnchorKinds = @('line', 'file')

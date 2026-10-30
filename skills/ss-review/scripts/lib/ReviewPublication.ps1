@@ -15,8 +15,6 @@ Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 $PSNativeCommandUseErrorActionPreference = $true
 
-. "$PSScriptRoot\NativeWorkflowBridge.ps1"
-
 # The approved artifact's format version, matching the version the finding model writes. The
 # artifact binds an approved finding set to the content it was approved against, which is what makes
 # publication refuse to write a review of one revision onto another.
