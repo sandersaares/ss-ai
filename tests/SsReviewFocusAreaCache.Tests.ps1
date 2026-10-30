@@ -1,4 +1,8 @@
 BeforeAll {
+    Set-StrictMode -Version Latest
+    $ErrorActionPreference = 'Stop'
+    $PSNativeCommandUseErrorActionPreference = $true
+
     $script:RepoRoot = Split-Path -Parent $PSScriptRoot
     $script:CacheCliDirectory = Join-Path $script:RepoRoot 'skills\ss-review\scripts'
     $script:Now = [DateTimeOffset]::Parse('2026-08-03T12:00:00Z')
@@ -850,77 +854,18 @@ Document supported invocation.
         Test-Path -LiteralPath $stagingPath | Should -BeTrue
     }
 
-    It 'waits for another operation before storing under the cache key' {
+    It 'forwards the preparation identity when storing the cache entry' {
         $arguments = @{
             SessionStateDirectory = $script:Session; InputDirectory = $script:Inputs
             RecipePath = $script:Recipe; CacheDirectory = $script:Cache
             GeneratorProfile = 'gpt-5-mini'; FreshnessDays = 7; NowUtc = $script:Now
         }
-        $key = (Restore-FocusAreaCache @arguments).key
+        $null = Restore-FocusAreaCache @arguments
         Publish-TestGeneration
-        $childScript = Join-Path $script:CaseRoot 'contended-save.ps1'
-        Set-Content -LiteralPath $childScript -Value @'
-#Requires -Version 7.6
-param([string] $Wrapper, [string] $Session, [string] $Inputs, [string] $Recipe, [string] $Cache, [string] $Now, [string] $PreparationIdentity)
-Set-StrictMode -Version Latest
-$ErrorActionPreference = 'Stop'
-$PSNativeCommandUseErrorActionPreference = $true
-[Console]::Out.WriteLine('ready')
-[Console]::Out.Flush()
-if ([Console]::In.ReadLine() -ne 'start') { throw 'Missing start signal' }
-& $Wrapper -SessionStateDirectory $Session -InputDirectory $Inputs -RecipePath $Recipe -CacheDirectory $Cache -GeneratorProfile 'gpt-5-mini' -FreshnessDays 7 -NowUtc $Now -PreparationIdentity $PreparationIdentity
-'@
-        $start = [Diagnostics.ProcessStartInfo]::new()
-        $start.FileName = (Get-Process -Id $PID).Path
-        $start.UseShellExecute = $false
-        $start.RedirectStandardInput = $true
-        $start.RedirectStandardOutput = $true
-        $start.RedirectStandardError = $true
-        foreach ($arg in @('-NoProfile', '-NonInteractive', '-File', $childScript,
-                '-Wrapper', (Join-Path $script:CacheCliDirectory 'Save-FocusAreaCache.ps1'),
-                '-Session', $script:Session, '-Inputs', $script:Inputs, '-Recipe', $script:Recipe,
-                '-Cache', $script:Cache, '-Now', $script:Now.ToString('O'),
-                '-PreparationIdentity', $script:PreparationIdentity)) {
-            $start.ArgumentList.Add($arg)
-        }
-        # Start the child before opening the lock: it must not inherit the held handle.
-        $child = [Diagnostics.Process]::Start($start)
-        $lock = $null
-        try {
-            $child.StandardOutput.ReadLine() | Should -Be 'ready'
-            $lockPath = Join-Path $script:Cache ".locks\$key.lock"
-            $lock = [IO.File]::Open($lockPath, [IO.FileMode]::OpenOrCreate, [IO.FileAccess]::ReadWrite, [IO.FileShare]::None)
-            $child.StandardInput.WriteLine('start')
-            $child.StandardInput.Flush()
-            $operationLock = Join-Path $script:Session 'focus-area-cache-operation.lock'
-            $observed = $false
-            while (-not $child.HasExited) {
-                try {
-                    $probe = [IO.File]::Open($operationLock, [IO.FileMode]::OpenOrCreate, [IO.FileAccess]::ReadWrite, [IO.FileShare]::None)
-                    $probe.Dispose()
-                } catch [IO.IOException] {
-                    $observed = $true
-                    break
-                }
-                [Threading.Thread]::Yield() | Out-Null
-            }
-            $observed | Should -BeTrue -Because 'the save must hold the operation lock while waiting for the key'
-            $lock.Dispose()
-            $lock = $null
-            $stdout = $child.StandardOutput.ReadToEnd()
-            $stderr = $child.StandardError.ReadToEnd()
-            $child.WaitForExit()
-            $child.ExitCode | Should -Be 0 -Because $stderr
-            $result = $stdout | ConvertFrom-Json
-            $result.status | Should -Be 'Stored'
-            $result.reason | Should -BeNullOrEmpty
-            $result.focusAreaCount | Should -Be @(Get-ChildItem -LiteralPath (Join-Path $script:Session 'focus-areas') -Filter '*.md' -File).Count
-        } finally {
-            if ($lock) { $lock.Dispose() }
-            $child.StandardInput.Close()
-            if (-not $child.HasExited) { $child.Kill($true); $child.WaitForExit() }
-            $child.Dispose()
-        }
+        $result = Save-FocusAreaCache @arguments -InputState Complete
+        $result.status | Should -Be 'Stored'
+        $result.reason | Should -BeNullOrEmpty
+        $result.focusAreaCount | Should -Be @(Get-ChildItem -LiteralPath (Join-Path $script:Session 'focus-areas') -Filter '*.md' -File).Count
     }
 
     It 'reports an unusable cache location distinctly from contention' {

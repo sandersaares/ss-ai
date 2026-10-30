@@ -87,6 +87,9 @@ struct Uncertainty {
     evidence: Vec<Span>,
 }
 
+/// Stores selected lines by their source tree and exact normalized path.
+type LineCoverage = HashMap<String, HashMap<String, HashSet<usize>>>;
+
 impl ValidatedMap {
     /// Validates a complete or partial worker map against one source snapshot.
     ///
@@ -121,8 +124,8 @@ impl ValidatedMap {
             }
         }
         let mut ids = HashSet::new();
-        let mut content = HashSet::new();
-        let mut coverage = HashSet::new();
+        let mut content = LineCoverage::new();
+        let mut coverage = LineCoverage::new();
         for chapter in &map.chapters {
             if !valid_id(&chapter.id) || !ids.insert(&chapter.id) {
                 return Err(fail("invalidInput", "Invalid or duplicate chapter"));
@@ -193,9 +196,10 @@ impl ValidatedMap {
                 .files()
                 .filter(|(root, _, _)| *root == "instruction-set-raw")
             {
+                let covered = coverage.get(root).and_then(|files| files.get(path));
                 for (index, line) in lines.iter().enumerate() {
                     if !line.trim().is_empty()
-                        && !coverage.contains(&(root.to_owned(), path.to_owned(), index + 1))
+                        && !covered.is_some_and(|lines| lines.contains(&(index + 1)))
                     {
                         return Err(fail(
                             "invalidInput",
@@ -333,18 +337,27 @@ fn chains_have_distinct_alternatives(
         candidates.push(matching);
     }
 
-    // An augmenting path permits a more specific chain to claim an alternative
-    // previously matched by a less specific chain, without requiring map order.
+    // The bipartite graph connects chains to their compatible alternatives.
+    // `assigned` maps alternatives to chains; `parents` maps a displaced chain
+    // to the preceding chain and their contested alternative. Reversing a path
+    // to a free alternative adds a pairing without losing earlier pairings.
+    // See https://en.wikipedia.org/wiki/Maximum_bipartite_matching#Algorithms
     let mut assigned: Vec<Option<usize>> = vec![None; alternatives.len()];
+    let mut parents = vec![None; candidates.len()];
+    let mut visited = vec![false; candidates.len()];
+    let mut queue = Vec::with_capacity(candidates.len());
     for first in 0..candidates.len() {
-        let mut parents = vec![None; candidates.len()];
-        let mut visited = vec![false; candidates.len()];
-        let mut queue = vec![first];
+        parents.fill(None);
+        visited.fill(false);
+        queue.clear();
+        queue.push(first);
         visited[first] = true;
-        let mut next = 0;
         let mut free = None;
-        while let Some(&chain) = queue.get(next) {
-            next += 1;
+        // Each chain can enter the queue at most once.
+        for next in 0..candidates.len() {
+            let Some(&chain) = queue.get(next) else {
+                break;
+            };
             for &alternative in &candidates[chain] {
                 if let Some(previous) = assigned[alternative] {
                     if !visited[previous] {
@@ -364,13 +377,36 @@ fn chains_have_distinct_alternatives(
         let Some((mut chain, mut alternative)) = free else {
             return Ok(false);
         };
-        loop {
+        // The predecessor path cannot contain more chains than the graph.
+        for _ in 0..candidates.len() {
             assigned[alternative] = Some(chain);
             let Some((parent, previous_alternative)) = parents[chain] else {
                 break;
             };
             chain = parent;
             alternative = previous_alternative;
+        }
+        debug_assert!(
+            parents[chain].is_none(),
+            "Matching predecessor path is cyclic"
+        );
+        #[cfg(debug_assertions)]
+        {
+            for processed in 0..=first {
+                debug_assert_eq!(
+                    assigned
+                        .iter()
+                        .filter(|&&value| value == Some(processed))
+                        .count(),
+                    1,
+                    "Each processed chain must have one alternative"
+                );
+            }
+            for (alternative, chain) in assigned.iter().enumerate() {
+                if let Some(chain) = chain {
+                    debug_assert!(candidates[*chain].contains(&alternative));
+                }
+            }
         }
     }
     Ok(true)
@@ -407,7 +443,12 @@ fn same_origin(origin: &str, canonical: &str) -> bool {
 fn declarations_cover(required: &Span, declarations: &[Span]) -> Result<bool, AppError> {
     let required_path = source_path(&required.path)?;
     let mut covered = required.start_line.saturating_sub(1);
-    while covered < required.end_line {
+    // Each successful extension uses a declaration with a greater end line,
+    // so the number of declarations bounds the number of extensions.
+    for _ in declarations {
+        if covered >= required.end_line {
+            return Ok(true);
+        }
         let mut next = covered;
         for declaration in declarations {
             if declaration.root == required.root
@@ -422,7 +463,7 @@ fn declarations_cover(required: &Span, declarations: &[Span]) -> Result<bool, Ap
         }
         covered = next;
     }
-    Ok(true)
+    Ok(covered >= required.end_line)
 }
 
 /// Checks the supported glob language without making scope judgments.
@@ -459,8 +500,8 @@ fn validate_path_scope(scope: &PathScope) -> Result<(), AppError> {
 fn cover(
     span: &Span,
     sources: &SourceSnapshot,
-    coverage: &mut HashSet<(String, String, usize)>,
-    mut content: Option<&mut HashSet<(String, String, usize)>>,
+    coverage: &mut LineCoverage,
+    content: Option<&mut LineCoverage>,
 ) -> Result<(), AppError> {
     sources.span(span)?;
     let path = source_path(&span.path)?;
@@ -468,14 +509,25 @@ fn cover(
         .map_err(|error| caused_by("invalidInput", "Invalid line", error))?;
     let last = usize::try_from(span.end_line)
         .map_err(|error| caused_by("invalidInput", "Invalid line", error))?;
+    let covered = coverage
+        .entry(span.root.clone())
+        .or_default()
+        .entry(path.clone())
+        .or_default();
+    let mut content = content.map(|content| {
+        content
+            .entry(span.root.clone())
+            .or_default()
+            .entry(path)
+            .or_default()
+    });
     for line in first..=last {
-        let key = (span.root.clone(), path.clone(), line);
         if let Some(content) = content.as_deref_mut()
-            && !content.insert(key.clone())
+            && !content.insert(line)
         {
             return Err(fail("invalidInput", "Overlapping chapter content"));
         }
-        coverage.insert(key);
+        covered.insert(line);
     }
     Ok(())
 }

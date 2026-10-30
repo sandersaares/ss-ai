@@ -33,6 +33,8 @@ switch ($Scenario) {
         [Console]::WriteLine('released')
     }
     { $_ -in 'exclusive-contender', 'shared-contender' } {
+        [Console]::WriteLine('ready')
+        if ([Console]::ReadLine() -cne 'acquire') { throw 'Expected acquire signal.' }
         $lock = Open-PullRequestFileLock -Path $Path -Shared:($_ -eq 'shared-contender')
         try { [Console]::WriteLine('acquired') } finally { $lock.Dispose() }
     }

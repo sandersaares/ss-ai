@@ -104,6 +104,11 @@ enum ExpansionState {
     Degraded,
 }
 
+/// Identifies unfinished discovery when finalization is requested.
+#[ohno::error]
+#[display("References are still pending")]
+struct PendingReferences;
+
 /// The full versioned expansion manifest.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -198,9 +203,9 @@ impl Expansion {
         sources: &SourceSnapshot,
         require_final: bool,
     ) -> Result<Self, AppError> {
-        let text = decode_text(bytes)?;
-        let value = parse_json(text.as_bytes())?;
-        let document: Self = serde_json::from_value(value)
+        let document = decode_text(bytes)?;
+        let document = parse_json(document.as_bytes())?;
+        let document: Self = serde_json::from_value(document)
             .map_err(|error| caused_by("invalidInput", "Invalid expansion manifest", error))?;
         document.validate(sources, require_final)?;
         Ok(document)
@@ -295,7 +300,7 @@ impl Expansion {
                     ));
                 }
             }
-            self.contexts(&reference.id)?;
+            self.chains(&reference.id, &mut Vec::new())?;
         }
         let expected = if failed {
             ExpansionState::Degraded
@@ -451,7 +456,12 @@ impl Expansion {
                     .iter()
                     .any(|reference| reference.state == ReferenceState::Pending)
                 {
-                    return Err(fail("invalidInput", "Cannot finalize pending references"));
+                    return Err(caused_by(
+                        "invalidInput",
+                        "Cannot finalize pending references",
+                        PendingReferences::new(),
+                    )
+                    .into());
                 }
                 self.state = if self
                     .references
@@ -605,7 +615,7 @@ mod tests {
 
     use serde_json::json;
 
-    use super::{Expansion, Operation, ReferenceInput, ReferenceResult};
+    use super::{Expansion, Operation, PendingReferences, ReferenceInput, ReferenceResult};
     use crate::focus_area_source::SourceSnapshot;
 
     fn sources() -> SourceSnapshot {
@@ -655,7 +665,9 @@ mod tests {
                 &sources,
             )
             .unwrap();
-        assert!(expansion.apply(&Operation::Finalize, &sources).is_err());
+        let error = expansion.apply(&Operation::Finalize, &sources).unwrap_err();
+        assert!(error.find_source::<PendingReferences>().is_some());
+        assert_eq!(ss_ai_runtime::classification(&error), "invalidInput");
         expansion
             .apply(&complete("parent", "parent.md"), &sources)
             .unwrap();

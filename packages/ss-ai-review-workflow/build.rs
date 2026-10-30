@@ -58,7 +58,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         let full = root.join(&path);
         println!("cargo:rerun-if-changed={}", full.display());
         add_field(&mut hash, path.as_bytes());
-        add_field(&mut hash, &fs::read(full)?);
+        let bytes = fs::read(&full).map_err(|error| {
+            io::Error::new(
+                error.kind(),
+                format!("Cannot read {}: {error}", full.display()),
+            )
+        })?;
+        add_field(&mut hash, &bytes);
     }
     println!("cargo:rustc-env=SS_AI_FOCUS_BUILD_TARGET={target}");
     println!("cargo:rustc-env=SS_AI_FOCUS_BUILD_PROFILE={profile}");
@@ -78,7 +84,13 @@ fn collect(
 ) -> io::Result<()> {
     let directory = root.join(relative);
     println!("cargo:rerun-if-changed={}", directory.display());
-    for entry in fs::read_dir(directory)? {
+    let entries = fs::read_dir(&directory).map_err(|error| {
+        io::Error::new(
+            error.kind(),
+            format!("Cannot read {}: {error}", directory.display()),
+        )
+    })?;
+    for entry in entries {
         let entry = entry?;
         let kind = entry.file_type()?;
         let path = relative.join(entry.file_name());

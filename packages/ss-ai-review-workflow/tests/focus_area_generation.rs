@@ -1,9 +1,15 @@
 //! Exercises generation fencing and publication with real session files.
 #![allow(
     clippy::indexing_slicing,
+    reason = "The tests construct the JSON shapes they index"
+)]
+#![allow(
     clippy::create_dir,
+    reason = "Reusing an existing fixture directory must fail"
+)]
+#![allow(
     clippy::assertions_on_result_states,
-    reason = "The fixtures use fixed paths and JSON shapes"
+    reason = "Some tests only need to verify that an operation is rejected"
 )]
 
 use std::fs;
@@ -42,6 +48,7 @@ struct Fixture(PathBuf);
 impl Fixture {
     fn new() -> Self {
         static NEXT: AtomicUsize = AtomicUsize::new(0);
+        // The counter only assigns unique fixture names; it does not publish shared data.
         let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join(format!(
             ".focus-area-generation-test-{}-{}",
             std::process::id(),

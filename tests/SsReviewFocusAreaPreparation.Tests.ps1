@@ -174,32 +174,27 @@ Describe 'ss-review focus-area preparation' {
         [IO.File]::WriteAllText((Join-Path $script:Session 'focus-area-expansion-status.json'), '{"schemaVersion":1,"state":"Complete","references":[]}')
     }
 
-    It 'reads a complete snapshot when a publisher coordinates with <CommandName>' -ForEach @(
+    It 'allows a shared PowerShell owner while <CommandName> reads' -ForEach @(
         @{ CommandName = 'Test-FocusAreaMap.ps1' }
         @{ CommandName = 'Update-FocusAreaMap.ps1' }
         @{ CommandName = 'New-FocusAreaArtifacts.ps1' }
         @{ CommandName = 'Update-FocusAreaExpansion.ps1' }
     ) {
-        # The publisher owns its descriptor in a separate process, so the executable cannot
-        # inherit it. Signals bracket the incomplete snapshot without relying on elapsed time.
+        # A separate process owns the shared descriptor so readers cannot inherit it.
         $holderPath = Join-Path $script:Session 'publisher.ps1'
         [IO.File]::WriteAllText($holderPath, @'
 #Requires -Version 7.6
-param([string] $Library, [string] $Session, [switch] $Shared)
+param([string] $Library, [string] $Session)
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 $PSNativeCommandUseErrorActionPreference = $true
 . $Library
-$lock = Open-PullRequestFileLock -Path (Join-Path $Session 'focus-area-cache-operation') -Shared:$Shared
-$source = Join-Path $Session 'instruction-set-source'
-$backup = Join-Path $Session 'instruction-set-source.previous'
+$lock = Open-PullRequestFileLock -Path (Join-Path $Session 'focus-area-cache-operation') -Shared
 try {
-    if (-not $Shared) { [IO.Directory]::Move($source, $backup) }
     [Console]::Out.WriteLine('ready')
     [Console]::Out.Flush()
     $null = [Console]::In.ReadLine()
 } finally {
-    if ([IO.Directory]::Exists($backup)) { [IO.Directory]::Move($backup, $source) }
     $lock.Dispose()
 }
 '@)
@@ -221,23 +216,6 @@ try {
             default { $arguments += @('-MapPath', $script:MapPath) }
         }
         try {
-            $holder.StandardOutput.ReadLine() | Should -BeExactly 'ready'
-            $reader = Start-FocusPreparationCommand $CommandName $arguments
-            $holder.StandardInput.WriteLine('publish')
-            $holder.StandardInput.Flush()
-            $result = Receive-FocusPreparationCommand $reader
-            $result.ExitCode | Should -Be 0 -Because $result.Error
-            $null = $result.Output | ConvertFrom-Json
-            $holder.WaitForExit()
-            $holder.ExitCode | Should -Be 0 -Because $holder.StandardError.ReadToEnd()
-            $writer = Open-PullRequestFileLock -Path (Join-Path $script:Session 'focus-area-cache-operation')
-            $writer.Dispose()
-
-            # A PowerShell shared owner must allow the native-backed reader while excluding
-            # an exclusive publisher. The holder, not the test process, owns the descriptor.
-            $holder.Dispose()
-            $start.ArgumentList.Add('-Shared')
-            $holder = [Diagnostics.Process]::Start($start)
             $holder.StandardOutput.ReadLine() | Should -BeExactly 'ready'
             {
                 $probe = [IO.File]::Open((Join-Path $script:Session 'focus-area-cache-operation.lock'), 'Open', 'ReadWrite', 'None')

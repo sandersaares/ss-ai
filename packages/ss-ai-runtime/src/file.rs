@@ -2,6 +2,7 @@
 
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, Read, Write};
+use std::num::NonZeroU32;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
@@ -23,28 +24,12 @@ use crate::{Clock, Failure, fail};
 ///
 /// Approximately five minutes permits parallel inspections to queue without
 /// treating a held file lock as a permanent conflict. Lock holders cannot extend this budget.
-const CONTENTION_ATTEMPTS: u32 = 6_000;
+const CONTENTION_ATTEMPTS: NonZeroU32 = NonZeroU32::new(6_000).expect("retry budget is nonzero");
 /// Avoids busy polling while concurrent operations wait for the same lock.
 const CONTENTION_INTERVAL: Duration = Duration::from_millis(50);
 /// Matches the shared workflow lock budget documented by the review skill.
-const RESOURCE_CONTENTION_ATTEMPTS: u32 = 600;
-
-/// Holds a file transaction across an operation's complete read-modify-write.
-///
-/// Retain the transaction across its reads, effects, and writes.
-/// Dropping the transaction releases exclusion without deleting the sibling lock.
-#[allow(
-    missing_debug_implementations,
-    reason = "The injected clock need not implement Debug"
-)]
-pub struct FileTransaction<'a> {
-    /// Publication destination; staging files stay beside it for atomic replacement.
-    path: PathBuf,
-    /// Retained handle makes exclusion last as long as this transaction owner.
-    _lock: ResourceLock,
-    /// Shares the invocation's wait policy for bounded filesystem contention.
-    clock: &'a dyn Clock,
-}
+const RESOURCE_CONTENTION_ATTEMPTS: NonZeroU32 =
+    NonZeroU32::new(600).expect("retry budget is nonzero");
 
 /// Selects whether a resource permits other readers while it is held.
 #[derive(Clone, Copy, Debug)]
@@ -79,7 +64,7 @@ impl ResourceLock {
         path: &Path,
         mode: LockMode,
         clock: &dyn Clock,
-        attempts: u32,
+        attempts: NonZeroU32,
     ) -> Result<Self, AppError> {
         let lock_path = lock_path(path)?;
         let file = retry_with_attempts(clock, attempts, || acquire(&lock_path, mode))?;
@@ -168,6 +153,23 @@ fn acquire(path: &Path, mode: LockMode) -> io::Result<File> {
     Ok(file)
 }
 
+/// Holds a file transaction across an operation's complete read-modify-write.
+///
+/// Retain the transaction across its reads, effects, and writes.
+/// Dropping the transaction releases exclusion without deleting the sibling lock.
+#[allow(
+    missing_debug_implementations,
+    reason = "The injected clock need not implement Debug"
+)]
+pub struct FileTransaction<'a> {
+    /// Publication destination; staging files stay beside it for atomic replacement.
+    path: PathBuf,
+    /// Retained handle makes exclusion last as long as this transaction owner.
+    _lock: ResourceLock,
+    /// Shares the invocation's wait policy for bounded filesystem contention.
+    clock: &'a dyn Clock,
+}
+
 impl<'a> FileTransaction<'a> {
     /// Acquires the transaction before testing for an existing file.
     pub fn open(path: &Path, clock: &'a dyn Clock) -> Result<Self, AppError> {
@@ -241,15 +243,15 @@ fn retry<T>(clock: &dyn Clock, operation: impl FnMut() -> io::Result<T>) -> Resu
 /// Keeps resource and provider transaction retry budgets independent.
 fn retry_with_attempts<T>(
     clock: &dyn Clock,
-    attempts: u32,
+    attempts: NonZeroU32,
     mut operation: impl FnMut() -> io::Result<T>,
 ) -> Result<T, AppError> {
     // Provider work retains the transaction lock, so retries must allow siblings to queue.
-    for attempt in 0..attempts {
+    for attempt in 0..attempts.get() {
         match operation() {
             Ok(value) => return Ok(value),
             Err(error) if contention(&error) => {
-                if attempt == attempts.saturating_sub(1) {
+                if attempt == attempts.get().saturating_sub(1) {
                     return Err(Failure::caused_by(
                         "contention",
                         "Shared file remains busy after bounded contention retries".to_owned(),
@@ -405,8 +407,8 @@ mod tests {
         })
         .unwrap_err();
         assert_eq!(crate::classification(&error), "contention");
-        assert_eq!(attempts, CONTENTION_ATTEMPTS);
-        assert_eq!(clock.waits.get(), CONTENTION_ATTEMPTS - 1);
+        assert_eq!(attempts, CONTENTION_ATTEMPTS.get());
+        assert_eq!(clock.waits.get(), CONTENTION_ATTEMPTS.get() - 1);
         assert_eq!(
             CONTENTION_INTERVAL * clock.waits.get(),
             // The budget excludes a wait after the final failed attempt.
@@ -426,8 +428,8 @@ mod tests {
         })
         .unwrap_err();
         assert_eq!(crate::classification(&error), "contention");
-        assert_eq!(attempts, RESOURCE_CONTENTION_ATTEMPTS);
-        assert_eq!(clock.waits.get(), RESOURCE_CONTENTION_ATTEMPTS - 1);
+        assert_eq!(attempts, RESOURCE_CONTENTION_ATTEMPTS.get());
+        assert_eq!(clock.waits.get(), RESOURCE_CONTENTION_ATTEMPTS.get() - 1);
     }
 
     #[test]

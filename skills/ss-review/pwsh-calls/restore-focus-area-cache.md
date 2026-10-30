@@ -6,6 +6,8 @@ $ErrorActionPreference = 'Stop'
 $PSNativeCommandUseErrorActionPreference = $true
 
 $cacheDirectory = Join-Path ([Environment]::GetFolderPath([Environment+SpecialFolder]::UserProfile)) '.copilot/cache/ss-review/focus-areas/v1'
+# The profile identifies the final scope verifier; freshness forces reference refresh.
+# See docs/implementation.md, "Cache inputs", and prepare-focus-areas.md, Stage 1.
 ss-ai workflow restore-focus-area-cache --session-state "{{SESSION_STATE}}" `
   --input-directory "{{SOURCE_DIRECTORY}}" --snapshot-identity "{{SNAPSHOT_IDENTITY}}" --skill-root "{{SKILL_ROOT}}" `
   --recipe-path "{{SKILL_ROOT}}/prepare-focus-areas.md" --cache-directory $cacheDirectory `

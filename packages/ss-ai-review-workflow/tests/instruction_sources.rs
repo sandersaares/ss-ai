@@ -555,23 +555,25 @@ fn holds_exclusive_cache_lock_during_snapshot() {
     let reader = ResourceLock::open(&lock_path, LockMode::Shared, &NoWait).unwrap();
     let (observed_tx, observed_rx) = mpsc::channel();
     let (release_tx, release_rx) = mpsc::channel();
-    let base = workspace.0.clone();
-    let worker = thread::spawn(move || {
-        let clock = PausedClock {
-            observed: observed_tx,
-            release: release_rx,
-            paused: Cell::new(false),
-        };
-        snapshot_instruction_sources(
-            &InstructionSourceOptions {
-                session_state: &base.join("session"),
-                skill_root: &base.join("skill"),
-                directory_list: None,
-                base_directory: &base,
-                repository_sources: None,
-            },
-            &clock,
-        )
+    let worker = thread::spawn({
+        let base = workspace.0.clone();
+        move || {
+            let clock = PausedClock {
+                observed: observed_tx,
+                release: release_rx,
+                paused: Cell::new(false),
+            };
+            snapshot_instruction_sources(
+                &InstructionSourceOptions {
+                    session_state: &base.join("session"),
+                    skill_root: &base.join("skill"),
+                    directory_list: None,
+                    base_directory: &base,
+                    repository_sources: None,
+                },
+                &clock,
+            )
+        }
     });
     observed_rx.recv().unwrap();
     assert!(!session.join("instruction-set-source").exists());

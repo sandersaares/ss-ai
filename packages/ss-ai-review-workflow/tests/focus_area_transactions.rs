@@ -4,9 +4,12 @@
     reason = "The tests index small JSON fixtures whose shape is constructed in the test"
 )]
 
+use std::cell::Cell;
 use std::fs;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::mpsc::{self, Receiver, Sender};
+use std::thread;
 use std::time::Duration;
 
 use jiff::Timestamp;
@@ -17,7 +20,7 @@ use ss_ai_review_workflow::focus_area_expansion::{
 };
 use ss_ai_review_workflow::focus_area_map::{MapOperation, assemble, update as update_map};
 use ss_ai_review_workflow::review_work;
-use ss_ai_runtime::Clock;
+use ss_ai_runtime::{Clock, LockMode, ResourceLock};
 
 /// Unexpected contention fails immediately rather than sleeping in a test.
 struct TestClock;
@@ -29,6 +32,26 @@ impl Clock for TestClock {
 
     fn wait(&self, _: Duration) -> Result<(), AppError> {
         panic!("Unexpected contention in an isolated fixture")
+    }
+}
+
+/// Reports contention and waits for publication before permitting a retry.
+struct PublicationClock {
+    events: Sender<bool>,
+    release: Receiver<()>,
+    waited: Cell<bool>,
+}
+
+impl Clock for PublicationClock {
+    fn now(&self) -> Timestamp {
+        Timestamp::MIN
+    }
+
+    fn wait(&self, _: Duration) -> Result<(), AppError> {
+        assert!(!self.waited.replace(true), "unexpected repeated contention");
+        self.events.send(true).unwrap();
+        self.release.recv().unwrap();
+        Ok(())
     }
 }
 
@@ -68,6 +91,67 @@ fn map() -> Vec<u8> {
                 "declarations":[],"origins":[],"uncertainties":[]}]}]}),
     )
     .unwrap()
+}
+
+#[test]
+fn preparation_readers_wait_for_complete_source_publication() {
+    for operation in ["validate", "update", "assemble", "expansion"] {
+        let fixture = Fixture::new();
+        let session = &fixture.0;
+        let clock = TestClock;
+        update(session, Operation::Initialize, &clock).unwrap();
+        update(session, Operation::Finalize, &clock).unwrap();
+        let map_path = session.join("map.json");
+        update_map(session, &map_path, MapOperation::Append(map()), &clock).unwrap();
+        let lock = ResourceLock::open(
+            &session.join("focus-area-cache-operation"),
+            LockMode::Exclusive,
+            &clock,
+        )
+        .unwrap();
+        let source = session.join("instruction-set-source");
+        let backup = session.join("instruction-set-source.previous");
+        fs::rename(&source, &backup).unwrap();
+        thread::scope(|scope| {
+            let (events_tx, events_rx) = mpsc::channel();
+            let (release_tx, release_rx) = mpsc::channel();
+            let worker = scope.spawn(move || {
+                let clock = PublicationClock {
+                    events: events_tx.clone(),
+                    release: release_rx,
+                    waited: Cell::new(false),
+                };
+                let result = match operation {
+                    "validate" => ss_ai_review_workflow::focus_area_map::validate(
+                        session, &map_path, &clock, false,
+                    ),
+                    "update" => update_map(
+                        session,
+                        &session.join("other-map.json"),
+                        MapOperation::Append(map()),
+                        &clock,
+                    ),
+                    "assemble" => assemble(session, &map_path, &clock),
+                    "expansion" => update(session, Operation::Read(None), &clock),
+                    _ => unreachable!(),
+                };
+                events_tx.send(false).unwrap();
+                result
+            });
+            let waited = events_rx.recv().unwrap();
+            fs::rename(&backup, &source).unwrap();
+            drop(lock);
+            if waited {
+                release_tx.send(()).unwrap();
+            }
+            let result = worker.join().unwrap();
+            assert!(
+                waited,
+                "{operation} completed without waiting for publication"
+            );
+            result.unwrap();
+        });
+    }
 }
 
 #[test]

@@ -41,6 +41,19 @@ Improvement ideas to revisit when the repo matures.
   during construction and represent validated decision journals with typed
   verdicts. Complete this when anchor resolution and decision replay consume
   those validated types without repeated checks or string verdict matching.
+- **Type validated focus preparation state.** Represent the coupled identities
+  and mutually exclusive publication receipts in the internal generation
+  record, while preserving the persisted format and its validation boundary.
+  Complete this when each transition constructs only coherent state.
+- **Type the cache refresh interval.** Represent the positive refresh interval
+  after input validation while retaining the existing CLI rejection behavior
+  and upper bound.
+- **Type validated instruction references and spans.** Represent reference
+  outcomes as distinct internal states and one-based source lines as nonzero
+  values after parsing. Preserve the existing wire format and diagnostics.
+- **Unify build-script errors.** Use the shared application error type for the
+  focus-generation fingerprint builder when its build dependencies can carry
+  that type without undermining the minimum-dependency checks.
 - **Deduplicate the workspace-flag exception list** (`std`, `alloc`,
   `clap/default`, `argh/default`, ...). Currently described twice in
   [`skills/ss-cargo-deps-tidy/SKILL.md`](skills/ss-cargo-deps-tidy/SKILL.md)

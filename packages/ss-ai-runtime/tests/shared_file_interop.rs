@@ -5,12 +5,16 @@ use std::fs;
 use std::io::{BufRead, BufReader, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Child, ChildStdin, ChildStdout, Command, Stdio};
+use std::sync::Mutex;
 use std::time::Duration;
 
 use jiff::Timestamp;
 use ohno::AppError;
 use ss_ai_runtime::{Clock, FileTransaction, LockMode, ResourceLock};
 use tempfile::{NamedTempFile, TempPath};
+
+/// Prevents other test children from inheriting locks during process creation.
+static PROCESS_AND_LOCK: Mutex<()> = Mutex::new(());
 
 /// Keeps each test's file and sibling lock within the checkout.
 struct TestFile {
@@ -139,6 +143,9 @@ impl Clock for NoWaitClock {
 #[test]
 #[cfg_attr(miri, ignore = "requires PowerShell subprocesses and real file locks")]
 fn powershell_owner_blocks_native_transaction() {
+    let _guard = PROCESS_AND_LOCK
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     for scenario in ["exclusive-owner", "shared-owner"] {
         let file = TestFile::new();
         let mut owner = PowerShell::start(&file.path, scenario);
@@ -162,10 +169,15 @@ fn powershell_owner_blocks_native_transaction() {
 #[test]
 #[cfg_attr(miri, ignore = "requires PowerShell subprocesses and real file locks")]
 fn native_owner_blocks_powershell_lock() {
+    let _guard = PROCESS_AND_LOCK
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     for scenario in ["exclusive-contender", "shared-contender"] {
         let file = TestFile::new();
-        let transaction = FileTransaction::open(&file.path, &NoWaitClock).unwrap();
         let mut contender = PowerShell::start(&file.path, scenario);
+        contender.expect("ready");
+        let transaction = FileTransaction::open(&file.path, &NoWaitClock).unwrap();
+        contender.send("acquire");
         contender.expect("contended");
         drop(transaction);
         contender.send("retry");
@@ -178,6 +190,9 @@ fn native_owner_blocks_powershell_lock() {
 #[test]
 #[cfg_attr(miri, ignore = "requires PowerShell subprocesses and real file locks")]
 fn shared_owners_coexist_and_exclude_writers() {
+    let _guard = PROCESS_AND_LOCK
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     let file = TestFile::new();
     let mut owner = PowerShell::start(&file.path, "shared-owner");
     owner.expect("held");
@@ -219,6 +234,9 @@ fn shared_owners_coexist_and_exclude_writers() {
     ignore = "requires PowerShell subprocesses and real file replacement"
 )]
 fn complete_publications_are_readable_in_both_directions() {
+    let _guard = PROCESS_AND_LOCK
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     let file = TestFile::new();
     fs::write(&file.path, br#"{"version":"original"}"#).unwrap();
     let mut reader = PowerShell::start(&file.path, "publication");

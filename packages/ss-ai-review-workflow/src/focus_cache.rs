@@ -254,8 +254,8 @@ pub fn restore(
     }
     let paths = ResolvedPaths::new(options, session)?;
     let options = &paths.options(options);
-    let count = user_instruction_count(options.input_directory)?;
     let descriptor = compute_descriptor(options, clock)?;
+    let count = user_instruction_count(options.input_directory, &descriptor)?;
     write_snapshot(options.session, Some(&descriptor.key), clock)?;
     let preparation_identity = focus_area_generation::bind_restore_locked(
         options.session,
@@ -1255,10 +1255,18 @@ fn artifact_records(root: &Path) -> Result<(Vec<Record>, usize), AppError> {
 }
 
 /// Counts only discovered user-scoped snapshot files.
-fn user_instruction_count(input: &Path) -> Result<usize, AppError> {
+fn user_instruction_count(input: &Path, descriptor: &Descriptor) -> Result<usize, AppError> {
     let external = input.join("external");
     match fs::symlink_metadata(&external) {
-        Ok(_) => Ok(tree_records(&external, "")?.len()),
+        Ok(_) => {
+            ensure_directory(&external)?;
+            Ok(descriptor
+                .identity
+                .inputs
+                .iter()
+                .filter(|record| record.path.starts_with("input/external/"))
+                .count())
+        }
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(0),
         Err(error) => Err(error.into()),
     }
@@ -1526,6 +1534,7 @@ fn staging_key(name: &str) -> Option<&str> {
 }
 
 #[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
     use std::cell::RefCell;
     use std::collections::HashSet;

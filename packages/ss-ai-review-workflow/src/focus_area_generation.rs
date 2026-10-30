@@ -997,6 +997,7 @@ fn swap_with(
 }
 
 #[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
     use std::cell::{Cell, RefCell};
     use std::collections::{BTreeMap, BTreeSet};

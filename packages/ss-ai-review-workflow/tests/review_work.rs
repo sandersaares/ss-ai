@@ -787,54 +787,58 @@ fn bound_work_holds_operation_lock_and_snapshots_before_replacement() {
     let (writer_resume_tx, writer_resume_rx) = mpsc::channel();
     let session = workspace.0.clone();
     let output = workspace.path("work");
-    let writer_session = session.clone();
-    let assignment_session = session.clone();
     let assignment_output = workspace.path("attempt");
-    let writer_focus = focus.clone();
-    let live_focus = focus.clone();
     std::thread::scope(move |scope| {
-        let worker = scope.spawn(move || {
-            let clock = EventGateClock {
-                events: worker_events_tx.clone(),
-                release: worker_retry_rx,
-                waits: Cell::new(0),
-            };
-            let result = review_work::create_with_preparation(
-                &inventory,
-                &groups,
-                &focus,
-                &output,
-                Some(&session),
-                Some(&findings),
-                &review_work::PreparationBinding {
-                    session: &session,
-                    identity: &identity,
-                },
-                &clock,
-            );
-            worker_events_tx.send("finished").unwrap();
-            result
+        let worker = scope.spawn({
+            let session = session.clone();
+            let focus = focus.clone();
+            move || {
+                let clock = EventGateClock {
+                    events: worker_events_tx.clone(),
+                    release: worker_retry_rx,
+                    waits: Cell::new(0),
+                };
+                let result = review_work::create_with_preparation(
+                    &inventory,
+                    &groups,
+                    &focus,
+                    &output,
+                    Some(&session),
+                    Some(&findings),
+                    &review_work::PreparationBinding {
+                        session: &session,
+                        identity: &identity,
+                    },
+                    &clock,
+                );
+                worker_events_tx.send("finished").unwrap();
+                result
+            }
         });
         assert_eq!(worker_events_rx.recv().unwrap(), "contended");
-        let writer = scope.spawn(move || -> Result<(), AppError> {
-            let clock = EventGateClock {
-                events: writer_events_tx.clone(),
-                release: writer_retry_rx,
-                waits: Cell::new(0),
-            };
-            let _operation = ResourceLock::open(
-                &writer_session.join("focus-area-cache-operation"),
-                LockMode::Exclusive,
-                &clock,
-            )?;
-            writer_events_tx.send("acquired").unwrap();
-            writer_resume_rx
-                .recv()
-                .map_err(|error| caused_by("io", "Writer permission was not received", error))?;
-            let _artifacts = FileTransaction::open(&writer_focus, &clock)?;
-            focus_area_generation::invalidate_locked(&writer_session, &clock)?;
-            fs::write(writer_focus.join("focus-rules.md"), "replacement")?;
-            Ok(())
+        let writer = scope.spawn({
+            let session = session.clone();
+            let focus = focus.clone();
+            move || -> Result<(), AppError> {
+                let clock = EventGateClock {
+                    events: writer_events_tx.clone(),
+                    release: writer_retry_rx,
+                    waits: Cell::new(0),
+                };
+                let _operation = ResourceLock::open(
+                    &session.join("focus-area-cache-operation"),
+                    LockMode::Exclusive,
+                    &clock,
+                )?;
+                writer_events_tx.send("acquired").unwrap();
+                writer_resume_rx.recv().map_err(|error| {
+                    caused_by("io", "Writer permission was not received", error)
+                })?;
+                let _artifacts = FileTransaction::open(&focus, &clock)?;
+                focus_area_generation::invalidate_locked(&session, &clock)?;
+                fs::write(focus.join("focus-rules.md"), "replacement")?;
+                Ok(())
+            }
         });
         assert_eq!(writer_events_rx.recv().unwrap(), "contended");
         drop(held_artifacts);
@@ -856,13 +860,13 @@ fn bound_work_holds_operation_lock_and_snapshots_before_replacement() {
         let snapshot = Path::new(manifest["reviewers"][0]["focusArea"].as_str().unwrap());
         assert_eq!(fs::read_to_string(snapshot).unwrap(), original);
         assert_eq!(
-            fs::read_to_string(live_focus.join("focus-rules.md")).unwrap(),
+            fs::read_to_string(focus.join("focus-rules.md")).unwrap(),
             "replacement"
         );
         let assignment = worker_input::create_assignment(
             &worker_input::AssignmentOptions {
                 phase: "review",
-                session_state: &assignment_session,
+                session_state: &session,
                 scope_path: &scope_path,
                 output_directory: &assignment_output,
                 skill_root: &skill,
@@ -888,9 +892,9 @@ fn bound_work_holds_operation_lock_and_snapshots_before_replacement() {
         let preparation_assignment = worker_input::create_assignment(
             &worker_input::AssignmentOptions {
                 phase: "focusAreas",
-                session_state: &assignment_session,
+                session_state: &session,
                 scope_path: &scope_path,
-                output_directory: &assignment_session.join("preparation-attempt"),
+                output_directory: &session.join("preparation-attempt"),
                 skill_root: &skill,
                 manifest_path: None,
                 reviewer_id: None,

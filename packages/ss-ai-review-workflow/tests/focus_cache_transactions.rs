@@ -1,9 +1,15 @@
 //! Exercises cache identity, publication, corruption, and diagnostics.
 #![allow(
     clippy::assertions_on_result_states,
+    reason = "Some tests only need to verify that an operation is rejected"
+)]
+#![allow(
     clippy::indexing_slicing,
+    reason = "The tests construct the record shapes they index"
+)]
+#![allow(
     clippy::create_dir,
-    reason = "The fixtures assert fixed record shapes and failure paths"
+    reason = "Reusing an existing fixture directory must fail"
 )]
 
 use std::cell::Cell;
@@ -248,11 +254,12 @@ impl Clock for ContendedClock {
     }
 
     fn wait(&self, _: Duration) -> Result<(), AppError> {
-        if !self.reported.replace(true) {
-            self.events.send(true).unwrap();
-            self.release.recv().unwrap();
-        }
-        thread::yield_now();
+        assert!(
+            !self.reported.replace(true),
+            "unexpected repeated contention"
+        );
+        self.events.send(true).unwrap();
+        self.release.recv().unwrap();
         Ok(())
     }
 }
@@ -543,14 +550,52 @@ fn identity_changes_with_sources_generation_profile_and_freshness() {
         options.input_directory.join("external/renamed.md"),
     )
     .unwrap();
-    assert_ne!(changed, get_key(&options));
+    let renamed = get_key(&options);
+    assert_ne!(changed, renamed);
     fs::write(options.skill_root.join("focus-area-format.md"), "changed").unwrap();
     let changed_skill = get_key(&options);
+    assert_ne!(renamed, changed_skill);
     options.generator_profile = "different-model";
     assert_ne!(changed_skill, get_key(&options));
     let changed_model = get_key(&options);
     options.freshness_days = 8;
     assert_ne!(changed_model, get_key(&options));
+}
+
+#[test]
+fn counts_only_files_under_external_including_nested_files() {
+    let fixture = Fixture::new("external-count");
+    let options = fixture.options();
+    let clock = TestClock(1_800_000_000);
+    let external = options.input_directory.join("external");
+    fs::remove_dir_all(&external).unwrap();
+    fs::create_dir_all(options.input_directory.join("external-other")).unwrap();
+    fs::write(
+        options.input_directory.join("external-other/rules.md"),
+        "other",
+    )
+    .unwrap();
+    fs::write(options.input_directory.join("external.md"), "other").unwrap();
+
+    for (expected, populate) in [(0, false), (0, true), (2, true)] {
+        if populate {
+            fs::create_dir_all(external.join("nested")).unwrap();
+            if expected != 0 {
+                fs::write(external.join("first.md"), "first").unwrap();
+                fs::write(external.join("nested/second.md"), "second").unwrap();
+            }
+        }
+        let source = options.session.join("instruction-set-source");
+        fs::remove_dir_all(&source).unwrap();
+        copy_directory(options.input_directory, &source);
+        let result = restore(&options, true, &clock).unwrap();
+        assert_eq!(result.user_instruction_file_count, Some(expected));
+        let diagnostics: serde_json::Value = serde_json::from_slice(
+            &fs::read(options.session.join("focus-area-cache-diagnostics.json")).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(diagnostics["userInstructionFileCount"], expected);
+    }
 }
 
 #[test]
@@ -739,9 +784,9 @@ fn restore_waits_for_a_busy_key_without_disturbing_its_lock_file() {
     store(&options, &first, &clock).unwrap();
     let key_path = options.cache_directory.join(".locks").join(&key);
     let lock = ResourceLock::open(&key_path, LockMode::Exclusive, &clock).unwrap();
-    let (events_tx, events_rx) = mpsc::channel();
-    let (release_tx, release_rx) = mpsc::channel();
     thread::scope(|scope| {
+        let (events_tx, events_rx) = mpsc::channel();
+        let (release_tx, release_rx) = mpsc::channel();
         let worker = scope.spawn(move || {
             let clock = ContendedClock {
                 events: events_tx.clone(),
@@ -761,6 +806,53 @@ fn restore_waits_for_a_busy_key_without_disturbing_its_lock_file() {
         assert_eq!(worker.join().unwrap().unwrap().status, "Hit");
     });
     assert!(key_path.with_extension("lock").exists());
+}
+
+#[test]
+fn store_holds_operation_lock_while_waiting_for_a_busy_key() {
+    let fixture = Fixture::new("store-contention");
+    let options = fixture.options();
+    let clock = TestClock(1_800_000_000);
+    let first = restore(&options, false, &clock).unwrap();
+    publish_generation(options.session, &first, &clock);
+    let key_path = options
+        .cache_directory
+        .join(".locks")
+        .join(first.key.as_ref().unwrap());
+    let key_lock = ResourceLock::open(&key_path, LockMode::Exclusive, &clock).unwrap();
+    let operation_path = options.session.join("focus-area-cache-operation");
+    thread::scope(|scope| {
+        let (events_tx, events_rx) = mpsc::channel();
+        let (release_tx, release_rx) = mpsc::channel();
+        let worker = scope.spawn(move || {
+            let clock = ContendedClock {
+                events: events_tx.clone(),
+                release: release_rx,
+                reported: Cell::new(false),
+            };
+            let result = store(&options, &first, &clock);
+            events_tx.send(false).unwrap();
+            result
+        });
+        let waited = events_rx.recv().unwrap();
+        let operation_held = ResourceLock::try_open(&operation_path, LockMode::Exclusive)
+            .unwrap()
+            .is_none();
+        drop(key_lock);
+        if waited {
+            release_tx.send(()).unwrap();
+        }
+        let result = worker.join().unwrap();
+        assert!(
+            waited,
+            "store completed without observing the held key lock"
+        );
+        assert!(
+            operation_held,
+            "store must retain the operation lock while waiting"
+        );
+        assert_eq!(result.unwrap().status, "Stored");
+    });
 }
 
 #[test]
@@ -989,6 +1081,7 @@ fn report_build_identity_for_child_process() {
 }
 
 #[test]
+#[cfg_attr(miri, ignore = "requires isolated native subprocesses")]
 fn copied_executable_paths_share_cache_identity() {
     let fixture = Fixture::new_exclusive("execution-path");
     let executable = std::env::current_exe().unwrap();

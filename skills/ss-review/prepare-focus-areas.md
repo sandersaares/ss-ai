@@ -157,8 +157,12 @@ Verify every non-null `pathScope` specifically: it must describe the complete in
 After scope verification, execute `pwsh-calls/publish-focus-area-generation.md`
 with the real session and the retained generation ID. Publication validates the
 generation and installs its outputs and receipt only if it is still current.
-On failure, stop this attempt and restart discovery and restore; do not copy
-outputs or adopt another generation's receipt.
+If publication reports `Cannot remove publication staging` after installing the
+outputs, retain the original identities and report the cleanup failure. Validate
+the published artifacts as described below, and continue only if validation
+confirms the current preparation identity. For any other failure, stop this
+attempt and restart discovery and restore; do not copy outputs or adopt another
+generation's receipt.
 
 Validate the published artifacts in the real session by executing the command
 in `pwsh-calls/validate-focus-area-artifacts.md` with the same

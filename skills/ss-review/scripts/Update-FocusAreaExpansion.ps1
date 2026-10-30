@@ -15,6 +15,6 @@ $PSNativeCommandUseErrorActionPreference = $true
 
 $arguments = @('update-focus-area-expansion', "--session-state=$SessionStateDirectory", "--operation=$($Operation.ToLowerInvariant())")
 if ($InputPath) { $arguments += "--input-path=$InputPath" }
-# Completed and failed results select their own reference, as in the original wrapper.
+# Completed and failed results select their own reference.
 if ($ReferenceId -and $Operation -notin @('Complete', 'Fail')) { $arguments += "--reference-id=$ReferenceId" }
 Invoke-NativeReviewWorkflow -Arguments $arguments
