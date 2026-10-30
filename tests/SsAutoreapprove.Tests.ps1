@@ -114,6 +114,17 @@ Describe 'Automatic reapproval repository scope instructions' {
         $script:Recipes | Should -Match 'with their current digests'
     }
 
+    It 'requires complete semantic discussion and shared historical excerpts' {
+        $assignment = Get-Content -LiteralPath (Join-Path $skill 'assessment.md') -Raw
+        $script:Recipes | Should -Match 'Discussion is a compact semantic document, not approval bookkeeping'
+        $script:Recipes | Should -Match '`discussionDigest` binds the complete document'
+        $script:Recipes | Should -Match 'Identical excerpt text does not merge comments'
+        $assignment | Should -Match 'Discussion includes all description, review, and comment bodies'
+        $assignment | Should -Match 'Read all unique excerpts'
+        $assignment | Should -Match 'Historical\s+excerpts may describe code absent from both comparison endpoints'
+        $script:Prompt | Should -Match 'compact presentation does not reduce coverage'
+    }
+
     It 'reports every in-range result with linked identity and service approval time' {
         $script:Prompt | Should -Match 'final report MUST include a Markdown table with one row for every in-range\s+candidate returned across all final `results` pages'
         $script:Prompt | Should -Match 'retained decisions,\s+already-valid approvals, no-prior-approval and ineligible outcomes, and failures'

@@ -215,7 +215,8 @@ mod tests {
 
     #[test]
     fn assessment_failures_keep_distinct_types_and_categories() {
-        let mut assessment = Assessment::new(inventory(), "snapshot", "policy").unwrap();
+        let mut assessment =
+            Assessment::new(inventory(), "snapshot", "policy", "discussion").unwrap();
         assert_failure::<IncompleteCoverage>(
             assessment.finish("policy", "discussion").unwrap_err(),
             "invalidState",

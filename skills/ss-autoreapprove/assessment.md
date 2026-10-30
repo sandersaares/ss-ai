@@ -54,6 +54,12 @@ interactions or a discussion objection. Do not infer the cumulative outcome
 merely from individual dispositions. Native receipts from earlier workers are
 not your knowledge of evidence needed for your own judgment.
 
+Discussion includes all description, review, and comment bodies. Shared
+`hunkReference` values point to exact excerpts in its `hunks` table, not a
+summary of the source. Read all unique excerpts and retain each comment's own
+thread, author, location, and revision when interpreting objections. Historical
+excerpts may describe code absent from both comparison endpoints.
+
 Opaque source can justify substantive uncertainty. A tool truncation, context
 limit, interrupted read, or inability to finish the assignment is instead
 incomplete work: return that diagnostic without inventing judgments for

@@ -354,7 +354,7 @@ fn changed_identity_policy_and_malformed_records_do_not_overwrite_evidence() {
 }
 
 #[test]
-fn stale_recovery_schema_migrates_only_legacy_runs_and_rejects_malformed_budgets() {
+fn incompatible_discussion_schemas_and_malformed_recovery_budgets_preserve_records() {
     let root = fixture();
     let provider = GitHub::new();
     run(
@@ -365,31 +365,23 @@ fn stale_recovery_schema_migrates_only_legacy_runs_and_rejects_malformed_budgets
     )
     .unwrap();
     let current = record(root.path());
-    assert_eq!(current["schemaVersion"], 8);
+    assert_eq!(current["schemaVersion"], 9);
     let path = root.path().join("run.json");
-    let mut legacy = current.clone();
-    legacy["schemaVersion"] = json!(7);
-    for entry in legacy["inventory"].as_array_mut().unwrap() {
-        entry.as_object_mut().unwrap().remove("recovery");
-    }
-    fs::write(&path, serde_json::to_vec(&legacy).unwrap()).unwrap();
-    let migrated: Value = serde_json::from_str(
-        &run(
+    for version in [7, 8] {
+        let mut legacy = current.clone();
+        legacy["schemaVersion"] = json!(version);
+        fs::write(&path, serde_json::to_vec(&legacy).unwrap()).unwrap();
+        let error = run(
             &result_arguments(root.path()),
             &NoProcess,
             &NoHttp,
             &FixedClock,
         )
-        .unwrap(),
-    )
-    .unwrap();
-    assert_eq!(migrated["schemaVersion"], 8);
-    assert_eq!(
-        migrated["items"][0]["staleRecovery"],
-        json!({"attempts":0, "limit":2, "exhausted":false})
-    );
-    // Read-only results do not rewrite the legacy record or its existing evidence.
-    assert_eq!(record(root.path()), legacy);
+        .unwrap_err();
+        assert_eq!(ss_ai::classification(&error), "invalidState");
+        assert!(error.to_string().contains("Unsupported discovery schema"));
+        assert_eq!(record(root.path()), legacy);
+    }
 
     let id = uuid::Uuid::new_v4().to_string();
     for recovery in [
