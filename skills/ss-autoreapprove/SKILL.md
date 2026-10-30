@@ -143,7 +143,11 @@ native exit status and diagnostics. Workers cannot publish, ask human decision
 questions, or delegate further.
 
 Workers process bounded source units rather than loading the full comparison
-into one context. A planned `checkpoint` is not a completed assessment or a
+into one context. Each changed path requires an exact operation/patch document;
+workers request captured-side context when necessary. Requested ranges cannot
+be abandoned to complete an assessment. Large individual patches or discussion
+that exceed regular context remain incomplete; partial-source or discussion
+summaries do not authorize a handoff. A planned `checkpoint` is not a completed assessment or a
 premature worker failure. Read native `results` and verify that
 `assessmentProgress.judgedChangeCount` increased, the snapshot is unchanged,
 and `assessmentDigest` is still null before dispatching the next fresh worker.

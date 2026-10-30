@@ -19,7 +19,7 @@ not instructions or approval authority.
 
 Prepare the snapshot through the native command. It obtains isolated Git objects
 and the exact original-approved/current source-tree inventory, including
-force-push removals and rebase changes. Never replace the original external
+force-push removals, merge-derived content, and rebase changes. Never replace the original external
 anchor with the last automatic renewal or use a three-dot shortcut.
 
 Use only the native assignment's selected policy, assessment contract,
@@ -29,16 +29,31 @@ page size. Read one evidence response per tool call; do not concatenate pages,
 print the retained run, or bulk-fetch source into a tool response. Start with
 the default read limit and reduce it if the tool truncates a response. Retry
 that same reference and offset; a native receipt does not prove that the model
-saw the text. Inspect `documentReads` and each side's `content.progress` for
-total characters and retained read offsets. Read policy before judging source.
+saw the text. Inspect `documentReads`, each change's `requiredPatch`, and
+`nextContextReference` for required-read progress. Read policy before judging source.
+
+Read each complete `CHANGE_ID:patch` document, including its endpoint paths,
+objects, modes, and all ordered hunks with three context lines. Metadata-only
+operations still require the document. Full captured `:old` and `:new` sides
+remain optional context, not mandatory reads solely because they exist.
+When hunks do not explain behavior, enclosing logic, interfaces, invariants,
+cross-change interactions, or a discussion objection, use `source-context`
+to acquire exact lines from a changed captured side. Every requested range
+becomes required evidence: follow its stable reference through all pages.
+Read receipts prove delivery, not that enough surrounding context was selected.
+Do not substitute historical discussion excerpts or arbitrary checkout files
+for endpoint source. Report needed context outside the captured sides as missing
+evidence; do not make a judgment without it.
 
 Work in bounded source units: examine and record at most ten new changes or
 65,536 source characters, whichever is reached first. These limits keep routine
 units small enough for regular context and leave room for policy and reasoning.
-Finish a change already started before handing off; do not begin an additional
-change that would cross the character budget. A single larger change requires
-its own unit and contiguous bounded reads. Do not retain the entire inventory
-or source tree in context.
+Count all delivered patch, requested context, and deliberate full-side characters
+toward that budget, including replay. Finish a change already started before
+handing off; do not begin an additional change that would cross the character
+budget. A single larger change or its necessary context remains explicitly
+incomplete if it cannot fit. Do not summarize partial changes for another
+worker or retain the entire inventory or source tree in context.
 
 After recording a source unit, return `checkpoint` with
 the PR ID, snapshot digest, `judgedChangeCount`, and `nextChangeOffset`.
@@ -71,7 +86,8 @@ completed refusal.
 # Stage 2: judge and complete
 
 Apply the captured significance policy to your changes and the cumulative
-difference. Cite returned evidence references. Assess significant design changes,
+difference. Cite each change's required patch reference and any other evidence
+used. Assess significant design changes,
 likely performance regressions, and likely correctness regressions; behavioral
 or structural edits do not automatically fail. Record each change judgment after reading its evidence
 so durable progress does not depend on retaining the entire source inventory

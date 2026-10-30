@@ -24,6 +24,7 @@ use crate::publication::{self, Outcome, Receipt, Scope};
 use crate::review_notice::{self, AutomaticApproval, Notice};
 use crate::target::{Platform, Target};
 use crate::{Clock, Process};
+use ss_ai_assessment::ContextRequest;
 
 /// Durable metadata-only stage; recent candidates still require approval assessment.
 #[derive(Debug, Deserialize, Serialize)]
@@ -174,7 +175,7 @@ impl DiscoveryRecord {
     }
 
     fn validate(&self) -> Result<(), AppError> {
-        if self.schema_version != 9
+        if self.schema_version != 10
             || Uuid::parse_str(&self.run_id).is_err()
             || self.repository_id.trim().is_empty()
             || self.account_id.trim().is_empty()
@@ -428,7 +429,7 @@ impl DiscoveryRecord {
             )
         })?;
         // Read offsets and judgments cannot be reinterpreted under another discussion contract.
-        if document.get("schemaVersion") != Some(&json!(9)) {
+        if document.get("schemaVersion") != Some(&json!(10)) {
             return Err(fail(
                 "invalidState",
                 "Unsupported discovery schema; use the original utility for retained effects or start a fresh run",
@@ -894,7 +895,7 @@ pub(crate) fn discover(
         run
     } else {
         DiscoveryRecord {
-            schema_version: 9,
+            schema_version: 10,
             run_id: Uuid::new_v4().to_string(),
             repository_url: input.repository.web_url.clone(),
             repository_id,
@@ -1270,6 +1271,10 @@ pub(crate) enum WorkAction {
     Read {
         reference: String,
         offset: usize,
+        limit: NonZeroUsize,
+    },
+    SourceContext {
+        request: ContextRequest,
         limit: NonZeroUsize,
     },
     Judge {
@@ -1722,9 +1727,10 @@ pub(crate) fn work(
             new,
             run.tenant.as_deref(),
         ) {
-            Ok(inventory) => {
+            Ok((inventory, patches)) => {
                 entry.assessment = Some(Assessment::new(
                     inventory,
+                    &patches,
                     snapshot,
                     &run.policy.sha256,
                     &discussion,
@@ -1761,6 +1767,26 @@ pub(crate) fn work(
             &run.policy.content,
             &discussion,
         )?,
+        WorkAction::SourceContext { request, limit } => {
+            match assessment.source_context(request, limit.get(), &run.policy.content, &discussion)
+            {
+                Ok(result) => result,
+                Err(error) => {
+                    // A failed attempt to acquire needed context is unfinished evidence, never
+                    // permission to ignore that request and publish a semantic refusal.
+                    if assessment.digest.is_none() {
+                        entry.execution_error = Some(Diagnostic::from_error(&error.into()));
+                        finish_state(&mut run);
+                        run.save(&journal)?;
+                        return Err(fail(
+                            "evidenceDelivery",
+                            "Captured source context acquisition failed; retained assessment is incomplete",
+                        ));
+                    }
+                    return Err(error.into());
+                }
+            }
+        }
         WorkAction::Judge {
             id,
             judgment,

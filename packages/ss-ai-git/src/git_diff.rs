@@ -2,7 +2,7 @@ use std::sync::LazyLock;
 
 use ohno::AppError;
 use regex::Regex;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 use ss_ai_runtime::fail;
 
@@ -17,13 +17,18 @@ pub struct FileDiff {
 }
 
 /// Side-specific ranges, including the context displayed by review services.
-#[derive(Debug, Serialize)]
-#[serde(rename_all = "camelCase")]
-struct Hunk {
-    old_start: u32,
-    old_count: u32,
-    new_start: u32,
-    new_count: u32,
+#[derive(Clone, Debug, Deserialize, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+#[allow(clippy::exhaustive_structs, reason = "Internal exact range record")]
+pub struct Hunk {
+    /// Original-side line start.
+    pub old_start: u32,
+    /// Original-side line count.
+    pub old_count: u32,
+    /// Current-side line start.
+    pub new_start: u32,
+    /// Current-side line count.
+    pub new_count: u32,
 }
 
 /// File operation labels consumed by the existing review anchor model.
@@ -270,9 +275,163 @@ fn parse_hunk(line: &str) -> Result<Hunk, AppError> {
     Ok(hunk)
 }
 
+/// Retains exact hunk bytes from an isolated blob comparison, without synthetic paths.
+pub fn blob_patch(diff: &str) -> Result<&str, AppError> {
+    let mut offset = 0_usize;
+    for line in diff.split_inclusive('\n') {
+        if line.starts_with("@@ ") {
+            return diff
+                .get(offset..)
+                .ok_or_else(|| fail("invalidState", "Invalid patch boundary"));
+        }
+        if !line.ends_with('\n')
+            || !["diff --git ", "index ", "--- ", "+++ "]
+                .iter()
+                .any(|prefix| line.starts_with(prefix))
+        {
+            return Err(fail("invalidState", "Unexpected isolated blob diff header"));
+        }
+        offset = offset.saturating_add(line.len());
+    }
+    Ok("")
+}
+
+/// Proves that complete ordered hunks reconstruct captured text byte for byte.
+///
+/// Unlike the service range parser, this retains CRLF and requires exact missing-newline
+/// markers. Unchanged gaps must match on both sides, so omitted edits cannot pass.
+pub fn validate_patch(patch: &str, old: &str, new: &str) -> Result<Vec<Hunk>, AppError> {
+    let old = old.split_inclusive('\n').collect::<Vec<_>>();
+    let new = new.split_inclusive('\n').collect::<Vec<_>>();
+    let mut lines = patch.split_inclusive('\n').peekable();
+    let mut cursors = (0_usize, 0_usize);
+    let mut hunks = Vec::new();
+    while let Some(header) = lines.next() {
+        let header = header
+            .strip_suffix('\n')
+            .ok_or_else(|| fail("invalidState", "Unterminated patch header"))?;
+        let hunk = parse_hunk(header)?;
+        let start = |line: u32, count: u32| -> Result<usize, AppError> {
+            Ok(usize::try_from(if count == 0 {
+                line
+            } else {
+                line.saturating_sub(1)
+            })?)
+        };
+        let starts = (
+            start(hunk.old_start, hunk.old_count)?,
+            start(hunk.new_start, hunk.new_count)?,
+        );
+        if old.get(cursors.0..starts.0).is_none()
+            || old.get(cursors.0..starts.0) != new.get(cursors.1..starts.1)
+        {
+            return Err(fail(
+                "invalidState",
+                "Patch omits or reorders changed source",
+            ));
+        }
+        cursors = starts;
+        let mut remaining = (hunk.old_count, hunk.new_count);
+        let mut changed = false;
+        while remaining != (0, 0) {
+            let line = lines
+                .next()
+                .ok_or_else(|| fail("invalidState", "Truncated exact patch"))?;
+            let (kind, mut text) = line
+                .split_at_checked(1)
+                .ok_or_else(|| fail("invalidState", "Missing patch line indicator"))?;
+            if !text.ends_with('\n') {
+                return Err(fail("invalidState", "Unterminated patch body"));
+            }
+            if lines.peek() == Some(&"\\ No newline at end of file\n") {
+                lines.next();
+                text = text
+                    .strip_suffix('\n')
+                    .ok_or_else(|| fail("invalidState", "Invalid newline marker"))?;
+            }
+            remaining = consume_line(line, remaining)?;
+            match kind {
+                " " => {
+                    exact_line(&old, &mut cursors.0, text)?;
+                    exact_line(&new, &mut cursors.1, text)?;
+                }
+                "-" => {
+                    exact_line(&old, &mut cursors.0, text)?;
+                    changed = true;
+                }
+                "+" => {
+                    exact_line(&new, &mut cursors.1, text)?;
+                    changed = true;
+                }
+                _ => return Err(fail("invalidState", "Invalid exact patch line")),
+            }
+        }
+        if !changed {
+            return Err(fail("invalidState", "Patch hunk contains no edit"));
+        }
+        hunks.push(hunk);
+    }
+    if old.get(cursors.0..) != new.get(cursors.1..) {
+        return Err(fail("invalidState", "Patch omits changed source tail"));
+    }
+    Ok(hunks)
+}
+
+/// Checks a body line against its captured side before advancing.
+fn exact_line(lines: &[&str], cursor: &mut usize, text: &str) -> Result<(), AppError> {
+    if lines.get(*cursor).copied() != Some(text) {
+        return Err(fail(
+            "invalidState",
+            "Patch text differs from captured source",
+        ));
+    }
+    *cursor = cursor
+        .checked_add(1)
+        .ok_or_else(|| fail("invalidState", "Patch line offset overflow"))?;
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn exact_patches_preserve_line_endings_and_reject_omitted_reordered_or_corrupt_text() {
+        let patch =
+            "@@ -1,3 +1,3 @@\n before\r\n-old\r\n+new\r\n last\n\\ No newline at end of file\n";
+        validate_patch(patch, "before\r\nold\r\nlast", "before\r\nnew\r\nlast").unwrap();
+        for corrupt in [
+            patch.replace("\r\n", "\n"),
+            patch.replace("-old", "-bad"),
+            patch.replace("+new", "+bad"),
+            patch.replace("\\ No newline at end of file\n", ""),
+            patch.replace("1,3", "2,3"),
+            format!("{patch}{patch}"),
+            String::new(),
+        ] {
+            validate_patch(&corrupt, "before\r\nold\r\nlast", "before\r\nnew\r\nlast").unwrap_err();
+        }
+        validate_patch("", "", "").unwrap();
+        validate_patch("@@ -0,0 +1 @@\n+\u{1f916}\n", "", "\u{1f916}\n").unwrap();
+        validate_patch(
+            "@@ -1 +0,0 @@\n-\u{1f916}\n\\ No newline at end of file\n",
+            "\u{1f916}",
+            "",
+        )
+        .unwrap();
+        validate_patch(
+            "@@ -2 +2 @@\n-old\n+new\n",
+            "omitted\nold\n",
+            "changed\nnew\n",
+        )
+        .unwrap_err();
+        validate_patch(
+            "@@ -1 +1 @@\n-old\n+new\n",
+            "old\nomitted\n",
+            "new\nchanged\n",
+        )
+        .unwrap_err();
+    }
 
     #[test]
     fn quoted_paths_are_lossless() {
@@ -327,6 +486,7 @@ mod tests {
             for second in fragments {
                 for third in fragments {
                     let _result = parse(&format!("{first}{second}{third}"));
+                    let _exact = validate_patch(&format!("{first}{second}{third}"), "a\n", "b\n");
                 }
             }
         }

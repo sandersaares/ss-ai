@@ -80,8 +80,9 @@ excluded PRs as counts. The window limits candidates, not approval history.
 
 Isolated Git-object access supplies exact paths, modes and content without executing
 reviewed code. Typed, snapshot-bound judgments cover every change and the cumulative
-result. Every judgment requires the policy and all readable sides of its change;
-the cumulative judgment requires complete policy and discussion reads.
+result. Every judgment requires the policy, its complete operation/patch document,
+and all requested context for its change; the cumulative judgment requires
+complete policy, discussion, and requested-context reads.
 Every completed outcome requires all readable evidence, not just favorable outcomes.
 The discussion document contains complete semantic discussion rather than the
 retained approval record. It preserves description and review bodies, comments,
@@ -93,6 +94,14 @@ Opaque source still prevents an insignificant outcome;
 absent sides represent additions or deletions, not missing evidence. Structural or
 behavioral edits are not automatically significant. Mixed significant or uncertain
 judgments prevent approval. See the package command contract for schemas and bounds.
+
+Patches retain all changed text with three surrounding lines. Complete captured
+readable sides remain available for deliberate context reads. Assessors request
+exact line ranges when hunks do not establish enclosing logic, interfaces,
+invariants, interactions, or an objection's relevance. Requested ranges become
+mandatory evidence. Native coverage cannot prove that the assessor chose enough
+context; needed evidence outside the captured sides remains explicitly missing.
+There is no filename, size, or edit-category exemption.
 
 The orchestrator dispatches a fresh GPT 6.1 Sol assessment worker per eligible PR
 with explicit medium reasoning and regular context. That worker owns preparation,
@@ -438,12 +447,32 @@ publication. Reconciliation failures identify the review node, REST review ID
 and state, related GraphQL review/dismissal IDs and states, endpoints, pagination
 methods, and collection sizes without including discussion bodies.
 
-`objects.rs` prepares isolated exact source inventories. `assessment.rs` owns
+`objects.rs` prepares isolated exact source inventories and compares captured
+blob pairs using fixed Myers behavior, no indent heuristic, and unified context.
+Blob comparison avoids repository attributes and preserves the raw inventory's
+rename/type pairing. An opaque side contributes no invented text; all text from
+the readable side remains required and the document identifies both kinds.
+Capture budgets and full retained blobs remain unchanged.
+
+The shared Git parser validates exact old-to-new reconstruction from each patch,
+including unchanged gaps, CRLF, and missing-final-newline markers. It retains
+ordered ranges without changing the existing full-review range output.
+`source.rs` binds operation metadata and ranges to the snapshot and inventory.
+Its context records bind line, byte, and Unicode-scalar bounds to a captured
+object and content digest, without copying the range's body into state.
+`assessment.rs` owns
 context selection, bounded contiguous reads, conditional judgment replacement,
 coverage, and completion digests. Producers and consumers use the same validation,
 so missing data cannot become an empty successful result. Timestamps use the shared
 Jiff parser and injectable clock; the reapproval workflow has no independent
 clock or retry timer.
+
+The required patch manifest has its own digest; completion also binds all
+requested ranges. Every command validates these against retained source.
+New context can block completion without erasing existing judgments; judgment
+replacement still requires the current digest. Failed context acquisition stays
+in the run as incomplete evidence, with no approval or notice authority.
+Incompatible run contracts require a new run rather than migrated read receipts.
 
 `discussion.rs` projects captured history into compact, provider-tagged semantic
 documents. It does not participate in authority or freshness comparisons.
@@ -458,7 +487,7 @@ dispatch use the same renderer, and the assessment binds its exact document
 bytes and projection version through `discussionDigest`. Incompatible read
 offsets and judgments are not migrated to another projection.
 
-Large discussion still requires a complete cumulative-worker read. Context
+Large individual source documents and discussion still require complete worker reads. Context
 exhaustion remains incomplete work. Checkpointed source/discussion summaries
 are a separate design decision tracked in the repository [TODO](../../../TODO.md);
 read receipts alone cannot establish that a summary preserves every objection.
@@ -506,6 +535,13 @@ the total character count; only exact-content comparisons collect the complete
 text in a caller-owned buffer. Explicit helper page limits are nonzero. Focused
 pagination coverage checks small Unicode pages, replay, overlap, gaps, incomplete evidence,
 stale snapshots, and the hard response cap through the same persisted commands.
+Controlled contention registers distinct captured-context ranges under the retained
+run lock and verifies neither range nor its progress is overwritten. Synthetic
+sparse/dense fixtures measure every serialized page separately from source
+characters and requested context. Sparse edits require at least 90% fewer
+mandatory source characters; dense replacements have no reduction guarantee.
+The bounded `ss-ai-assessment/fuzz` target exercises exact patch parsing and
+read/context/judgment operation ordering without contacting a provider.
 
 Publication-only matrices share an immutable editorial source repository and
 its captured commit IDs. Their journals, host stores, and provider state remain
