@@ -179,6 +179,92 @@ fn escaped_and_unicode_evidence_is_delivered_exactly_with_a_serialized_byte_boun
 }
 
 #[test]
+fn context_pages_fit_long_escaped_bindings_and_preserve_required_delivery() {
+    // Escaped path metadata exceeds the ordinary text-page reserve while remaining
+    // a valid captured Git path. Escaped text and Unicode exercise byte sizing.
+    let path = "\u{1}nested/".repeat(450) + "file";
+    let text = "\u{1}\u{1f916}\t".repeat(4096);
+    let change = change(
+        &path,
+        Content::Text { text: text.clone() },
+        Content::Text {
+            text: format!("{text}changed"),
+        },
+    );
+    let id = change.id.clone();
+    let mut assessment = assessment(inventory(vec![change]), "discussion");
+    read_all(&mut assessment, "policy", "policy", "policy", "discussion");
+    read_patch(&mut assessment, &id, "policy", "discussion");
+    let request = ContextRequest {
+        change_id: id.clone(),
+        side: SourceSide::Old,
+        start_line: NonZeroUsize::MIN,
+        line_count: NonZeroUsize::MIN,
+    };
+    let first = assessment
+        .source_context(request.clone(), usize::MAX, "policy", "discussion")
+        .unwrap();
+    assert_bounded(&first);
+    assert_eq!(first["context"]["source"]["path"], path);
+    assert!(!first["text"].as_str().unwrap().is_empty());
+    assert_eq!(first["complete"], false);
+    let reference = first["reference"].as_str().unwrap();
+    assessment
+        .record(
+            &id,
+            judgment(&id, Disposition::Significant),
+            None,
+            "policy",
+            "discussion",
+        )
+        .unwrap_err();
+    let retry = assessment
+        .source_context(request, 1, "policy", "discussion")
+        .unwrap();
+    assert_eq!(retry["reference"], reference);
+    assert_eq!(retry["text"], "\u{1}");
+    read_all(&mut assessment, reference, &text, "policy", "discussion");
+    assessment
+        .record(
+            &id,
+            judgment(&id, Disposition::Significant),
+            None,
+            "policy",
+            "discussion",
+        )
+        .unwrap();
+    assessment
+        .validate("snapshot", "policy", "policy", "discussion")
+        .unwrap();
+}
+
+#[test]
+fn context_binding_that_cannot_fit_does_not_record_evidence_delivery() {
+    let change = change(
+        &("nested/".repeat(3_000) + "file"),
+        Content::Text { text: "old".into() },
+        Content::Text { text: "new".into() },
+    );
+    let id = change.id.clone();
+    let mut assessment = assessment(inventory(vec![change]), "discussion");
+    let request = ContextRequest {
+        change_id: id,
+        side: SourceSide::Old,
+        start_line: NonZeroUsize::MIN,
+        line_count: NonZeroUsize::MIN,
+    };
+    assessment
+        .source_context(request, usize::MAX, "policy", "discussion")
+        .unwrap_err();
+    let saved = serde_json::to_value(&assessment).unwrap();
+    assert!(saved["reads"].as_object().unwrap().is_empty());
+    assert_eq!(saved["contexts"].as_object().unwrap().len(), 1);
+    assessment
+        .validate("snapshot", "policy", "policy", "discussion")
+        .unwrap();
+}
+
+#[test]
 fn unread_source_cannot_be_bulk_judged_uncertain_or_completed_as_a_refusal() {
     let change = change(
         "source.rs",

@@ -113,6 +113,8 @@ JSON escaping and pretty formatting, so a character-count bound cannot hide
 tool truncation. Metadata pages shrink at complete change boundaries and return
 their actual next offset; a single oversized item fails explicitly. Evidence
 pages advance only through returned characters and expose total length.
+Page sizing includes the exact serialized context binding, including its path;
+metadata that leaves no room for the next character fails explicitly.
 Native read progress distinguishes unread empty text from an explicitly read
 empty document and distinguishes opaque content from pending text delivery.
 Read receipts track native delivery, not model comprehension; a truncated tool
