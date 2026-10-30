@@ -198,6 +198,181 @@ fn aggregate(assessment: &mut Assessment, discussion: &str) {
 }
 
 #[test]
+fn discussion_json_spans_preserve_whitespace_order_and_escapes() {
+    let documents = [
+        r#" { "reviews" : [ { "body" : "a\u0062", "id" : 7 } ], "pullRequest" : { "body" : "literal \"reviews\": [x]" }, "comments" : [], "hunks" : {"z":"\u0061"} } "#.to_owned(),
+        json!({"schemaVersion":1,"platform":"gitHub","pullRequest":{"body":"description"},
+            "reviews":[{"id":7,"body":"objection"}],
+            "reviewComments":[{"id":1,"body":"reply","hunkReference":"h"}],
+            "comments":[],"hunks":{"h":"@@ -1 +1 @@\n"}}).to_string(),
+    ];
+    for discussion in documents {
+        let mut assessment = fixture(&discussion, "", "");
+        let mut ranges = Vec::new();
+        for unit in units(&assessment) {
+            let text = read(
+                &mut assessment,
+                unit["reference"].as_str().unwrap(),
+                &discussion,
+            );
+            let mut offset = 0;
+            for range in unit["unit"]["ranges"].as_array().unwrap() {
+                let start = usize::try_from(range["startCharacter"].as_u64().unwrap()).unwrap();
+                let end = usize::try_from(range["endCharacter"].as_u64().unwrap()).unwrap();
+                ranges.push((
+                    start,
+                    end,
+                    text.chars()
+                        .skip(offset)
+                        .take(end - start)
+                        .collect::<String>(),
+                ));
+                offset += end - start;
+            }
+        }
+        ranges.sort_by_key(|range| range.0);
+        let mut result = String::new();
+        let mut end = 0;
+        for (start, next, text) in ranges {
+            assert_eq!(start, end);
+            end = next;
+            result.push_str(&text);
+        }
+        assert_eq!(result, discussion);
+        assessment
+            .validate("snapshot", "policy", "policy", &discussion)
+            .unwrap();
+    }
+}
+
+#[test]
+fn each_large_provider_thread_unit_fits_the_existing_worker_budget() {
+    let long = "x".repeat(900);
+    let ado = json!({"platform":"azureDevOps","threads":[{
+        "id":42,"threadContext":{"filePath":"file","line":3},
+        "comments":(0..100).map(|id| json!({"id":id,"parentCommentId":0,
+            "content":format!("body {id}"),"author":{"id":format!("{id}-{long}")}})).collect::<Vec<_>>()
+    }]});
+    let github = json!({"platform":"gitHub","reviewComments":
+        (0..100).map(|id| json!({"id":id+1,"in_reply_to_id":if id==0 { Value::Null } else {json!(1)},
+            "body":format!("body {id}"),"path":format!("{id}-{long}"),"hunkReference":"h"})).collect::<Vec<_>>(),
+        "hunks":{"h":"@@ -1 +1 @@\n"}});
+    let escaped = json!({"platform":"azureDevOps","threads":[{
+        "id":123,"threadContext":{"filePath":"file"},"comments":[{
+            "id":1,"content":"\0\t\\\"".repeat(12_000)
+        }]
+    }]});
+    for (discussion, collection) in [
+        (ado.to_string(), "threads"),
+        (github.to_string(), "reviewComments"),
+        (escaped.to_string(), "threads"),
+    ] {
+        let mut assessment = fixture(&discussion, "", "");
+        let all = units(&assessment);
+        let mut group = None;
+        let mut ranges = Vec::new();
+        for (index, unit) in all.into_iter().enumerate() {
+            let metadata = assessment.units(index, 1).unwrap();
+            let policy = assessment
+                .read("policy", 0, usize::MAX, "policy", &discussion)
+                .unwrap();
+            let mut delivered = serde_json::to_string_pretty(&metadata)
+                .unwrap()
+                .chars()
+                .count()
+                + serde_json::to_string_pretty(&policy)
+                    .unwrap()
+                    .chars()
+                    .count()
+                + 2;
+            let mut raw = String::new();
+            for reference in [
+                unit["reference"].as_str().unwrap(),
+                unit["bindingReference"].as_str().unwrap(),
+            ] {
+                let mut offset = 0;
+                let mut complete = String::new();
+                loop {
+                    let page = assessment
+                        .read(reference, offset, usize::MAX, "policy", &discussion)
+                        .unwrap();
+                    let serialized = serde_json::to_string_pretty(&page).unwrap();
+                    assert!(serialized.len() < 16_384);
+                    delivered += serialized.chars().count() + 1;
+                    complete.push_str(page["text"].as_str().unwrap());
+                    let Some(next) = page["nextOffset"].as_u64() else {
+                        break;
+                    };
+                    let next = usize::try_from(next).unwrap();
+                    assert!(next > offset);
+                    offset = next;
+                }
+                if reference.starts_with("unit:") {
+                    raw = complete;
+                } else {
+                    let binding: Value = serde_json::from_str(&complete).unwrap();
+                    if binding
+                        .as_array()
+                        .unwrap()
+                        .iter()
+                        .any(|entry| entry["collection"] == collection)
+                    {
+                        let parent = unit["unit"]["parent"].as_str().unwrap();
+                        assert_eq!(group.get_or_insert_with(|| parent.to_owned()), parent);
+                    }
+                }
+            }
+            let digest = assessment
+                .note(
+                    unit["unit"]["id"].as_str().unwrap(),
+                    note(unit["reference"].as_str().unwrap()),
+                    None,
+                    "policy",
+                    &discussion,
+                )
+                .unwrap();
+            let checkpoint = assessment.checkpoint().unwrap();
+            delivered += digest.len()
+                + serde_json::to_string_pretty(&checkpoint)
+                    .unwrap()
+                    .chars()
+                    .count();
+            assert!(
+                delivered < 65_536,
+                "individual unit requires {delivered} characters"
+            );
+            let mut local = 0;
+            for range in unit["unit"]["ranges"].as_array().unwrap() {
+                let start = usize::try_from(range["startCharacter"].as_u64().unwrap()).unwrap();
+                let end = usize::try_from(range["endCharacter"].as_u64().unwrap()).unwrap();
+                ranges.push((
+                    start,
+                    end,
+                    raw.chars()
+                        .skip(local)
+                        .take(end - start)
+                        .collect::<String>(),
+                ));
+                local += end - start;
+            }
+        }
+        assert!(group.is_some());
+        ranges.sort_by_key(|range| range.0);
+        let mut end = 0;
+        let mut reconstructed = String::new();
+        for (start, next, text) in ranges {
+            assert_eq!(start, end);
+            end = next;
+            reconstructed.push_str(&text);
+        }
+        assert_eq!(reconstructed, discussion);
+        assessment
+            .validate("snapshot", "policy", "policy", &discussion)
+            .unwrap();
+    }
+}
+
+#[test]
 fn lossless_unicode_crlf_oversized_lines_and_interleaved_threads_have_exact_coverage() {
     let body = format!("first\r\n{}\u{1f916}\0last", "x".repeat(40_000));
     let discussion = json!({"schemaVersion":1, "platform":"gitHub", "pullRequest":{"body":body},
@@ -808,7 +983,7 @@ fn large_thread_metadata_and_many_ranges_remain_accessible_without_losing_bindin
     let all = units(&assessment);
     assert!(all.len() > 2);
     let mut ranges = Vec::new();
-    let mut saw_nested = false;
+    let mut saw_thread_binding = false;
     for unit in all {
         let reference = unit["reference"].as_str().unwrap();
         let text = read(&mut assessment, reference, &discussion);
@@ -822,9 +997,9 @@ fn large_thread_metadata_and_many_ranges_remain_accessible_without_losing_bindin
             &discussion,
         );
         let bindings: Value = serde_json::from_str(&bindings).unwrap();
-        if bindings.to_string().contains("author-99") {
-            saw_nested = true;
-            assert!(bindings.to_string().contains("filePath"));
+        if bindings.to_string().contains("\"threads\"") {
+            saw_thread_binding = true;
+            assert!(bindings.to_string().contains("identityDigest"));
         }
         assessment
             .note(id, note(reference), None, "policy", &discussion)
@@ -842,7 +1017,7 @@ fn large_thread_metadata_and_many_ranges_remain_accessible_without_losing_bindin
             ranges.push((start, end, part));
         }
     }
-    assert!(saw_nested);
+    assert!(saw_thread_binding);
     ranges.sort_by_key(|range| range.0);
     let mut next = 0;
     let mut reconstructed = String::new();

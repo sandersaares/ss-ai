@@ -218,7 +218,7 @@ The producer and consumer validate the full record, including excluded PRs.
 
 | Record | Fields |
 | --- | --- |
-| Run | `schemaVersion: 12`; UUID `runId`; canonical `repositoryUrl`; nonempty string `repositoryId`, `accountId`, `utilityVersion`; `platform` (`gitHub` or `azureDevOps`); nullable string `tenant`; `policy`; Boolean `dryRun`, `enumerationComplete`; `state`; `inventory`; nullable `error` and positive integer `errorPullRequestId`. A PR-bound publication failure records its originating PR; only that PR's owned operation can recover the failed run. |
+| Run | `schemaVersion: 13`; UUID `runId`; canonical `repositoryUrl`; nonempty string `repositoryId`, `accountId`, `utilityVersion`; `platform` (`gitHub` or `azureDevOps`); nullable string `tenant`; `policy`; Boolean `dryRun`, `enumerationComplete`; `state`; `inventory`; nullable `error` and positive integer `errorPullRequestId`. A PR-bound publication failure records its originating PR; only that PR's owned operation can recover the failed run. |
 | Policy | Absolute UTF-8 `sourcePath`; nonempty UTF-8 `content`; lowercase hexadecimal `sha256` of the captured content bytes. |
 | Inventory entry | Unique positive integer `pullRequestId`; canonical `url`; nonempty `title`; `draft: false`; `recency`; `recovery`; nullable `inspection`, `assessment`, `executionError`, `publication`, `reviewNotice`, and `automaticApproval`. Entries are in ascending PR order. |
 | Recovery | `attemptIds`: ordered distinct UUIDs, at most the recovery limit, excluding the run ID; nullable `stale` (`staleEvidence`) and `error` (`retryExhausted`, only at the limit). The last attempt ID selects the current PR's host-journal `runId`; the initial attempt uses the enclosing run ID. |
@@ -355,8 +355,10 @@ without replaying completed metadata pages. Filtered lists have separate offsets
 Read every returned `unit:ID` and `binding:ID` through the ordinary reader. Units cover each
 original document exactly once through half-open scalar ranges; their text
 concatenates those ranges in order. The stable parent identifier groups a source
-change or discussion record; separately paged bindings retain its exact identity
-and distinguish threads and shared historical excerpts.
+change or discussion thread; bounded bindings identify each record by collection
+and digests. Exact identities, locations, and excerpt links remain in the original
+unit text. Read other units with the same parent and reacquire original evidence
+as needed to interpret a fragment.
 Complete unit coverage also satisfies the original document's required read.
 
 `note` takes `--unit-id`, `--observations`, `--interfaces`, repeated `--evidence`,

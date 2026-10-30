@@ -27,7 +27,7 @@ use crate::{Clock, Process};
 use ss_ai_assessment::{ContextRequest, Note};
 
 /// Checkpoint notes and dependency-bound aggregates require a fresh assessment contract.
-const RUN_SCHEMA: u32 = 12;
+const RUN_SCHEMA: u32 = 13;
 
 /// Durable metadata-only stage; recent candidates still require approval assessment.
 #[derive(Debug, Deserialize, Serialize)]

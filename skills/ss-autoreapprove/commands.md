@@ -146,7 +146,9 @@ Other placeholders retain their definitions above/below. Follow each returned
 `nextOffset`. Unit metadata contains a stable parent identifier, original reference,
 binding references, exact half-open scalar ranges and digests. Read returned
 `unit:ID` and `binding:ID` references completely, then record notes citing
-that exact unit and any context used.
+that exact unit and any context used. Binding digests group records; exact
+identities and links remain in original unit text. Reacquire related units and
+original evidence when a fragment alone does not explain its context.
 Every unit requires a note even when the complete original document was read.
 Use `note:ID`, `judgment:CHANGE_ID`, `discussion-note`, `check:ID`, and
 `resolution:ID` through the same bounded `read` command. Metadata includes

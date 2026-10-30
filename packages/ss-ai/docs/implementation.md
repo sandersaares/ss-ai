@@ -60,8 +60,9 @@ time boundary supports both claim decisions and transport recovery waits.
 including noncontiguous replies, then splits oversized text at exact scalar
 ranges. The manifest covers the original serialized documents rather than a
 second reconstruction of their bodies. Source/thread bindings accompany split
-records through independently paged binding references so fragments remain
-interpretable even when their metadata is large. Unit bounds reserve regular worker
+records through bounded digest-based binding references. Exact metadata remains
+in the covered original ranges rather than being repeated on every fragment.
+Workers use the stable parent to reacquire related evidence. Unit bounds reserve regular worker
 context for policy, exact follow-up evidence, and reasoning.
 
 `checkpoint.rs` owns notes, fixed-level discussion aggregation, explicit concern

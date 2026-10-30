@@ -125,8 +125,10 @@ complete discussion into bounded exact ranges. It prefers complete hunks,
 threads, and review bodies, groups interleaved replies by their retained parent,
 and splits oversized records or single lines without omission. Each unit retains
 its original reference, scalar ranges, content digests, and a reference to
-source/thread bindings. Workers read those bindings in bounded pages before
-recording a unit note.
+source/thread binding references. Bindings use bounded record and thread digests;
+the original unit text retains exact identities, locations, and links. Workers
+read the bindings before recording a unit note and reacquire related original
+units as needed to interpret fragments.
 Sharing excerpt text never merges its referencing threads.
 
 Workers record typed unit notes with observations, interfaces/invariants,
@@ -239,7 +241,7 @@ or forgets such effects.
 An existing publication receipt also requires retained host evidence of a
 preflight-only operation; missing host history is not proof that no write occurred.
 
-`discovery.rs` owns the schema-12 run, recovery record, and result metadata.
+`discovery.rs` owns the schema-13 run, recovery record, and result metadata.
 Incompatible run schemas require a fresh run; retained effects require
 reconciliation with their original utility version.
 Discovery discards draft PRs before recency checks. Valid older records drop

@@ -51,10 +51,14 @@ metadata pages. Omit `--reference` when using that unfiltered offset.
 Each unit names its original
 document, parent identifier, exact half-open Unicode scalar ranges,
 content digest, and a binding reference. Read the binding reference completely
-before recording the unit note. Whole hunks and threads are preferred;
+before recording the unit note. Bindings group records by digest; exact identities,
+locations, and links remain in the original text. Read related units with the
+same parent and reacquire exact evidence when needed. Whole hunks and threads are preferred;
 oversized records and single lines use lossless ranges. A boundary is not a
 semantic boundary: inspect its bindings and reacquire neighboring units or exact
-source when needed. Shared historical excerpts retain separate referencing
+source when needed. If a fragment lacks context that does not fit in the current
+worker, record the missing relationship as an interaction for later examination,
+not as evidence that no relationship exists. Shared historical excerpts retain separate referencing
 threads. No description, review, reply, or excerpt is irrelevant by default.
 
 Work on at most ten new units or final changes and 65,536 delivered evidence

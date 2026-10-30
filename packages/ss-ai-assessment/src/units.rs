@@ -8,8 +8,8 @@ use serde_json::{Value, json};
 use crate::assessment::{document_digest, hash};
 use crate::error::{self, AssessmentError};
 
-/// Leaves most of the worker budget available for policy, context, and reasoning.
-pub(crate) const UNIT_CHARACTERS: usize = 16_384;
+/// Reserve worker budget for JSON escaping, metadata, policy, and a completed note.
+pub(crate) const UNIT_CHARACTERS: usize = 4_096;
 /// Reserve most of a metadata response for the unit identity and pagination.
 const UNIT_RANGES: usize = 8;
 
@@ -85,7 +85,7 @@ pub(crate) fn partition(
     reference: &str,
     document: &str,
 ) -> Result<Vec<EvidenceUnit>, AssessmentError> {
-    let segments = segments(document)?;
+    let segments = segments(document, reference)?;
     let mut groups = BTreeMap::<String, Vec<Segment>>::new();
     for segment in segments {
         groups
@@ -127,10 +127,7 @@ pub(crate) fn partition(
                     content_digest: document_digest(text),
                 });
                 unit.total_characters = unit.total_characters.saturating_add(text.chars().count());
-                unit.bindings.push(json!({
-                    "identity": segment.identity,
-                    "record": segment.binding
-                }));
+                unit.bindings.push(segment.binding.clone());
                 if bytes == remaining.len() {
                     break;
                 }
@@ -178,8 +175,8 @@ fn finish_unit(
     Ok(())
 }
 
-/// Locate exact serialized values instead of parsing offsets with a second JSON parser.
-fn segments(document: &str) -> Result<Vec<Segment>, AssessmentError> {
+/// Locate records using the JSON parser's consumed byte offsets.
+fn segments(document: &str, reference: &str) -> Result<Vec<Segment>, AssessmentError> {
     let Ok(Value::Object(object)) = serde_json::from_str::<Value>(document) else {
         return Ok(vec![Segment {
             start: 0,
@@ -189,59 +186,49 @@ fn segments(document: &str) -> Result<Vec<Segment>, AssessmentError> {
         }]);
     };
     let mut boundaries = Vec::new();
-    for field in [
-        "pullRequest",
-        "reviews",
-        "comments",
-        "reviewComments",
-        "threads",
-        "hunks",
-    ] {
-        if object.contains_key("patch") {
-            break;
-        }
-        let Some(value) = object.get(field) else {
-            continue;
-        };
-        let marker = format!("\"{field}\":");
-        let mut cursor = document
-            .find(&marker)
-            .ok_or_else(error::InvalidUnitManifest::classified)?
-            .saturating_add(marker.len());
-        let records = match value {
-            Value::Array(values) => values
-                .iter()
-                .enumerate()
-                .map(|(index, value)| (index.to_string(), value))
-                .collect::<Vec<_>>(),
-            Value::Object(values) if field == "hunks" => values
-                .iter()
-                .map(|(key, value)| (key.clone(), value))
-                .collect(),
-            _ => vec![(String::new(), value)],
-        };
-        for (index, value) in records {
-            let text = serde_json::to_string(value)?;
-            let offset = document
-                .get(cursor..)
-                .ok_or_else(error::InvalidUnitManifest::classified)?
-                .find(&text)
-                .ok_or_else(error::InvalidUnitManifest::classified)?;
-            cursor = cursor.saturating_add(offset).saturating_add(text.len());
-            let identity = if matches!(field, "comments" | "reviewComments") {
-                thread_identity(field, &index, value, value_array(object.get(field)))?
+    if reference == "discussion" {
+        for (field, span) in object_spans(document, 0)? {
+            if !matches!(
+                field.as_str(),
+                "pullRequest" | "reviews" | "comments" | "reviewComments" | "threads" | "hunks"
+            ) {
+                continue;
+            }
+            let thread_records = if matches!(field.as_str(), "comments" | "reviewComments") {
+                value_array(Some(&span.value)).to_vec()
             } else {
-                format!(
-                    "/{field}/{}",
-                    value
-                        .get("id")
-                        .map_or_else(|| index.clone(), Value::to_string)
-                )
+                Vec::new()
             };
-            boundaries.push((cursor, identity, record_binding(field, &index, value)));
+            let records = match &span.value {
+                Value::Array(_) => array_spans(document, span.start)?
+                    .into_iter()
+                    .enumerate()
+                    .map(|(index, span)| (index.to_string(), span))
+                    .collect::<Vec<_>>(),
+                Value::Object(_) if field == "hunks" => object_spans(document, span.start)?,
+                _ => vec![(String::new(), span)],
+            };
+            for (index, span) in records {
+                let identity = if matches!(field.as_str(), "comments" | "reviewComments") {
+                    thread_identity(&field, &index, &span.value, &thread_records)?
+                } else {
+                    format!(
+                        "/{field}/{}",
+                        span.value
+                            .get("id")
+                            .map_or_else(|| index.clone(), Value::to_string)
+                    )
+                };
+                let binding = json!({
+                    "collection": field,
+                    "indexDigest": hash(&index)?,
+                    "identityDigest": hash(&identity)?
+                });
+                boundaries.push((span.end, identity, binding));
+            }
         }
     }
-    if object.contains_key("patch") && boundaries.is_empty() {
+    if reference != "discussion" && object.contains_key("patch") && boundaries.is_empty() {
         let mut binding = object;
         let patch = binding
             .remove("patch")
@@ -250,7 +237,7 @@ fn segments(document: &str) -> Result<Vec<Segment>, AssessmentError> {
             .as_str()
             .ok_or_else(error::InvalidUnitManifest::classified)?;
         binding.remove("hunks");
-        let binding = Value::Object(binding);
+        let binding = json!({"collection":"patch"});
         let patch_start = document
             .find("\"patch\":")
             .ok_or_else(error::InvalidUnitManifest::classified)?
@@ -299,6 +286,94 @@ fn segments(document: &str) -> Result<Vec<Segment>, AssessmentError> {
         .collect())
 }
 
+/// One parsed value retains its exact byte span in the original document.
+struct JsonSpan {
+    start: usize,
+    end: usize,
+    value: Value,
+}
+
+/// Parse one value with serde so string escaping and nested values stay exact.
+fn json_span(document: &str, start: usize) -> Result<JsonSpan, AssessmentError> {
+    let start = skip_whitespace(document, start);
+    let text = document
+        .get(start..)
+        .ok_or_else(error::InvalidUnitManifest::classified)?;
+    let mut stream = serde_json::Deserializer::from_str(text).into_iter::<Value>();
+    let value = stream
+        .next()
+        .ok_or_else(error::InvalidUnitManifest::classified)??;
+    let end = start.saturating_add(stream.byte_offset());
+    Ok(JsonSpan { start, end, value })
+}
+
+/// Structural punctuation is checked even though the full document was parsed first.
+fn delimiter(document: &str, offset: usize, expected: u8) -> Result<usize, AssessmentError> {
+    let offset = skip_whitespace(document, offset);
+    if document.as_bytes().get(offset) != Some(&expected) {
+        return Err(error::InvalidUnitManifest::classified());
+    }
+    Ok(offset.saturating_add(1))
+}
+
+fn skip_whitespace(document: &str, offset: usize) -> usize {
+    let mut offset = offset;
+    while document
+        .as_bytes()
+        .get(offset)
+        .is_some_and(|byte| matches!(byte, b' ' | b'\n' | b'\r' | b'\t'))
+    {
+        offset = offset.saturating_add(1);
+    }
+    offset
+}
+
+/// Iterate object members in document order without reconstructing their values.
+fn object_spans(document: &str, start: usize) -> Result<Vec<(String, JsonSpan)>, AssessmentError> {
+    let mut cursor = delimiter(document, start, b'{')?;
+    let mut fields = Vec::new();
+    loop {
+        cursor = skip_whitespace(document, cursor);
+        if document.as_bytes().get(cursor) == Some(&b'}') {
+            return Ok(fields);
+        }
+        let key = json_span(document, cursor)?;
+        let key_text = key
+            .value
+            .as_str()
+            .ok_or_else(error::InvalidUnitManifest::classified)?
+            .to_owned();
+        let value = json_span(document, delimiter(document, key.end, b':')?)?;
+        cursor = skip_whitespace(document, value.end);
+        fields.push((key_text, value));
+        if document.as_bytes().get(cursor) != Some(&b',') {
+            delimiter(document, cursor, b'}')?;
+            return Ok(fields);
+        }
+        cursor = cursor.saturating_add(1);
+    }
+}
+
+/// Iterate array records using the same exact value boundaries.
+fn array_spans(document: &str, start: usize) -> Result<Vec<JsonSpan>, AssessmentError> {
+    let mut cursor = delimiter(document, start, b'[')?;
+    let mut values = Vec::new();
+    loop {
+        cursor = skip_whitespace(document, cursor);
+        if document.as_bytes().get(cursor) == Some(&b']') {
+            return Ok(values);
+        }
+        let value = json_span(document, cursor)?;
+        cursor = skip_whitespace(document, value.end);
+        values.push(value);
+        if document.as_bytes().get(cursor) != Some(&b',') {
+            delimiter(document, cursor, b']')?;
+            return Ok(values);
+        }
+        cursor = cursor.saturating_add(1);
+    }
+}
+
 fn value_array(value: Option<&Value>) -> &[Value] {
     value.and_then(Value::as_array).map_or(&[], Vec::as_slice)
 }
@@ -334,26 +409,6 @@ fn thread_identity(
             .get("id")
             .map_or_else(|| index.to_owned(), Value::to_string)
     ))
-}
-
-/// Split bodies keep their source/thread metadata available without repeating the body.
-fn record_binding(field: &str, index: &str, value: &Value) -> Value {
-    if let Value::Object(object) = value {
-        let mut object = object.clone();
-        for body in ["body", "description", "content"] {
-            object.remove(body);
-        }
-        if let Some(Value::Array(comments)) = object.get_mut("comments") {
-            for comment in comments {
-                if let Value::Object(comment) = comment {
-                    comment.remove("content");
-                }
-            }
-        }
-        json!({"collection":field, "index":index, "record":object})
-    } else {
-        json!({"collection":field, "index":index})
-    }
 }
 
 /// Prefer complete physical/JSON-escaped lines, but never stall on a long single line.

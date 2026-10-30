@@ -204,6 +204,10 @@ Use the returned references with the driver's named `--operation read`, `units`,
 `note`, `judge`, `checks`, `resolve`, `checkpoint`, `complete`, and `results`
 operations. Their assessment arguments match the skill's native recipes; the
 driver replaces provider/run selection with its isolated `--state-path`.
+Before recording each unit note, both arms read the complete unit and its
+`bindingReference`, including every page. Bindings group related fragments by
+digest; the original evidence contains their exact identities and locations.
+Workers reacquire the related fragments needed to understand each observation.
 State writes use retained sibling locks and atomic replacement. Do not edit
 the state JSON to bypass a missing read, stale dependency, or semantic obligation.
 
