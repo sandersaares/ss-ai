@@ -199,11 +199,7 @@ pub(crate) fn collect(transport: &mut Transport<'_>, target: &Target) -> Result<
         && !text(field(head_repo, "full_name")?)?
             .eq_ignore_ascii_case(text(field(base_repo, "full_name")?)?);
     let merge_base = merge_base(transport, target, base_sha, head_sha, head_repo, fork)?;
-    let source_ref = if fork {
-        nonempty(field(head, "label")?)?
-    } else {
-        nonempty(field(head, "ref")?)?
-    };
+    let source_ref = source_ref(head, head_repo, fork)?;
     unique(&threads, "id")?;
     Ok(json!({
         "target": target,
@@ -221,6 +217,20 @@ pub(crate) fn collect(transport: &mut Transport<'_>, target: &Target) -> Result<
         },
         "reviewers": reviewers, "revisions": [], "threads": threads
     }))
+}
+
+/// Keeps an owner-qualified branch name whenever its repository is not local.
+fn source_ref<'a>(head: &'a Value, head_repo: &Value, fork: bool) -> Result<&'a str, AppError> {
+    // A deleted head repository cannot prove that the branch was local. GitHub's
+    // label retains the owner and avoids making an ambiguous branch name local.
+    nonempty(field(
+        head,
+        if fork || head_repo.is_null() {
+            "label"
+        } else {
+            "ref"
+        },
+    )?)
 }
 
 /// Resolves an immutable merge base without treating other refusals as absence.
@@ -438,9 +448,6 @@ fn review_thread(node: &Value, comments: &[Value]) -> Result<Value, AppError> {
         ));
     }
     let opener = field(root, "id")?.clone();
-    let first = canonical
-        .first()
-        .ok_or_else(|| fail("service", "GitHub review thread has no comments"))?;
     // Every reply must reach the unique opener; missing parents and cycles do not
     // establish ownership of a thread even when all comment bodies are present.
     let parents: HashMap<_, _> = canonical
@@ -476,8 +483,10 @@ fn review_thread(node: &Value, comments: &[Value]) -> Result<Value, AppError> {
             ));
         }
     }
-    let published = nullable_field(first, "publishedUtc")?.clone();
-    let url = nullable_field(first, "url")?.clone();
+    // The connection order is not ownership evidence; a reply can precede its
+    // opener in a returned page, so the opener supplies the thread's event.
+    let published = nullable_field(root, "publishedUtc")?.clone();
+    let url = nullable_field(root, "url")?.clone();
     let mut updated = published.clone();
     for comment in &canonical {
         for key in ["publishedUtc", "lastEditedUtc"] {
@@ -616,55 +625,68 @@ fn force_push(node: &Value) -> Result<Value, AppError> {
 
 /// Combines submitted reviewers with all requested users and teams.
 fn reviewers(reviews: &[Value], pages: &[Value]) -> Result<Vec<Value>, AppError> {
-    let mut result = Vec::new();
-    let mut seen = HashSet::new();
+    let mut identities = Vec::new();
     for review in reviews {
-        let identity = rest_identity(nullable_field(review, "user")?)?;
-        add_reviewer(&mut result, &mut seen, &identity, false)?;
+        let account = nullable_field(review, "user")?;
+        // A deleted author has no roster identity, but the review itself remains
+        // in the discussion with its unknown author and unmodified body.
+        if account.is_null() {
+            continue;
+        }
+        let identity = rest_identity(account)?;
+        add_reviewer(&mut identities, identity, false)?;
+    }
+    if pages.is_empty() {
+        return Err(fail("service", "Missing GitHub requested reviewers page"));
     }
     for page in pages {
         for user in array(field(page, "users")?)? {
-            add_reviewer(&mut result, &mut seen, &rest_identity(user)?, false)?;
+            add_reviewer(&mut identities, rest_identity(user)?, false)?;
         }
         for team in array(field(page, "teams")?)? {
-            add_reviewer(&mut result, &mut seen, &Identity::from_team(team)?, true)?;
+            add_reviewer(&mut identities, Identity::from_team(team)?, true)?;
         }
     }
-    Ok(result)
+    Ok(identities
+        .into_iter()
+        .map(|(identity, team)| json!({"identity":identity,"isRequired":false,"isTeam":team}))
+        .collect())
 }
 
-/// Deduplicates the roster without conflating teams with accounts.
+/// Deduplicates the roster using the strongest shared identity evidence.
 fn add_reviewer(
-    result: &mut Vec<Value>,
-    seen: &mut HashSet<String>,
-    identity: &Identity,
+    result: &mut Vec<(Identity, bool)>,
+    identity: Identity,
     team: bool,
 ) -> Result<(), AppError> {
-    let key = if team {
-        format!(
-            "team:{}",
-            identity
-                .unique_name
-                .as_deref()
-                .ok_or_else(|| fail("service", "Missing team slug"))?
-                .to_lowercase()
-        )
-    } else {
-        identity
-            .id
-            .clone()
-            .or_else(|| {
-                identity
-                    .unique_name
-                    .as_ref()
-                    .map(|name| name.to_lowercase())
-            })
-            .ok_or_else(|| fail("service", "Missing reviewer identity"))?
-    };
-    if seen.insert(key) {
-        result.push(json!({"identity":identity,"isRequired":false,"isTeam":team}));
+    if team && identity.unique_name.is_none() {
+        return Err(fail("service", "Missing team slug"));
     }
+    if identity.id.is_none() && identity.descriptor.is_none() && identity.unique_name.is_none() {
+        return Err(fail("service", "Missing reviewer identity"));
+    }
+    if result
+        .iter()
+        .any(|(existing, is_team)| *is_team == team && same_reviewer(existing, &identity))
+    {
+        return Ok(());
+    }
+    result.push((identity, team));
     Ok(())
+}
+
+/// Avoids weaker login matches when shared immutable identifiers disagree.
+fn same_reviewer(left: &Identity, right: &Identity) -> bool {
+    if let Some((left, right)) = left.descriptor.as_deref().zip(right.descriptor.as_deref()) {
+        return left == right;
+    }
+    if let Some((left, right)) = left.id.as_deref().zip(right.id.as_deref()) {
+        return left == right;
+    }
+    left.unique_name
+        .as_deref()
+        .zip(right.unique_name.as_deref())
+        .is_some_and(|(left, right)| left.eq_ignore_ascii_case(right))
 }
 
 #[cfg(test)]
@@ -684,7 +706,10 @@ mod tests {
     use ohno::AppError;
     use serde_json::{Value, json};
 
-    use super::{collect, connection, force_push, merge_base, metadata, review_thread, utc};
+    use super::{
+        collect, connection, force_push, merge_base, metadata, review_thread, reviewers,
+        source_ref, utc,
+    };
     use crate::target::Target;
     use crate::transport::{Http, HttpResponse, Transport};
     use crate::{Clock, Process, ProcessOutput};
@@ -711,6 +736,10 @@ mod tests {
             let method =
                 &arguments[arguments.iter().position(|arg| arg == "--method").unwrap() + 1];
             assert_eq!(method, if expected == "graphql" { "POST" } else { "GET" });
+            if expected.contains("per_page=100") {
+                assert!(arguments.iter().any(|arg| arg == "--paginate"));
+                assert!(arguments.iter().any(|arg| arg == "--slurp"));
+            }
             if expected == "graphql" {
                 let query: Value = serde_json::from_slice(input).unwrap();
                 assert!(query["query"].as_str().unwrap().starts_with("query"));
@@ -718,6 +747,11 @@ mod tests {
                     reply.as_object_mut().unwrap().remove("__expectedCursor")
                 {
                     assert_eq!(query["variables"]["cur"], expected_cursor);
+                }
+                if let Some(expected_thread) =
+                    reply.as_object_mut().unwrap().remove("__expectedThread")
+                {
+                    assert_eq!(query["variables"]["threadId"], expected_thread);
                 }
             } else {
                 assert!(input.is_empty());
@@ -805,6 +839,9 @@ mod tests {
         let issue = json!({"id":10,"node_id":"I1","body":"[Copilot speaking] hi","user":account,
             "created_at":"2026-01-03T03:04:06Z","html_url":"https://github.com/issue",
             "author_association":"MEMBER"});
+        let issue_two = json!({"id":11,"node_id":"I2","body":"later\r\n🐙","user":account,
+            "created_at":"2026-01-04T03:04:06Z","html_url":"https://github.com/issue2",
+            "author_association":"MEMBER"});
         let pr = json!({"number":42,"title":"Exact","body":"line\r\né","draft":false,"user":account,
             "created_at":"2026-01-01T00:00:00Z","head":{"sha":b,"ref":"feature","repo":{"full_name":"acme/repo"}},
             "base":{"sha":a,"ref":"main","repo":{"full_name":"acme/repo"}},
@@ -819,7 +856,7 @@ mod tests {
                 ),
                 (
                     "repos/acme/repo/issues/42/comments?per_page=100",
-                    json!([[issue]]),
+                    json!([[issue], [issue_two]]),
                 ),
                 (
                     "repos/acme/repo/pulls/42/requested_reviewers?per_page=100",
@@ -827,7 +864,15 @@ mod tests {
                 ),
                 (
                     "graphql",
-                    wrap("reviewThreads", page(json!([thread]), false, Value::Null)),
+                    wrap(
+                        "reviewThreads",
+                        page(json!([thread]), true, json!("threads-next")),
+                    ),
+                ),
+                (
+                    "graphql",
+                    json!({"__expectedCursor":"threads-next","data":{"repository":{"pullRequest":{
+                        "reviewThreads":page(json!([]),false,Value::Null)}}}}),
                 ),
                 (
                     "graphql",
@@ -837,8 +882,17 @@ mod tests {
                     "graphql",
                     wrap(
                         "comments",
-                        page(json!([{"id":"I1","lastEditedAt":null}]), false, Value::Null),
+                        page(
+                            json!([{"id":"I1","lastEditedAt":null}]),
+                            true,
+                            json!("issues-next"),
+                        ),
                     ),
+                ),
+                (
+                    "graphql",
+                    json!({"__expectedCursor":"issues-next","data":{"repository":{"pullRequest":{
+                        "comments":page(json!([{"id":"I2","lastEditedAt":"2026-01-05T00:00:00Z"}]),false,Value::Null)}}}}),
                 ),
                 (
                     "graphql",
@@ -868,12 +922,20 @@ mod tests {
         assert_eq!(captured["pullRequest"]["description"], "line\r\né");
         assert_eq!(captured["pullRequest"]["reviewedMergeBaseCommit"], c);
         assert_eq!(captured["reviewers"].as_array().unwrap().len(), 1);
-        assert_eq!(captured["threads"].as_array().unwrap().len(), 3);
+        assert_eq!(captured["threads"].as_array().unwrap().len(), 4);
         assert_eq!(captured["threads"][0]["comments"][0]["content"], "é\nexact");
         assert_eq!(captured["threads"][0]["comments"][1]["parentId"], "C1");
         assert_eq!(captured["threads"][0]["openingCommentId"], "C1");
         assert_eq!(captured["threads"][1]["comments"][0]["authorship"], "human");
         assert_eq!(captured["threads"][2]["comments"][0]["authorship"], "agent");
+        assert_eq!(
+            captured["threads"][3]["comments"][0]["content"],
+            "later\r\n🐙"
+        );
+        assert_eq!(
+            captured["threads"][3]["comments"][0]["lastEditedUtc"],
+            "2026-01-05T00:00:00.0000000Z"
+        );
         assert_eq!(
             captured["threads"][0]["publishedUtc"],
             "2026-01-02T02:04:05.0000000Z"
@@ -981,6 +1043,138 @@ mod tests {
         .unwrap();
         assert_eq!(result, vec![json!({"id":"one"}), json!({"id":"two"})]);
         assert!(script.replies.borrow().is_empty());
+    }
+
+    #[test]
+    fn follows_nested_comment_cursor_and_propagates_graphql_errors() {
+        let target = Target::pull_request("https://github.com/acme/repo/pull/42", None).unwrap();
+        let first = page(json!([{"id":"root"}]), true, json!("next"));
+        let script = Recording {
+            replies: RefCell::new(VecDeque::from(vec![(
+                "graphql",
+                json!({"__expectedCursor":"next","__expectedThread":"thread",
+                    "data":{"node":{"comments":page(json!([{"id":"reply"}]),false,Value::Null)}}}),
+            )])),
+        };
+        let transport = Transport::new(&target, None, &script, &script, &FixedClock);
+        assert_eq!(
+            connection(
+                &transport,
+                &target,
+                super::THREAD_COMMENTS,
+                "/data/node/comments",
+                Some("thread"),
+                Some(first),
+            )
+            .unwrap(),
+            vec![json!({"id":"root"}), json!({"id":"reply"})]
+        );
+        assert!(script.replies.borrow().is_empty());
+
+        let script = Recording {
+            replies: RefCell::new(VecDeque::from(vec![(
+                "graphql",
+                json!({"data":{"node":{"comments":page(json!([]),false,Value::Null)}},
+                    "errors":[{"message":"partial result"}]}),
+            )])),
+        };
+        let transport = Transport::new(&target, None, &script, &script, &FixedClock);
+        connection(
+            &transport,
+            &target,
+            super::THREAD_COMMENTS,
+            "/data/node/comments",
+            Some("thread"),
+            None,
+        )
+        .unwrap_err();
+        assert!(script.replies.borrow().is_empty());
+    }
+
+    #[test]
+    fn thread_event_and_url_follow_structural_opener_not_page_order() {
+        let comment = |id, reply, at, url| {
+            json!({"id":id,"url":url,"body":"exact\r\né","createdAt":at,
+                "lastEditedAt":null,"replyTo":reply,"author":null,"minimizedReason":null})
+        };
+        let node = json!({"id":"T","isResolved":false,"isOutdated":false,"isCollapsed":false,
+            "path":null,"line":null,"startLine":null,"originalLine":null,
+            "originalStartLine":null,"diffSide":null,"startDiffSide":null,
+            "subjectType":"FILE","resolvedBy":null});
+        let reply = comment(
+            "reply",
+            json!({"id":"root"}),
+            "2026-01-03T00:00:00Z",
+            "reply-url",
+        );
+        let root = comment("root", Value::Null, "2026-01-01T00:00:00Z", "root-url");
+        let thread = review_thread(&node, &[reply, root]).unwrap();
+        assert_eq!(thread["openingCommentId"], "root");
+        assert_eq!(thread["eventUtc"], "2026-01-01T00:00:00.0000000Z");
+        assert_eq!(thread["url"], "root-url");
+        assert_eq!(thread["lastUpdatedUtc"], "2026-01-03T00:00:00.0000000Z");
+        assert_eq!(thread["comments"][1]["content"], "exact\r\né");
+    }
+
+    #[test]
+    fn deleted_review_author_does_not_hide_discussion_or_invent_a_reviewer() {
+        let review = json!({"id":1,"node_id":"R","state":"COMMENTED","body":"é\r\nfeedback",
+            "user":null,"submitted_at":"2026-01-01T00:00:00Z","html_url":null,
+            "author_association":"NONE","commit_id":null});
+        let thread = super::summary_thread(&review, &json!({"lastEditedAt":null})).unwrap();
+        assert_eq!(thread["comments"][0]["content"], "é\r\nfeedback");
+        assert_eq!(thread["comments"][0]["author"]["id"], Value::Null);
+        assert_eq!(
+            reviewers(&[review], &[json!({"users":[],"teams":[]})]).unwrap(),
+            Vec::<Value>::new()
+        );
+        reviewers(&[], &[]).unwrap_err();
+    }
+
+    #[test]
+    fn deleted_head_repository_keeps_owner_qualified_source_ref() {
+        let head = json!({"ref":"topic","label":"fork-owner:topic"});
+        assert_eq!(source_ref(&head, &json!({}), false).unwrap(), "topic");
+        assert_eq!(
+            source_ref(&head, &json!({}), true).unwrap(),
+            "fork-owner:topic"
+        );
+        assert_eq!(
+            source_ref(&head, &Value::Null, false).unwrap(),
+            "fork-owner:topic"
+        );
+        source_ref(&json!({"ref":"topic","label":null}), &Value::Null, false).unwrap_err();
+    }
+
+    #[test]
+    fn reviewer_keys_preserve_identifier_namespaces_and_stable_team_ids() {
+        let reviews = [
+            json!({"user":{"id":7,"login":"old","node_id":"U_7","type":"User"}}),
+            json!({"user":{"login":"7","type":"User"}}),
+            json!({"user":{"id":7,"login":"renamed","node_id":"U_7","type":"User"}}),
+        ];
+        let pages = [
+            json!({"users":[],"teams":[{"id":7,"slug":"old-team","name":"Old"}]}),
+            json!({"users":[],"teams":[{"id":7,"slug":"new-team","name":"New"}]}),
+        ];
+        let roster = reviewers(&reviews, &pages).unwrap();
+        assert_eq!(roster.len(), 3);
+        assert_eq!(roster[0]["identity"]["id"], "7");
+        assert_eq!(roster[1]["identity"]["uniqueName"], "7");
+        assert_eq!(roster[2]["isTeam"], true);
+    }
+
+    #[test]
+    fn reviewer_join_uses_strongest_shared_evidence() {
+        let reviews = [
+            json!({"user":{"id":7,"login":"alice","node_id":"Node_A","type":"User"}}),
+            json!({"user":{"login":"ALICE","type":"User"}}),
+            json!({"user":{"id":8,"login":"alice","node_id":"node_a","type":"User"}}),
+        ];
+        let roster = reviewers(&reviews, &[json!({"users":[],"teams":[]})]).unwrap();
+        assert_eq!(roster.len(), 2);
+        assert_eq!(roster[0]["identity"]["id"], "7");
+        assert_eq!(roster[1]["identity"]["id"], "8");
     }
 
     #[test]

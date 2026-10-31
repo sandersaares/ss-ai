@@ -1,13 +1,15 @@
 //! Builds and publishes immutable captures from provider-independent evidence.
 
 use std::any::type_name;
-use std::fmt;
+use std::fmt::{self, Write as _};
 use std::fs;
+use std::io::{self, Write};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use ohno::AppError;
 use serde_json::{Value, json};
-use ss_ai_runtime::{Clock, FileTransaction, fail};
+use ss_ai_runtime::{Clock, FileTransaction, fail, read_bytes};
 
 use crate::capture::{
     CAPTURE_VERSION, POLICY_VERSION, apply_decisions, array_property, comment_input_hash,
@@ -16,7 +18,7 @@ use crate::capture::{
 };
 use crate::query::capture_delta;
 use crate::request::{full_path, path_string};
-use crate::{document_hash, powershell_json, read_capture};
+use crate::{document_hash, powershell_json};
 
 /// Retains the destination lock and the checked baseline across provider reads.
 pub struct CapturePreparation<'a> {
@@ -24,6 +26,7 @@ pub struct CapturePreparation<'a> {
     sidecar: FileTransaction<'a>,
     capture: FileTransaction<'a>,
     previous: Option<Value>,
+    previous_raw: Option<Value>,
     decisions: Option<Value>,
     target_url: String,
 }
@@ -48,36 +51,47 @@ pub fn prepare_capture<'a>(
     let output_sidecar = sidecar_path(&path);
     if let Some(compare) = compare {
         let compare = full_path(compare)?;
-        if compare == path
-            || compare == output_sidecar
-            || fs::canonicalize(&compare)
-                .ok()
-                .zip(fs::canonicalize(&path).ok())
-                .is_some_and(|(a, b)| a == b)
-        {
+        if same_existing_path(&compare, &path) || same_existing_path(&compare, &output_sidecar) {
             return Err(fail(
                 "invalidInput",
                 "Give the capture a distinct -OutputPrefix",
             ));
         }
     }
-    let (previous, decisions) = if let Some(compare) = compare {
+    let (previous, previous_raw, decisions) = if let Some(compare) = compare {
         let compare = full_path(compare)?;
         let lock = FileTransaction::open(&sidecar_path(&compare), clock)?;
-        let previous = read_capture(&compare, clock)?;
+        let bytes = read_bytes(&compare, clock)?
+            .ok_or_else(|| fail("invalidInput", "Comparison capture is missing"))?;
+        let raw = parse_file(&bytes)?;
+        validate_capture_keys(&raw)?;
+        if property(&raw, "schemaVersion").as_i64() != Some(CAPTURE_VERSION) {
+            return Err(fail(
+                "invalidInput",
+                format!(
+                    "Unsupported capture schema version {}. Capture the pull request again.",
+                    property(&raw, "schemaVersion")
+                ),
+            ));
+        }
+        validate_capture_structure(&raw)?;
+        let decisions = lock
+            .read_bytes()?
+            .map(|bytes| parse_file(&bytes))
+            .transpose()?;
+        let mut previous = raw.clone();
+        if let Some(decisions) = &decisions {
+            apply_decisions(&mut previous, decisions)?;
+        }
         if !matches_target(&previous, target_url) {
             return Err(fail(
                 "invalidInput",
                 "Cannot compare captures of different pull requests",
             ));
         }
-        let decisions = lock
-            .read_bytes()?
-            .map(|bytes| parse_file(&bytes))
-            .transpose()?;
-        (Some(previous), decisions)
+        (Some(previous), Some(raw), decisions)
     } else {
-        (None, None)
+        (None, None, None)
     };
     let sidecar = FileTransaction::open(&output_sidecar, clock)?;
     let capture = FileTransaction::open(&path, clock)?;
@@ -92,6 +106,7 @@ pub fn prepare_capture<'a>(
         sidecar,
         capture,
         previous,
+        previous_raw,
         decisions,
         target_url: target_url.to_owned(),
     })
@@ -103,9 +118,7 @@ impl CapturePreparation<'_> {
         let mut document = document(context, fetched_utc)?;
         validate_capture_keys(&document)?;
         validate_capture_structure(&document)?;
-        if !self.target_url.contains("/_git/pullrequest/")
-            && property(&document, "pullRequestUrl").as_str() != Some(&self.target_url)
-        {
+        if !matches_target(&document, &self.target_url) {
             return Err(fail(
                 "invalidInput",
                 "Provider returned a different pull request",
@@ -123,11 +136,31 @@ impl CapturePreparation<'_> {
         let mut decisions = json!({"schemaVersion": 1, "policyVersion": POLICY_VERSION, "captureHash": document_hash(&document)?, "decisions": []});
         let mut reused = Vec::new();
         if let Some(previous) = &self.decisions
+            && let Some(previous_raw) = &self.previous_raw
             && property(previous, "policyVersion").as_str() == Some(POLICY_VERSION)
         {
             for entry in array_property(previous, "decisions") {
                 let thread_id = property(&entry, "threadId").as_str().unwrap_or_default();
                 let comment_id = property(&entry, "commentId").as_str().unwrap_or_default();
+                // A stale decision must match both the baseline and the new capture.
+                let Some((is_array, index)) =
+                    last_matching(property(previous_raw, "threads"), thread_id)
+                else {
+                    continue;
+                };
+                let thread = selected(property(previous_raw, "threads"), is_array, index);
+                let Some((is_array, index)) =
+                    last_matching(property(thread, "comments"), comment_id)
+                else {
+                    continue;
+                };
+                let comment = selected(property(thread, "comments"), is_array, index);
+                if property(comment, "authorship").as_str() != Some("indeterminate")
+                    || property(&entry, "inputHash").as_str()
+                        != Some(&comment_input_hash(previous_raw, thread_id, comment)?)
+                {
+                    continue;
+                }
                 let Some((is_array, index)) =
                     last_matching(property(&document, "threads"), thread_id)
                 else {
@@ -144,12 +177,11 @@ impl CapturePreparation<'_> {
                     && property(&entry, "inputHash").as_str()
                         == Some(&comment_input_hash(&document, thread_id, comment)?)
                 {
-                    let mut entry = entry;
-                    entry
-                        .as_object_mut()
-                        .ok_or_else(|| fail("invalidInput", "Invalid authorship decision"))?
-                        .insert("origin".to_owned(), json!("reused"));
-                    reused.push(entry);
+                    reused.push(json!({
+                        "threadId": thread_id, "commentId": comment_id,
+                        "kind": property(&entry, "kind"),
+                        "inputHash": property(&entry, "inputHash"), "origin": "reused"
+                    }));
                 }
             }
         }
@@ -185,11 +217,68 @@ impl CapturePreparation<'_> {
             "reusedClassificationCount": reused.len(),
             "delta": delta
         });
-        self.sidecar
-            .write_bytes(powershell_json(&decisions)?.as_bytes())?;
-        self.capture.write_bytes(raw_text.as_bytes())?;
+        if self.sidecar.read_bytes()?.is_some() || self.capture.read_bytes()?.is_some() {
+            return Err(fail(
+                "invalidInput",
+                "Capture output already exists; choose a new prefix",
+            ));
+        }
+        publish_new(
+            &sidecar_path(&self.path),
+            powershell_json(&decisions)?.as_bytes(),
+        )?;
+        publish_new(&self.path, raw_text.as_bytes())?;
         Ok(result)
     }
+}
+
+/// Detects aliases when both existing paths refer to the same file.
+fn same_existing_path(left: &Path, right: &Path) -> bool {
+    left == right
+        || fs::canonicalize(left)
+            .ok()
+            .zip(fs::canonicalize(right).ok())
+            .is_some_and(|(left, right)| left == right)
+}
+
+/// Publishes complete bytes without replacing even a non-cooperating creator.
+fn publish_new(path: &Path, bytes: &[u8]) -> Result<(), AppError> {
+    static NEXT: AtomicU64 = AtomicU64::new(0);
+    // A crashed process can leave a staging file whose PID is later reused.
+    // Bound attempts while never deleting or replacing another creator's file.
+    let mut created = None;
+    for _ in 0..64 {
+        // The counter only supplies distinct staging names; locks guard shared state.
+        let id = NEXT.fetch_add(1, Ordering::Relaxed);
+        let mut name = path.as_os_str().to_os_string();
+        name.push(format!(".stage-{}-{id}", std::process::id()));
+        let staging = PathBuf::from(name);
+        match fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&staging)
+        {
+            Ok(file) => {
+                created = Some((staging, file));
+                break;
+            }
+            Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {}
+            Err(error) => return Err(error.into()),
+        }
+    }
+    let (staging, mut file) =
+        created.ok_or_else(|| fail("io", "Cannot allocate a unique staging file"))?;
+    let result = (|| -> io::Result<()> {
+        file.write_all(bytes)?;
+        file.sync_all()?;
+        drop(file);
+        fs::hard_link(&staging, path)?;
+        Ok(())
+    })();
+    let cleanup = fs::remove_file(&staging);
+    result?;
+    cleanup?;
+    Ok(())
 }
 
 /// Matches identifier-only Azure targets within their globally scoped collection.
@@ -236,15 +325,30 @@ fn document(context: &Value, fetched_utc: &str) -> Result<Value, AppError> {
     let platform = property(target, "platform")
         .as_str()
         .ok_or_else(|| fail("invalidInput", "Provider target has no platform"))?;
-    let suffix = if platform == "gitHub" {
-        "/pull/"
-    } else {
-        "/pullrequest/"
+    let component = |name| -> Result<String, AppError> {
+        let value = property(target, name)
+            .as_str()
+            .ok_or_else(|| fail("invalidInput", format!("Provider target requires {name}")))?;
+        Ok(escape_uri_component(value))
     };
-    let repository_url = url
-        .rsplit_once(suffix)
-        .map(|(repository, _)| repository)
-        .ok_or_else(|| fail("invalidInput", "Provider target URL is incomplete"))?;
+    let repository_url = if platform == "gitHub" {
+        format!(
+            "https://github.com/{}/{}",
+            component("organization")?,
+            component("repository")?
+        )
+    } else if platform == "azureDevOps" {
+        let collection = property(target, "collectionUrl")
+            .as_str()
+            .ok_or_else(|| fail("invalidInput", "Provider target requires collectionUrl"))?;
+        format!(
+            "{collection}/{}/_git/{}",
+            component("project")?,
+            component("repository")?
+        )
+    } else {
+        return Err(fail("invalidInput", "Unsupported provider platform"));
+    };
     let identity = property(context, "authenticatedIdentity");
     let mut pull_request = property(context, "pullRequest").clone();
     let self_authored = identity_matches(property(&pull_request, "author"), identity);
@@ -261,7 +365,7 @@ fn document(context: &Value, fetched_utc: &str) -> Result<Value, AppError> {
             ));
         }
         let mut comments = array_property(thread, "comments");
-        comments.sort_by_key(|comment| sort_key(comment, "publishedUtc"));
+        comments.sort_by_cached_key(|comment| sort_key(comment, "publishedUtc"));
         for comment in &mut comments {
             let authored = identity_matches(property(comment, "author"), identity);
             comment
@@ -273,10 +377,9 @@ fn document(context: &Value, fetched_utc: &str) -> Result<Value, AppError> {
         let author = comments
             .iter()
             .find(|comment| !opener.is_empty() && string_id(property(comment, "id")) == opener)
-            .map_or_else(
-                || property(property(thread, "decision"), "by"),
-                |comment| property(comment, "author"),
-            );
+            .map(|comment| property(comment, "author"))
+            .filter(|author| !author.is_null())
+            .unwrap_or_else(|| property(property(thread, "decision"), "by"));
         let authored = identity_matches(author, identity);
         let object = thread
             .as_object_mut()
@@ -284,7 +387,7 @@ fn document(context: &Value, fetched_utc: &str) -> Result<Value, AppError> {
         object.insert("comments".to_owned(), json!(comments));
         object.insert("isAuthoredBySelf".to_owned(), json!(authored));
     }
-    threads.sort_by_key(|thread| sort_key(thread, "eventUtc"));
+    threads.sort_by_cached_key(|thread| sort_key(thread, "eventUtc"));
     Ok(json!({
         "schemaVersion": CAPTURE_VERSION, "fetchedUtc": fetched_utc, "platform": platform,
         "repositoryUrl": repository_url, "pullRequestUrl": url, "target": target,
@@ -294,7 +397,7 @@ fn document(context: &Value, fetched_utc: &str) -> Result<Value, AppError> {
 }
 
 /// Orders timestamped events deterministically, placing missing times last.
-fn sort_key(value: &Value, timestamp: &str) -> String {
+fn sort_key(value: &Value, timestamp: &str) -> Vec<u16> {
     let stamp = property(value, timestamp)
         .as_str()
         .filter(|s| !s.trim().is_empty())
@@ -305,19 +408,29 @@ fn sort_key(value: &Value, timestamp: &str) -> String {
     } else {
         id
     };
-    format!("{stamp}|{id}")
+    // .NET's ordinal comparison sorts UTF-16 code units, not UTF-8 bytes.
+    format!("{stamp}|{id}").encode_utf16().collect()
+}
+
+/// Encodes path segments using the URI component rules used by the model.
+fn escape_uri_component(value: &str) -> String {
+    let mut result = String::new();
+    for byte in value.bytes() {
+        if byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'.' | b'_' | b'~') {
+            result.push(char::from(byte));
+        } else {
+            write!(result, "%{byte:02X}").expect("writing to a string cannot fail");
+        }
+    }
+    result
 }
 
 /// Uses the strongest identity field shared by both account records.
 fn identity_matches(left: &Value, right: &Value) -> bool {
     for name in ["descriptor", "id", "uniqueName"] {
-        let left = property(left, name)
-            .as_str()
-            .filter(|s| !s.trim().is_empty());
-        let right = property(right, name)
-            .as_str()
-            .filter(|s| !s.trim().is_empty());
-        if let (Some(left), Some(right)) = (left, right) {
+        let left = string_id(property(left, name));
+        let right = string_id(property(right, name));
+        if !left.trim().is_empty() && !right.trim().is_empty() {
             return left
                 .chars()
                 .map(ordinal_upper)

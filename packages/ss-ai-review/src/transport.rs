@@ -239,6 +239,11 @@ impl<'a> Transport<'a> {
                 let Value::Array(pages) = pages else {
                     return Err(fail("service", "Expected an array in service evidence"));
                 };
+                // A successful slurped response contains at least one page, even
+                // when the provider returned an empty collection.
+                if pages.is_empty() {
+                    return Err(fail("service", "GitHub list has no response pages"));
+                }
                 let mut values = Vec::new();
                 for page in pages {
                     match page {

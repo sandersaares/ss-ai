@@ -223,6 +223,36 @@ fn sequential_batches_preserve_matching_decisions_and_reject_stale_snapshots() {
 }
 
 #[test]
+fn old_policy_decisions_do_not_override_new_classification() {
+    let files = Files::new();
+    let clock = SystemClock::default();
+    let original = fs::read(&files.capture).unwrap();
+    let first = json!([{"threadId":"T","commentId":"C","kind":"agent"}]);
+    write_comment_authorship(&files.capture, &files.snapshot(), &first, &clock).unwrap();
+    let mut record = files.record();
+    record["policyVersion"] = json!("old");
+    fs::write(&files.sidecar, serde_json::to_vec(&record).unwrap()).unwrap();
+
+    let document = read_capture(&files.capture, &clock).unwrap();
+    assert_eq!(
+        document["threads"][0]["comments"][0]["authorship"],
+        "indeterminate"
+    );
+    let next = json!([{"threadId":"T","commentId":"C","kind":"human"}]);
+    let result = write_comment_authorship(
+        &files.capture,
+        &snapshot_id(&document).unwrap(),
+        &next,
+        &clock,
+    )
+    .unwrap();
+    assert_eq!(result["applied"], 1);
+    assert_eq!(files.record()["policyVersion"], "2");
+    assert_eq!(files.record()["decisions"][0]["kind"], "human");
+    assert_eq!(fs::read(&files.capture).unwrap(), original);
+}
+
+#[test]
 fn rejects_malformed_existing_sidecars_without_replacement() {
     let files = Files::new();
     let clock = SystemClock::default();

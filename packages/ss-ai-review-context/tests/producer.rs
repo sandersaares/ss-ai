@@ -18,7 +18,7 @@ use serde_json::{Value, json};
 use ss_ai_review_context::{
     document_hash, prepare_capture, read_capture, snapshot_id, write_comment_authorship,
 };
-use ss_ai_runtime::{Clock, SystemClock};
+use ss_ai_runtime::{Clock, FileTransaction, SystemClock};
 
 /// Keeps each test's capture and retained locks in the active checkout.
 struct Output(PathBuf);
@@ -33,6 +33,12 @@ impl Output {
                 .unwrap()
                 .join(format!(".capture-test-{}-{id}.json", std::process::id())),
         )
+    }
+
+    fn sidecar(&self) -> PathBuf {
+        let mut path = self.0.as_os_str().to_os_string();
+        path.push(".authorship.json");
+        path.into()
     }
 }
 
@@ -106,6 +112,36 @@ fn publishes_identical_captures_for_both_providers() {
 }
 
 #[test]
+fn published_capture_and_classification_bind_powershell_serialized_numbers() {
+    let clock = SystemClock::default();
+    let mut context = fixture("azure-devops-context.json");
+    // PowerShell's Double formatter emits this value using its compatibility spelling.
+    context["threads"][0]["comments"][0]["author"]["nativeNumber"] =
+        json!(f64::from_bits(0x3e60_0000_0000_0000));
+    let target = context["target"]["webUrl"].as_str().unwrap();
+    let output = Output::new();
+    prepare_capture(&output.0, None, target, &clock)
+        .unwrap()
+        .publish(&context, "2026-08-04T12:00:00.0000000Z")
+        .unwrap();
+    let raw: Value = serde_json::from_slice(&fs::read(&output.0).unwrap()).unwrap();
+    let record: Value = serde_json::from_slice(&fs::read(output.sidecar()).unwrap()).unwrap();
+    assert_eq!(record["captureHash"], document_hash(&raw).unwrap());
+    let snapshot = snapshot_id(&read_capture(&output.0, &clock).unwrap()).unwrap();
+    write_comment_authorship(
+        &output.0,
+        &snapshot,
+        &json!([{"threadId":"101", "commentId":"1", "kind":"human"}]),
+        &clock,
+    )
+    .unwrap();
+    assert_eq!(
+        read_capture(&output.0, &clock).unwrap()["threads"][0]["comments"][0]["authorship"],
+        "human"
+    );
+}
+
+#[test]
 fn refresh_reuses_only_unchanged_decisions_and_preserves_baseline() {
     let clock = SystemClock::default();
     let context = fixture("azure-devops-context.json");
@@ -176,4 +212,175 @@ fn concurrent_creators_do_not_replace_the_published_capture() {
     release_send.send(()).unwrap();
     assert!(worker.join().unwrap());
     assert_eq!(fs::read(&output.0).unwrap(), original);
+}
+
+#[test]
+fn comparison_rejects_malformed_or_unbound_sidecar_before_provider_work() {
+    let clock = SystemClock::default();
+    let context = fixture("github-context.json");
+    let target = context["target"]["webUrl"].as_str().unwrap();
+    let baseline = Output::new();
+    prepare_capture(&baseline.0, None, target, &clock)
+        .unwrap()
+        .publish(&context, "2026-08-04T12:00:00.0000000Z")
+        .unwrap();
+    let sidecar = baseline.sidecar();
+    let original = fs::read(&sidecar).unwrap();
+    for bad in [
+        b"not json".to_vec(),
+        br#"{"schemaVersion":1,"policyVersion":"2","captureHash":"0000000000000000000000000000000000000000000000000000000000000000","decisions":[]}"#.to_vec(),
+    ] {
+        fs::write(&sidecar, bad).unwrap();
+        let output = Output::new();
+        prepare_capture(&output.0, Some(&baseline.0), target, &clock).unwrap_err();
+        assert!(!output.0.exists());
+        assert!(!output.sidecar().exists());
+    }
+    fs::write(sidecar, original).unwrap();
+}
+
+#[test]
+fn comparison_reads_sidecar_after_acquiring_baseline_lock() {
+    let clock = SystemClock::default();
+    let context = fixture("github-context.json");
+    let target = context["target"]["webUrl"].as_str().unwrap().to_owned();
+    let baseline = Output::new();
+    let output = Output::new();
+    prepare_capture(&baseline.0, None, &target, &clock)
+        .unwrap()
+        .publish(&context, "2026-08-04T12:00:00.0000000Z")
+        .unwrap();
+    let lock = FileTransaction::open(&baseline.sidecar(), &clock).unwrap();
+    let (reached_send, reached_receive) = mpsc::channel();
+    let (release_send, release_receive) = mpsc::channel();
+    let baseline_path = baseline.0.clone();
+    let output_path = output.0.clone();
+    let worker = thread::spawn(move || {
+        let clock = ContendedClock {
+            reached: reached_send,
+            release: RefCell::new(release_receive),
+        };
+        prepare_capture(&output_path, Some(&baseline_path), &target, &clock).is_err()
+    });
+    reached_receive.recv().unwrap();
+    lock.write_bytes(b"invalid sidecar").unwrap();
+    drop(lock);
+    release_send.send(()).unwrap();
+    assert!(worker.join().unwrap());
+    assert!(!output.0.exists());
+    assert!(!output.sidecar().exists());
+}
+
+#[test]
+fn reuse_requires_matching_baseline_inputs_even_when_new_inputs_match() {
+    let clock = SystemClock::default();
+    let context = fixture("azure-devops-context.json");
+    let target = context["target"]["webUrl"].as_str().unwrap();
+    let baseline = Output::new();
+    let changed = Output::new();
+    let refresh = Output::new();
+    let mut changed_context = context.clone();
+    changed_context["threads"][0]["comments"][0]["content"] = json!("new evidence");
+    for (output, context) in [(&baseline, &context), (&changed, &changed_context)] {
+        prepare_capture(&output.0, None, target, &clock)
+            .unwrap()
+            .publish(context, "2026-08-04T12:00:00.0000000Z")
+            .unwrap();
+        let snapshot = snapshot_id(&read_capture(&output.0, &clock).unwrap()).unwrap();
+        write_comment_authorship(
+            &output.0,
+            &snapshot,
+            &json!([{"threadId":"101", "commentId":"1", "kind":"human"}]),
+            &clock,
+        )
+        .unwrap();
+    }
+    let mut old: Value = serde_json::from_slice(&fs::read(baseline.sidecar()).unwrap()).unwrap();
+    let new: Value = serde_json::from_slice(&fs::read(changed.sidecar()).unwrap()).unwrap();
+    assert_ne!(
+        old["decisions"][0]["inputHash"],
+        new["decisions"][0]["inputHash"]
+    );
+    old["decisions"][0]["inputHash"] = new["decisions"][0]["inputHash"].clone();
+    fs::write(baseline.sidecar(), serde_json::to_vec(&old).unwrap()).unwrap();
+    let summary = prepare_capture(&refresh.0, Some(&baseline.0), target, &clock)
+        .unwrap()
+        .publish(&changed_context, "2026-08-04T12:00:00.0000000Z")
+        .unwrap();
+    assert_eq!(summary["reusedClassificationCount"], 0);
+    assert_eq!(
+        read_capture(&refresh.0, &clock).unwrap()["threads"][0]["comments"][0]["authorship"],
+        "indeterminate"
+    );
+}
+
+#[test]
+fn publication_never_replaces_files_created_after_preparation() {
+    let clock = SystemClock::default();
+    let context = fixture("github-context.json");
+    let target = context["target"]["webUrl"].as_str().unwrap();
+    for sidecar in [false, true] {
+        let output = Output::new();
+        let prepared = prepare_capture(&output.0, None, target, &clock).unwrap();
+        let path = if sidecar {
+            output.sidecar()
+        } else {
+            output.0.clone()
+        };
+        fs::write(&path, b"other owner").unwrap();
+        prepared
+            .publish(&context, "2026-08-04T12:00:00.0000000Z")
+            .unwrap_err();
+        assert_eq!(fs::read(path).unwrap(), b"other owner");
+    }
+}
+
+#[test]
+fn canonical_model_uses_ordinal_chronology_target_fields_and_opener_fallback() {
+    let clock = SystemClock::default();
+    let mut context = fixture("github-context.json");
+    let target = context["target"]["webUrl"].as_str().unwrap().to_owned();
+    context["target"]["organization"] = json!("space owner");
+    context["target"]["repository"] = json!("répo");
+    let template = context["threads"][0].clone();
+    let mut supplementary = template.clone();
+    supplementary["id"] = json!("\u{10000}");
+    supplementary["eventUtc"] = json!("same");
+    let mut bmp = template;
+    bmp["id"] = json!("\u{e000}");
+    bmp["eventUtc"] = json!("same");
+    bmp["comments"][0]["author"] = Value::Null;
+    bmp["decision"] = json!({"by": context["authenticatedIdentity"]});
+    context["threads"] = json!([bmp, supplementary]);
+    let output = Output::new();
+    prepare_capture(&output.0, None, &target, &clock)
+        .unwrap()
+        .publish(&context, "2026-08-04T12:00:00.0000000Z")
+        .unwrap();
+    let document = read_capture(&output.0, &clock).unwrap();
+    assert_eq!(
+        document["repositoryUrl"],
+        "https://github.com/space%20owner/r%C3%A9po"
+    );
+    assert_eq!(document["threads"][0]["id"], "\u{10000}");
+    assert_eq!(document["threads"][1]["id"], "\u{e000}");
+    assert_eq!(document["threads"][1]["isAuthoredBySelf"], true);
+}
+
+#[test]
+fn azure_identifier_target_must_match_provider_result() {
+    let clock = SystemClock::default();
+    let context = fixture("azure-devops-context.json");
+    let output = Output::new();
+    let prepared = prepare_capture(
+        &output.0,
+        None,
+        "https://example.visualstudio.com/_git/pullrequest/99",
+        &clock,
+    )
+    .unwrap();
+    prepared
+        .publish(&context, "2026-08-04T12:00:00.0000000Z")
+        .unwrap_err();
+    assert!(!output.0.exists());
 }

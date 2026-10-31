@@ -315,9 +315,29 @@ fn write_github_responses(output: &Output, edited: bool) {
     }
 }
 
+/// Keeps capture command parsing within the stack budget used by Windows.
+fn capture_command() -> Command {
+    #[cfg(target_os = "linux")]
+    {
+        let mut command = Command::new("sh");
+        command.args([
+            "-c",
+            "ulimit -c 0; ulimit -s 768; exec \"$@\"",
+            "sh",
+            env!("CARGO_BIN_EXE_ss-ai"),
+        ]);
+        command
+    }
+
+    #[cfg(not(target_os = "linux"))]
+    {
+        Command::new(env!("CARGO_BIN_EXE_ss-ai"))
+    }
+}
+
 /// Invokes the real executable with a private PATH and no usable network provider.
 fn cli(output: &Output, path: &OsString, arguments: &[OsString]) -> Value {
-    let result = Command::new(env!("CARGO_BIN_EXE_ss-ai"))
+    let result = capture_command()
         .args(arguments)
         .env("PATH", path)
         .env("FIXTURE_ROOT", &output.0)

@@ -64,6 +64,14 @@ pub(crate) fn collect(transport: &mut Transport<'_>, target: &Target) -> Result<
     if connection.continuation.is_some() {
         return Err(fail("service", "Unexpected connection-data continuation"));
     }
+    let account_properties =
+        properties(field(&connection.payload, "authenticatedUser")?.get("properties"))?;
+    if let Some(account) = account_properties
+        .get("Account")
+        .filter(|value| !value.is_null())
+    {
+        text(account)?;
+    }
     let identity = Identity::from_connection(&connection.payload)?;
     if identity.id.is_none() {
         return Err(fail(
@@ -80,6 +88,25 @@ pub(crate) fn collect(transport: &mut Transport<'_>, target: &Target) -> Result<
             "service",
             "Azure DevOps returned a different pull request",
         ));
+    }
+    for name in [
+        "title",
+        "description",
+        "sourceRefName",
+        "targetRefName",
+        "mergeStatus",
+        "mergeId",
+    ] {
+        optional_text(&pr, name)?;
+    }
+    for name in [
+        "lastMergeSourceCommit",
+        "lastMergeTargetCommit",
+        "lastMergeCommit",
+    ] {
+        if let Some(commit) = optional_object(&pr, name)? {
+            optional_text(commit, "commitId")?;
+        }
     }
     let iterations = list(transport, &format!("{path}/iterations"))?;
     let reviewers = list(transport, &format!("{path}/reviewers"))?;
@@ -136,7 +163,7 @@ pub(crate) fn collect(transport: &mut Transport<'_>, target: &Target) -> Result<
         {
             continue;
         }
-        let id = identifier(field(thread, "id")?)?;
+        let id = service_id(field(thread, "id")?)?;
         if !thread_ids.insert(id) {
             return Err(fail("service", "Duplicate Azure DevOps thread"));
         }
@@ -208,6 +235,23 @@ fn required_text<'a>(node: &'a Value, name: &str) -> Result<&'a str, AppError> {
     Ok(value)
 }
 
+/// Keeps optional provider prose verbatim while rejecting non-string values.
+fn optional_text<'a>(node: &'a Value, name: &str) -> Result<Option<&'a str>, AppError> {
+    node.get(name)
+        .filter(|value| !value.is_null())
+        .map(text)
+        .transpose()
+}
+
+/// Rejects malformed optional objects before reading their nested evidence.
+fn optional_object<'a>(node: &'a Value, name: &str) -> Result<Option<&'a Value>, AppError> {
+    match node.get(name) {
+        None | Some(Value::Null) => Ok(None),
+        Some(value) if value.is_object() => Ok(Some(value)),
+        _ => Err(fail("service", format!("Invalid object {name}"))),
+    }
+}
+
 /// Iteration ordinals are ordered numerically even if represented as strings.
 fn iteration_id(value: &Value) -> Result<u64, AppError> {
     let id = ordinal(value)?;
@@ -223,6 +267,16 @@ fn ordinal(value: &Value) -> Result<u64, AppError> {
         .as_u64()
         .or_else(|| value.as_str()?.parse().ok())
         .ok_or_else(|| fail("service", "Invalid Azure DevOps iteration ordinal"))
+}
+
+/// Detects numeric identity aliases without changing the provider's displayed ID.
+fn service_id(value: &Value) -> Result<String, AppError> {
+    let id = identifier(value)?;
+    if id.bytes().all(|byte| byte.is_ascii_digit()) {
+        let number = iteration_id(value)?;
+        return Ok(number.to_string());
+    }
+    Ok(id)
 }
 
 /// Produces the same UTC representation as the canonical PowerShell document.
@@ -258,6 +312,12 @@ fn canonical_time(value: Option<&Value>) -> Result<Option<String>, AppError> {
 
 /// Common ref commit is the iteration's merge base, not the target branch head.
 fn revision(node: &Value) -> Result<Value, AppError> {
+    for name in ["sourceRefCommit", "targetRefCommit", "commonRefCommit"] {
+        if let Some(commit) = optional_object(node, name)? {
+            optional_text(commit, "commitId")?;
+        }
+    }
+    optional_text(node, "reason")?;
     Ok(json!({
         "id": field(node, "id")?,
         "createdUtc": canonical_time(node.get("createdDate"))?,
@@ -306,6 +366,21 @@ fn context(node: Option<&Value>) -> Result<Value, AppError> {
             .trim_start_matches('/')
             .to_owned(),
     };
+    for name in [
+        "rightFileStart",
+        "rightFileEnd",
+        "leftFileStart",
+        "leftFileEnd",
+    ] {
+        if let Some(position) = optional_object(node, name)? {
+            if let Some(line) = position.get("line").filter(|line| !line.is_null()) {
+                ordinal(line)?;
+            }
+            if let Some(offset) = position.get("offset").filter(|offset| !offset.is_null()) {
+                ordinal(offset)?;
+            }
+        }
+    }
     let right = node.get("rightFileStart").is_some_and(|v| !v.is_null())
         || node.get("rightFileEnd").is_some_and(|v| !v.is_null());
     let left = node.get("leftFileStart").is_some_and(|v| !v.is_null())
@@ -332,7 +407,7 @@ fn opening_index(comments: &[Value]) -> Result<Option<usize>, AppError> {
     let mut ids = HashSet::new();
     let mut ordinals = HashSet::new();
     for (index, comment) in comments.iter().enumerate() {
-        let id = identifier(field(comment, "id")?)?;
+        let id = service_id(field(comment, "id")?)?;
         if !ids.insert(id.clone()) {
             return Err(fail("service", "Duplicate thread comment ID"));
         }
@@ -399,11 +474,23 @@ fn convert_thread(
     } else {
         "system"
     };
-    let anchor_revision = node
-        .pointer("/pullRequestThreadContext/iterationContext/secondComparingIteration")
+    let thread_context = optional_object(node, "pullRequestThreadContext")?;
+    let iteration_context = thread_context
+        .map(|context| optional_object(context, "iterationContext"))
+        .transpose()?
+        .flatten();
+    let anchor_revision = iteration_context
+        .and_then(|context| context.get("secondComparingIteration"))
         .filter(|value| !value.is_null())
         .map(ordinal)
         .transpose()?;
+    if let Some(context) = thread_context
+        && let Some(value) = context
+            .get("changeTrackingId")
+            .filter(|value| !value.is_null())
+    {
+        ordinal(value)?;
+    }
     let nodes = array(field(node, "comments")?)?;
     let opener = opening_index(nodes)?;
     let mut comments = Vec::new();
@@ -483,7 +570,12 @@ fn convert_comment(
     let parent = node
         .get("parentCommentId")
         .filter(|v| !v.is_null())
-        .filter(|v| v.as_u64() != Some(0) && v.as_str() != Some("0"));
+        .filter(|v| {
+            v.as_u64() != Some(0) && v.as_str().and_then(|id| id.parse().ok()) != Some(0_u64)
+        });
+    if let Some(parent) = parent {
+        service_id(parent)?;
+    }
     Ok(json!({
         "id": field(node, "id")?, "url": url, "parentId": parent,
         "author": author, "content": content, "publishedUtc": published,
@@ -556,6 +648,28 @@ mod tests {
         }
     }
 
+    /// Simulates a refused later page without involving a live service.
+    struct RefusedPage<'a>(&'a Recording);
+
+    impl Http for RefusedPage<'_> {
+        fn send(
+            &self,
+            method: &str,
+            url: &str,
+            token: &str,
+            body: Option<&[u8]>,
+        ) -> Result<HttpResponse, AppError> {
+            if url.contains("continuationToken=next%2Btoken") {
+                return Ok(HttpResponse::new(
+                    403,
+                    BTreeMap::new(),
+                    br#"{"message":"page access denied"}"#.to_vec(),
+                ));
+            }
+            self.0.send(method, url, token, body)
+        }
+    }
+
     struct TestClock;
     impl Clock for TestClock {
         fn now(&self) -> Timestamp {
@@ -593,7 +707,7 @@ mod tests {
                 ),
                 (
                     "pullRequests/7?",
-                    json!({"pullRequestId": 7, "createdBy": {"id": "author"}, "title": "Unicode λ", "sourceRefName": "refs/heads/topic", "targetRefName": "refs/heads/main"}),
+                    json!({"pullRequestId": 7, "createdBy": {"id": "author"}, "title": "Unicode λ", "description": null, "sourceRefName": "refs/heads/topic", "targetRefName": "refs/heads/main"}),
                     None,
                 ),
                 (
@@ -712,6 +826,35 @@ mod tests {
     }
 
     #[test]
+    fn retains_left_and_right_positions_and_change_tracking_identity() {
+        let target = target();
+        let recording = recording();
+        {
+            let mut replies = recording.replies.borrow_mut();
+            let thread = &mut replies[5].1["value"][1];
+            thread["threadContext"] = json!({
+                "filePath": "/renamed.rs",
+                "leftFileStart": {"line": 7, "offset": 1},
+                "leftFileEnd": {"line": 9, "offset": 2}
+            });
+            thread["pullRequestThreadContext"]["iterationContext"]["secondComparingIteration"] =
+                json!(2);
+            thread["comments"][0]["parentCommentId"] = json!("00");
+        }
+        let mut transport = Transport::new(&target, None, &recording, &recording, &TestClock);
+        let result = collect(&mut transport, &target).unwrap();
+        let thread = &result["threads"][0];
+        assert_eq!(thread["context"]["filePath"], "renamed.rs");
+        assert_eq!(thread["context"]["side"], "left");
+        assert_eq!(thread["context"]["originalStartLine"], 7);
+        assert_eq!(thread["context"]["originalEndLine"], 9);
+        assert_eq!(thread["context"]["startLine"], Value::Null);
+        assert_eq!(thread["anchorKey"], 42);
+        assert_eq!(thread["isOutdated"], false);
+        assert_eq!(thread["comments"][0]["parentId"], Value::Null);
+    }
+
+    #[test]
     fn rejects_missing_or_ambiguous_collections_and_comment_order() {
         let target = target();
         let recording = recording();
@@ -721,6 +864,120 @@ mod tests {
 
         let recording = self::recording();
         recording.replies.borrow_mut()[5].1["value"][1]["comments"][0]["id"] = json!("opaque");
+        let mut transport = Transport::new(&target, None, &recording, &recording, &TestClock);
+        collect(&mut transport, &target).unwrap_err();
+    }
+
+    #[test]
+    fn follows_reviewer_and_thread_pages_and_preserves_reply_evidence() {
+        let target = target();
+        let recording = recording();
+        {
+            let mut replies = recording.replies.borrow_mut();
+            replies[4].2 = Some("reviewers-next");
+            replies.insert(
+                5,
+                (
+                    "continuationToken=reviewers-next",
+                    list(json!([{"id":"other", "isContainer":true}])),
+                    None,
+                ),
+            );
+            replies[6].2 = Some("threads-next");
+            replies[6].1["value"][1]["comments"][0]["parentCommentId"] = json!(1);
+            replies.insert(
+                7,
+                (
+                    "continuationToken=threads-next",
+                    list(json!([{"id":10, "comments":[
+                        {"id":1, "author":{"id":"b"}, "content":" \n  β\r\n\n"}
+                    ]}])),
+                    None,
+                ),
+            );
+        }
+        let mut transport = Transport::new(&target, None, &recording, &recording, &TestClock);
+        let result = collect(&mut transport, &target).unwrap();
+        assert!(recording.replies.borrow().is_empty());
+        assert_eq!(result["reviewers"].as_array().unwrap().len(), 2);
+        assert_eq!(result["threads"].as_array().unwrap().len(), 2);
+        assert_eq!(result["threads"][0]["comments"][0]["parentId"], 1);
+        assert_eq!(
+            result["threads"][1]["comments"][0]["content"],
+            " \n  β\r\n\n"
+        );
+    }
+
+    #[test]
+    fn refuses_incomplete_later_pages_and_numeric_identity_aliases() {
+        let target = target();
+        let recording = recording();
+        recording.replies.borrow_mut()[3].1 = json!({"count":1,"value":[]});
+        let mut transport = Transport::new(&target, None, &recording, &recording, &TestClock);
+        collect(&mut transport, &target).unwrap_err();
+
+        let recording = self::recording();
+        recording.replies.borrow_mut()[5].1["value"][1]["comments"][0]["id"] = json!("01");
+        let mut transport = Transport::new(&target, None, &recording, &recording, &TestClock);
+        collect(&mut transport, &target).unwrap_err();
+
+        let recording = self::recording();
+        recording.replies.borrow_mut()[5].1["value"][1]["id"] = json!("0");
+        let mut transport = Transport::new(&target, None, &recording, &recording, &TestClock);
+        collect(&mut transport, &target).unwrap_err();
+    }
+
+    #[test]
+    fn propagates_a_later_page_refusal_instead_of_returning_partial_data() {
+        let target = target();
+        let recording = recording();
+        let http = RefusedPage(&recording);
+        let mut transport = Transport::new(&target, None, &recording, &http, &TestClock);
+        let error = collect(&mut transport, &target).unwrap_err();
+        assert!(format!("{error:?}").contains("page access denied"));
+        assert_eq!(recording.requests.borrow().len(), 3);
+    }
+
+    #[test]
+    fn rejects_malformed_commit_anchor_parent_and_prose_evidence() {
+        let target = target();
+        for (page, pointer, value) in [
+            (1, "/description", json!({"unexpected":"object"})),
+            (2, "/value/0/targetRefCommit", json!("not a commit")),
+            (
+                5,
+                "/value/1/threadContext/leftFileStart",
+                json!("not a position"),
+            ),
+            (5, "/value/1/threadContext/rightFileEnd/line", json!([])),
+            (
+                5,
+                "/value/1/pullRequestThreadContext/iterationContext",
+                json!("not a comparison"),
+            ),
+            (
+                5,
+                "/value/1/pullRequestThreadContext/changeTrackingId",
+                json!([]),
+            ),
+            (5, "/value/1/comments/0/parentCommentId", json!({})),
+        ] {
+            let recording = recording();
+            *recording.replies.borrow_mut()[page]
+                .1
+                .pointer_mut(pointer)
+                .unwrap() = value;
+            let mut transport = Transport::new(&target, None, &recording, &recording, &TestClock);
+            assert!(collect(&mut transport, &target).is_err(), "{pointer}");
+        }
+    }
+
+    #[test]
+    fn refuses_incomplete_authenticated_account_property() {
+        let target = target();
+        let recording = recording();
+        recording.replies.borrow_mut()[0].1["authenticatedUser"]["properties"] =
+            json!({"Account": {"$type": "String"}});
         let mut transport = Transport::new(&target, None, &recording, &recording, &TestClock);
         collect(&mut transport, &target).unwrap_err();
     }
