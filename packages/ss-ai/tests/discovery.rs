@@ -365,9 +365,9 @@ fn incompatible_assessment_schemas_and_malformed_recovery_budgets_preserve_recor
     )
     .unwrap();
     let current = record(root.path());
-    assert_eq!(current["schemaVersion"], 11);
+    assert_eq!(current["schemaVersion"], 14);
     let path = root.path().join("run.json");
-    for version in [7, 8, 9, 10] {
+    for version in [7, 8, 9, 10, 11, 12, 13] {
         let mut legacy = current.clone();
         legacy["schemaVersion"] = json!(version);
         fs::write(&path, serde_json::to_vec(&legacy).unwrap()).unwrap();

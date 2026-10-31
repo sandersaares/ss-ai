@@ -24,7 +24,10 @@ use crate::publication::{self, Outcome, Receipt, Scope};
 use crate::review_notice::{self, AutomaticApproval, Notice};
 use crate::target::{Platform, Target};
 use crate::{Clock, Process};
-use ss_ai_assessment::ContextRequest;
+use ss_ai_assessment::{ContextRequest, Note};
+
+/// Checkpoint notes and dependency-bound aggregates require a fresh assessment contract.
+const RUN_SCHEMA: u32 = 14;
 
 /// Durable metadata-only stage; recent candidates still require approval assessment.
 #[derive(Debug, Deserialize, Serialize)]
@@ -175,7 +178,7 @@ impl DiscoveryRecord {
     }
 
     fn validate(&self) -> Result<(), AppError> {
-        if self.schema_version != 11
+        if self.schema_version != RUN_SCHEMA
             || Uuid::parse_str(&self.run_id).is_err()
             || self.repository_id.trim().is_empty()
             || self.account_id.trim().is_empty()
@@ -429,7 +432,7 @@ impl DiscoveryRecord {
             )
         })?;
         // Earlier contracts cannot establish that judgments considered all requested context.
-        if document.get("schemaVersion") != Some(&json!(11)) {
+        if document.get("schemaVersion") != Some(&json!(RUN_SCHEMA)) {
             return Err(fail(
                 "invalidState",
                 "Unsupported discovery schema; use the original utility for retained effects or start a fresh run",
@@ -895,7 +898,7 @@ pub(crate) fn discover(
         run
     } else {
         DiscoveryRecord {
-            schema_version: 11,
+            schema_version: RUN_SCHEMA,
             run_id: Uuid::new_v4().to_string(),
             repository_url: input.repository.web_url.clone(),
             repository_id,
@@ -1268,6 +1271,26 @@ pub(crate) enum WorkAction {
         after: usize,
         limit: NonZeroUsize,
     },
+    Units {
+        reference: Option<String>,
+        after: usize,
+        limit: NonZeroUsize,
+    },
+    Checks {
+        after: usize,
+        limit: NonZeroUsize,
+    },
+    Note {
+        id: String,
+        note: Note,
+        previous_digest: Option<String>,
+    },
+    Resolve {
+        id: String,
+        judgment: Judgment,
+        previous_digest: Option<String>,
+    },
+    Checkpoint,
     Read {
         reference: String,
         offset: usize,
@@ -1756,6 +1779,41 @@ pub(crate) fn work(
             &run.policy.content,
             &discussion,
         )?,
+        WorkAction::Units {
+            reference,
+            after,
+            limit,
+        } => assessment.units_for(reference.as_deref(), after, limit.get().min(100))?,
+        WorkAction::Checks { after, limit } => assessment.checks(after, limit.get().min(100))?,
+        WorkAction::Note {
+            id,
+            note,
+            previous_digest,
+        } => {
+            let digest = assessment.note(
+                &id,
+                note,
+                previous_digest.as_deref(),
+                &run.policy.content,
+                &discussion,
+            )?;
+            json!({"snapshotDigest":snapshot, "recorded":id, "noteDigest":digest})
+        }
+        WorkAction::Resolve {
+            id,
+            judgment,
+            previous_digest,
+        } => {
+            let digest = assessment.resolve(
+                &id,
+                judgment,
+                previous_digest.as_deref(),
+                &run.policy.content,
+                &discussion,
+            )?;
+            json!({"snapshotDigest":snapshot, "recorded":id, "resolutionDigest":digest})
+        }
+        WorkAction::Checkpoint => assessment.checkpoint()?,
         WorkAction::Read {
             reference,
             offset,

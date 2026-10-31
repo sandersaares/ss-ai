@@ -1042,6 +1042,14 @@ fn work(
     snapshot: &str,
     args: &[String],
 ) -> Result<Value, AppError> {
+    if operation == "judge" {
+        let id = args
+            .windows(2)
+            .find(|pair| pair[0] == "--change-id")
+            .map(|pair| pair[1].as_str())
+            .unwrap();
+        fixture_checkpoint_inputs(root, provider, snapshot, id)?;
+    }
     let mut all = vec![
         "--pull-request-id".into(),
         provider.number.to_string(),
@@ -1050,6 +1058,146 @@ fn work(
     ];
     all.extend_from_slice(args);
     invoke(root, provider, operation, &all)
+}
+
+/// Publication matrices supply ordinary checkpoint observations after their raw delivery.
+/// Dedicated assessment tests exercise missing notes, replacement, and incomplete handoffs.
+fn fixture_checkpoint_inputs(
+    root: &Path,
+    provider: &Provider,
+    snapshot: &str,
+    id: &str,
+) -> Result<(), AppError> {
+    let mut after = 0;
+    let mut changes = Vec::new();
+    let mut ready = BTreeMap::new();
+    loop {
+        let page = work(
+            root,
+            provider,
+            "assessment",
+            snapshot,
+            &["--after".into(), after.to_string()],
+        )?;
+        if page["documentReads"][0]["complete"] != true {
+            return Ok(());
+        }
+        ready.insert(
+            "discussion".to_owned(),
+            page["documentReads"][1]["complete"] == true,
+        );
+        for change in page["changes"].as_array().unwrap() {
+            ready.insert(
+                format!("{}:patch", change["id"].as_str().unwrap()),
+                change["requiredPatch"]["complete"] == true,
+            );
+            changes.push(change.clone());
+        }
+        let Some(next) = page["nextOffset"].as_u64() else {
+            break;
+        };
+        assert!(next > after);
+        after = next;
+    }
+    let reference = if id == "cumulative" {
+        "discussion".to_owned()
+    } else {
+        format!("{id}:patch")
+    };
+    if ready.get(&reference) != Some(&true) {
+        return Ok(());
+    }
+    let mut after = 0;
+    loop {
+        let page = work(
+            root,
+            provider,
+            "units",
+            snapshot,
+            &["--after".into(), after.to_string()],
+        )?;
+        for item in page["items"].as_array().unwrap() {
+            if item["unit"]["reference"] != reference {
+                continue;
+            }
+            let unit_reference = item["reference"].as_str().unwrap();
+            read_evidence(root, provider, snapshot, unit_reference, None, None);
+            read_evidence(
+                root,
+                provider,
+                snapshot,
+                item["bindingReference"].as_str().unwrap(),
+                None,
+                None,
+            );
+            if item["completed"] != true {
+                work(
+                    root,
+                    provider,
+                    "note",
+                    snapshot,
+                    &[
+                        "--unit-id".into(),
+                        item["unit"]["id"].as_str().unwrap().into(),
+                        "--observations".into(),
+                        "Complete synthetic fixture evidence.".into(),
+                        "--interfaces".into(),
+                        "Fixture contract examined.".into(),
+                        "--evidence".into(),
+                        unit_reference.into(),
+                    ],
+                )?;
+            }
+            read_evidence(
+                root,
+                provider,
+                snapshot,
+                item["noteReference"].as_str().unwrap(),
+                None,
+                None,
+            );
+        }
+        let Some(next) = page["nextOffset"].as_u64() else {
+            break;
+        };
+        assert!(next > after);
+        after = next;
+    }
+    if id == "cumulative" {
+        let page = work(root, provider, "assessment", snapshot, &[])?;
+        if page["discussionNoteDigest"].is_null() {
+            work(
+                root,
+                provider,
+                "note",
+                snapshot,
+                &[
+                    "--unit-id".into(),
+                    "discussion".into(),
+                    "--observations".into(),
+                    "Complete synthetic discussion.".into(),
+                    "--interfaces".into(),
+                    "Fixture contract examined.".into(),
+                    "--evidence".into(),
+                    "discussion".into(),
+                ],
+            )?;
+        }
+        read_evidence(root, provider, snapshot, "discussion-note", None, None);
+        for change in changes {
+            if !change["decision"].is_null() {
+                read_evidence(
+                    root,
+                    provider,
+                    snapshot,
+                    &format!("judgment:{}", change["id"].as_str().unwrap()),
+                    None,
+                    None,
+                );
+            }
+        }
+    }
+    Ok(())
 }
 
 /// Completes the ordinary insignificant assessment used by publication fault matrices.
@@ -1191,7 +1339,20 @@ fn read_evidence(
 
 /// Bounds command paging from captured input, without fabricating any read receipts.
 fn evidence_length(root: &Path, provider: &Provider, snapshot: &str, reference: &str) -> usize {
-    if reference.ends_with(":patch") || reference.contains(":context:") {
+    if reference.ends_with(":patch")
+        || reference.contains(":context:")
+        || reference == "discussion-note"
+        || [
+            "unit:",
+            "binding:",
+            "note:",
+            "judgment:",
+            "check:",
+            "resolution:",
+        ]
+        .iter()
+        .any(|prefix| reference.starts_with(prefix))
+    {
         let first = work(
             root,
             provider,

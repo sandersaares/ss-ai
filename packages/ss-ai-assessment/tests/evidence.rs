@@ -7,8 +7,8 @@
 
 use serde_json::{Value, json};
 use ss_ai_assessment::{
-    Assessment, Change, Content, ContextRequest, Disposition, Inventory, Judgment, Side,
-    SourceSide, change_id,
+    Assessment, AssessmentError, Change, Content, ContextRequest, Disposition, Inventory, Judgment,
+    Note, Side, SourceSide, change_id,
 };
 use std::num::NonZeroUsize;
 
@@ -121,6 +121,8 @@ fn change(path: &str, old: Content, new: Content) -> Change {
 fn judgment(id: &str, disposition: Disposition) -> Judgment {
     Judgment {
         disposition,
+        concerns: Vec::new(),
+        interactions: Vec::new(),
         rationale:
             "Examined the exact evidence against the design, performance and correctness criteria."
                 .to_owned(),
@@ -132,6 +134,145 @@ fn judgment(id: &str, disposition: Disposition) -> Judgment {
     }
 }
 
+/// B's delivery scenarios supply ordinary C notes only after their tested raw reads.
+/// Missing-note and dependency behavior is exercised directly in checkpoints.rs.
+trait FixtureJudgment {
+    fn record_fixture(
+        &mut self,
+        id: &str,
+        judgment: Judgment,
+        previous: Option<&str>,
+        policy: &str,
+        discussion: &str,
+    ) -> Result<String, AssessmentError>;
+}
+
+impl FixtureJudgment for Assessment {
+    fn record_fixture(
+        &mut self,
+        id: &str,
+        judgment: Judgment,
+        previous: Option<&str>,
+        policy: &str,
+        discussion: &str,
+    ) -> Result<String, AssessmentError> {
+        let change_offset = self
+            .inventory
+            .changes
+            .iter()
+            .position(|change| change.id == id)
+            .unwrap_or(0);
+        let summary = self.summary(change_offset, 1, policy, discussion)?;
+        let reference = if id == "cumulative" {
+            "discussion".to_owned()
+        } else {
+            format!("{id}:patch")
+        };
+        let ready =
+            summary["documentReads"][0]["complete"] == true
+                && if id == "cumulative" {
+                    summary["documentReads"][1]["complete"] == true
+                } else {
+                    summary["changes"].as_array().unwrap().iter().any(|change| {
+                        change["id"] == id && change["requiredPatch"]["complete"] == true
+                    })
+                };
+        if ready {
+            let mut after = 0;
+            loop {
+                let page = self.units_for(Some(&reference), after, 100)?;
+                for item in page["items"].as_array().unwrap() {
+                    if item["unit"]["reference"] != reference {
+                        continue;
+                    }
+                    let unit = item["reference"].as_str().unwrap();
+                    deliver(self, unit, policy, discussion)?;
+                    deliver(
+                        self,
+                        item["bindingReference"].as_str().unwrap(),
+                        policy,
+                        discussion,
+                    )?;
+                    if item["completed"] != true {
+                        self.note(
+                            item["unit"]["id"].as_str().unwrap(),
+                            fixture_note(unit),
+                            None,
+                            policy,
+                            discussion,
+                        )?;
+                    }
+                    deliver(
+                        self,
+                        item["noteReference"].as_str().unwrap(),
+                        policy,
+                        discussion,
+                    )?;
+                }
+                let Some(next) = page["nextOffset"].as_u64() else {
+                    break;
+                };
+                let next = usize::try_from(next).unwrap();
+                assert!(next > after);
+                after = next;
+            }
+            if id == "cumulative" {
+                if summary["discussionNoteDigest"].is_null() {
+                    self.note(
+                        "discussion",
+                        fixture_note("discussion"),
+                        None,
+                        policy,
+                        discussion,
+                    )?;
+                }
+                deliver(self, "discussion-note", policy, discussion)?;
+                let ids = self
+                    .inventory
+                    .changes
+                    .iter()
+                    .map(|change| change.id.clone())
+                    .collect::<Vec<_>>();
+                for id in ids {
+                    deliver(self, &format!("judgment:{id}"), policy, discussion)?;
+                }
+            }
+        }
+        let result = self.record(id, judgment, previous, policy, discussion)?;
+        if id != "cumulative" {
+            deliver(self, &format!("judgment:{id}"), policy, discussion)?;
+        }
+        Ok(result)
+    }
+}
+
+fn fixture_note(reference: &str) -> Note {
+    Note {
+        observations: "Examined complete fixture evidence.".into(),
+        interfaces: "Fixture invariants are preserved.".into(),
+        concerns: Vec::new(),
+        interactions: Vec::new(),
+        evidence: vec![reference.into()],
+    }
+}
+
+fn deliver(
+    assessment: &mut Assessment,
+    reference: &str,
+    policy: &str,
+    discussion: &str,
+) -> Result<(), AssessmentError> {
+    let mut offset = 0;
+    loop {
+        let page = assessment.read(reference, offset, usize::MAX, policy, discussion)?;
+        let Some(next) = page["nextOffset"].as_u64() else {
+            return Ok(());
+        };
+        let next = usize::try_from(next).unwrap();
+        assert!(next > offset);
+        offset = next;
+    }
+}
 /// Follows native offsets, bounding progress by captured length rather than a watchdog.
 fn read_all(
     assessment: &mut Assessment,
@@ -224,6 +365,46 @@ fn context_pages_fit_long_escaped_bindings_and_preserve_required_delivery() {
     assert_eq!(retry["reference"], reference);
     assert_eq!(retry["text"], "\u{1}");
     read_all(&mut assessment, reference, &text, "policy", "discussion");
+    // The oversized path can exceed a change-summary page, so use the bounded unit list.
+    let mut after = 0;
+    loop {
+        let page = assessment
+            .units_for(Some(&format!("{id}:patch")), after, 100)
+            .unwrap();
+        for unit in page["items"].as_array().unwrap() {
+            let reference = unit["reference"].as_str().unwrap();
+            deliver(&mut assessment, reference, "policy", "discussion").unwrap();
+            deliver(
+                &mut assessment,
+                unit["bindingReference"].as_str().unwrap(),
+                "policy",
+                "discussion",
+            )
+            .unwrap();
+            assessment
+                .note(
+                    unit["unit"]["id"].as_str().unwrap(),
+                    fixture_note(reference),
+                    None,
+                    "policy",
+                    "discussion",
+                )
+                .unwrap();
+            deliver(
+                &mut assessment,
+                unit["noteReference"].as_str().unwrap(),
+                "policy",
+                "discussion",
+            )
+            .unwrap();
+        }
+        let Some(next) = page["nextOffset"].as_u64() else {
+            break;
+        };
+        let next = usize::try_from(next).unwrap();
+        assert!(next > after);
+        after = next;
+    }
     assessment
         .record(
             &id,
@@ -280,7 +461,7 @@ fn unread_source_cannot_be_bulk_judged_uncertain_or_completed_as_a_refusal() {
         let mut assessment = assessment(inventory(vec![change_copy(&change)]), "discussion");
         read_all(&mut assessment, "policy", "policy", "policy", "discussion");
         assessment
-            .record(
+            .record_fixture(
                 &id,
                 judgment(&id, disposition),
                 None,
@@ -296,7 +477,7 @@ fn unread_source_cannot_be_bulk_judged_uncertain_or_completed_as_a_refusal() {
             "discussion",
         );
         assessment
-            .record(
+            .record_fixture(
                 &id,
                 judgment(&id, disposition),
                 None,
@@ -312,7 +493,7 @@ fn unread_source_cannot_be_bulk_judged_uncertain_or_completed_as_a_refusal() {
             "discussion",
         );
         assessment
-            .record(
+            .record_fixture(
                 &id,
                 judgment(&id, disposition),
                 None,
@@ -322,7 +503,7 @@ fn unread_source_cannot_be_bulk_judged_uncertain_or_completed_as_a_refusal() {
             .unwrap_err();
         read_patch(&mut assessment, &id, "policy", "discussion");
         assessment
-            .record(
+            .record_fixture(
                 &id,
                 judgment(&id, disposition),
                 None,
@@ -331,7 +512,7 @@ fn unread_source_cannot_be_bulk_judged_uncertain_or_completed_as_a_refusal() {
             )
             .unwrap();
         assessment
-            .record(
+            .record_fixture(
                 "cumulative",
                 judgment("cumulative", disposition),
                 None,
@@ -351,7 +532,7 @@ fn unread_source_cannot_be_bulk_judged_uncertain_or_completed_as_a_refusal() {
             "discussion",
         );
         assessment
-            .record(
+            .record_fixture(
                 "cumulative",
                 judgment("cumulative", disposition),
                 None,
@@ -386,13 +567,13 @@ fn opaque_source_still_requires_semantic_uncertainty_without_reading_nonexistent
     read_all(&mut assessment, "discussion", "", "", "");
     read_patch(&mut assessment, &id, "", "");
     assessment
-        .record(&id, judgment(&id, Disposition::Insignificant), None, "", "")
+        .record_fixture(&id, judgment(&id, Disposition::Insignificant), None, "", "")
         .unwrap_err();
     assessment
-        .record(&id, judgment(&id, Disposition::Uncertain), None, "", "")
+        .record_fixture(&id, judgment(&id, Disposition::Uncertain), None, "", "")
         .unwrap();
     assessment
-        .record(
+        .record_fixture(
             "cumulative",
             judgment("cumulative", Disposition::Insignificant),
             None,
@@ -444,7 +625,7 @@ fn large_exact_comparison_can_be_examined_incrementally_without_a_whole_inventor
             let id = change["id"].as_str().unwrap();
             read_patch(&mut assessment, id, "policy", &discussion);
             assessment
-                .record(
+                .record_fixture(
                     id,
                     judgment(id, Disposition::Insignificant),
                     None,
@@ -454,12 +635,10 @@ fn large_exact_comparison_can_be_examined_incrementally_without_a_whole_inventor
                 .unwrap();
             examined += 1;
         }
+        assert_eq!(assessment.progress()["judgedChangeCount"], examined);
         assert_eq!(
-            assessment.progress(),
-            json!({
-                "changeCount": 923, "judgedChangeCount": examined,
-                "nextChangeOffset": (examined < 923).then_some(examined)
-            })
+            assessment.progress()["nextChangeOffset"],
+            json!((examined < 923).then_some(examined))
         );
         if after == 0 {
             // A fresh worker resumes the native record, not another worker's in-memory source.
@@ -478,7 +657,7 @@ fn large_exact_comparison_can_be_examined_incrementally_without_a_whole_inventor
     }
     assert_eq!(examined, 923);
     assessment
-        .record(
+        .record_fixture(
             "cumulative",
             judgment("cumulative", Disposition::Insignificant),
             None,
@@ -540,7 +719,7 @@ fn discussion_binding_rejects_replaced_text_even_when_read_lengths_match() {
         "original",
     );
     assessment
-        .record(
+        .record_fixture(
             "cumulative",
             judgment("cumulative", Disposition::Insignificant),
             None,
@@ -585,7 +764,7 @@ fn requested_context_is_exact_contiguous_required_and_snapshot_bound_for_every_d
         let mut assessment = assessment(inventory(vec![change_copy(&change)]), "discussion");
         read_patch(&mut assessment, &id, "policy", "discussion");
         assessment
-            .record(
+            .record_fixture(
                 &id,
                 judgment(&id, disposition),
                 None,
@@ -620,7 +799,7 @@ fn requested_context_is_exact_contiguous_required_and_snapshot_bound_for_every_d
             .read(reference, 2, 1, "policy", "discussion")
             .unwrap_err();
         assessment
-            .record(
+            .record_fixture(
                 &id,
                 judgment(&id, disposition),
                 None,
@@ -636,7 +815,7 @@ fn requested_context_is_exact_contiguous_required_and_snapshot_bound_for_every_d
             "discussion",
         );
         assessment
-            .record(
+            .record_fixture(
                 "cumulative",
                 judgment("cumulative", disposition),
                 None,
@@ -692,7 +871,7 @@ fn requested_context_is_exact_contiguous_required_and_snapshot_bound_for_every_d
             "discussion",
         );
         assessment
-            .record(
+            .record_fixture(
                 &id,
                 judgment(&id, disposition),
                 None,
@@ -701,7 +880,7 @@ fn requested_context_is_exact_contiguous_required_and_snapshot_bound_for_every_d
             )
             .unwrap();
         assessment
-            .record(
+            .record_fixture(
                 "cumulative",
                 judgment("cumulative", disposition),
                 None,
@@ -755,7 +934,7 @@ fn new_context_invalidates_affected_judgments_until_they_are_recorded_again() {
     read_patch(&mut assessment, &id, "policy", "discussion");
     read_patch(&mut assessment, &other_id, "policy", "discussion");
     let digest = assessment
-        .record(
+        .record_fixture(
             &id,
             judgment(&id, Disposition::Insignificant),
             None,
@@ -764,7 +943,7 @@ fn new_context_invalidates_affected_judgments_until_they_are_recorded_again() {
         )
         .unwrap();
     let other_digest = assessment
-        .record(
+        .record_fixture(
             &other_id,
             judgment(&other_id, Disposition::Insignificant),
             None,
@@ -773,7 +952,7 @@ fn new_context_invalidates_affected_judgments_until_they_are_recorded_again() {
         )
         .unwrap();
     let cumulative_digest = assessment
-        .record(
+        .record_fixture(
             "cumulative",
             judgment("cumulative", Disposition::Insignificant),
             None,
@@ -829,7 +1008,7 @@ fn new_context_invalidates_affected_judgments_until_they_are_recorded_again() {
         .unwrap();
     assessment.finish("policy", "discussion").unwrap_err();
     assessment
-        .record(
+        .record_fixture(
             &id,
             judgment(&id, Disposition::Significant),
             Some(&digest),
@@ -847,7 +1026,7 @@ fn new_context_invalidates_affected_judgments_until_they_are_recorded_again() {
         )
         .unwrap();
     assessment
-        .record(
+        .record_fixture(
             "cumulative",
             judgment("cumulative", Disposition::Significant),
             Some(&cumulative_digest),
@@ -856,7 +1035,7 @@ fn new_context_invalidates_affected_judgments_until_they_are_recorded_again() {
         )
         .unwrap_err();
     assessment
-        .record(
+        .record_fixture(
             "cumulative",
             judgment("cumulative", Disposition::Significant),
             None,

@@ -52,6 +52,52 @@ classified_error!(
     "invalidState",
     "Source context binding changed"
 );
+classified_error!(
+    InvalidUnitManifest,
+    "invalidState",
+    "Invalid exact evidence unit manifest"
+);
+classified_error!(UnknownUnit, "invalidInput", "Unknown evidence unit");
+classified_error!(
+    IncompleteUnits,
+    "invalidState",
+    "Complete and read every required unit note before aggregation"
+);
+classified_error!(
+    InvalidCheckpointNote,
+    "invalidInput",
+    "Notes require bounded observations, interfaces, exact evidence, and explicit nonempty checks; cumulative judgments cannot introduce unexamined checks"
+);
+classified_error!(
+    MissingExactEvidence,
+    "invalidState",
+    "Semantic work requires exact native evidence, not only summaries"
+);
+classified_error!(
+    UnknownCheck,
+    "invalidInput",
+    "Unknown or stale concern or interaction"
+);
+classified_error!(
+    UnresolvedCheck,
+    "invalidState",
+    "Every concern and interaction requires an evidence-backed disposition"
+);
+classified_error!(
+    NoCheckpointProgress,
+    "invalidState",
+    "A planned checkpoint requires newly completed immutable work"
+);
+classified_error!(
+    StaleAggregate,
+    "invalidState",
+    "Aggregate dependencies are missing or stale"
+);
+classified_error!(
+    InvalidAggregateDependency,
+    "invalidInput",
+    "Source aggregation requires unit notes and exact evidence, not dependent judgments or checks"
+);
 
 /// Reconstruction failures keep their parser diagnostic without becoming opaque evidence.
 #[ohno::error]

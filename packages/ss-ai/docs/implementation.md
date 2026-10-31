@@ -52,3 +52,24 @@ Read the topics relevant to the responsibility being changed:
 The topic structure separates shared mechanisms from functional areas. For
 example, provider evidence supports both registration and selection, and the
 time boundary supports both claim decisions and transport recovery waits.
+
+## Assessment checkpoints
+
+`ss-ai-assessment` owns the immutable unit manifest and typed observations.
+`units.rs` groups complete source hunks and provider discussion records,
+including noncontiguous replies, then splits oversized text at exact scalar
+ranges. The manifest covers the original serialized documents rather than a
+second reconstruction of their bodies. Source/thread bindings accompany split
+records through bounded digest-based binding references. Exact metadata remains
+in the covered original ranges rather than being repeated on every fragment.
+Workers use the stable parent to reacquire related evidence. Unit bounds reserve regular worker
+context for policy, exact follow-up evidence, and reasoning.
+
+`checkpoint.rs` owns notes, fixed-level discussion aggregation, explicit concern
+and interaction records, evidence-backed dispositions, and dependency digests.
+It does not own approval authority or provider effects. Replacements invalidate
+transitive aggregates instead of preserving conclusions derived from obsolete
+notes. The cumulative judgment binds all final change judgments, discussion
+observations, checks, and dispositions. Read receipts establish delivery only.
+Monotonic completed-work identities bound handoffs without rewarding replay or
+replacement, independently of the skill's worker-replacement and stale budgets.

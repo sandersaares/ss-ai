@@ -99,9 +99,10 @@ Patches retain all changed text with three surrounding lines. Complete captured
 readable sides remain available for deliberate context reads. Assessors request
 exact line ranges when hunks do not establish enclosing logic, interfaces,
 invariants, interactions, or an objection's relevance. Requested ranges become
-mandatory evidence. A newly registered range invalidates the affected change
-judgment and the cumulative judgment; both must be recorded again after delivery.
-Repeating an existing request leaves judgments intact. Native coverage cannot prove
+mandatory evidence. A newly registered range invalidates the affected change's
+unit notes and judgment, their dependents, the discussion aggregate, all check
+dispositions, and the cumulative judgment. Repeating an existing request leaves
+records intact. Native coverage cannot prove
 that the assessor chose enough context; needed evidence outside the captured
 sides remains explicitly missing.
 There is no filename, size, or edit-category exemption.
@@ -123,15 +124,48 @@ empty document and distinguishes opaque content from pending text delivery.
 Read receipts track native delivery, not model comprehension; a truncated tool
 response must be replayed with a smaller limit.
 
-Each worker examines a small source unit and records its judgments before
-returning a planned checkpoint. The orchestrator verifies increased native
-judgment counts on the unchanged snapshot before starting a fresh worker.
-Each checkpoint adds at least one judgment, bounding source handoffs by the
-inventory size rather than a retry loop. Workers do not overlap. The final
-worker reads durable judgment pages and complete discussion, reacquiring source
-needed for cross-change reasoning. Individual favorable judgments do not
-replace a cumulative semantic assessment. Native scalar progress avoids
-loading source or per-change rationales into the orchestrator.
+An immutable evidence-unit manifest partitions every required patch and the
+complete discussion into bounded exact ranges. It prefers complete hunks,
+threads, and review bodies, groups interleaved replies by their retained parent,
+and splits oversized records or single lines without omission. Each unit retains
+its original reference, scalar ranges, content digests, and a reference to
+source/thread binding references. Bindings use bounded record and thread digests;
+the original unit text retains exact identities, locations, and links. Workers
+read the bindings before recording a unit note and reacquire related original
+units as needed to interpret fragments.
+Sharing excerpt text never merges its referencing threads.
+
+Workers record typed unit notes with observations, interfaces/invariants,
+interactions, concerns, and exact references. Notes are not approval judgments.
+Each exact changed-path record still needs a single final judgment after its
+aggregator reads all unit notes and relevant exact source. The discussion
+aggregate covers every discussion note, including original bodies and unique
+historical excerpts. It can bind relevant source notes without replacing the
+required discussion notes.
+
+Native checkpoints require newly completed immutable work: a unit note or final
+change judgment. Replays and replacement records earn no new progress.
+The immutable unit and changed-path counts bound planned handoffs; the separate
+replacement and stale-recovery budgets still apply. Workers do not overlap and
+do not increase model context. Scalar progress keeps semantic evidence out of
+the orchestrator.
+
+The fresh cumulative worker reads every final change judgment, discussion
+observation, and explicit concern/interaction disposition. It independently
+examines combined effects and reacquires relevant exact evidence. Every recorded
+concern or interaction requires a rationale and exact supporting evidence.
+Significant or uncertain members and check dispositions prevent a favorable
+aggregate from authorizing renewal. Replacing a note invalidates dependent
+aggregates through their bound digests; unrelated notes remain available.
+
+Completion requires all raw unit ranges, requested context, unit notes, final
+change judgments, discussion aggregation, check dispositions, and the independent
+cumulative judgment, including with an empty source inventory. Native receipts
+prove delivery, not comprehension. Notes can omit an implication even when
+coverage is complete; synthetic adversarial evaluation reduces that risk but
+does not prove semantic equivalence. There is no recursive summary hierarchy
+or guarantee that an arbitrary PR fits: a cumulative set that cannot be examined
+with its necessary exact evidence remains explicitly incomplete.
 
 Tool-output, context, and worker limits are incomplete evidence, not substantive
 uncertainty. They neither freeze a semantic refusal nor authorize a notice.
@@ -211,7 +245,7 @@ or forgets such effects.
 An existing publication receipt also requires retained host evidence of a
 preflight-only operation; missing host history is not proof that no write occurred.
 
-`discovery.rs` owns the schema-11 run, recovery record, and result metadata.
+`discovery.rs` owns the schema-14 run, recovery record, and result metadata.
 Incompatible run schemas require a fresh run; retained effects require
 reconciliation with their original utility version.
 Discovery discards draft PRs before recency checks. Valid older records drop
@@ -468,16 +502,18 @@ Its context records bind line, byte, and Unicode-scalar bounds to a captured
 object and content digest, without copying the range's body into state.
 `assessment.rs` owns
 context selection, bounded contiguous reads, conditional judgment replacement,
-coverage, and completion digests. Producers and consumers use the same validation,
+coverage, and completion digests. `units.rs` supplies exact source/discussion
+partitions; `checkpoint.rs` binds typed notes, fixed-level aggregates, explicit
+check dispositions, and monotonic handoff progress. Producers and consumers use the same validation,
 so missing data cannot become an empty successful result. Timestamps use the shared
 Jiff parser and injectable clock; the reapproval workflow has no independent
 clock or retry timer.
 
 The required patch manifest has its own digest; completion also binds all
 requested ranges. Every command validates these against retained source.
-New context removes the affected change judgment and cumulative judgment, so
-their next recording cannot reuse an obsolete conditional digest. Unrelated
-judgments remain intact. Failed context acquisition stays
+New context removes the affected change's unit notes and judgment, their
+dependents, the discussion aggregate, check dispositions, and the cumulative
+judgment. Unrelated change judgments remain intact. Failed context acquisition stays
 in the run as incomplete evidence, with no approval or notice authority.
 Incompatible run contracts require a new run rather than migrated read receipts.
 

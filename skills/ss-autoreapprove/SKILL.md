@@ -142,25 +142,36 @@ native `results`. A delivered tool result is not command success; inspect the
 native exit status and diagnostics. Workers cannot publish, ask human decision
 questions, or delegate further.
 
-Workers process bounded source units rather than loading the full comparison
+Workers process native bounded evidence units rather than loading the full comparison
 into one context. Each changed path requires an exact operation/patch document;
 workers request captured-side context when necessary. Requested ranges cannot
-be abandoned to complete an assessment. Large individual patches or discussion
-that exceed regular context remain incomplete; partial-source or discussion
-summaries do not authorize a handoff. A planned `checkpoint` is not a completed assessment or a
-premature worker failure. Read native `results` and verify that
-`assessmentProgress.judgedChangeCount` increased, the snapshot is unchanged,
+be abandoned to complete an assessment. Snapshot-bound unit notes retain exact
+ranges, observations, interfaces/invariants, interactions, and concerns.
+They do not grant approval or notice authority. A planned `checkpoint` is not a completed assessment or a
+premature worker failure. Require native `checkpoint` acceptance, then read
+native `results` and verify that `assessmentProgress.completedWorkCount`
+increased because a new unit note or final change judgment completed, the snapshot is unchanged,
 and `assessmentDigest` is still null before dispatching the next fresh worker.
 Pass the original assignment and scalar progress, not the previous worker's
-conclusions. The final worker reads durable judgments and discussion and owns
+conclusions. The final worker reads every durable judgment, discussion observation,
+and explicit concern/interaction disposition, reacquires relevant exact evidence, and owns
 the cumulative judgment. The orchestrator never synthesizes semantic results.
 Native discussion separates semantic bodies and source excerpts from approval
-bookkeeping. Workers must still read the complete document, including its
+bookkeeping. Unit coverage must still include the complete document, including its
 shared historical excerpts; compact presentation does not reduce coverage.
-Only one worker may be active for a PR. Since each source checkpoint must add
-at least one judgment, allow no more source handoffs than the native
-`assessmentProgress.changeCount`; the final cumulative worker is separate.
+Only one worker may be active for a PR. Allow no more planned handoffs than
+the native `assessmentProgress.handoffLimit`, derived from immutable unit and
+changed-path counts; the final cumulative worker is separate.
 Use the same explicit model and context configuration for every unit.
+Native `unitCount`, `completedUnitCount`, `nextUnitId`, and `nextUnitOffset` locate missing unit
+notes; `judgedChangeCount` and `nextChangeOffset` locate final source judgments.
+Replayed reads, identical notes, replacement notes, and discussion aggregation
+alone are not new completed work. Preserve the separate replacement and
+stale-evidence budgets below. Do not raise model context or recursively summarize
+until an arbitrary assessment fits. If the complete cumulative judgment/check
+set and necessary exact evidence do not fit, report explicit incomplete work.
+Summary omission remains a semantic risk: delivery receipts cannot prove that
+every material objection or interaction survived the notes.
 
 An interrupted or prematurely returned worker leaves unfinished work, not
 permission. A returned synchronous task has ended; do not use `write_agent` to resume it.

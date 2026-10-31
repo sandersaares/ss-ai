@@ -94,8 +94,9 @@ exact `context` binding. Continue through `read` using that reference and
 `requestedContextCount` and `nextContextReference` at assessment and change level
 to resume required context. Full `:old` / `:new` reads remain available as
 optional context. All offsets count Unicode scalar values, not UTF-8 bytes.
-Registering a new range removes that change's judgment and the cumulative
-judgment. After reading the range, record both again as new judgments.
+Registering a new range removes that change's unit notes and judgment, their
+dependents, the discussion aggregate, all check dispositions, and the cumulative
+judgment. After reading the range, rebuild the missing records.
 Invalid or unavailable requested context is a retained incomplete-evidence
 failure, never a reason to publish a needs-review notice. Finalized assessments
 allow replay of existing evidence but no new ranges.
@@ -116,13 +117,57 @@ Native read coverage does not establish that a replacement worker has seen the e
 Finish missing work and retain existing judgments unless deliberately replacing them
 with their current digests. Never edit the run JSON or recreate the assessment
 to resume it.
-For a planned source-unit handoff, the next worker starts at `nextChangeOffset`
-and reads only the missing changes it will judge. The final cumulative worker
-reads recorded judgments through every bounded page and acquires its own policy,
-discussion, and any source evidence needed for interactions. Native `results`
-exposes `assessmentProgress` with `changeCount`, `judgedChangeCount`, and nullable
-`nextChangeOffset`, without source content or change rationales, for orchestration
-to verify forward progress.
+For a planned handoff, the next worker starts `units --after` at `nextUnitOffset`
+to locate `nextUnitId` without replaying completed metadata, or
+starts final change aggregation at `nextChangeOffset`. The final cumulative
+worker reads every final judgment, discussion observation, and explicit check,
+and reacquires exact evidence needed for interactions. Native `results` exposes
+`assessmentProgress` with `changeCount`, `judgedChangeCount`, `nextChangeOffset`,
+`unitCount`, `completedUnitCount`, `nextUnitId`, `nextUnitOffset`, `completedWorkCount`,
+`checkpointCount`, and `handoffLimit`, without source or semantic conclusions.
+
+```powershell
+ss-ai autoreapprove units --state-path "{{RUN}}" --pull-request-id "{{PR}}" --snapshot-digest "{{SNAPSHOT}}" --after "{{AFTER}}" --limit "{{LIMIT}}" --reference "{{DOCUMENT}}"
+ss-ai autoreapprove note --state-path "{{RUN}}" --pull-request-id "{{PR}}" --snapshot-digest "{{SNAPSHOT}}" --unit-id "{{UNIT}}" --observations "{{OBSERVATIONS}}" --interfaces "{{INTERFACES}}" --evidence "{{REFERENCE}}" --concern "{{CONCERN}}" --interaction "{{INTERACTION}}" --previous-digest "{{PREVIOUS}}"
+ss-ai autoreapprove checks --state-path "{{RUN}}" --pull-request-id "{{PR}}" --snapshot-digest "{{SNAPSHOT}}" --after "{{AFTER}}" --limit "{{LIMIT}}"
+ss-ai autoreapprove resolve --state-path "{{RUN}}" --pull-request-id "{{PR}}" --snapshot-digest "{{SNAPSHOT}}" --check-id "{{CHECK}}" --disposition "{{DISPOSITION}}" --rationale "{{RATIONALE}}" --evidence "{{REFERENCE}}" --previous-digest "{{PREVIOUS}}"
+ss-ai autoreapprove checkpoint --state-path "{{RUN}}" --pull-request-id "{{PR}}" --snapshot-digest "{{SNAPSHOT}}"
+```
+
+Additional placeholders:
+
+| Placeholder | Value |
+| --- | --- |
+| `DOCUMENT` | Optional original document filter, `discussion` or `CHANGE_ID:patch`; omit the option to enumerate every unit. Offsets apply to the selected list. |
+| `UNIT` | Native unit ID, or `discussion` for the final discussion aggregate. |
+| `OBSERVATIONS` | Concise behavioral observations, preserving relevant objections. |
+| `INTERFACES` | Relevant interfaces/invariants and their relationship to the evidence. |
+| `CONCERN`, `INTERACTION` | Explicit obligation to examine; repeat each option as needed, or omit it when there are none. |
+| `CHECK` | Native concern or interaction ID returned by `checks`. |
+
+Other placeholders retain their definitions above/below. Follow each returned
+`nextOffset`. Unit metadata contains a stable parent identifier, original reference,
+binding references, exact half-open scalar ranges and digests. Read returned
+`unit:ID` and `binding:ID` references completely, then record notes citing
+that exact unit and any context used. Binding digests group records; exact
+identities and links remain in original unit text. Reacquire related units and
+original evidence when a fragment alone does not explain its context.
+Every unit requires a note even when the complete original document was read.
+Use `note:ID`, `judgment:CHANGE_ID`, `discussion-note`, `check:ID`, and
+`resolution:ID` through the same bounded `read` command. Metadata includes
+current note/resolution digests for conditional replacement.
+A judgment displayed in metadata does not satisfy its dedicated `read`
+receipt. Use the returned unit offset with the unfiltered unit list; document
+filters have their own offsets.
+
+The discussion aggregate requires all discussion notes and relevant exact
+evidence. Source aggregation requires every note for that exact change.
+All check resolutions require exact evidence, the originating semantic record,
+and the check itself. Missing or stale dependencies block every disposition.
+Replacing notes or judgments invalidates dependent aggregates and resolutions.
+`checkpoint` accepts only a newly completed unit or final change judgment;
+replay and replacement never increase `completedWorkCount`. It returns scalar
+progress, not approval authority.
 
 # Stage 3: judgments and completion
 
@@ -133,16 +178,25 @@ ss-ai autoreapprove complete --state-path "{{RUN}}" --pull-request-id "{{PR}}" -
 
 Repeat `--evidence` for additional returned references. A change judgment must
 cite its `CHANGE_ID:patch`. The cumulative judgment must cite both `policy` and
-`discussion`. Every change judgment requires complete policy, required patch,
+`discussion`. Repeat optional `--concern` and `--interaction` on a change judgment
+for explicit cumulative obligations. The cumulative judgment cannot introduce
+unchecked obligations; record them on the relevant unit or change first.
+Every change judgment requires complete policy, required patch,
 and applicable requested context reads, regardless of disposition. Cited optional
 evidence also requires complete delivery. A cumulative judgment requires
-complete policy, discussion, and all requested context reads. Opaque source can retain uncertainty, but
+complete policy, discussion, all final change judgment and discussion-aggregate
+reads, every check and disposition, and all requested context reads.
+Opaque source can retain uncertainty, but
 unexamined readable content cannot become a completed semantic refusal.
 Omit `--previous-digest` for a new judgment; replacement requires
 the current digest from `assessment` and rejects conflicting updates.
 Missing work is not an empty successful assessment. Completion
 requires all readable evidence for every disposition: mandatory patches,
 requested ranges, policy, and discussion. Delivery, context, and
+worker limits cannot be hidden behind notes. All unit notes, final source
+judgments, discussion aggregation, check dispositions, and an independent
+cumulative judgment are mandatory. Native delivery does not prove comprehension
+or that notes captured every implication. Delivery, context, and
 worker limits leave incomplete work; do not loop over the inventory to invent
 uncertain judgments. An `evidenceDelivery` diagnostic is a tooling failure,
 not a completed nonqualifying assessment.
