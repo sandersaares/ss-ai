@@ -9,6 +9,7 @@
 use std::cell::RefCell;
 use std::fs;
 use std::io;
+use std::panic::{RefUnwindSafe, UnwindSafe};
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
@@ -16,7 +17,7 @@ use jiff::Timestamp;
 use ohno::AppError;
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
-use ss_ai_review_workflow::report_html::{probe, write_report};
+use ss_ai_review_workflow::report_html::{ReportResult, probe, write_report};
 use ss_ai_review_workflow::report_tools::{ReportTools, tools_lock};
 use ss_ai_runtime::{Clock, LockMode, NativeProcess, Process, ProcessOutput, ResourceLock, fail};
 use tempfile::{Builder, TempDir};
@@ -192,6 +193,7 @@ fn embeds_checked_diagrams_and_transforms_the_pandoc_ast() {
         &TestClock,
     )
     .unwrap();
+    _ = format!("{result:?}");
     assert_eq!(result.diagram_count, 1);
     assert!(result.html_uri.contains("report%20%231.html"));
     let html = fs::read_to_string(output).unwrap();
@@ -221,6 +223,13 @@ fn embeds_checked_diagrams_and_transforms_the_pandoc_ast() {
         result.html_hash,
         format!("{:x}", Sha256::digest(html.as_bytes()))
     );
+}
+
+/// Records the report result's compatibility with panic-catching callers.
+#[test]
+fn report_result_is_unwind_safe() {
+    fn assert_traits<T: UnwindSafe + RefUnwindSafe>() {}
+    assert_traits::<ReportResult>();
 }
 
 /// Equivalent decoded Markdown has the same identity and deterministic rendering.
