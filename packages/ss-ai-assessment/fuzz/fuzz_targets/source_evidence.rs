@@ -44,11 +44,23 @@ fuzz_target!(|input: &[u8]| {
         text,
     ) {
         for operation in input.iter().take(MAX_OPERATIONS) {
-            unit_operation(&mut discussion, usize::from(*operation), text);
+            unit_operation(
+                &mut discussion,
+                usize::from(*operation),
+                usize::from(*operation).saturating_add(1),
+                true,
+                text,
+            );
             discussion.validate("snapshot", "policy", "", text).unwrap();
         }
     }
-    let mut fields = text.splitn(3, "\n===\n");
+    // Checked-out seed files may use CRLF, while arbitrary input also exercises LF.
+    let separator = if text.contains("\r\n===\r\n") {
+        "\r\n===\r\n"
+    } else {
+        "\n===\n"
+    };
+    let mut fields = text.splitn(3, separator);
     let old_text = fields.next().unwrap_or("");
     let new_text = fields.next().unwrap_or("");
     let patch = fields.next().unwrap_or("");
@@ -87,17 +99,24 @@ fuzz_target!(|input: &[u8]| {
     else {
         return;
     };
+    let mut patch_offset = 0;
     for (index, operation) in input.iter().take(MAX_OPERATIONS).enumerate() {
-        // The small selector deliberately includes invalid offsets/ranges and post-finalization calls.
-        match operation % 7 {
+        // The selector retains the completion seed's operations and includes invalid calls and checkpoints.
+        match operation % 16 {
             0 => {
-                let _read = assessment.read(
+                let read = assessment.read(
                     &format!("{id}:patch"),
-                    index,
-                    usize::from(*operation).saturating_add(1),
+                    patch_offset,
+                    MAX_INPUT_BYTES,
                     "",
                     "",
                 );
+                if let Ok(page) = read {
+                    patch_offset = page["nextOffset"]
+                        .as_u64()
+                        .and_then(|offset| usize::try_from(offset).ok())
+                        .unwrap_or(patch_offset);
+                }
             }
             1 => {
                 let _context = assessment.source_context(
@@ -131,11 +150,57 @@ fuzz_target!(|input: &[u8]| {
                 );
             }
             4 => {
+                let _change =
+                    assessment.read(&format!("judgment:{id}"), 0, MAX_INPUT_BYTES, "", "");
+                let _judgment = assessment.record(
+                    "cumulative",
+                    Judgment {
+                        concerns: Vec::new(),
+                        interactions: Vec::new(),
+                        disposition: Disposition::Significant,
+                        rationale: "synthetic".into(),
+                        evidence: vec!["policy".into(), "discussion".into()],
+                    },
+                    None,
+                    "",
+                    "",
+                );
+            }
+            5 => {
+                let _read = assessment.read("discussion", 0, 1, "", "");
+            }
+            6 => {
                 let _complete = assessment.finish("", "");
             }
-            5 => unit_operation(&mut assessment, index, ""),
-            _ => {
+            8 => {
+                let limit = if operation & 32 == 0 {
+                    MAX_INPUT_BYTES
+                } else {
+                    index.saturating_add(1)
+                };
+                unit_operation(&mut assessment, index, limit, operation & 16 != 0, "");
+            }
+            9 => {
                 let _checkpoint = assessment.checkpoint();
+            }
+            10 => {
+                let _note = assessment.note(
+                    "discussion",
+                    Note {
+                        observations: "Synthetic discussion".into(),
+                        interfaces: "Synthetic invariant".into(),
+                        concerns: Vec::new(),
+                        interactions: Vec::new(),
+                        evidence: vec!["discussion".into()],
+                    },
+                    None,
+                    "",
+                    "",
+                );
+                let _read = assessment.read("discussion-note", 0, MAX_INPUT_BYTES, "", "");
+            }
+            _ => {
+                let _read = assessment.read(&format!("{id}:patch"), index, 1, "", "");
             }
         }
         assessment.validate("snapshot", "policy", "", "").unwrap();
@@ -146,7 +211,13 @@ fuzz_target!(|input: &[u8]| {
 });
 
 /// Generated unit work mixes partial delivery, idempotent notes, replacement, and paging.
-fn unit_operation(assessment: &mut Assessment, selector: usize, discussion: &str) {
+fn unit_operation(
+    assessment: &mut Assessment,
+    selector: usize,
+    limit: usize,
+    concern: bool,
+    discussion: &str,
+) {
     let _policy = assessment.read("policy", 0, 1, "", discussion);
     let count = usize::try_from(assessment.progress()["unitCount"].as_u64().unwrap()).unwrap();
     assert!(count > 0);
@@ -156,13 +227,7 @@ fn unit_operation(assessment: &mut Assessment, selector: usize, discussion: &str
     let offset = unit["readOffset"]
         .as_u64()
         .map_or(0, |offset| usize::try_from(offset).unwrap());
-    let result = assessment.read(
-        reference,
-        offset,
-        selector.saturating_add(1),
-        "",
-        discussion,
-    );
+    let result = assessment.read(reference, offset, limit, "", discussion);
     if let Ok(result) = result
         && result["complete"] == false
     {
@@ -171,7 +236,7 @@ fn unit_operation(assessment: &mut Assessment, selector: usize, discussion: &str
     let _binding = assessment.read(
         unit["bindingReference"].as_str().unwrap(),
         0,
-        selector.saturating_add(1),
+        limit,
         "",
         discussion,
     );
@@ -181,7 +246,11 @@ fn unit_operation(assessment: &mut Assessment, selector: usize, discussion: &str
         Note {
             observations: format!("Synthetic {selector}"),
             interfaces: "Synthetic invariant".into(),
-            concerns: vec!["Synthetic concern".into()],
+            concerns: if concern {
+                vec!["Synthetic concern".into()]
+            } else {
+                Vec::new()
+            },
             interactions: Vec::new(),
             evidence: vec![reference.into()],
         },
@@ -192,7 +261,7 @@ fn unit_operation(assessment: &mut Assessment, selector: usize, discussion: &str
     let _read = assessment.read(
         unit["noteReference"].as_str().unwrap(),
         0,
-        selector.saturating_add(1),
+        limit,
         "",
         discussion,
     );

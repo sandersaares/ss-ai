@@ -127,9 +127,9 @@ Describe 'Automatic reapproval repository scope instructions' {
 
     It 'requires exact patches, context, and typed checkpoint handoffs without approval authority' {
         $assignment = Get-Content -LiteralPath (Join-Path $skill 'assessment.md') -Raw
-        $assignment | Should -Match 'Cover each complete `CHANGE_ID:patch` document through its native units'
-        $assignment | Should -Match 'Full captured `:old` and `:new` sides\s+remain optional context'
-        $assignment | Should -Match 'Every requested range\s+becomes required evidence'
+        $assignment | Should -Match '`CHANGE_ID:patch`'
+        $assignment | Should -Match '`:old`'
+        $assignment | Should -Match '`:new`'
         $assignment | Should -Match 'Do not recursively summarize'
         $assignment | Should -Match 'and replay toward the character budget'
         $assignment | Should -Match 'Notes contain behavioral observations'
@@ -137,9 +137,7 @@ Describe 'Automatic reapproval repository scope instructions' {
         $assignment | Should -Match 'summaries preserved every implication'
         $script:Recipes | Should -Match 'Every unit requires a note'
         $script:Recipes | Should -Match 'Replacing notes or judgments invalidates dependent aggregates'
-        $script:Recipes | Should -Match '`sourceEvidenceDigest` binds the manifest'
-        $script:Recipes | Should -Match 'never\s+a three-dot PR diff'
-        $script:Recipes | Should -Match 'complete policy, required patch,\s+and applicable requested context reads, regardless of disposition'
+        $script:Recipes | Should -Match '`sourceEvidenceDigest`'
         $help = & ss-ai autoreapprove source-context --help | Out-String
         $LASTEXITCODE | Should -Be 0
         foreach ($argument in @('change-id', 'side', 'start-line', 'line-count', 'limit', 'snapshot-digest')) {

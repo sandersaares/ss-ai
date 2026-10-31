@@ -493,8 +493,9 @@ rename/type pairing. An opaque side contributes no invented text; all text from
 the readable side remains required and the document identifies both kinds.
 Capture budgets and full retained blobs remain unchanged.
 
-The shared Git parser validates exact old-to-new reconstruction from each patch,
-including unchanged gaps, CRLF, and missing-final-newline markers. It retains
+The shared Git parser validates exact old-to-new reconstruction from each patch
+using forward-only captured-line iterators, including unchanged gaps, CRLF, and
+missing-final-newline markers. It retains
 ordered ranges without changing the existing full-review range output.
 `source.rs` binds operation metadata and ranges to the snapshot and inventory.
 Its context records bind line, byte, and Unicode-scalar bounds to a captured

@@ -228,12 +228,12 @@ impl Assessment {
         self.validate_checkpoints(policy_content, discussion)?;
         for (id, decision) in &self.decisions {
             self.validate_judgment(id, decision)?;
-            self.judgment_reads(id, policy_content, discussion, false)?;
+            self.judgment_reads(id, policy_content, discussion)?;
             self.cited_reads(decision, policy_content, discussion)?;
         }
         if let Some(cumulative) = &self.cumulative {
             self.validate_judgment("cumulative", cumulative)?;
-            self.judgment_reads("cumulative", policy_content, discussion, false)?;
+            self.judgment_reads("cumulative", policy_content, discussion)?;
             self.cited_reads(cumulative, policy_content, discussion)?;
         }
         for (reference, offset) in &self.reads {
@@ -366,20 +366,9 @@ impl Assessment {
                 bytes <= TEXT_BYTES
             })
             .collect::<String>();
-        let boundaries = text
-            .char_indices()
-            .map(|(index, _)| index)
-            .chain(std::iter::once(text.len()))
-            .collect::<Vec<_>>();
-        let page = |characters: usize| -> Result<Value, AssessmentError> {
+        let page = |page_text: &str, characters: usize| -> Result<Value, AssessmentError> {
             let end = offset
                 .checked_add(characters)
-                .ok_or_else(error::ReadOffsetOverflow::classified)?;
-            let byte_end = *boundaries
-                .get(characters)
-                .ok_or_else(error::ReadOffsetOverflow::classified)?;
-            let page_text = text
-                .get(..byte_end)
                 .ok_or_else(error::ReadOffsetOverflow::classified)?;
             Ok(
                 json!({"snapshotDigest": self.snapshot_digest, "reference": reference, "offset": offset,
@@ -390,24 +379,40 @@ impl Assessment {
                 "nextOffset": if end < total { Some(end) } else { None }}),
             )
         };
-        let mut count = boundaries.len().saturating_sub(1);
-        let mut result = page(count)?;
+        let mut count = text.chars().count();
+        let mut result = page(&text, count)?;
         if response_size(&result)? > RESPONSE_BYTES {
             // Metadata varies with the captured path. Search complete character boundaries
             // against the delivered JSON, including offsets and escaping, before recording a read.
-            check_response(&page(0)?)?;
+            let boundaries = text
+                .char_indices()
+                .map(|(index, _)| index)
+                .chain(std::iter::once(text.len()))
+                .collect::<Vec<_>>();
+            let prefix = |characters: usize| -> Result<Value, AssessmentError> {
+                let byte_end = *boundaries
+                    .get(characters)
+                    .ok_or_else(error::ReadOffsetOverflow::classified)?;
+                let prefix = text
+                    .get(..byte_end)
+                    .ok_or_else(error::ReadOffsetOverflow::classified)?;
+                page(prefix, characters)
+            };
+            check_response(&prefix(0)?)?;
             let mut lower = 0_usize;
             let mut upper = count;
             while lower < upper {
+                let previous = (lower, upper);
                 let middle = lower.saturating_add(upper.saturating_sub(lower).div_ceil(2));
-                if response_size(&page(middle)?)? <= RESPONSE_BYTES {
+                if response_size(&prefix(middle)?)? <= RESPONSE_BYTES {
                     lower = middle;
                 } else {
                     upper = middle.saturating_sub(1);
                 }
+                debug_assert!(lower > previous.0 || upper < previous.1);
             }
             count = lower;
-            result = page(count)?;
+            result = prefix(count)?;
         }
         if count == 0 && offset < total && limit > 0 {
             return Err(error::OversizedResponse::classified());
@@ -454,7 +459,7 @@ impl Assessment {
             return Err(error::ImmutableAssessment::classified());
         }
         self.validate_judgment(id, &judgment)?;
-        self.judgment_reads(id, policy, discussion, true)?;
+        self.judgment_reads(id, policy, discussion)?;
         self.cited_reads(&judgment, policy, discussion)?;
         let dependencies = self.aggregate_dependencies(id, &judgment, policy, discussion)?;
         let previous = if id == "cumulative" {
@@ -503,9 +508,9 @@ impl Assessment {
     }
 
     fn complete_reads(&self, policy: &str, discussion: &str) -> Result<(), AssessmentError> {
-        self.judgment_reads("cumulative", policy, discussion, true)?;
+        self.judgment_reads("cumulative", policy, discussion)?;
         for change in &self.inventory.changes {
-            self.judgment_reads(&change.id, policy, discussion, true)?;
+            self.judgment_reads(&change.id, policy, discussion)?;
         }
         Ok(())
     }
@@ -516,14 +521,11 @@ impl Assessment {
         id: &str,
         policy: &str,
         discussion: &str,
-        requested_context: bool,
     ) -> Result<(), AssessmentError> {
         self.require_read("policy", policy)?;
-        if requested_context {
-            for (reference, context) in &self.contexts {
-                if id == "cumulative" || context.request.change_id == id {
-                    self.require_read(reference, context.content(&self.inventory)?)?;
-                }
+        for (reference, context) in &self.contexts {
+            if id == "cumulative" || context.request.change_id == id {
+                self.require_read(reference, context.content(&self.inventory)?)?;
             }
         }
         if id == "cumulative" {

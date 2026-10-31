@@ -104,14 +104,12 @@ classified_error!(
 pub(crate) struct InvalidSourcePatch;
 
 impl InvalidSourcePatch {
-    pub(crate) fn from_error(error: &ohno::AppError) -> AssessmentError {
-        AssessmentError::caused_by(Self::caused_by(
-            ss_ai_runtime::fail(
-                "invalidState",
-                format!("Invalid exact source patch: {error}"),
-            )
-            .into_std_error(),
-        ))
+    pub(crate) fn from_error(error: ss_ai_git::ExactPatchError) -> AssessmentError {
+        AssessmentError::caused_by(Self::caused_by(ss_ai_runtime::caused_by(
+            "invalidState",
+            "Invalid exact source patch",
+            error,
+        )))
     }
 }
 classified_error!(
@@ -246,7 +244,7 @@ mod tests {
 
     use super::{
         AssessmentError, IncompleteCoverage, IncompleteInventory, InvalidChangeId,
-        InvalidChangeShape, InvalidCommit, InvalidReference, NoncontiguousRead,
+        InvalidChangeShape, InvalidCommit, InvalidReference, InvalidSourcePatch, NoncontiguousRead,
     };
 
     /// Confirms both the owning invariant and the application's recovery category.
@@ -310,5 +308,15 @@ mod tests {
                 .unwrap_err(),
             "invalidInput",
         );
+    }
+
+    #[test]
+    fn source_patch_failure_preserves_the_parser_error_and_classification() {
+        let parser = ss_ai_git::validate_patch("", "old\n", "new\n").unwrap_err();
+        let error = InvalidSourcePatch::from_error(parser);
+        let error: AppError = error.into();
+        assert!(error.find_source::<InvalidSourcePatch>().is_some());
+        assert!(error.find_source::<ss_ai_git::ExactPatchError>().is_some());
+        assert_eq!(classification(&error), "invalidState");
     }
 }

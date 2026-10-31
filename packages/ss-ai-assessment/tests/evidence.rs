@@ -736,8 +736,8 @@ fn discussion_binding_rejects_replaced_text_even_when_read_lengths_match() {
         .unwrap_err();
     let mut record = serde_json::to_value(&assessment).unwrap();
     record["discussionDigest"] = json!("0".repeat(64));
-    let corrupt: Assessment = serde_json::from_value(record).unwrap();
-    corrupt
+    let record: Assessment = serde_json::from_value(record).unwrap();
+    record
         .validate("snapshot", "policy", "policy", "original")
         .unwrap_err();
     let mut record = serde_json::to_value(&assessment).unwrap();
@@ -969,6 +969,21 @@ fn new_context_invalidates_affected_judgments_until_they_are_recorded_again() {
     let first = assessment
         .source_context(request.clone(), 1, "policy", "discussion")
         .unwrap();
+    // Persisted judgments cannot precede an unread required range.
+    let mut malformed = serde_json::to_value(&assessment).unwrap();
+    malformed["decisions"][&id] =
+        serde_json::to_value(judgment(&id, Disposition::Insignificant)).unwrap();
+    let malformed: Assessment = serde_json::from_value(malformed).unwrap();
+    malformed
+        .validate("snapshot", "policy", "policy", "discussion")
+        .unwrap_err();
+    let mut malformed = serde_json::to_value(&assessment).unwrap();
+    malformed["cumulative"] =
+        serde_json::to_value(judgment("cumulative", Disposition::Insignificant)).unwrap();
+    let malformed: Assessment = serde_json::from_value(malformed).unwrap();
+    malformed
+        .validate("snapshot", "policy", "policy", "discussion")
+        .unwrap_err();
     assessment
         .validate("snapshot", "policy", "policy", "discussion")
         .unwrap();
@@ -1055,6 +1070,7 @@ fn malformed_source_manifests_and_missing_documents_never_become_empty_evidence(
     );
     let id = change.id.clone();
     let assessment = assessment(inventory(vec![change]), "");
+    let _diagnostic = format!("{assessment:?}");
     let original = serde_json::to_value(&assessment).unwrap();
     for field in ["sourceEvidence", "sourceEvidenceDigest", "contexts"] {
         let mut record = original.clone();
@@ -1077,15 +1093,15 @@ fn malformed_source_manifests_and_missing_documents_never_become_empty_evidence(
         } else {
             json!("changed")
         };
-        let corrupt: Assessment = serde_json::from_value(record).unwrap();
-        corrupt
+        let record: Assessment = serde_json::from_value(record).unwrap();
+        record
             .validate("snapshot", "policy", "policy", "")
             .unwrap_err();
     }
     let mut record = original;
     record["sourceEvidence"] = json!({});
-    let corrupt: Assessment = serde_json::from_value(record).unwrap();
-    corrupt
+    let record: Assessment = serde_json::from_value(record).unwrap();
+    record
         .validate("snapshot", "policy", "policy", "")
         .unwrap_err();
 }
