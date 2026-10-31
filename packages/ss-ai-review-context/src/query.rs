@@ -1117,6 +1117,7 @@ fn serialize_page(
 )]
 mod tests {
     use serde_json::{Value, json};
+    use ss_ai_runtime::{Failure, classification};
 
     use super::{
         LiteralSearch, capture_delta, case_insensitive_equal, changes, normalize_options, query,
@@ -1503,22 +1504,34 @@ mod tests {
         assert!(changes(&previous, &current).unwrap().is_empty());
 
         current["pullRequest"]["reviewedSourceCommit"] = json!("é");
-        assert_eq!(
-            capture_delta(&previous, &current)
-                .err()
-                .unwrap()
-                .to_string(),
-            changes(&previous, &current).err().unwrap().to_string()
-        );
+        for error in [
+            capture_delta(&previous, &current).unwrap_err(),
+            changes(&previous, &current).err().unwrap(),
+        ] {
+            assert_eq!(classification(&error), "invalidInput");
+            assert!(
+                error
+                    .find_source::<Failure>()
+                    .unwrap()
+                    .to_string()
+                    .starts_with("invalidInput: Cannot compare these values exactly")
+            );
+        }
 
         current["pullRequest"]["reviewedSourceCommit"] = json!("source");
         current["threads"][0]["comments"][0]["authorshipEvidence"] = json!(null);
-        assert_eq!(
-            capture_delta(&previous, &current)
-                .err()
-                .unwrap()
-                .to_string(),
-            changes(&previous, &current).err().unwrap().to_string()
-        );
+        for error in [
+            capture_delta(&previous, &current).unwrap_err(),
+            changes(&previous, &current).err().unwrap(),
+        ] {
+            assert_eq!(classification(&error), "invalidInput");
+            assert!(
+                error
+                    .find_source::<Failure>()
+                    .unwrap()
+                    .to_string()
+                    .starts_with("invalidInput: Capture comment requires authorship evidence")
+            );
+        }
     }
 }
