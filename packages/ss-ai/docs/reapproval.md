@@ -83,6 +83,12 @@ reviewed code. Typed, snapshot-bound judgments cover every change and the cumula
 result. Every judgment requires the policy and all readable sides of its change;
 the cumulative judgment requires complete policy and discussion reads.
 Every completed outcome requires all readable evidence, not just favorable outcomes.
+The discussion document contains complete semantic discussion rather than the
+retained approval record. It preserves description and review bodies, comments,
+authorship, reply relationships, available thread state, and source locations.
+GitHub inline comments reference a shared table of exact excerpt text. Workers
+read every shared excerpt as part of the complete document; sharing does not
+permit skipping historical context or dropping repeated comments.
 Opaque source still prevents an insignificant outcome;
 absent sides represent additions or deletions, not missing evidence. Structural or
 behavioral edits are not automatically significant. Mixed significant or uncertain
@@ -191,8 +197,9 @@ or forgets such effects.
 An existing publication receipt also requires retained host evidence of a
 preflight-only operation; missing host history is not proof that no write occurred.
 
-`discovery.rs` owns the schema-8 recovery record and result metadata. Schema-7
-runs migrate with no consumed attempts and unchanged initial host identities.
+`discovery.rs` owns the schema-9 run, recovery record, and result metadata.
+Incompatible run schemas require a fresh run; retained effects require
+reconciliation with their original utility version.
 Discovery discards draft PRs before recency checks. Valid older records drop
 draft entries when loaded, and inspection, refresh, or publication preflight removes
 a PR found to have become a draft without consuming the stale-recovery budget.
@@ -202,7 +209,7 @@ Each fresh attempt adds a UUID used as that PR's host-journal run identity;
 the enclosing run ID stays fixed. The snapshot digest also binds this UUID,
 so equal evidence and timestamps cannot reuse an earlier snapshot. This preserves
 canceled preflight records and prevents a new assessment from colliding with an
-old immutable journal operation. Existing schema-8 snapshots remain readable.
+old immutable journal operation.
 Notification staleness is recorded separately from an uncertain assessment's
 diagnostic, so neither condition conceals the other.
 
@@ -437,6 +444,24 @@ coverage, and completion digests. Producers and consumers use the same validatio
 so missing data cannot become an empty successful result. Timestamps use the shared
 Jiff parser and injectable clock; the reapproval workflow has no independent
 clock or retry timer.
+
+`discussion.rs` projects captured history into compact, provider-tagged semantic
+documents. It does not participate in authority or freshness comparisons.
+Provider-shaped locations retain missing and null distinctions, including
+outdated inline positions. Exact hunk text shares a SHA-256 reference while
+comments retain their own paths, authors, revisions, and reply relationships.
+ADO discussion retains a compact iteration-to-source-commit map so earlier
+inline coordinates remain interpretable. Deleted comment tombstones do not
+require removed identifiers or bodies. Human replies in service threads remain present.
+Native validation and work
+dispatch use the same renderer, and the assessment binds its exact document
+bytes and projection version through `discussionDigest`. Incompatible read
+offsets and judgments are not migrated to another projection.
+
+Large discussion still requires a complete cumulative-worker read. Context
+exhaustion remains incomplete work. Checkpointed source/discussion summaries
+are a separate design decision tracked in the repository [TODO](../../../TODO.md);
+read receipts alone cannot establish that a summary preserves every objection.
 
 `publication.rs` dispatches the provider transaction and acquires the stable
 account/repository/PR lock before the run lock. `ado_publication.rs` owns ADO's

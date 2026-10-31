@@ -218,7 +218,7 @@ The producer and consumer validate the full record, including excluded PRs.
 
 | Record | Fields |
 | --- | --- |
-| Run | `schemaVersion: 8`; UUID `runId`; canonical `repositoryUrl`; nonempty string `repositoryId`, `accountId`, `utilityVersion`; `platform` (`gitHub` or `azureDevOps`); nullable string `tenant`; `policy`; Boolean `dryRun`, `enumerationComplete`; `state`; `inventory`; nullable `error` and positive integer `errorPullRequestId`. A PR-bound publication failure records its originating PR; only that PR's owned operation can recover the failed run. |
+| Run | `schemaVersion: 9`; UUID `runId`; canonical `repositoryUrl`; nonempty string `repositoryId`, `accountId`, `utilityVersion`; `platform` (`gitHub` or `azureDevOps`); nullable string `tenant`; `policy`; Boolean `dryRun`, `enumerationComplete`; `state`; `inventory`; nullable `error` and positive integer `errorPullRequestId`. A PR-bound publication failure records its originating PR; only that PR's owned operation can recover the failed run. |
 | Policy | Absolute UTF-8 `sourcePath`; nonempty UTF-8 `content`; lowercase hexadecimal `sha256` of the captured content bytes. |
 | Inventory entry | Unique positive integer `pullRequestId`; canonical `url`; nonempty `title`; `draft: false`; `recency`; `recovery`; nullable `inspection`, `assessment`, `executionError`, `publication`, `reviewNotice`, and `automaticApproval`. Entries are in ascending PR order. |
 | Recovery | `attemptIds`: ordered distinct UUIDs, at most the recovery limit, excluding the run ID; nullable `stale` (`staleEvidence`) and `error` (`retryExhausted`, only at the limit). The last attempt ID selects the current PR's host-journal `runId`; the initial attempt uses the enclosing run ID. |
@@ -239,16 +239,14 @@ all timestamps are future-dated. Failed recency has a check time and error,
 without a latest timestamp or complete evidence.
 An inspection's digest covers its capture time and complete evidence. Fresh
 recovery captures also bind the recovery attempt ID, so a repeated observation
-cannot reuse an earlier snapshot digest. Existing schema-8 captures without
-that binding remain readable.
+cannot reuse an earlier snapshot digest.
 Freshness comparisons use the [material-evidence projections](docs/reapproval.md#material-evidence)
 for both newly captured and richer retained observations. Existing records and
 their digests are not rewritten; immutable assessment and journal bindings remain exact.
 Consumers recompute its conclusion and validate its run identity.
-Schema-7 records load with empty recovery state; their original journal identities,
-assessment contracts, and uncertain effects remain unchanged. Other older run
-schemas require a fresh run. Valid retained draft entries from older runs are
-removed on access.
+Other run schemas require a fresh run. Reconcile retained effects with the utility
+version that created them; never rewrite their records to adopt another schema.
+Valid retained draft entries are removed on access.
 
 ADO inspections ignore deleted threads and comments as authority while retaining
 their tombstones and audit evidence in snapshots. They report `noPriorApproval` when no
@@ -310,6 +308,21 @@ text. `pendingChangeCount` and nullable `nextChangeOffset` identify missing
 judgments. Results expose nullable `assessmentProgress` with `changeCount`,
 `judgedChangeCount`, and `nextChangeOffset` without source or per-change rationales.
 
+The `discussion` reference contains compact JSON with `schemaVersion: 1` and
+`platform`. GitHub supplies `pullRequest`, `reviews`, `comments`,
+`reviewComments`, and `hunks`; ADO supplies `pullRequest`, `sourceCommit`,
+`iterationCommits`, and `threads`. `iterationCommits` maps iteration identifiers
+to source commits for interpreting historical inline coordinates.
+Discussion records preserve provider field names, bodies, stable
+authorship, reply relationships, available thread state, and source locations.
+GitHub comments reference exact shared excerpt text through `hunkReference`;
+`hunks` maps its SHA-256 reference to that text. A null reference preserves a
+null excerpt, and an absent reference preserves an absent excerpt. Deleted ADO
+comment tombstones preserve absent identifiers and bodies. Read the
+complete document, including all shared excerpts. Approval reconstruction and
+policy records remain in native authority evidence, not this discussion document.
+`discussionDigest` binds the document's exact UTF-8 bytes.
+
 `judge` takes `--change-id` (an exact ID or `cumulative`), `--disposition`,
 `--rationale` and repeated `--evidence`. Judgments apply the installed policy's
 significant-design-change and likely-performance/correctness-regression criteria,
@@ -362,7 +375,7 @@ These records are created and updated only through the native commands.
 
 | Record | Fields |
 | --- | --- |
-| Assessment | `snapshotDigest`, `policyDigest`, `inventory`, `inventoryDigest`, exact `documents`, `reads` map of reference to contiguous character count, `decisions` map of change ID to judgment, nullable `cumulative`, Boolean `complete`, nullable `assessmentDigest`. |
+| Assessment | `snapshotDigest`, `policyDigest`, `discussionDigest`, `inventory`, `inventoryDigest`, exact `documents`, `reads` map of reference to contiguous character count, `decisions` map of change ID to judgment, nullable `cumulative`, Boolean `complete`, nullable `assessmentDigest`. |
 | Inventory | Full `oldCommit`, `newCommit`, `oldTree`, `newTree`; complete ordered `changes`; Boolean `complete`. Equal trees require empty changes. |
 | Change | SHA-256 `id` binding kind and both sides; `kind` (`A`, `D`, `M`, `T`, `R`); nullable `old`, `new`. |
 | Side | Exact UTF-8 Git `path`, full `object` ID, `mode`, and `content`. |

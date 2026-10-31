@@ -1147,7 +1147,7 @@ fn read_evidence(
 ) {
     // Match Command::Read's ordinary default and Assessment::read's response cap.
     let page_limit = limit.map_or(4096, NonZeroUsize::get).min(16_384);
-    let length = evidence_length(root, provider.number, reference);
+    let length = evidence_length(root, provider, snapshot, reference);
     let mut offset = 0;
     let mut pages = 0;
     let mut total_chars = 0;
@@ -1199,23 +1199,27 @@ fn read_evidence(
 }
 
 /// Bounds command paging from captured input, without fabricating any read receipts.
-fn evidence_length(root: &Path, number: u32, reference: &str) -> usize {
+fn evidence_length(root: &Path, provider: &Provider, snapshot: &str, reference: &str) -> usize {
+    if reference == "discussion" {
+        let metadata = work(root, provider, "assessment", snapshot, &[]).unwrap();
+        return usize::try_from(
+            metadata["documentReads"][1]["totalCharacters"]
+                .as_u64()
+                .unwrap(),
+        )
+        .unwrap();
+    }
     let record: Value = serde_json::from_slice(&fs::read(root.join("run.json")).unwrap()).unwrap();
     let entry = record["inventory"]
         .as_array()
         .unwrap()
         .iter()
-        .find(|entry| entry["pullRequestId"] == number)
+        .find(|entry| entry["pullRequestId"] == provider.number)
         .unwrap();
 
     match reference {
         "policy" => record["policy"]["content"]
             .as_str()
-            .unwrap()
-            .chars()
-            .count(),
-        // Pretty JSON key order does not affect the serialized character count.
-        "discussion" => serde_json::to_string_pretty(&entry["inspection"]["evidence"])
             .unwrap()
             .chars()
             .count(),
@@ -3217,6 +3221,98 @@ fn incomplete_evidence_does_not_authorize_approval_or_needs_review_publication()
         assert_eq!(provider.writes.get(), 1);
         publish(scope.path(), &provider, &snapshot).unwrap_err();
         assert_eq!(provider.writes.get(), 1);
+    }
+}
+
+/// Native reads deliver the semantic projection while retained authority stays unchanged.
+#[test]
+fn compact_discussion_is_snapshot_bound_and_keeps_objections_on_both_providers() {
+    let _guard = PROCESS_TEST_LOCK
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner);
+    let sources = Sources::new();
+    for ado in [false, true] {
+        let scope = TempDir::new().unwrap();
+        let provider = sources.provider(ado);
+        {
+            let mut evidence = provider.evidence.borrow_mut();
+            if ado {
+                evidence["pullRequest"]["description"] = json!("Description-only requirement.");
+                evidence["threads"].as_array_mut().unwrap().push(json!({
+                    "id": 50, "status": "active", "publishedDate": "2026-01-02T00:00:00Z",
+                    "comments": [{"id": 1, "commentType": "text", "content": "Human objection.",
+                        "author": {"id": "other-reviewer"}, "publishedDate": "2026-01-02T00:00:00Z"}]
+                }));
+                evidence["threads"].as_array_mut().unwrap().extend([
+                    json!({"id": "deleted-thread", "isDeleted": true,
+                        "comments": [{"commentType": "system"}]}),
+                    json!({"id": "deleted-comment", "status": "pending",
+                        "comments": [{"isDeleted": true, "commentType": "text"}]}),
+                ]);
+            } else {
+                evidence["pullRequest"]["body"] = json!("Description-only requirement.");
+                evidence["reviews"][0]["body"] = json!("Review-only objection.");
+                evidence["reviewComments"] = json!((10..12).map(|id| json!({
+                    "id": id, "body": "Human objection.", "user": {"id": 99, "type": "User"},
+                    "diff_hunk": "@@ -1 +1 @@\n-old\n+historical", "path": format!("file-{id}.rs"),
+                    "created_at": "2026-01-02T00:00:00Z", "updated_at": "2026-01-02T00:00:00Z"
+                })).collect::<Vec<_>>());
+            }
+        }
+        let (snapshot, prepared) = prepare(scope.path(), &provider, true);
+        assert!(prepared["discussionDigest"].is_string());
+        let before: Value =
+            serde_json::from_slice(&fs::read(scope.path().join("run.json")).unwrap()).unwrap();
+        let mut discussion = String::new();
+        read_evidence(
+            scope.path(),
+            &provider,
+            &snapshot,
+            "discussion",
+            None,
+            Some(&mut discussion),
+        );
+        let document: Value = serde_json::from_str(&discussion).unwrap();
+        assert_eq!(document["schemaVersion"], 1);
+        assert!(discussion.contains("Description-only requirement."));
+        assert!(discussion.contains("Human objection."));
+        if ado {
+            assert!(document.get("reviewers").is_none());
+            assert!(document.get("iterations").is_none());
+            assert_eq!(document["iterationCommits"]["1"], sources.old);
+            assert_eq!(document["iterationCommits"]["2"], sources.new);
+            for id in ["deleted-thread", "deleted-comment"] {
+                let thread = document["threads"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .find(|thread| thread["id"] == id)
+                    .unwrap();
+                assert!(thread["comments"][0].get("id").is_none());
+            }
+        } else {
+            assert!(discussion.contains("Review-only objection."));
+            assert_eq!(document["hunks"].as_object().unwrap().len(), 1);
+            assert_eq!(document["reviewComments"].as_array().unwrap().len(), 2);
+            assert!(document.get("timeline").is_none());
+        }
+        assert!(document.get("policies").is_none());
+        let path = scope.path().join("run.json");
+        let mut saved: Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+        assert_eq!(
+            saved["inventory"][0]["inspection"],
+            before["inventory"][0]["inspection"]
+        );
+        assert_eq!(
+            saved["inventory"][0]["assessment"]["discussionDigest"],
+            prepared["discussionDigest"]
+        );
+        saved["inventory"][0]["assessment"]["discussionDigest"] = json!("0".repeat(64));
+        let corrupt = serde_json::to_vec(&saved).unwrap();
+        fs::write(&path, &corrupt).unwrap();
+        work(scope.path(), &provider, "assessment", &snapshot, &[]).unwrap_err();
+        assert_eq!(fs::read(&path).unwrap(), corrupt);
+        assert_eq!(provider.writes.get(), 0);
     }
 }
 

@@ -150,6 +150,9 @@ and `assessmentDigest` is still null before dispatching the next fresh worker.
 Pass the original assignment and scalar progress, not the previous worker's
 conclusions. The final worker reads durable judgments and discussion and owns
 the cumulative judgment. The orchestrator never synthesizes semantic results.
+Native discussion separates semantic bodies and source excerpts from approval
+bookkeeping. Workers must still read the complete document, including its
+shared historical excerpts; compact presentation does not reduce coverage.
 Only one worker may be active for a PR. Since each source checkpoint must add
 at least one judgment, allow no more source handoffs than the native
 `assessmentProgress.changeCount`; the final cumulative worker is separate.

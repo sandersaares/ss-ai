@@ -70,6 +70,14 @@ responses contain `text`, `totalCharacters`, `complete`, and `nextOffset`; consu
 pages until complete. A side without readable text cannot support an
 insignificant decision. Do not substitute an arbitrary checkout or target tip.
 
+Discussion is a compact semantic document, not approval bookkeeping. Preserve
+the distinction between review bodies, comments, and replies. GitHub comments
+use `hunkReference` to locate exact historical excerpts in the document's
+`hunks` table; read every shared excerpt and interpret it using each comment's
+own path and revision. Identical excerpt text does not merge comments.
+The native `discussionDigest` binds the complete document. Do not reconstruct
+discussion from the retained run or skip outdated or repeated objections.
+
 Repeating `prepare` on the same snapshot preserves recorded reads and judgments.
 A replacement worker follows the inventory from the first page, checking each
 `decision` and `decisionDigest` and the `cumulative` judgment. Reread evidence needed for your own judgment
