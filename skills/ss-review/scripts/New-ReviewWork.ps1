@@ -15,7 +15,9 @@ param(
     [string] $OutputDirectory,
 
     [string] $RepositoryRoot,
-    [string] $ArtifactDirectory
+    [string] $ArtifactDirectory,
+    [string] $SessionStateDirectory,
+    [string] $PreparationIdentity
 )
 
 Set-StrictMode -Version Latest
@@ -26,4 +28,6 @@ $arguments = @('create-review-work', "--inventory-path=$InventoryPath", "--file-
     "--focus-area-directory=$FocusAreaDirectory", "--output-directory=$OutputDirectory")
 if ($RepositoryRoot) { $arguments += "--repository-root=$RepositoryRoot" }
 if ($ArtifactDirectory) { $arguments += "--artifact-directory=$ArtifactDirectory" }
+if ($SessionStateDirectory) { $arguments += "--session-state=$SessionStateDirectory" }
+if ($PreparationIdentity) { $arguments += "--preparation-identity=$PreparationIdentity" }
 Invoke-NativeReviewWorkflow -Arguments $arguments

@@ -1,13 +1,17 @@
 ```powershell
-pwsh -NoProfile -NonInteractive -File "{{SKILL_ROOT}}\scripts\Test-FocusAreaMap.ps1" `
-  -SessionStateDirectory "{{SESSION_STATE}}" -MapPath "{{MAP_PATH}}"
+#Requires -Version 7.6
+
+Set-StrictMode -Version Latest
+$ErrorActionPreference = 'Stop'
+$PSNativeCommandUseErrorActionPreference = $true
+
+ss-ai workflow validate-focus-area-map --session-state "{{PREPARATION_STATE}}" --map-path "{{MAP_PATH}}"
 ```
 
 | Placeholder | Value |
 | --- | --- |
-| `SKILL_ROOT` | Absolute path to this skill. |
-| `SESSION_STATE` | Absolute path to the review's session-state directory. |
-| `MAP_PATH` | Absolute path to the worker's categorization JSON. |
+| `PREPARATION_STATE` | Generation-specific `sessionState` returned by begin. |
+| `MAP_PATH` | Absolute path to the worker's categorization JSON in the preparation directory. |
 
 Success emits one JSON object with `status: "Valid"`, `categoryCount`, and
 `chapterCount`. On failure, have the worker repair its JSON and repeat validation;

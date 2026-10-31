@@ -15,9 +15,6 @@ Improvement ideas to revisit when the repo matures.
 - **Bash startup test output.** Isolate the interactive-shell assertion in
   `tests/BashEnvironment.Tests.ps1` from distribution startup banners, which
   can precede the environment value being checked.
-- **Portable schema-error assertions.** Make the diagnostic assertion in
-  `tests/SsReviewWorkflowData.Tests.ps1` independent of PowerShell's
-  console-width line wrapping.
 - **Evaluation cache/task publication.** Assess shared access to
   `dev/ss-cargo-deps-tidy/evals/Generate-FoloFullTask.ps1` and add transaction
   protection where needed; use disposable checkouts for standalone preparation.
@@ -25,9 +22,9 @@ Improvement ideas to revisit when the repo matures.
 ## Skill design
 
 - **Migrate ss-review command families to Rust.** Replace the remaining complete
-  families in order: instruction preparation and cache; provider capture;
-  report tooling; overview publication; final review publication; and trackers.
-  Local context, finding, audit, rendering, coverage, and worker-input commands
+  families in order: provider capture; report tooling; overview publication;
+  final review publication; and trackers. Local context, finding, audit,
+  rendering, coverage, worker-input, instruction preparation, and cache commands
   use native operations through PowerShell adapters. Retire the adapters after
   their callers migrate while preserving the hybrid workflow's records,
   transaction boundaries and authority gates.
@@ -44,6 +41,22 @@ Improvement ideas to revisit when the repo matures.
   during construction and represent validated decision journals with typed
   verdicts. Complete this when anchor resolution and decision replay consume
   those validated types without repeated checks or string verdict matching.
+- **Type validated focus preparation state.** Represent the coupled identities
+  and mutually exclusive publication receipts in the internal generation
+  record, while preserving the persisted format and its validation boundary.
+  Complete this when each transition constructs only coherent state.
+- **Type the cache refresh interval.** Represent the positive refresh interval
+  after input validation while retaining the existing CLI rejection behavior
+  and upper bound.
+- **Type validated instruction references and spans.** Represent reference
+  outcomes as distinct internal states and one-based source lines as nonzero
+  values after parsing. Preserve the existing wire format and diagnostics.
+- **Clarify symlinked instruction references.** Decide whether local references
+  inside a symlinked instruction file use the link's directory or the target's
+  directory, then document and test the chosen behavior.
+- **Unify build-script errors.** Use the shared application error type for the
+  focus-generation fingerprint builder when its build dependencies can carry
+  that type without undermining the minimum-dependency checks.
 - **Deduplicate the workspace-flag exception list** (`std`, `alloc`,
   `clap/default`, `argh/default`, ...). Currently described twice in
   [`skills/ss-cargo-deps-tidy/SKILL.md`](skills/ss-cargo-deps-tidy/SKILL.md)

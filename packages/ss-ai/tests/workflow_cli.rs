@@ -2,11 +2,157 @@
 
 use std::collections::BTreeSet;
 use std::fs;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 
-use serde_json::Value;
+use serde_json::{Value, json};
+use ss_ai_review_workflow::{focus_area_expansion, focus_area_generation, focus_area_map};
+use ss_ai_runtime::{LockMode, ResourceLock, SystemClock};
 use tempfile::Builder;
+
+/// Keeps review initialization fixtures inside the active checkout.
+struct ReviewFixture(PathBuf);
+
+impl ReviewFixture {
+    fn new() -> Self {
+        let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join(format!(".review-init-cli-{}", std::process::id()));
+        #[expect(
+            clippy::create_dir,
+            reason = "The fixture must not reuse existing state"
+        )]
+        fs::create_dir(&path).unwrap();
+        Self(path)
+    }
+}
+
+impl Drop for ReviewFixture {
+    fn drop(&mut self) {
+        fs::remove_dir_all(&self.0).unwrap();
+    }
+}
+
+/// CLI callers must supply the caller-held identity and receive private focus snapshots.
+#[test]
+#[cfg_attr(miri, ignore = "requires a native subprocess")]
+fn review_initialization_cli_binds_the_preparation_identity() {
+    let fixture = ReviewFixture::new();
+    let session = &fixture.0;
+    let clock = SystemClock::default();
+    let source = session.join("instruction-set-source");
+    fs::create_dir_all(&source).unwrap();
+    fs::write(source.join("guide.md"), "# Rule\nKeep it.\n").unwrap();
+    let identity = {
+        let _operation = ResourceLock::open(
+            &session.join("focus-area-cache-operation"),
+            LockMode::Exclusive,
+            &clock,
+        )
+        .unwrap();
+        focus_area_generation::invalidate_locked(session, &clock).unwrap();
+        focus_area_generation::invalidate_snapshot_locked(session, &clock).unwrap();
+        focus_area_generation::bind_snapshot_locked(session, &clock).unwrap();
+        focus_area_generation::bind_restore_locked(session, &source, &clock).unwrap()
+    };
+    let generation = focus_area_generation::begin(session, &identity, &clock).unwrap();
+    let preparation = Path::new(&generation.session_state);
+    focus_area_expansion::update(
+        preparation,
+        focus_area_expansion::Operation::Initialize,
+        &clock,
+    )
+    .unwrap();
+    focus_area_expansion::update(
+        preparation,
+        focus_area_expansion::Operation::Finalize,
+        &clock,
+    )
+    .unwrap();
+    let span = |root| json!({"root":root,"path":"guide.md","startLine":1,"endLine":2});
+    let map = json!({"schemaVersion":1,"categories":[{"id":"rules","title":"Rules"}],
+        "chapters":[{"id":"rule","categoryId":"rules","content":span("instruction-set-raw"),
+            "sources":[span("instruction-set-source")],"applicability":[{
+                "effectiveScope":"No explicit restriction; interpret the guideline in context.",
+                "declarations":[],"origins":[],"uncertainties":[]}]}]});
+    let map_path = preparation.join("focus-area-map.json");
+    focus_area_map::update(
+        preparation,
+        &map_path,
+        focus_area_map::MapOperation::Append(serde_json::to_vec(&map).unwrap()),
+        &clock,
+    )
+    .unwrap();
+    focus_area_map::assemble(preparation, &map_path, &clock).unwrap();
+    focus_area_generation::publish(session, &generation.generation_id, &clock).unwrap();
+
+    let files = json!([{"path":session.join("file.rs"),"sizeBytes":1,"change":"modified"}]);
+    let inventory = session.join("inventory.json");
+    let groups = session.join("groups.json");
+    fs::write(&inventory, serde_json::to_vec(&files).unwrap()).unwrap();
+    fs::write(
+        &groups,
+        serde_json::to_vec(&json!([{"groupId":"group-1","files":files}])).unwrap(),
+    )
+    .unwrap();
+    let output = session.join("work");
+    let run = |session_arg: bool, identity_arg: Option<&str>| {
+        let mut command = Command::new(env!("CARGO_BIN_EXE_ss-ai"));
+        command
+            .args(["workflow", "create-review-work", "--inventory-path"])
+            .arg(&inventory)
+            .arg("--file-groups-path")
+            .arg(&groups)
+            .arg("--focus-area-directory")
+            .arg(session.join("focus-areas"))
+            .arg("--output-directory")
+            .arg(&output);
+        if session_arg {
+            command.arg("--session-state").arg(session);
+        }
+        if let Some(identity) = identity_arg {
+            command.arg("--preparation-identity").arg(identity);
+        }
+        command.output().unwrap()
+    };
+    for (has_session, token) in [
+        (false, None),
+        (true, None),
+        (false, Some(identity.as_str())),
+        (true, Some("stale")),
+    ] {
+        let result = run(has_session, token);
+        assert!(!result.status.success());
+        assert!(result.stdout.is_empty());
+        assert!(!output.exists());
+    }
+    let result = run(true, Some(&identity));
+    assert!(
+        result.status.success(),
+        "{}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    let result: Value = serde_json::from_slice(&result.stdout).unwrap();
+    let manifest: Value = serde_json::from_slice(
+        &fs::read(result.get("manifestPath").unwrap().as_str().unwrap()).unwrap(),
+    )
+    .unwrap();
+    let snapshot = Path::new(
+        manifest
+            .get("reviewers")
+            .unwrap()
+            .get(0)
+            .unwrap()
+            .get("focusArea")
+            .unwrap()
+            .as_str()
+            .unwrap(),
+    );
+    assert!(snapshot.starts_with(output));
+    assert_eq!(
+        fs::read(snapshot).unwrap(),
+        fs::read(session.join("focus-areas/focus-rules.md")).unwrap()
+    );
+}
 
 /// Builds the normal CLI invocation with a restricted Linux process stack.
 ///
@@ -42,6 +188,154 @@ fn all_workflow_commands_dispatch_with_a_bounded_stack() {
     let cases: &[(&[&str], bool)] = &[
         (
             &[
+                "restore-focus-area-cache",
+                "--session-state",
+                "missing",
+                "--input-directory",
+                "missing",
+                "--skill-root",
+                "missing",
+                "--recipe-path",
+                "missing",
+                "--cache-directory",
+                "missing",
+                "--generator-profile",
+                "profile",
+                "--freshness-days",
+                "1",
+                "--now-utc",
+                "2024-05-06T07:08:09Z",
+                "--snapshot-identity",
+                "snapshot",
+                "--refresh",
+            ],
+            false,
+        ),
+        (
+            &[
+                "begin-focus-area-generation",
+                "--session-state",
+                "missing",
+                "--preparation-identity",
+                "identity",
+            ],
+            false,
+        ),
+        (
+            &[
+                "publish-focus-area-generation",
+                "--session-state",
+                "missing",
+                "--generation-id",
+                "generation",
+            ],
+            false,
+        ),
+        (
+            &[
+                "save-focus-area-cache",
+                "--session-state",
+                "missing",
+                "--input-directory",
+                "missing",
+                "--skill-root",
+                "missing",
+                "--recipe-path",
+                "missing",
+                "--cache-directory",
+                "missing",
+                "--generator-profile",
+                "profile",
+                "--freshness-days",
+                "1",
+                "--now-utc",
+                "2024-05-06T07:08:09Z",
+                "--preparation-identity",
+                "identity",
+            ],
+            false,
+        ),
+        (
+            &[
+                "validate-focus-area-artifacts",
+                "--session-state",
+                "missing",
+                "--preparation-identity",
+                "identity",
+            ],
+            false,
+        ),
+        (
+            &[
+                "update-focus-area-expansion",
+                "--session-state",
+                "missing",
+                "--operation",
+                "register",
+                "--input-path",
+                "missing",
+                "--reference-id",
+                "reference",
+            ],
+            false,
+        ),
+        (
+            &[
+                "update-focus-area-map",
+                "--session-state",
+                "missing",
+                "--path",
+                "missing",
+                "--operation",
+                "regroup",
+                "--input-path",
+                "missing",
+                "--category-id",
+                "old",
+                "--new-category-id",
+                "new",
+                "--title",
+                "Title",
+            ],
+            false,
+        ),
+        (
+            &[
+                "validate-focus-area-map",
+                "--session-state",
+                "missing",
+                "--map-path",
+                "missing",
+                "--complete",
+            ],
+            false,
+        ),
+        (
+            &[
+                "assemble-focus-areas",
+                "--session-state",
+                "missing",
+                "--map-path",
+                "missing",
+            ],
+            false,
+        ),
+        (
+            &[
+                "snapshot-instructions",
+                "--session-state",
+                "missing",
+                "--skill-root",
+                "missing",
+                "--repository-root",
+                "missing",
+                "--repository-instruction",
+                "missing",
+            ],
+            false,
+        ),
+        (
+            &[
                 "set-review-input",
                 "--kind",
                 "inventory",
@@ -63,6 +357,10 @@ fn all_workflow_commands_dispatch_with_a_bounded_stack() {
                 "missing",
                 "--output-directory",
                 "output",
+                "--session-state",
+                "missing",
+                "--preparation-identity",
+                "identity",
             ],
             false,
         ),
@@ -414,20 +712,44 @@ fn all_workflow_commands_dispatch_with_a_bounded_stack() {
         .collect();
     assert_eq!(covered, listed);
 
-    let invalid = workflow_command()
-        .current_dir(directory.path())
-        .args(["workflow", "worker-document"])
-        .output()
-        .unwrap();
-    assert_eq!(invalid.status.code(), Some(1));
-    assert!(invalid.stdout.is_empty());
-    let diagnostic = String::from_utf8_lossy(&invalid.stderr);
-    assert!(
-        diagnostic.contains("Invalid command arguments"),
-        "{diagnostic}"
-    );
-    assert!(diagnostic.contains("--assignment-path"), "{diagnostic}");
-    assert!(diagnostic.contains("--document-id"), "{diagnostic}");
+    for (command, required) in [
+        (
+            "worker-document",
+            &["--assignment-path", "--document-id"][..],
+        ),
+        ("restore-focus-area-cache", &["--snapshot-identity"][..]),
+        (
+            "begin-focus-area-generation",
+            &["--preparation-identity"][..],
+        ),
+        ("publish-focus-area-generation", &["--generation-id"][..]),
+        ("save-focus-area-cache", &["--preparation-identity"][..]),
+        (
+            "validate-focus-area-artifacts",
+            &["--preparation-identity"][..],
+        ),
+        ("update-focus-area-expansion", &["--operation"][..]),
+        ("update-focus-area-map", &["--operation", "--path"][..]),
+        ("validate-focus-area-map", &["--map-path"][..]),
+        ("assemble-focus-areas", &["--map-path"][..]),
+        ("snapshot-instructions", &["--skill-root"][..]),
+    ] {
+        let invalid = workflow_command()
+            .current_dir(directory.path())
+            .args(["workflow", command])
+            .output()
+            .unwrap();
+        assert_eq!(invalid.status.code(), Some(1));
+        assert!(invalid.stdout.is_empty());
+        let diagnostic = String::from_utf8_lossy(&invalid.stderr);
+        assert!(
+            diagnostic.contains("Invalid command arguments"),
+            "{diagnostic}"
+        );
+        for argument in required {
+            assert!(diagnostic.contains(argument), "{command}: {diagnostic}");
+        }
+    }
 
     for (arguments, succeeds) in cases {
         let output = workflow_command()

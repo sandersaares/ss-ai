@@ -18,6 +18,11 @@ pwsh -NoProfile -NonInteractive -File '{{SKILL_ROOT}}\scripts\New-ReviewWorkerAs
 
 For `review`, add `-ManifestPath '{{MANIFEST_PATH}}' -ReviewerId '{{REVIEWER_ID}}'`; the builder selects the immutable inventory paths, focus area, and private queue directly from that manifest. Prepared assignments use `-Resume` in the generated prompt even on first dispatch, retaining their artifacts and exclusions. Entirely excluded focus areas are not dispatchable. For a replacement add `-Resume` after confirming the previous worker has stopped. Preparation retries use a new attempt directory without `-Resume`.
 
+For `focusAreas`, retain the worker's returned `preparationIdentity` alongside
+its source-root mappings, including the separate `repositoryRoot` when present.
+Pass that exact identity to review-work initialization;
+do not read an identity from session files or replace it with a later worker's.
+
 | Placeholder | Description |
 | --- | --- |
 | `MANIFEST_PATH` | Absolute manifest path returned by work initialization. |
