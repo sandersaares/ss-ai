@@ -61,17 +61,24 @@ fuzz_target!(|input: &[u8]| {
     else {
         return;
     };
+    let mut patch_offset = 0;
     for (index, operation) in input.iter().take(MAX_OPERATIONS).enumerate() {
         // The small selector deliberately includes invalid offsets/ranges and post-finalization calls.
-        match operation % 5 {
+        match operation % 8 {
             0 => {
-                let _read = assessment.read(
+                let read = assessment.read(
                     &format!("{id}:patch"),
-                    index,
-                    usize::from(*operation).saturating_add(1),
+                    patch_offset,
+                    MAX_INPUT_BYTES,
                     "",
                     "",
                 );
+                if let Ok(page) = read {
+                    patch_offset = page["nextOffset"]
+                        .as_u64()
+                        .and_then(|offset| usize::try_from(offset).ok())
+                        .unwrap_or(patch_offset);
+                }
             }
             1 => {
                 let _context = assessment.source_context(
@@ -102,8 +109,27 @@ fuzz_target!(|input: &[u8]| {
                     "",
                 );
             }
-            _ => {
+            4 => {
+                let _judgment = assessment.record(
+                    "cumulative",
+                    Judgment {
+                        disposition: Disposition::Significant,
+                        rationale: "synthetic".into(),
+                        evidence: vec!["policy".into(), "discussion".into()],
+                    },
+                    None,
+                    "",
+                    "",
+                );
+            }
+            5 => {
+                let _read = assessment.read("discussion", 0, 1, "", "");
+            }
+            6 => {
                 let _complete = assessment.finish("", "");
+            }
+            _ => {
+                let _read = assessment.read(&format!("{id}:patch"), index, 1, "", "");
             }
         }
         assessment.validate("snapshot", "policy", "", "").unwrap();

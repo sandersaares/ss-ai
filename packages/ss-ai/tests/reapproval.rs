@@ -3352,12 +3352,22 @@ fn source_patch_volume_and_captured_context_preserve_endpoint_scope() {
             "hunkCharacters": parsed["patch"].as_str().unwrap().chars().count(),
             "serializedDeliveredBytes": bytes, "responses": responses}),
         );
-        assert!(
-            change["old"].is_null() || change["old"]["content"]["progress"]["readOffset"].is_null()
-        );
-        assert!(
-            change["new"].is_null() || change["new"]["content"]["progress"]["readOffset"].is_null()
-        );
+    }
+    let refreshed = work(scope.path(), &provider, "assessment", &snapshot, &[]).unwrap();
+    assert!(refreshed["nextOffset"].is_null());
+    for original in prepared["changes"].as_array().unwrap() {
+        let change = refreshed["changes"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|change| change["id"] == original["id"])
+            .unwrap();
+        assert_eq!(change["requiredPatch"]["complete"], true);
+        for side in ["old", "new"] {
+            if change[side]["content"]["kind"] == "text" {
+                assert!(change[side]["content"]["progress"]["readOffset"].is_null());
+            }
+        }
     }
     // Neither another checkout write nor another provider read participates in captured context.
     fs::write(
@@ -3717,8 +3727,8 @@ fn overlapping_context_requests_retain_both_ranges_and_read_progress() {
             if contended {
                 permits[worker].send(()).unwrap();
             }
-            let result = handle.join().unwrap().unwrap();
-            let page: Value = serde_json::from_str(&result).unwrap();
+            let page = handle.join().unwrap().unwrap();
+            let page: Value = serde_json::from_str(&page).unwrap();
             assert_eq!(page["complete"], false);
             assert!(contended);
         }
