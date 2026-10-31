@@ -5,10 +5,6 @@
 //! offline presentation and source-preserving transformations.
 
 use std::fs;
-#[cfg(unix)]
-use std::os::unix::fs::MetadataExt;
-#[cfg(windows)]
-use std::os::windows::fs::MetadataExt;
 use std::path::{Component, Path, PathBuf};
 use std::sync::OnceLock;
 
@@ -627,32 +623,15 @@ fn reject_alias(source: &Path, output: &Path) -> Result<(), AppError> {
     Ok(())
 }
 
-/// Detects hard-linked inputs where filesystem identity is available.
+/// Detects hard-linked inputs using filesystem identity.
 fn same_file(source: &Path, output: &Path) -> Result<bool, AppError> {
-    let source = fs::metadata(source)
-        .map_err(|error| caused_by("io", "Cannot inspect report source", error))?;
-    let output = match fs::metadata(output) {
-        Ok(value) => value,
+    match fs::metadata(output) {
+        Ok(_) => {}
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(false),
         Err(error) => return Err(caused_by("io", "Cannot inspect report output", error).into()),
-    };
-    #[cfg(unix)]
-    {
-        Ok(source.dev() == output.dev() && source.ino() == output.ino())
     }
-    #[cfg(windows)]
-    {
-        Ok(source
-            .volume_serial_number()
-            .zip(source.file_index())
-            .zip(output.volume_serial_number().zip(output.file_index()))
-            .is_some_and(|(a, b)| a == b))
-    }
-    #[cfg(not(any(unix, windows)))]
-    {
-        let _ = (source, output);
-        Ok(false)
-    }
+    same_file::is_same_file(source, output)
+        .map_err(|error| caused_by("io", "Cannot compare report file identities", error).into())
 }
 
 /// Runs a renderer and preserves its failure instead of interpreting stale output.

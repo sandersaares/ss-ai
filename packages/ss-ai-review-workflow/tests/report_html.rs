@@ -415,25 +415,35 @@ fn failures_preserve_existing_output_and_reject_input_aliases() {
         )
         .is_err()
     );
-    #[cfg(unix)]
-    {
-        let alias = directory.path().join("hard-link.html");
-        fs::hard_link(&source, &alias).unwrap();
-        assert!(
-            write_report(
-                &source,
-                &alias,
-                &skill_root(),
-                "Report",
-                &tools(),
-                &guard,
-                &fake,
-                &TestClock
-            )
-            .is_err()
-        );
-    }
     assert_eq!(fs::read_to_string(source).unwrap(), "# Source");
+}
+
+/// A hard-linked output cannot replace the canonical Markdown source.
+#[test]
+fn rejects_hard_linked_output_before_rendering() {
+    let directory = directory();
+    let source = directory.path().join("source.md");
+    let alias = directory.path().join("hard-link.html");
+    fs::write(&source, "# Source").unwrap();
+    fs::hard_link(&source, &alias).unwrap();
+    let guard = tools_lock(directory.path(), LockMode::Shared, &TestClock).unwrap();
+    let fake = process(vec![], "<svg/>");
+
+    let error = write_report(
+        &source,
+        &alias,
+        &skill_root(),
+        "Report",
+        &tools(),
+        &guard,
+        &fake,
+        &TestClock,
+    )
+    .unwrap_err();
+    assert!(error.to_string().contains("must not replace"));
+    assert!(fake.observed_ast.borrow().is_none());
+    assert_eq!(fs::read_to_string(&source).unwrap(), "# Source");
+    assert_eq!(fs::read_to_string(alias).unwrap(), "# Source");
 }
 
 /// Static images and links cannot introduce active or external content.
