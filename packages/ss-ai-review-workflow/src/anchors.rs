@@ -1,6 +1,6 @@
 //! Resolves authored finding anchors without changing the authored record.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::num::NonZeroU32;
 use std::path::Path;
 
@@ -35,28 +35,50 @@ pub fn resolve_request(request: &Value) -> Result<Value, AppError> {
         .ok_or_else(|| invalid("Anchor request must be an object"))?;
     if object
         .keys()
-        .any(|key| !["anchor", "diff", "diffFile"].contains(&key.as_str()))
+        .any(|key| !["anchor", "anchors", "diff", "diffFile"].contains(&key.as_str()))
     {
         return Err(invalid("Unknown anchor request field"));
+    }
+    if let Some(anchors) = object.get("anchors") {
+        if object.contains_key("anchor") || object.contains_key("diffFile") {
+            return Err(invalid("Supply anchors and diff only"));
+        }
+        let anchors = anchors
+            .as_array()
+            .ok_or_else(|| invalid("Anchors must be an array"))?;
+        let files = read_diff(object.get("diff").ok_or_else(|| invalid("Missing diff"))?)?;
+        let paths: HashMap<_, _> = files.iter().map(|file| (file.path(), file)).collect();
+        let results: Vec<_> = anchors
+            .iter()
+            .map(|anchor| {
+                // PowerShell's dictionary parameter rejects missing or non-object anchors
+                // before resolution; freshness must not discard those as stale findings.
+                if !anchor.is_object() {
+                    return json!({"argumentError": "Anchor must be a non-null object"});
+                }
+                let result = (|| {
+                    let path = canonical_path(text(anchor, "path")?)?;
+                    let file = paths.get(path.as_str()).ok_or_else(|| {
+                        invalid(format!(
+                            "The reviewed diff does not change '{path}', so a finding cannot be anchored to it."
+                        ))
+                    })?;
+                    resolve_anchor(anchor, file)
+                })();
+                match result {
+                    Ok(anchor) => json!({"anchor": anchor}),
+                    Err(error) => json!({"error": format!("Unresolvable anchor: {error}")}),
+                }
+            })
+            .collect();
+        return Ok(json!({"results": results}));
     }
     let anchor = object
         .get("anchor")
         .ok_or_else(|| invalid("Missing anchor"))?;
     match (object.get("diff"), object.get("diffFile")) {
         (Some(diff), None) => {
-            let files = diff
-                .get("files")
-                .and_then(Value::as_array)
-                .ok_or_else(|| invalid("Diff requires a files array"))?;
-            let mut paths = HashSet::new();
-            let mut parsed = Vec::with_capacity(files.len());
-            for value in files {
-                let file = read_file(value)?;
-                if !paths.insert(file.path().to_owned()) {
-                    return Err(invalid("Diff contains duplicate file paths"));
-                }
-                parsed.push(file);
-            }
+            let parsed = read_diff(diff)?;
             resolve_anchor_in_files(anchor, &parsed)
                 .map_err(|error| invalid(format!("Unresolvable anchor: {error}")))
         }
@@ -67,6 +89,24 @@ pub fn resolve_request(request: &Value) -> Result<Value, AppError> {
         }
         _ => Err(invalid("Supply either diff or diffFile")),
     }
+}
+
+/// Validates the entire diff, including files no anchor happens to name.
+fn read_diff(diff: &Value) -> Result<Vec<FileDiff>, AppError> {
+    let files = diff
+        .get("files")
+        .and_then(Value::as_array)
+        .ok_or_else(|| invalid("Diff requires a files array"))?;
+    let mut paths = HashSet::new();
+    let mut parsed = Vec::with_capacity(files.len());
+    for value in files {
+        let file = read_file(value)?;
+        if !paths.insert(file.path().to_owned()) {
+            return Err(invalid("Diff contains duplicate file paths"));
+        }
+        parsed.push(file);
+    }
+    Ok(parsed)
 }
 
 /// Validates serialized Git evidence before using it for publication.

@@ -1,6 +1,7 @@
 #Requires -Version 7.6
 
 # These helpers translate existing PowerShell callers to the native audit operations.
+# Callers load JsonValue.ps1 before invoking the JSON-reading helpers.
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 $PSNativeCommandUseErrorActionPreference = $true
@@ -35,7 +36,7 @@ function Get-ReviewAuditFeedback {
     param([Parameter(Mandatory)][string] $Path, [Parameter(Mandatory)][string] $FindingId)
     $path = $ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath($Path)
     $json = Invoke-NativeReviewWorkflow -Arguments @('audit-get-feedback', "--path=$path", "--finding-id=$FindingId")
-    $result = ConvertFrom-Json -InputObject $json -NoEnumerate
+    $result = ConvertFrom-JsonVerbatim -Text $json
     if ($result -isnot [string]) { throw 'Native audit feedback result is not a string.' }
     $result
 }
@@ -68,7 +69,7 @@ function Test-ReviewMergeApproval {
     $path = $ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath($Path)
     $json = Invoke-NativeReviewWorkflow -Arguments @('audit-test-merge-approval', "--path=$path",
         "--pull-request-url=$PullRequestUrl", "--source-commit=$SourceCommit")
-    $result = ConvertFrom-Json -InputObject $json -NoEnumerate
+    $result = ConvertFrom-JsonVerbatim -Text $json
     if ($result -isnot [bool]) { throw 'Native merge approval result is not a boolean.' }
     $result
 }
@@ -95,7 +96,7 @@ function Set-ReviewMergeApproval {
             $arguments += '--approve'
         }
         $json = Invoke-NativeReviewWorkflow -Arguments $arguments
-        $result = ConvertFrom-Json -InputObject $json -AsHashtable
+        $result = ConvertFrom-JsonVerbatim -Text $json
         if ($result['status'] -cnotin @('Recorded', 'NoApproval')) { throw 'Invalid native merge approval result.' }
         $result['status']
     } finally {
