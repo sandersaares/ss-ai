@@ -8,8 +8,11 @@ use std::time::Duration;
 
 use jiff::Timestamp;
 use ohno::AppError;
+#[cfg(unix)]
 use serde_json::json;
+#[cfg(unix)]
 use ss_ai_review_workflow::focus_area_expansion::{Operation, update};
+#[cfg(unix)]
 use ss_ai_review_workflow::focus_area_map::{MapOperation, assemble, update as update_map};
 use ss_ai_review_workflow::focus_area_source::{SourceSnapshot, Span};
 use ss_ai_runtime::Clock;
@@ -53,6 +56,7 @@ impl Drop for Fixture {
 }
 
 /// Builds an already published, complete map for failure-preservation checks.
+#[cfg(unix)]
 fn assemble_fixture(fixture: &Fixture) -> PathBuf {
     let session = &fixture.0;
     update(session, Operation::Initialize, &TestClock).unwrap();
