@@ -221,7 +221,8 @@ JSON result identifies the source directory, the discovered file count, and
 each original root's snapshot prefix. When repository instructions are
 authorized, callers can supply `--repository-root` with repeated
 `--repository-instruction` repository-relative paths to include them in the
-same coordinated snapshot.
+same coordinated snapshot. The result reports their original root and snapshot
+prefix separately in `repositoryRoot`; `roots` contains configured user roots.
 
 `ss-ai workflow worker-assignment` prepares an immutable assignment using the
 active skill directory supplied with `--skill-root`. Its result contains the

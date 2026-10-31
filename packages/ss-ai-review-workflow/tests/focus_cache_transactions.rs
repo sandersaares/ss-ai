@@ -17,6 +17,8 @@ use std::env::consts::EXE_SUFFIX;
 use std::fs;
 #[cfg(unix)]
 use std::os::unix::fs::symlink;
+#[cfg(windows)]
+use std::os::windows::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::mpsc::{self, Receiver, Sender};
@@ -32,6 +34,9 @@ use ss_ai_review_workflow::focus_area_map::{self, MapOperation};
 use ss_ai_review_workflow::focus_cache::{
     CacheOptions, CacheResult, check_artifacts, generator_build_fingerprint,
     restore as restore_with_snapshot, store as store_with_identity, validate_artifacts,
+};
+use ss_ai_review_workflow::instruction_sources::{
+    InstructionSourceOptions, RepositoryInstructionSources, snapshot_instruction_sources,
 };
 use ss_ai_runtime::{Clock, LockMode, ResourceLock};
 
@@ -344,6 +349,252 @@ fn complete_store_restore_and_diagnostics_are_consistent() {
         )
         .is_ok()
     );
+}
+
+#[test]
+fn selected_repository_origin_is_bound_across_sessions() {
+    assert_source_cache_origin(false, false);
+}
+
+#[cfg(any(unix, windows))]
+#[test]
+fn selected_repository_alias_retargeting_cannot_reuse_cache() {
+    assert_source_cache_origin(true, false);
+}
+
+#[cfg(any(unix, windows))]
+#[test]
+fn configured_root_alias_retargeting_cannot_reuse_cache() {
+    assert_source_cache_origin(true, true);
+}
+
+/// Exercises stored linked guidance using different source origins.
+fn assert_source_cache_origin(use_alias: bool, external: bool) {
+    let fixture = Fixture::new(match (use_alias, external) {
+        (true, true) => "external-alias-origin",
+        (true, false) => "repository-alias-origin",
+        _ => "repository-origin",
+    });
+    let clock = TestClock(1_800_000_000);
+    let paths = [PathBuf::from("AGENTS.md")];
+    let repo_a = fixture.root.join("repo-a");
+    let repo_b = fixture.root.join("repo-b");
+    for (repository, guidance) in [(&repo_a, "Guidance A\n"), (&repo_b, "Guidance B\n")] {
+        fs::create_dir_all(repository.join("docs")).unwrap();
+        fs::write(repository.join("AGENTS.md"), "See docs/rules.md\n").unwrap();
+        fs::write(repository.join("docs/rules.md"), guidance).unwrap();
+    }
+    let alias = fixture.root.join("repository-alias");
+    #[cfg(any(unix, windows))]
+    if use_alias {
+        link_directory(&repo_a, &alias);
+    }
+    let first_root = if use_alias { &alias } else { &repo_a };
+
+    let snapshot_for = |session: &Path, repository: &Path| {
+        fs::create_dir_all(session).unwrap();
+        snapshot_instruction_sources(
+            &InstructionSourceOptions {
+                session_state: session,
+                skill_root: &fixture.skill,
+                directory_list: external.then(|| repository.to_str().unwrap()),
+                base_directory: &fixture.root,
+                repository_sources: (!external).then_some(RepositoryInstructionSources {
+                    root: repository,
+                    paths: &paths,
+                }),
+            },
+            &clock,
+        )
+        .unwrap()
+    };
+    let session_a = fixture.root.join("session-a");
+    let first_snapshot = snapshot_for(&session_a, first_root);
+    let mapping = if external {
+        &first_snapshot.roots[0]
+    } else {
+        first_snapshot.repository_root.as_ref().unwrap()
+    };
+    assert_eq!(mapping.path, first_root.to_str().unwrap());
+    let options_for = |session, input_directory| CacheOptions {
+        session,
+        input_directory,
+        skill_root: &fixture.skill,
+        recipe: &fixture.recipe,
+        cache_directory: &fixture.cache,
+        generator_profile: "test-model",
+        freshness_days: 7,
+    };
+    let input_a = session_a.join("instruction-set-source");
+    let options_a = options_for(&session_a, &input_a);
+    let first = restore_with_snapshot(&options_a, false, &first_snapshot.snapshot_identity, &clock)
+        .unwrap();
+    assert_eq!(first.status, "Miss");
+    let generation = focus_area_generation::begin(
+        &session_a,
+        first.preparation_identity.as_deref().unwrap(),
+        &clock,
+    )
+    .unwrap();
+    let staged = Path::new(&generation.session_state);
+    let source_path = format!("{}/AGENTS.md", mapping.prefix);
+    let uri = format!("file://{}", first_root.join("docs/rules.md").display());
+    let span = |root: &str, path: &str| serde_json::json!({"root":root,"path":path,"startLine":1,"endLine":1});
+    fs::copy(
+        repo_a.join("docs/rules.md"),
+        staged.join("instruction-set-raw/linked.md"),
+    )
+    .unwrap();
+    focus_area_expansion::update(staged, Operation::Initialize, &clock).unwrap();
+    let reference = serde_json::from_value(serde_json::json!({
+        "id":"linked", "uri":uri,
+        "referrers":[{"parentId":null,"source":span("instruction-set-source",&source_path),
+            "scope":"all","declarations":[]}]
+    }))
+    .unwrap();
+    focus_area_expansion::update(staged, Operation::Register(reference), &clock).unwrap();
+    focus_area_expansion::update(
+        staged,
+        Operation::Complete(focus_area_expansion::ReferenceResult {
+            reference_id: "linked".into(),
+            outputs: vec!["linked.md".into()],
+            error: None,
+        }),
+        &clock,
+    )
+    .unwrap();
+    focus_area_expansion::update(staged, Operation::Finalize, &clock).unwrap();
+    let skill_lines = fs::read_to_string(staged.join("instruction-set-raw/skill/focus-areas.md"))
+        .unwrap()
+        .lines()
+        .count();
+    let skill_span = |root| serde_json::json!({"root":root,"path":"skill/focus-areas.md","startLine":1,"endLine":skill_lines});
+    let direct_scope = serde_json::json!({
+        "effectiveScope":"No explicit restriction; interpret the guideline in context.",
+        "origins":[],"declarations":[],"uncertainties":[]
+    });
+    let map = serde_json::json!({
+        "schemaVersion":1,"categories":[{"id":"all","title":"All"}],
+        "chapters":[{"id":"skill","categoryId":"all",
+            "content":skill_span("instruction-set-raw"),
+            "sources":[skill_span("instruction-set-source")],
+            "applicability":[direct_scope]},
+            {"id":"direct","categoryId":"all",
+            "content":span("instruction-set-raw",&source_path),
+            "sources":[span("instruction-set-source",&source_path)],
+            "applicability":[direct_scope]},
+            {"id":"rule","categoryId":"all",
+            "content":span("instruction-set-raw","linked.md"),
+            "sources":[span("instruction-set-raw","linked.md")],
+            "applicability":[{"effectiveScope":"all","origins":[uri],
+                "declarations":[],"uncertainties":[],"pathScope":null}]}]
+    });
+    let map_path = staged.join("focus-area-map.json");
+    focus_area_map::update(
+        staged,
+        &map_path,
+        MapOperation::Append(serde_json::to_vec(&map).unwrap()),
+        &clock,
+    )
+    .unwrap();
+    focus_area_map::assemble(staged, &map_path, &clock).unwrap();
+    focus_area_generation::publish(&session_a, &generation.generation_id, &clock).unwrap();
+    assert_eq!(store(&options_a, &first, &clock).unwrap().status, "Stored");
+
+    let session_same = fixture.root.join("session-same");
+    let same_snapshot = snapshot_for(&session_same, first_root);
+    let input_same = session_same.join("instruction-set-source");
+    let same = restore_with_snapshot(
+        &options_for(&session_same, &input_same),
+        false,
+        &same_snapshot.snapshot_identity,
+        &clock,
+    )
+    .unwrap();
+    assert_eq!(same.status, "Hit");
+    assert_eq!(same.key, first.key);
+    assert!(
+        fs::read_to_string(session_same.join("focus-areas/focus-all.md"))
+            .unwrap()
+            .contains("Guidance A")
+    );
+
+    let session_direct = fixture.root.join("session-direct");
+    let input_direct = session_direct.join("instruction-set-source");
+    if use_alias {
+        let direct_snapshot = snapshot_for(&session_direct, &repo_a);
+        let direct = restore_with_snapshot(
+            &options_for(&session_direct, &input_direct),
+            false,
+            &direct_snapshot.snapshot_identity,
+            &clock,
+        )
+        .unwrap();
+        assert_eq!(direct.status, "Miss");
+        assert_ne!(direct.key, first.key);
+    }
+
+    #[cfg(any(unix, windows))]
+    if use_alias {
+        remove_directory_link(&alias);
+        link_directory(&repo_b, &alias);
+    }
+    let second_root = if use_alias { &alias } else { &repo_b };
+    let session_b = fixture.root.join("session-b");
+    let second_snapshot = snapshot_for(&session_b, second_root);
+    let mapping = if external {
+        &second_snapshot.roots[0]
+    } else {
+        second_snapshot.repository_root.as_ref().unwrap()
+    };
+    assert_eq!(mapping.path, second_root.to_str().unwrap());
+    let input_b = session_b.join("instruction-set-source");
+    let second = restore_with_snapshot(
+        &options_for(&session_b, &input_b),
+        false,
+        &second_snapshot.snapshot_identity,
+        &clock,
+    )
+    .unwrap();
+    assert_eq!(second.status, "Miss");
+    assert_ne!(second.key, first.key);
+    assert!(!session_b.join("focus-areas/focus-all.md").exists());
+    #[cfg(any(unix, windows))]
+    if use_alias {
+        remove_directory_link(&alias);
+    }
+}
+
+/// Creates directory links without requiring Windows symbolic-link privileges.
+#[cfg(any(unix, windows))]
+fn link_directory(target: &Path, link: &Path) {
+    #[cfg(unix)]
+    symlink(target, link).unwrap();
+    #[cfg(windows)]
+    {
+        // Environment expansion keeps path characters inside quoted arguments.
+        let output = Command::new("cmd")
+            .args(["/D", "/S", "/V:OFF", "/C"])
+            .env("SS_AI_TEST_LINK", link)
+            .env("SS_AI_TEST_TARGET", target)
+            .raw_arg("\"mklink /J \"%SS_AI_TEST_LINK%\" \"%SS_AI_TEST_TARGET%\"\"")
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "Cannot create junction: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+}
+
+/// Removes only the link so its target remains available to the fixture.
+#[cfg(any(unix, windows))]
+fn remove_directory_link(link: &Path) {
+    #[cfg(unix)]
+    fs::remove_file(link).unwrap();
+    #[cfg(windows)]
+    fs::remove_dir(link).unwrap();
 }
 
 #[test]

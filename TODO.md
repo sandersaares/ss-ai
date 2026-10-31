@@ -51,6 +51,9 @@ Improvement ideas to revisit when the repo matures.
 - **Type validated instruction references and spans.** Represent reference
   outcomes as distinct internal states and one-based source lines as nonzero
   values after parsing. Preserve the existing wire format and diagnostics.
+- **Clarify symlinked instruction references.** Decide whether local references
+  inside a symlinked instruction file use the link's directory or the target's
+  directory, then document and test the chosen behavior.
 - **Unify build-script errors.** Use the shared application error type for the
   focus-generation fingerprint builder when its build dependencies can carry
   that type without undermining the minimum-dependency checks.

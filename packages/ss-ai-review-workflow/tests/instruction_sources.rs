@@ -16,8 +16,12 @@ use std::sync::mpsc::{self, Receiver, Sender};
 use std::thread;
 use std::time::Duration;
 
+#[cfg(unix)]
+use std::ffi::OsString;
 #[cfg(windows)]
 use std::io;
+#[cfg(unix)]
+use std::os::unix::ffi::OsStringExt;
 #[cfg(unix)]
 use std::os::unix::fs::symlink;
 #[cfg(windows)]
@@ -29,7 +33,6 @@ use std::process::Command;
 
 use jiff::Timestamp;
 use ohno::AppError;
-use ss_ai_review_context::bytes_hash;
 use ss_ai_review_workflow::focus_area_generation;
 use ss_ai_review_workflow::instruction_sources::{
     InstructionSourceOptions, InstructionSourceSnapshot, RepositoryInstructionSources,
@@ -160,13 +163,8 @@ fn records_roots_and_exact_bytes_and_replaces_removed_sources() {
         result.roots[0].path,
         workspace.0.join("one").to_str().unwrap()
     );
-    assert_eq!(
-        result.roots[0].prefix,
-        format!(
-            "external/{}",
-            bytes_hash(result.roots[0].path.as_bytes()).to_lowercase()
-        )
-    );
+    assert!(result.roots[0].prefix.starts_with("external/"));
+    assert_ne!(result.roots[0].prefix, result.roots[1].prefix);
     assert_eq!(result.roots[0].file_count, 2);
     let source = Path::new(&result.source_directory);
     assert_eq!(
@@ -288,16 +286,53 @@ fn stages_explicit_repository_files_without_discovering_other_sources() {
     )
     .unwrap();
     let snapshot = Path::new(&result.source_directory);
+    let repository = result.repository_root.as_ref().unwrap();
     assert_eq!(
-        fs::read(snapshot.join("review-repository").join(&paths[0])).unwrap(),
+        repository.path,
+        workspace.0.join("repository").to_str().unwrap()
+    );
+    assert_eq!(repository.file_count, 1);
+    assert_eq!(
+        fs::read(snapshot.join(&repository.prefix).join(&paths[0])).unwrap(),
         b"\xef\xbb\xbfexact\r\n"
     );
-    assert!(!snapshot.join("review-repository/AGENTS.md").exists());
+    assert!(!snapshot.join(&repository.prefix).join("AGENTS.md").exists());
     assert_eq!(result.external_file_count, 0);
     assert!(snapshot_is_current(
         &workspace.0.join("session"),
         &result.snapshot_identity
     ));
+}
+
+#[test]
+fn repository_selection_order_does_not_change_source_provenance() {
+    let workspace = Workspace::new("repository-order");
+    workspace.put("repository/AGENTS.md", b"first");
+    workspace.put("repository/nested/AGENTS.md", b"second");
+    let root = workspace.0.join("repository");
+    let snapshot = |paths: &[PathBuf]| {
+        snapshot_instruction_sources(
+            &InstructionSourceOptions {
+                session_state: &workspace.0.join("session"),
+                skill_root: &workspace.0.join("skill"),
+                directory_list: None,
+                base_directory: &workspace.0,
+                repository_sources: Some(RepositoryInstructionSources { root: &root, paths }),
+            },
+            &NoWait,
+        )
+        .unwrap()
+    };
+    let paths = [
+        PathBuf::from("AGENTS.md"),
+        PathBuf::from("nested/AGENTS.md"),
+    ];
+    let first = snapshot(&paths);
+    let second = snapshot(&[paths[1].clone(), paths[0].clone()]);
+    assert_eq!(
+        first.repository_root.unwrap().prefix,
+        second.repository_root.unwrap().prefix
+    );
 }
 
 #[test]
@@ -474,6 +509,133 @@ fn remove_directory_link(link: &Path) {
     fs::remove_file(link).unwrap();
     #[cfg(windows)]
     fs::remove_dir(link).unwrap();
+}
+
+#[cfg(any(unix, windows))]
+#[test]
+fn nested_directory_retarget_changes_source_provenance() {
+    let workspace = Workspace::new("nested-origin");
+    let root = workspace.0.join("root");
+    let common = workspace.put("root/shared/source.txt", b"See docs/rules.md\n");
+    for (name, guidance) in [
+        ("first", b"first".as_slice()),
+        ("second", b"second".as_slice()),
+    ] {
+        workspace.put(&format!("root/{name}/docs/rules.md"), guidance);
+        let instruction = root.join(name).join("AGENTS.md");
+        #[cfg(unix)]
+        symlink(&common, &instruction).unwrap();
+        #[cfg(windows)]
+        fs::copy(&common, &instruction).unwrap();
+    }
+    let alias = root.join("nested");
+    link_directory(&root.join("first"), &alias);
+    let paths = [PathBuf::from("nested/AGENTS.md")];
+    let selected = || {
+        snapshot_instruction_sources(
+            &InstructionSourceOptions {
+                session_state: &workspace.0.join("selected-session"),
+                skill_root: &workspace.0.join("skill"),
+                directory_list: None,
+                base_directory: &workspace.0,
+                repository_sources: Some(RepositoryInstructionSources {
+                    root: &root,
+                    paths: &paths,
+                }),
+            },
+            &NoWait,
+        )
+        .unwrap()
+    };
+    let external_before = workspace.snapshot(Some("root")).unwrap();
+    let selected_before = selected();
+    remove_directory_link(&alias);
+    link_directory(&root.join("second"), &alias);
+    let external_after = workspace.snapshot(Some("root")).unwrap();
+    let selected_after = selected();
+    assert_eq!(external_before.roots[0].path, external_after.roots[0].path);
+    assert_ne!(
+        external_before.roots[0].prefix,
+        external_after.roots[0].prefix
+    );
+    let before = selected_before.repository_root.as_ref().unwrap();
+    let after = selected_after.repository_root.as_ref().unwrap();
+    assert_eq!(before.path, after.path);
+    assert_ne!(before.prefix, after.prefix);
+    remove_directory_link(&alias);
+}
+
+#[cfg(unix)]
+#[test]
+fn instruction_file_retarget_changes_source_provenance() {
+    let workspace = Workspace::new("file-origin");
+    workspace.put("root/first/source.txt", b"See docs/rules.md\n");
+    workspace.put("root/second/source.txt", b"See docs/rules.md\n");
+    workspace.put("root/first/docs/rules.md", b"first");
+    workspace.put("root/second/docs/rules.md", b"second");
+    let root = workspace.0.join("root");
+    let alias = root.join("AGENTS.md");
+    symlink(root.join("first/source.txt"), &alias).unwrap();
+    let paths = [PathBuf::from("AGENTS.md")];
+    let selected = || {
+        snapshot_instruction_sources(
+            &InstructionSourceOptions {
+                session_state: &workspace.0.join("selected-session"),
+                skill_root: &workspace.0.join("skill"),
+                directory_list: None,
+                base_directory: &workspace.0,
+                repository_sources: Some(RepositoryInstructionSources {
+                    root: &root,
+                    paths: &paths,
+                }),
+            },
+            &NoWait,
+        )
+        .unwrap()
+    };
+    let external_before = workspace.snapshot(Some("root")).unwrap();
+    let selected_before = selected();
+    fs::remove_file(&alias).unwrap();
+    symlink(root.join("second/source.txt"), &alias).unwrap();
+    let external_after = workspace.snapshot(Some("root")).unwrap();
+    let selected_after = selected();
+    assert_ne!(
+        external_before.roots[0].prefix,
+        external_after.roots[0].prefix
+    );
+    assert_ne!(
+        selected_before.repository_root.unwrap().prefix,
+        selected_after.repository_root.unwrap().prefix
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn resolved_non_unicode_origins_preserve_unicode_source_paths() {
+    let workspace = Workspace::new("non-unicode-origin");
+    let root = workspace.0.join("root");
+    let target = root.join(OsString::from_vec(b"target-\xff".to_vec()));
+    fs::create_dir_all(&target).unwrap();
+    fs::write(target.join("AGENTS.md"), "guidance").unwrap();
+    symlink(&target, root.join("nested")).unwrap();
+    let external = workspace.snapshot(Some("root/nested")).unwrap();
+    assert_eq!(external.external_file_count, 1);
+    let paths = [PathBuf::from("nested/AGENTS.md")];
+    let selected = snapshot_instruction_sources(
+        &InstructionSourceOptions {
+            session_state: &workspace.0.join("selected-session"),
+            skill_root: &workspace.0.join("skill"),
+            directory_list: None,
+            base_directory: &workspace.0,
+            repository_sources: Some(RepositoryInstructionSources {
+                root: &root,
+                paths: &paths,
+            }),
+        },
+        &NoWait,
+    )
+    .unwrap();
+    assert_eq!(selected.repository_root.unwrap().file_count, 1);
 }
 
 #[cfg(any(unix, windows))]

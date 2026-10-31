@@ -40,7 +40,7 @@ repository instructions as described below, then execute
 `instruction-set-source/` in the real session as a complete byte-preserving snapshot:
 
 * The skill's `focus-areas.md` under `skill/focus-areas.md`.
-* Every `AGENTS.md` and `*.instructions.md` recursively discovered under each root in `COPILOT_CUSTOM_INSTRUCTIONS_DIRS`, including linked instruction directories and hidden `.github/instructions/` trees, under `external/<root-identity>/` with original relative paths. The root identity is bound to the absolute configured path; keep the command's root mapping for resolving original local references and identifying instruction ownership.
+* Every `AGENTS.md` and `*.instructions.md` recursively discovered under each root in `COPILOT_CUSTOM_INSTRUCTIONS_DIRS`, including linked instruction directories and hidden `.github/instructions/` trees, under `external/<root-identity>/` with original relative paths. The root identity binds the configured path and resolved source locations; keep the command's root mapping for resolving original local references and identifying instruction ownership.
 
 The environment variable is a comma-separated directory list on every platform, not a platform PATH list. Surrounding whitespace and empty entries are ignored; relative entries resolve against the command's working directory. Repeated identical absolute roots are included once. There is no shell-variable or tilde expansion. An unset or empty list uses only the built-in focus areas. Existing empty roots are allowed; configured missing or unreadable roots and link cycles are errors, never grounds for silently reducing coverage. Do not require particular instruction filenames or fall back to a co-located instruction checkout.
 
@@ -49,8 +49,10 @@ Discovery excludes the current review's session-state tree, including links into
 ONLY IF EXPLICITLY AUTHORIZED (default no), identify each repository instruction
 file (e.g. `AGENTS.md`) that governs the reviewed content. Supply the reviewed
 repository root and every selected repository-relative path to the snapshot
-command, which copies them under `instruction-set-source/review-repository/`
-within the same coordinated snapshot. Explicitly configured external roots
+command, which copies them under `instruction-set-source/review-repository/<root-identity>/`
+within the same coordinated snapshot. The root identity binds the selected
+absolute path and resolved source locations. Retain the returned repository root mapping
+to resolve original local references. Explicitly configured external roots
 remain sources even if they overlap the reviewed repository; do not discover
 additional repository instructions implicitly. Never copy or edit files in the
 published source tree separately from that command.
@@ -64,7 +66,10 @@ Use these values in the cache recipes:
 * `SKILL_ROOT` is the directory containing this prompt.
 * `SESSION_STATE` is the absolute directory containing this review's artifacts.
 
-Retain the snapshot's `sourceDirectory`, `snapshotIdentity`, and root mapping.
+Retain the snapshot's `sourceDirectory` and `snapshotIdentity`. The source-root
+mappings are all entries in `roots` and, when present, the separate
+`repositoryRoot` entry. Retain both for reference expansion and the parent
+handoff; `roots` alone does not include selected repository instructions.
 Execute `pwsh-calls/restore-focus-area-cache.md` with that exact source directory
 and snapshot identity. Retain the returned `preparationIdentity`; never adopt an
 identity from a later snapshot or restore.
@@ -82,7 +87,7 @@ with reason `ValidationFailed`; continue with Stage 2 using the same restore
 identity. A stale identity or another failure stops this attempt; restart source
 discovery and restore rather than accepting another attempt's artifacts or
 diagnostics. If validation succeeds, skip the remaining stages and return the
-restored focus areas, the discovery root mapping, and the exact retained
+restored focus areas, the source-root mappings including `repositoryRoot` when present, and the exact retained
 `preparationIdentity` to the parent agent. The
 parent retains that mapping in its checkpoint for later instruction ownership
 and learning. The command checks artifact structure, not scope semantics.
@@ -114,7 +119,7 @@ Before registering raw source spans, remove chapters that govern only the review
 
 The raw inputs may contain references to other files in the same repo or to external materials (e.g. statements like "Follow the guidelines at [Some API guidelines](https://example.com/some-api-guidelines)"). Materialize referenced guidance into `instruction-set-raw/`; the manifest records the local targets, so later workers do not fetch the links again.
 
-For each external reference found in `instruction-set-raw/`, instruct a subagent (GPT 6.1 Sol) to follow the reference and to extract any guidelines it finds into one or more categorized `instruction-set-raw/reference-name/*.md` files. Resolve local references relative to their original source file: reconstruct its path from the configured root and source-relative path using the discovery mapping, never this skill's checkout. Instruct the subagent to recurse into the guidelines to extract multiple layers of categorized guidelines that may exist, as well as to follow redirects and try API-based alternate access methods for web apps that do not render as basic HTML (e.g. Azure DevOps Wiki pages, which require API access to load content). Instruct the subagent to watch out for duplicates - if the same URL is reached via different paths, it should only be expanded once. Also have it watch out for pre-expanded content - some references may already contain embedded versions of other references, so title-based matching may also offer opportunities to deduplicate. Some references may also offer links to historical versions of themselves - only keep the latest version of content is multiple versions are offered.
+For each reference found in `instruction-set-raw/`, instruct a subagent (GPT 6.1 Sol) to follow the reference and to extract any guidelines it finds into one or more categorized `instruction-set-raw/reference-name/*.md` files. Pass the applicable source-root mapping (`roots` entry or `repositoryRoot`) to the worker. Resolve local references relative to their original source file: use the mapping's original path and the source path relative to its snapshot prefix, never this skill's checkout. Instruct the subagent to recurse into the guidelines to extract multiple layers of categorized guidelines that may exist, as well as to follow redirects and try API-based alternate access methods for web apps that do not render as basic HTML (e.g. Azure DevOps Wiki pages, which require API access to load content). Instruct the subagent to watch out for duplicates - if the same URL is reached via different paths, it should only be expanded once. Also have it watch out for pre-expanded content - some references may already contain embedded versions of other references, so title-based matching may also offer opportunities to deduplicate. Some references may also offer links to historical versions of themselves - only keep the latest version of content is multiple versions are offered.
 
 The preparation agent owns reference deduplication and scope merging. Collect known referrers before dispatch and assign only one writer to each expanded target. Pass that worker every known referring source path, section, and inherited scope declaration. Expansion workers report additional referring contexts or duplicate targets to the preparation agent instead of overwriting another worker's output.
 
@@ -181,4 +186,4 @@ session, the original source directory, and the same `preparationIdentity`.
 
 The command emits one compact JSON object. `status` is `Stored` for a new entry, `Existing` when an equivalent entry already exists, or `Bypassed` when storage was intentionally skipped. `reason` explains bypasses. `Degraded` input always produces `Bypassed` and is never published.
 
-The cache always stores and restores the complete focus-area set. Do not select, filter, sample, or omit focus areas based on the current review content. Return the discovery root mapping, generated focus areas, and exact retained `preparationIdentity` to the parent so it can bind review work to this preparation and retain source ownership in its checkpoint.
+The cache always stores and restores the complete focus-area set. Do not select, filter, sample, or omit focus areas based on the current review content. Return the source-root mappings, including `repositoryRoot` when present, generated focus areas, and exact retained `preparationIdentity` to the parent so it can bind review work to this preparation and retain source ownership in its checkpoint.

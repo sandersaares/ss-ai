@@ -382,11 +382,14 @@ Describe 'ss-review configured instruction discovery' {
         $selected.snapshotIdentity | Should -Not -BeExactly $without.snapshotIdentity
         $selected.externalFileCount | Should -Be 0
         $selected.roots.Count | Should -Be 0
-        [IO.File]::ReadAllBytes((Join-Path $selected.sourceDirectory 'review-repository\AGENTS.md')) |
+        $selected.repositoryRoot.path | Should -BeExactly $repository
+        $selected.repositoryRoot.fileCount | Should -Be 2
+        $selectedRoot = Join-Path $selected.sourceDirectory $selected.repositoryRoot.prefix
+        [IO.File]::ReadAllBytes((Join-Path $selectedRoot 'AGENTS.md')) |
             Should -Be ([IO.File]::ReadAllBytes($firstFile))
-        [IO.File]::ReadAllBytes((Join-Path $selected.sourceDirectory 'review-repository\nested\other.instructions.md')) |
+        [IO.File]::ReadAllBytes((Join-Path $selectedRoot 'nested\other.instructions.md')) |
             Should -Be ([IO.File]::ReadAllBytes($secondFile))
-        Test-Path -LiteralPath (Join-Path $selected.sourceDirectory 'review-repository\nested\unselected.instructions.md') |
+        Test-Path -LiteralPath (Join-Path $selectedRoot 'nested\unselected.instructions.md') |
             Should -BeFalse
         $selectedCache = Get-TestCacheResult -Snapshot $selected
         $selectedCache.userInstructionFileCount | Should -Be 0
@@ -460,8 +463,12 @@ Describe 'ss-review configured instruction discovery' {
             $result.roots.Count | Should -Be $Count
             $result.snapshotIdentity | Should -Not -BeNullOrEmpty
             if ($Count -gt 0) { $result.roots[0].path | Should -BeExactly $script:Base }
-            (Test-Path -LiteralPath (Join-Path $result.sourceDirectory 'review-repository\chosen\AGENTS.md')) |
-                Should -Be ($Count -gt 0)
+            if ($Count -gt 0) {
+                Test-Path -LiteralPath (Join-Path $result.sourceDirectory "$($result.repositoryRoot.prefix)\chosen\AGENTS.md") |
+                    Should -BeTrue
+            } else {
+                Test-Path -LiteralPath (Join-Path $result.sourceDirectory 'review-repository') | Should -BeFalse
+            }
         } finally { $process.Dispose() }
     }
 }

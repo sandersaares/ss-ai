@@ -149,7 +149,7 @@ Prepare every phase-1 step-5/step-6 preparation assignment and phase-2 reviewer 
    * Instruct a subagent (GPT 6.1 Sol) to publish or restore `focus-areas/*.md` files in session state using the prompt in `prepare-focus-areas.md`. Generation uses an isolated preparation directory and publishes only after scope verification.
      If the skill invocation authorized use of in-repo instructions, forward this authorization to the subagent.
      The prompt may restore a complete cached artifact set if matching inputs were already processed recently.
-     Retain the worker's exact returned `preparationIdentity` and source-root mapping with the review checkpoint. Do not read or adopt a later identity from session files.
+     Retain the worker's exact returned `preparationIdentity` and source-root mappings with the review checkpoint, including the separate `repositoryRoot` mapping when present. Do not read or adopt a later identity from session files.
 
 6. Instruct a subagent (GPT 6.1 Sol) to generate a `content-overview.md` in session state using the prompt in `prepare-content-overview.md`.
    This step depends on `file-inventory.json` and `references.md` from the preceding steps.
