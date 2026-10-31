@@ -22,7 +22,13 @@ fuzz_target!(|input: &[u8]| {
     let Ok(text) = str::from_utf8(input) else {
         return;
     };
-    let mut fields = text.splitn(3, "\n===\n");
+    // Checked-out seed files may use CRLF, while arbitrary input also exercises LF.
+    let separator = if text.contains("\r\n===\r\n") {
+        "\r\n===\r\n"
+    } else {
+        "\n===\n"
+    };
+    let mut fields = text.splitn(3, separator);
     let old_text = fields.next().unwrap_or("");
     let new_text = fields.next().unwrap_or("");
     let patch = fields.next().unwrap_or("");
