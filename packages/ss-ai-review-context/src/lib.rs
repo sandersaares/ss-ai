@@ -8,7 +8,7 @@ mod json;
 mod query;
 mod request;
 
-pub use capture::{evidence_hash, read_capture, snapshot_id};
+pub use capture::{decode_file_text, evidence_hash, read_capture, snapshot_id};
 pub use diagnostics::{increment_diagnostic, read_diagnostics};
 pub use json::{bytes_hash, document_hash, powershell_json};
 pub use query::{normalize_options, query};

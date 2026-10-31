@@ -476,6 +476,16 @@ Describe 'Human audit records' {
         { Add-ReviewAuditFeedback @feedbackArguments } | Should -Throw
     }
 
+    It 'returns timestamp-shaped feedback as the original string' {
+        $text = '2026-10-07T00:00:00Z'
+        Add-ReviewAuditFeedback -Path $script:FeedbackPath -FindingsPath $script:FindingsPath `
+            -ResponseId response-1 -FindingId $script:FindingId -Text $text
+
+        $feedback = Get-ReviewAuditFeedback -Path $script:FeedbackPath -FindingId $script:FindingId
+        $feedback | Should -BeOfType [string]
+        $feedback | Should -BeExactly $text
+    }
+
     It 'loads accumulated feedback in the decision command rather than a shell-generated argument' {
         Add-ReviewAuditFeedback -Path $script:FeedbackPath -FindingsPath $script:FindingsPath -ResponseId response-1 -FindingId $script:FindingId -Text 'Preserve $this exactly.'
         $run = Invoke-DataCommand 'Add-FindingDecision.ps1' @(

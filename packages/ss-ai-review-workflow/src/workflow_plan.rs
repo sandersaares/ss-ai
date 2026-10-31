@@ -8,6 +8,7 @@ use ohno::AppError;
 use serde::de::{Error as _, MapAccess, SeqAccess, Visitor};
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Number, Value};
+use ss_ai_review_context::decode_file_text;
 use ss_ai_runtime::{Clock, FileTransaction, caused_by, fail, read_bytes};
 
 /// Selects the schema and list in a workflow plan.
@@ -258,7 +259,8 @@ impl<'de> Deserialize<'de> for StrictValue {
 
 /// Parses JSON without discarding conflicting object keys.
 pub(crate) fn parse_json(bytes: &[u8]) -> Result<Value, AppError> {
-    let StrictValue(value) = serde_json::from_slice(bytes)
+    let text = decode_file_text(bytes);
+    let StrictValue(value) = serde_json::from_str(&text)
         .map_err(|error| caused_by("invalidInput", "Invalid JSON", error))?;
     Ok(value)
 }
@@ -486,6 +488,41 @@ fn write_plan(transaction: &FileTransaction<'_>, plan: &Plan) -> Result<(), AppE
 #[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
     use super::{PlanItem, PlanKind, parse_plan};
+
+    /// Builds the BOM-marked forms accepted by the shared PowerShell reader.
+    fn encoded(text: &str) -> Vec<Vec<u8>> {
+        let mut utf8 = vec![0xef, 0xbb, 0xbf];
+        utf8.extend_from_slice(text.as_bytes());
+        let mut utf16_le = vec![0xff, 0xfe];
+        let mut utf16_be = vec![0xfe, 0xff];
+        for word in text.encode_utf16() {
+            utf16_le.extend_from_slice(&word.to_le_bytes());
+            utf16_be.extend_from_slice(&word.to_be_bytes());
+        }
+        let mut utf32_le = vec![0xff, 0xfe, 0x00, 0x00];
+        let mut utf32_be = vec![0x00, 0x00, 0xfe, 0xff];
+        for character in text.chars() {
+            utf32_le.extend_from_slice(&u32::from(character).to_le_bytes());
+            utf32_be.extend_from_slice(&u32::from(character).to_be_bytes());
+        }
+        vec![utf8, utf16_le, utf16_be, utf32_le, utf32_be]
+    }
+
+    #[test]
+    fn decision_plans_accept_unicode_boms_without_losing_duplicate_checks() {
+        let valid =
+            r#"{"schemaVersion":1,"decisions":[{"findingId":"F-😀","decision":"approved"}]}"#;
+        let duplicate = r#"{"schemaVersion":1,"decisions":[{"findingId":"a","FindingId":"b","decision":"approved"}]}"#;
+        for bytes in encoded(valid) {
+            let plan = parse_plan(PlanKind::Decisions, &bytes).unwrap();
+            assert!(
+                matches!(plan.items(), [PlanItem::Decision(item)] if item.finding_id == "F-😀")
+            );
+        }
+        for bytes in encoded(duplicate) {
+            parse_plan(PlanKind::Decisions, &bytes).unwrap_err();
+        }
+    }
 
     #[test]
     fn plan_parsing_moves_valid_items_and_rejects_invalid_envelopes() {

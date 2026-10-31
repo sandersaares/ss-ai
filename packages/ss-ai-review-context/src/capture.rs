@@ -1,6 +1,6 @@
 //! Validates immutable captures and applies matching authorship decisions.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::path::Path;
 
 use ohno::AppError;
@@ -403,7 +403,16 @@ fn valid_identifier(value: &Value) -> bool {
 
 /// Loads the encodings recognized by the shared PowerShell stream reader.
 fn parse_file(bytes: &[u8]) -> Result<Value, AppError> {
-    let text = if let Some(bytes) = bytes.strip_prefix(&[0xef, 0xbb, 0xbf]) {
+    parse_text(&decode_file_text(bytes))
+}
+
+/// Decodes text using the shared PowerShell stream reader's BOM handling.
+///
+/// UTF-8 is the default; a byte order mark selects UTF-8, UTF-16, or UTF-32.
+/// Malformed encoded sequences are replaced as in the PowerShell reader.
+#[must_use]
+pub fn decode_file_text(bytes: &[u8]) -> String {
+    if let Some(bytes) = bytes.strip_prefix(&[0xef, 0xbb, 0xbf]) {
         String::from_utf8_lossy(bytes).into_owned()
     } else if let Some(bytes) = bytes.strip_prefix(&[0xff, 0xfe, 0x00, 0x00]) {
         decode_utf32(bytes, true)
@@ -415,8 +424,7 @@ fn parse_file(bytes: &[u8]) -> Result<Value, AppError> {
         decode_utf16(bytes, false)
     } else {
         String::from_utf8_lossy(bytes).into_owned()
-    };
-    parse_text(&text)
+    }
 }
 
 /// Decodes UTF-16 using the stream reader's replacement behavior.
@@ -519,21 +527,20 @@ fn apply_decisions(document: &mut Value, sidecar: &Value) -> Result<(), AppError
     if property(sidecar, "policyVersion").as_str() != Some(POLICY_VERSION) {
         return Ok(());
     }
+    let index = comment_coordinates(document);
     for entry in sidecar["decisions"].as_array().into_iter().flatten() {
         let thread_id = entry["threadId"].as_str().unwrap_or_default();
         let comment_id = entry["commentId"].as_str().unwrap_or_default();
-        // The PowerShell index keeps the last occurrence of each identifier.
-        let Some((thread_is_array, thread_index)) =
-            last_matching(property(document, "threads"), thread_id)
-        else {
+        let Some(coordinates) = index.get(thread_id) else {
             continue;
         };
+        let Some(&comment_index) = coordinates.comments.get(comment_id) else {
+            continue;
+        };
+        let thread_index = coordinates.thread;
+        let thread_is_array = property(document, "threads").is_array();
         let thread = selected(property(document, "threads"), thread_is_array, thread_index);
-        let Some((comment_is_array, comment_index)) =
-            last_matching(property(thread, "comments"), comment_id)
-        else {
-            continue;
-        };
+        let comment_is_array = property(thread, "comments").is_array();
         let comment = selected(
             property(thread, "comments"),
             comment_is_array,
@@ -565,17 +572,35 @@ fn apply_decisions(document: &mut Value, sidecar: &Value) -> Result<(), AppError
     Ok(())
 }
 
-/// Locates the last matching identifier in either a scalar or an array.
-fn last_matching(value: &Value, id: &str) -> Option<(bool, usize)> {
-    match value {
-        Value::Null => None,
-        Value::Array(values) => values
-            .iter()
-            .rposition(|value| string_id(property(value, "id")) == id)
-            .map(|index| (true, index)),
-        value if string_id(property(value, "id")) == id => Some((false, 0)),
-        _ => None,
+/// Coordinates locate comments without retaining references during mutation.
+struct ThreadCoordinates {
+    thread: usize,
+    comments: HashMap<String, usize>,
+}
+
+/// Indexes identifiers once so each decision can locate its captured comment.
+fn comment_coordinates(document: &Value) -> HashMap<String, ThreadCoordinates> {
+    let mut index = HashMap::new();
+    for (thread_index, thread) in list_values(property(document, "threads"))
+        .iter()
+        .enumerate()
+    {
+        let mut comments = HashMap::new();
+        for (comment_index, comment) in list_values(property(thread, "comments")).iter().enumerate()
+        {
+            comments.insert(string_id(property(comment, "id")), comment_index);
+        }
+        // The PowerShell index keeps the last thread and last comment for each
+        // case-sensitive identifier, including when a thread ID is repeated.
+        index.insert(
+            string_id(property(thread, "id")),
+            ThreadCoordinates {
+                thread: thread_index,
+                comments,
+            },
+        );
     }
+    index
 }
 
 /// Recovers a value after locating its coordinate without changing its shape.
@@ -759,6 +784,51 @@ mod tests {
         apply_decisions(&mut document, &sidecar).unwrap();
         assert_eq!(document["threads"]["comments"]["authorship"], "human");
         assert_eq!(evidence_hash(&document).unwrap(), evidence);
+    }
+
+    #[test]
+    fn decisions_use_last_thread_and_comment_with_case_sensitive_ids() {
+        let mut document = fixture();
+        let mut first = document["threads"][0].clone();
+        let mut old_only = first["comments"][0].clone();
+        old_only["id"] = json!("old-only");
+        first["comments"].as_array_mut().unwrap().push(old_only);
+        let mut last = first.clone();
+        let upper = last["comments"][0].clone();
+        let mut lower = upper.clone();
+        lower["id"] = json!("c");
+        last["comments"] = json!([upper.clone(), upper, lower]);
+        let mut lower_thread = last.clone();
+        lower_thread["id"] = json!("t");
+        document["threads"] = json!([first, last, lower_thread]);
+        let upper_hash =
+            comment_input_hash(&document, "T", &document["threads"][1]["comments"][1]).unwrap();
+        let lower_hash =
+            comment_input_hash(&document, "T", &document["threads"][1]["comments"][2]).unwrap();
+        let lower_thread_hash =
+            comment_input_hash(&document, "t", &document["threads"][2]["comments"][1]).unwrap();
+        let old_hash =
+            comment_input_hash(&document, "T", &document["threads"][0]["comments"][1]).unwrap();
+        let sidecar = json!({
+            "schemaVersion": 1, "policyVersion": "2",
+            "captureHash": document_hash(&document).unwrap(),
+            "decisions": [
+                {"threadId": "T", "commentId": "C", "inputHash": upper_hash, "kind": "agent", "origin": "classified"},
+                {"threadId": "T", "commentId": "c", "inputHash": lower_hash, "kind": "human", "origin": "classified"},
+                {"threadId": "t", "commentId": "C", "inputHash": lower_thread_hash, "kind": "human", "origin": "classified"},
+                {"threadId": "T", "commentId": "old-only", "inputHash": old_hash, "kind": "human", "origin": "classified"}
+            ]
+        });
+
+        apply_decisions(&mut document, &sidecar).unwrap();
+        assert_eq!(document["threads"][0], first);
+        assert_eq!(
+            document["threads"][1]["comments"][0]["authorship"],
+            "indeterminate"
+        );
+        assert_eq!(document["threads"][1]["comments"][1]["authorship"], "agent");
+        assert_eq!(document["threads"][1]["comments"][2]["authorship"], "human");
+        assert_eq!(document["threads"][2]["comments"][1]["authorship"], "human");
     }
 
     #[test]

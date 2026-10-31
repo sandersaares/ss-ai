@@ -538,6 +538,14 @@ function Assert-FindingFollowUpTarget {
     throw "The captured discussion reports platform '$platform', and this helper knows where a reply may be posted only on gitHub and azureDevOps."
 }
 
+# Identifies the sibling staging names of the PowerShell and native file writers.
+function Test-FindingArtifactStagingName {
+    param([Parameter(Mandatory)][string] $Name)
+
+    return $Name -imatch '\A\..+\.json\.[0-9a-f]{32}\.tmp\z' -or
+        $Name -cmatch '\A\.ss-ai-transaction-[a-zA-Z0-9]{24}\.tmp\z'
+}
+
 # Reports whether a set of artifacts is fit to consolidate.
 #
 # `-Path` names either one artifact or the directory holding a run's reviewer artifacts. Naming the
@@ -581,7 +589,7 @@ function Get-FindingArtifactValidation {
             }
             # Retained locks and unique staging files belong to the shared artifact writer,
             # not to the reviewer set. A concurrent writer may still be using either file.
-            if ($entry.Name -like '*.json.lock' -or $entry.Name -match '^\..+\.json\.[0-9a-f]{32}\.tmp$') {
+            if ($entry.Name -like '*.json.lock' -or (Test-FindingArtifactStagingName -Name $entry.Name)) {
                 continue
             }
             if ($entry.Extension -ine '.json') {
