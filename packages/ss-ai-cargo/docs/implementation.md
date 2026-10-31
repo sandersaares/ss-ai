@@ -27,16 +27,16 @@ filesystem error. Manifest and operation context identifies the failed input.
 
 ## Parser fuzzing
 
-The `fuzz/` package runs the same in-process parser used for manifests through
+The `ss-ai-cargo-fuzz` package runs the same in-process parser used for manifests through
 a bounded libFuzzer target. Input size is capped by the target, and the
 target verifies that every emitted raw declaration belongs to its reported
 source line. It ignores inputs that do not parse as UTF-8 or valid manifests.
 The checked-in seeds cover declaration styles and malformed input. The fuzzer
 maintains its generated corpus between runs.
 
-With `cargo-fuzz` already available, run from `packages/ss-ai-cargo`:
+With `cargo-fuzz` already available, run from the repository root:
 
 ```text
-mkdir -p fuzz/corpus/manifest
-cargo fuzz run manifest fuzz/corpus/manifest fuzz/seeds -- -max_total_time=60 -max_len=16384
+mkdir -p packages/ss-ai-cargo-fuzz/corpus/manifest
+cargo fuzz run --fuzz-dir packages/ss-ai-cargo-fuzz manifest packages/ss-ai-cargo-fuzz/corpus/manifest packages/ss-ai-cargo-fuzz/seeds -- -max_total_time=60 -max_len=16384
 ```

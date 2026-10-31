@@ -110,8 +110,8 @@ function Get-RustTestIdentity {
 
         # Manifest parser tests embed these seeds; generated fuzz corpora are not build inputs.
         foreach ($seed in @(
-            'packages/ss-ai-cargo/fuzz/seeds/dependencies.toml',
-            'packages/ss-ai-cargo/fuzz/seeds/malformed.toml'
+            'packages/ss-ai-cargo-fuzz/seeds/dependencies.toml',
+            'packages/ss-ai-cargo-fuzz/seeds/malformed.toml'
         )) {
             $path = Join-Path $RepositoryRoot $seed
             if (Test-Path -LiteralPath $path -PathType Leaf) {
