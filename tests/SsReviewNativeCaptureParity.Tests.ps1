@@ -23,6 +23,8 @@ BeforeAll {
     [void] [IO.Directory]::CreateDirectory($script:Scratch)
     $script:Native = (Get-Command ss-ai -CommandType Application -ErrorAction Stop | Select-Object -First 1).Source
 
+    # Exercise retained Azure DevOps mapping with offline responses. PreDocument
+    # returns the checked provider context; otherwise assemble a canonical capture.
     function New-OfflineAdoCapture {
         param([string] $ReplacementContent, [switch] $PreDocument)
 
@@ -36,6 +38,7 @@ BeforeAll {
             param([string] $Method, [string] $Url, [hashtable] $Headers, $Body)
             if ($Method -cne 'GET') { throw "Unexpected provider write: $Method $Url" }
             $script:Requests.Add($Url)
+            # Arbitrary headroom above the fixture's requests bounds runaway traversal.
             if ($script:Requests.Count -gt 20) { throw 'Fixture request limit exceeded.' }
             $key = if ($Url -match '/_apis/connectionData\?') { 'connectionData' }
             elseif ($Url -match '/threads\?') { 'threads' }
@@ -60,6 +63,8 @@ BeforeAll {
         New-PullRequestContextDocument -Context $context -NowUtc $script:Instant
     }
 
+    # Exercise retained GitHub mapping with offline responses. PreDocument
+    # returns the checked provider context; otherwise assemble a canonical capture.
     function New-OfflineGitHubCapture {
         param([switch] $PreDocument, [string] $ReplacementContent)
 
@@ -75,6 +80,7 @@ BeforeAll {
 
             $command = $ArgumentList -join ' '
             $script:Requests.Add($command)
+            # Arbitrary headroom above the fixture's requests bounds runaway traversal.
             if ($script:Requests.Count -gt 20) { throw 'Fixture request limit exceeded.' }
             if ($command -match '--method (?!GET\b)') { throw "Unexpected provider write: $command" }
             $key = if ($command -match '^api user --method GET\b') { 'user' }
@@ -186,6 +192,7 @@ Describe 'Offline provider capture and native reading compatibility' {
         $content = 'Alpha ' + [char]0x2014 + ' ' + [char]0x201C + 'gamma' + [char]0x201D +
             ' ' + [char]::ConvertFromUtf32(0x1F916) + ' caf' + [char]0x00E9
         $document['threads'][0]['comments'][0]['content'] | Should -BeExactly $content
+        # Date-shaped comment text must remain text rather than become a timestamp.
         $document['threads'][0]['comments'][1]['content'] | Should -BeExactly '2026-08-04T10:07:33.677Z'
         $path = Join-Path $script:Scratch 'original.json'
         Write-PullRequestCapture -Path $path -Document $document | Out-Null

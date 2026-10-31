@@ -9,8 +9,8 @@ use ss_ai_runtime::{Clock, FileTransaction, fail, read_bytes};
 
 use crate::capture::{
     CAPTURE_VERSION, CLASSIFICATION_EVIDENCE, POLICY_VERSION, apply_decisions, array_property,
-    comment_input_hash, last_matching, parse_file, property, selected, selected_mut, string_id,
-    validate_capture_keys, validate_capture_structure, validate_decisions,
+    comment_input_hash, last_matching, parse_file, property, property_values, selected,
+    selected_mut, string_id, validate_capture_keys, validate_capture_structure, validate_decisions,
 };
 use crate::request::{full_path, path_string};
 use crate::{document_hash, powershell_json, snapshot_id};
@@ -231,8 +231,8 @@ fn locate(
 /// Counts unsettled comments through the same identifier index used for updates.
 fn remaining(document: &Value) -> Result<usize, AppError> {
     let mut threads = HashSet::new();
-    for thread in array_property(document, "threads") {
-        threads.insert(string_id(property(&thread, "id")));
+    for thread in property_values(document, "threads") {
+        threads.insert(string_id(property(thread, "id")));
     }
     let mut remaining = 0_usize;
     for thread_id in threads {
@@ -240,8 +240,8 @@ fn remaining(document: &Value) -> Result<usize, AppError> {
             .ok_or_else(|| fail("invalidInput", "Missing capture thread"))?;
         let thread = selected(property(document, "threads"), thread_array, thread_index);
         let mut comments = HashSet::new();
-        for comment in array_property(thread, "comments") {
-            comments.insert(string_id(property(&comment, "id")));
+        for comment in property_values(thread, "comments") {
+            comments.insert(string_id(property(comment, "id")));
         }
         for comment_id in comments {
             let (comment_array, comment_index) =

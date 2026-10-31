@@ -4,6 +4,7 @@ use std::collections::{HashMap, HashSet};
 
 use ohno::AppError;
 use serde_json::{Value, json};
+use ss_ai_assessment::commit;
 
 use crate::clock::timestamp;
 use crate::error::fail;
@@ -192,8 +193,8 @@ pub(crate) fn collect(transport: &mut Transport<'_>, target: &Target) -> Result<
     }
     let base_sha = text(field(base, "sha")?)?;
     let head_sha = text(field(head, "sha")?)?;
-    ss_ai_assessment::commit(base_sha)?;
-    ss_ai_assessment::commit(head_sha)?;
+    commit(base_sha)?;
+    commit(head_sha)?;
     let head_repo = nullable_field(head, "repo")?;
     let fork = !head_repo.is_null()
         && !text(field(head_repo, "full_name")?)?
@@ -264,7 +265,7 @@ fn merge_base(
             .ok_or_else(|| fail("service", "GitHub could not resolve the merge base"))?
     };
     let sha = text(field(field(&comparison, "merge_base_commit")?, "sha")?)?;
-    ss_ai_assessment::commit(sha)?;
+    commit(sha)?;
     Ok(sha.to_owned())
 }
 
@@ -459,9 +460,10 @@ fn review_thread(node: &Value, comments: &[Value]) -> Result<Value, AppError> {
             ))
         })
         .collect::<Result<_, AppError>>()?;
+    let mut seen = HashSet::new();
     for comment in &canonical {
         let mut current = nonempty(field(comment, "id")?)?;
-        let mut seen = HashSet::new();
+        seen.clear();
         let mut reached_root = false;
         for _ in 0..=canonical.len() {
             if !seen.insert(current) {
@@ -543,6 +545,9 @@ fn text_thread(node: &Value, meta: &Value, review: bool) -> Result<Value, AppErr
     let identity = rest_identity(nullable_field(node, "user")?)?;
     let content = body(node, "body")?;
     let (mut author_kind, mut evidence) = authorship(&identity, content);
+    // Vote-only reviews have no text to classify and default to human unless
+    // agent evidence is established. See skills/ss-review/docs/design.md,
+    // "Authorship classification".
     if review
         && author_kind == "indeterminate"
         && content.trim().is_empty()
@@ -611,8 +616,8 @@ fn force_push(node: &Value) -> Result<Value, AppError> {
     let at = utc(field(node, "createdAt")?)?;
     let before = text(field(field(node, "beforeCommit")?, "oid")?)?;
     let after = text(field(field(node, "afterCommit")?, "oid")?)?;
-    ss_ai_assessment::commit(before)?;
-    ss_ai_assessment::commit(after)?;
+    commit(before)?;
+    commit(after)?;
     Ok(
         json!({"id":id,"url":null,"publishedUtc":at,"lastUpdatedUtc":at,"eventUtc":at,
         "rawStatus":"HeadRefForcePushedEvent","resolution":"indeterminate","kind":"refUpdate",
@@ -699,22 +704,22 @@ fn same_reviewer(left: &Identity, right: &Identity) -> bool {
 mod tests {
     use std::cell::RefCell;
     use std::collections::VecDeque;
-    use std::io;
+    use std::io::Result as StdIoResult;
     use std::time::Duration;
 
     use jiff::Timestamp;
     use ohno::AppError;
-    use serde_json::{Value, json};
+    use serde_json::{Value, from_slice, from_str, from_value, json, to_vec};
 
     use super::{
         collect, connection, force_push, merge_base, metadata, review_thread, reviewers,
         source_ref, utc,
     };
     use crate::target::Target;
-    use crate::transport::{Http, HttpResponse, Transport};
-    use crate::{Clock, Process, ProcessOutput};
+    use crate::transport::Transport;
+    use crate::{Clock, Http, HttpResponse, Process, ProcessOutput};
 
-    /// Strictly ordered replies assert the adapter's read-only transport contract.
+    /// Routes independent reads separately while preserving each connection's page order.
     struct Recording {
         replies: RefCell<VecDeque<(&'static str, Value)>>,
     }
@@ -725,36 +730,46 @@ mod tests {
             program: &str,
             arguments: &[String],
             input: &[u8],
-        ) -> io::Result<ProcessOutput> {
+        ) -> StdIoResult<ProcessOutput> {
             assert_eq!(program, "gh");
-            let (expected, mut reply) = self
-                .replies
-                .borrow_mut()
-                .pop_front()
-                .expect("unexpected request");
-            assert_eq!(arguments[1], expected);
+            let path = &arguments[1];
             let method =
                 &arguments[arguments.iter().position(|arg| arg == "--method").unwrap() + 1];
-            assert_eq!(method, if expected == "graphql" { "POST" } else { "GET" });
-            if expected.contains("per_page=100") {
+            assert_eq!(method, if path == "graphql" { "POST" } else { "GET" });
+            if path.contains("per_page=100") {
                 assert!(arguments.iter().any(|arg| arg == "--paginate"));
                 assert!(arguments.iter().any(|arg| arg == "--slurp"));
             }
-            if expected == "graphql" {
-                let query: Value = serde_json::from_slice(input).unwrap();
+            let query = if path == "graphql" {
+                let query: Value = from_slice(input).unwrap();
                 assert!(query["query"].as_str().unwrap().starts_with("query"));
-                if let Some(expected_cursor) =
-                    reply.as_object_mut().unwrap().remove("__expectedCursor")
-                {
-                    assert_eq!(query["variables"]["cur"], expected_cursor);
-                }
-                if let Some(expected_thread) =
-                    reply.as_object_mut().unwrap().remove("__expectedThread")
-                {
-                    assert_eq!(query["variables"]["threadId"], expected_thread);
-                }
+                Some(query)
             } else {
                 assert!(input.is_empty());
+                None
+            };
+            let mut replies = self.replies.borrow_mut();
+            let index = replies
+                .iter()
+                .position(|(route, reply)| {
+                    if let Some(query) = &query {
+                        *route == query["query"].as_str().unwrap()
+                            && reply.get("__expectedThread").unwrap_or(&Value::Null)
+                                == &query["variables"]["threadId"]
+                    } else {
+                        *route == path
+                    }
+                })
+                .expect("unexpected request");
+            let (_, mut reply) = replies.remove(index).unwrap();
+            if let Some(query) = query {
+                let expected_cursor = reply
+                    .as_object_mut()
+                    .unwrap()
+                    .remove("__expectedCursor")
+                    .unwrap_or(Value::Null);
+                assert_eq!(query["variables"]["cur"], expected_cursor);
+                reply.as_object_mut().unwrap().remove("__expectedThread");
             }
             let status = reply
                 .as_object_mut()
@@ -863,23 +878,24 @@ mod tests {
                     json!([{"users":[account],"teams":[]}]),
                 ),
                 (
-                    "graphql",
+                    super::THREADS,
                     wrap(
                         "reviewThreads",
                         page(json!([thread]), true, json!("threads-next")),
                     ),
                 ),
                 (
-                    "graphql",
+                    super::THREADS,
                     json!({"__expectedCursor":"threads-next","data":{"repository":{"pullRequest":{
                         "reviewThreads":page(json!([]),false,Value::Null)}}}}),
                 ),
                 (
-                    "graphql",
-                    json!({"data":{"node":{"comments":page(json!([comment("C2",json!({"id":"C1"}),"reply")]),false,Value::Null)}}}),
+                    super::THREAD_COMMENTS,
+                    json!({"__expectedCursor":"more","__expectedThread":"T1",
+                        "data":{"node":{"comments":page(json!([comment("C2",json!({"id":"C1"}),"reply")]),false,Value::Null)}}}),
                 ),
                 (
-                    "graphql",
+                    super::ISSUE_METADATA,
                     wrap(
                         "comments",
                         page(
@@ -890,12 +906,12 @@ mod tests {
                     ),
                 ),
                 (
-                    "graphql",
+                    super::ISSUE_METADATA,
                     json!({"__expectedCursor":"issues-next","data":{"repository":{"pullRequest":{
                         "comments":page(json!([{"id":"I2","lastEditedAt":"2026-01-05T00:00:00Z"}]),false,Value::Null)}}}}),
                 ),
                 (
-                    "graphql",
+                    super::REVIEW_METADATA,
                     wrap(
                         "reviews",
                         page(
@@ -906,7 +922,7 @@ mod tests {
                     ),
                 ),
                 (
-                    "graphql",
+                    super::FORCE_PUSHES,
                     wrap("timelineItems", page(json!([]), false, Value::Null)),
                 ),
                 ("user", account),
@@ -944,15 +960,15 @@ mod tests {
 
     #[test]
     fn shared_fixture_matches_powershell_pre_document() {
-        let fixture: Value = serde_json::from_str(include_str!(
+        let fixture: Value = from_str(include_str!(
             "../../../tests/fixtures/ss-review-native-capture/github.json"
         ))
         .unwrap();
-        let expected: Value = serde_json::from_str(include_str!(
+        let expected: Value = from_str(include_str!(
             "../../../tests/fixtures/ss-review-native-capture/github-context.json"
         ))
         .unwrap();
-        let target: Target = serde_json::from_value(fixture["target"].clone()).unwrap();
+        let target: Target = from_value(fixture["target"].clone()).unwrap();
         let responses = &fixture["responses"];
         let script = Recording {
             replies: RefCell::new(VecDeque::from(vec![
@@ -972,10 +988,10 @@ mod tests {
                     "repos/octo/widget/pulls/7/requested_reviewers?per_page=100",
                     json!([responses["requestedReviewers"]]),
                 ),
-                ("graphql", responses["reviewThreads"].clone()),
-                ("graphql", responses["issueEdits"].clone()),
-                ("graphql", responses["reviewEdits"].clone()),
-                ("graphql", responses["timeline"].clone()),
+                (super::THREADS, responses["reviewThreads"].clone()),
+                (super::ISSUE_METADATA, responses["issueEdits"].clone()),
+                (super::REVIEW_METADATA, responses["reviewEdits"].clone()),
+                (super::FORCE_PUSHES, responses["timeline"].clone()),
                 ("user", responses["user"].clone()),
                 (
                     "repos/octo/widget/compare/bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb...aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
@@ -995,8 +1011,12 @@ mod tests {
         let response = json!({"data":{"repository":{"pullRequest":{"comments":page(json!([]),true,json!("same"))}}}});
         let script = Recording {
             replies: RefCell::new(VecDeque::from(vec![
-                ("graphql", response.clone()),
-                ("graphql", response),
+                (super::ISSUE_METADATA, response.clone()),
+                (
+                    super::ISSUE_METADATA,
+                    json!({"__expectedCursor":"same",
+                        "data":response["data"]}),
+                ),
             ])),
         };
         let transport = Transport::new(&target, None, &script, &script, &FixedClock);
@@ -1022,11 +1042,11 @@ mod tests {
         let script = Recording {
             replies: RefCell::new(VecDeque::from(vec![
                 (
-                    "graphql",
+                    super::ISSUE_METADATA,
                     response(json!([{"id":"one"}]), true, json!("cursor-1"), Value::Null),
                 ),
                 (
-                    "graphql",
+                    super::ISSUE_METADATA,
                     response(json!([{"id":"two"}]), false, Value::Null, json!("cursor-1")),
                 ),
             ])),
@@ -1046,12 +1066,146 @@ mod tests {
     }
 
     #[test]
+    fn routes_independent_reads_in_either_order() {
+        let target = Target::pull_request("https://github.com/acme/repo/pull/42", None).unwrap();
+        for reverse in [false, true] {
+            let script = Recording {
+                replies: RefCell::new(VecDeque::from(vec![
+                    ("user", json!({"login":"reader"})),
+                    (
+                        super::ISSUE_METADATA,
+                        json!({"data":{"repository":{"pullRequest":{"comments":
+                            page(json!([{"id":"issue"}]),false,Value::Null)}}}}),
+                    ),
+                    (
+                        super::REVIEW_METADATA,
+                        json!({"data":{"repository":{"pullRequest":{"reviews":
+                            page(json!([{"id":"review"}]),false,Value::Null)}}}}),
+                    ),
+                ])),
+            };
+            let mut transport = Transport::new(&target, None, &script, &script, &FixedClock);
+            let reads = [
+                (
+                    super::ISSUE_METADATA,
+                    "/data/repository/pullRequest/comments",
+                    "issue",
+                ),
+                (
+                    super::REVIEW_METADATA,
+                    "/data/repository/pullRequest/reviews",
+                    "review",
+                ),
+            ];
+            if reverse {
+                assert_eq!(
+                    transport.request("user", "GET", None).unwrap()["login"],
+                    "reader"
+                );
+            }
+            for index in if reverse { [1, 0] } else { [0, 1] } {
+                let (query, path, id) = reads[index];
+                assert_eq!(
+                    connection(&transport, &target, query, path, None, None).unwrap(),
+                    vec![json!({"id":id})]
+                );
+            }
+            if !reverse {
+                assert_eq!(
+                    transport.request("user", "GET", None).unwrap()["login"],
+                    "reader"
+                );
+            }
+            assert!(script.replies.borrow().is_empty());
+        }
+    }
+
+    #[test]
+    fn routes_nested_pages_by_thread() {
+        let target = Target::pull_request("https://github.com/acme/repo/pull/42", None).unwrap();
+        let response = |thread, id| {
+            json!({"__expectedThread":thread,
+                "data":{"node":{"comments":page(json!([{"id":id}]),false,Value::Null)}}})
+        };
+        let script = Recording {
+            replies: RefCell::new(VecDeque::from(vec![
+                (super::THREAD_COMMENTS, response("first", "one")),
+                (super::THREAD_COMMENTS, response("second", "two")),
+            ])),
+        };
+        let transport = Transport::new(&target, None, &script, &script, &FixedClock);
+        for (thread, id) in [("second", "two"), ("first", "one")] {
+            assert_eq!(
+                connection(
+                    &transport,
+                    &target,
+                    super::THREAD_COMMENTS,
+                    "/data/node/comments",
+                    Some(thread),
+                    None,
+                )
+                .unwrap(),
+                vec![json!({"id":id})]
+            );
+        }
+        assert!(script.replies.borrow().is_empty());
+    }
+
+    #[test]
+    #[should_panic(expected = "unexpected request")]
+    fn rejects_unexpected_read_immediately() {
+        let script = Recording {
+            replies: RefCell::new(VecDeque::from(vec![("user", json!({}))])),
+        };
+        script
+            .execute(
+                "gh",
+                &[
+                    "api".into(),
+                    "other".into(),
+                    "--method".into(),
+                    "GET".into(),
+                ],
+                &[],
+            )
+            .unwrap();
+    }
+
+    #[test]
+    #[should_panic(expected = "assertion `left == right` failed")]
+    fn rejects_out_of_order_connection_pages() {
+        let script = Recording {
+            replies: RefCell::new(VecDeque::from(vec![
+                (super::ISSUE_METADATA, json!({"data":{}})),
+                (
+                    super::ISSUE_METADATA,
+                    json!({"__expectedCursor":"next","data":{}}),
+                ),
+            ])),
+        };
+        let request =
+            json!({"query":super::ISSUE_METADATA,"variables":{"cur":"next","threadId":null}});
+        script
+            .execute(
+                "gh",
+                &[
+                    "api".into(),
+                    "graphql".into(),
+                    "--method".into(),
+                    "POST".into(),
+                ],
+                &to_vec(&request).unwrap(),
+            )
+            .unwrap();
+    }
+
+    #[test]
     fn follows_nested_comment_cursor_and_propagates_graphql_errors() {
         let target = Target::pull_request("https://github.com/acme/repo/pull/42", None).unwrap();
         let first = page(json!([{"id":"root"}]), true, json!("next"));
         let script = Recording {
             replies: RefCell::new(VecDeque::from(vec![(
-                "graphql",
+                super::THREAD_COMMENTS,
                 json!({"__expectedCursor":"next","__expectedThread":"thread",
                     "data":{"node":{"comments":page(json!([{"id":"reply"}]),false,Value::Null)}}}),
             )])),
@@ -1073,8 +1227,9 @@ mod tests {
 
         let script = Recording {
             replies: RefCell::new(VecDeque::from(vec![(
-                "graphql",
-                json!({"data":{"node":{"comments":page(json!([]),false,Value::Null)}},
+                super::THREAD_COMMENTS,
+                json!({"__expectedThread":"thread",
+                    "data":{"node":{"comments":page(json!([]),false,Value::Null)}},
                     "errors":[{"message":"partial result"}]}),
             )])),
         };
@@ -1114,6 +1269,29 @@ mod tests {
         assert_eq!(thread["url"], "root-url");
         assert_eq!(thread["lastUpdatedUtc"], "2026-01-03T00:00:00.0000000Z");
         assert_eq!(thread["comments"][1]["content"], "exact\r\né");
+    }
+
+    #[test]
+    fn validates_each_reply_chain_independently() {
+        let comment = |id, reply| {
+            json!({"id":id,"url":null,"body":"","createdAt":"2026-01-01T00:00:00Z",
+                "lastEditedAt":null,"replyTo":reply,"author":null,"minimizedReason":null})
+        };
+        let node = json!({"id":"T","isResolved":false,"isOutdated":false,"isCollapsed":false,
+            "path":null,"line":null,"startLine":null,"originalLine":null,
+            "originalStartLine":null,"diffSide":null,"startDiffSide":null,
+            "subjectType":"FILE","resolvedBy":null});
+        let root = comment("root", Value::Null);
+        let first = comment("first", json!({"id":"root"}));
+        let second = comment("second", json!({"id":"first"}));
+        let thread = review_thread(&node, &[root.clone(), first, second]).unwrap();
+        assert_eq!(thread["comments"].as_array().unwrap().len(), 3);
+
+        let missing = comment("missing-parent", json!({"id":"absent"}));
+        review_thread(&node, &[root.clone(), missing]).unwrap_err();
+        let cycle_a = comment("a", json!({"id":"b"}));
+        let cycle_b = comment("b", json!({"id":"a"}));
+        review_thread(&node, &[root, cycle_a, cycle_b]).unwrap_err();
     }
 
     #[test]

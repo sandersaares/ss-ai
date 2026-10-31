@@ -6,6 +6,8 @@
 
 use std::cell::RefCell;
 use std::fs;
+#[cfg(unix)]
+use std::os::unix::fs::symlink;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::mpsc;
@@ -18,7 +20,7 @@ use serde_json::{Value, json};
 use ss_ai_review_context::{
     document_hash, prepare_capture, read_capture, snapshot_id, write_comment_authorship,
 };
-use ss_ai_runtime::{Clock, FileTransaction, SystemClock};
+use ss_ai_runtime::{Clock, FileTransaction, SystemClock, classification};
 
 /// Keeps each test's capture and retained locks in the active checkout.
 struct Output(PathBuf);
@@ -106,6 +108,24 @@ fn publishes_identical_captures_for_both_providers() {
         assert_eq!(
             usize::try_from(summary["threadCount"].as_u64().unwrap()).unwrap(),
             expected["threads"].as_array().unwrap().len()
+        );
+        let comments: Vec<_> = expected["threads"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .flat_map(|thread| thread["comments"].as_array().unwrap())
+            .collect();
+        assert_eq!(summary["commentCount"], comments.len());
+        assert_eq!(
+            summary["indeterminateCommentCount"],
+            comments
+                .iter()
+                .filter(|comment| comment["authorship"] == "indeterminate")
+                .count()
+        );
+        assert_eq!(
+            summary["reviewerCount"],
+            expected["reviewers"].as_array().unwrap().len()
         );
         assert!(summary["delta"].is_null());
     }
@@ -237,6 +257,247 @@ fn comparison_rejects_malformed_or_unbound_sidecar_before_provider_work() {
         assert!(!output.sidecar().exists());
     }
     fs::write(sidecar, original).unwrap();
+}
+
+#[test]
+fn comparison_reserves_absent_sidecar_and_accepts_distinct_output() {
+    let clock = SystemClock::default();
+    let context = fixture("github-context.json");
+    let baseline_document = fixture("github-expected.json");
+    let target = context["target"]["webUrl"].as_str().unwrap();
+    let baseline = Output::new();
+    fs::write(&baseline.0, serde_json::to_vec(&baseline_document).unwrap()).unwrap();
+    let baseline_bytes = fs::read(&baseline.0).unwrap();
+    let output_path = baseline.sidecar();
+    let mut output_sidecar = output_path.as_os_str().to_os_string();
+    output_sidecar.push(".authorship.json");
+    let mut baseline_sidecar_lock = output_path.as_os_str().to_os_string();
+    baseline_sidecar_lock.push(".lock");
+    let error = prepare_capture(&output_path, Some(&baseline.0), target, &clock).unwrap_err();
+    assert_eq!(classification(&error), "invalidInput");
+    assert!(!output_path.exists());
+    assert!(!PathBuf::from(output_sidecar).exists());
+    assert!(!PathBuf::from(baseline_sidecar_lock).exists());
+    assert_eq!(fs::read(&baseline.0).unwrap(), baseline_bytes);
+    assert_eq!(
+        read_capture(&baseline.0, &clock).unwrap(),
+        baseline_document
+    );
+
+    let output = Output::new();
+    prepare_capture(&output.0, Some(&baseline.0), target, &clock)
+        .unwrap()
+        .publish(&context, "2026-08-04T12:00:00.0000000Z")
+        .unwrap();
+    assert_eq!(
+        read_capture(&baseline.0, &clock).unwrap(),
+        baseline_document
+    );
+    assert!(output.0.exists());
+    assert!(output.sidecar().exists());
+}
+
+#[cfg(unix)]
+#[test]
+fn comparison_rejects_dangling_sidecar_before_publication() {
+    let clock = SystemClock::default();
+    let context = fixture("github-context.json");
+    let document = fixture("github-expected.json");
+    let target = context["target"]["webUrl"].as_str().unwrap();
+    for points_to_capture in [true, false] {
+        let baseline = Output::new();
+        let output = Output::new();
+        let bytes = serde_json::to_vec(&document).unwrap();
+        fs::write(&baseline.0, &bytes).unwrap();
+        let link_target = if points_to_capture {
+            output.0.clone()
+        } else {
+            output.sidecar()
+        };
+        symlink(&link_target, baseline.sidecar()).unwrap();
+
+        let error = prepare_capture(&output.0, Some(&baseline.0), target, &clock).unwrap_err();
+        assert_eq!(classification(&error), "invalidInput");
+        assert_eq!(fs::read(&baseline.0).unwrap(), bytes);
+        assert_eq!(fs::read_link(baseline.sidecar()).unwrap(), link_target);
+        assert!(!output.0.exists());
+        assert!(!output.sidecar().exists());
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn comparison_reserves_absent_sidecar_through_directory_alias() {
+    let clock = SystemClock::default();
+    let context = fixture("github-context.json");
+    let baseline_document = fixture("github-expected.json");
+    let target = context["target"]["webUrl"].as_str().unwrap();
+    let baseline = Output::new();
+    fs::write(&baseline.0, serde_json::to_vec(&baseline_document).unwrap()).unwrap();
+    let alias = Output::new();
+    symlink(baseline.0.parent().unwrap(), &alias.0).unwrap();
+    let output_path = alias.0.join(baseline.sidecar().file_name().unwrap());
+    let mut output_sidecar = output_path.as_os_str().to_os_string();
+    output_sidecar.push(".authorship.json");
+    let error = prepare_capture(&output_path, Some(&baseline.0), target, &clock).unwrap_err();
+    assert_eq!(classification(&error), "invalidInput");
+    assert!(!output_path.exists());
+    assert!(!PathBuf::from(output_sidecar).exists());
+    assert_eq!(
+        read_capture(&baseline.0, &clock).unwrap(),
+        baseline_document
+    );
+}
+
+#[test]
+fn comparison_reserves_sidecar_under_actual_case_rules() {
+    let clock = SystemClock::default();
+    let context = fixture("github-context.json");
+    let baseline_document = fixture("github-expected.json");
+    let target = context["target"]["webUrl"].as_str().unwrap();
+    let baseline = Output::new();
+    fs::write(&baseline.0, serde_json::to_vec(&baseline_document).unwrap()).unwrap();
+
+    // Probe the same directory rather than inferring case rules from the OS.
+    let alternate_name = baseline
+        .0
+        .file_name()
+        .unwrap()
+        .to_str()
+        .unwrap()
+        .to_uppercase();
+    let case_insensitive = baseline.0.with_file_name(alternate_name).exists();
+    let alternate_sidecar_name = baseline
+        .sidecar()
+        .file_name()
+        .unwrap()
+        .to_str()
+        .unwrap()
+        .to_uppercase();
+    let output = Output(baseline.0.with_file_name(alternate_sidecar_name));
+    let prepared = prepare_capture(&output.0, Some(&baseline.0), target, &clock);
+    if case_insensitive {
+        assert_eq!(classification(&prepared.unwrap_err()), "invalidInput");
+        assert!(!baseline.sidecar().exists());
+        assert!(!output.sidecar().exists());
+    } else {
+        prepared
+            .unwrap()
+            .publish(&context, "2026-08-04T12:00:00.0000000Z")
+            .unwrap();
+        assert!(output.0.exists());
+        assert!(!baseline.sidecar().exists());
+    }
+    assert_eq!(
+        read_capture(&baseline.0, &clock).unwrap(),
+        baseline_document
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn comparison_rejects_output_with_aliased_sidecar_lock() {
+    let clock = SystemClock::default();
+    let context = fixture("github-context.json");
+    let target = context["target"]["webUrl"].as_str().unwrap();
+    let baseline = Output::new();
+    fs::write(
+        &baseline.0,
+        serde_json::to_vec(&fixture("github-expected.json")).unwrap(),
+    )
+    .unwrap();
+    drop(FileTransaction::open(&baseline.sidecar(), &clock).unwrap());
+    let mut baseline_lock = baseline.sidecar().into_os_string();
+    baseline_lock.push(".lock");
+    let output = Output::new();
+    let mut output_lock = output.0.as_os_str().to_os_string();
+    output_lock.push(".lock");
+    symlink(baseline_lock, output_lock).unwrap();
+    let error = prepare_capture(&output.0, Some(&baseline.0), target, &clock).unwrap_err();
+    assert_eq!(classification(&error), "invalidInput");
+    assert!(!baseline.sidecar().exists());
+    assert!(!output.0.exists());
+    assert!(!output.sidecar().exists());
+}
+
+#[test]
+fn comparison_reserves_sidecar_under_actual_trailing_dot_rules() {
+    let clock = SystemClock::default();
+    let context = fixture("github-context.json");
+    let baseline_document = fixture("github-expected.json");
+    let target = context["target"]["webUrl"].as_str().unwrap();
+    let baseline = Output::new();
+    fs::write(&baseline.0, serde_json::to_vec(&baseline_document).unwrap()).unwrap();
+
+    let mut probe = baseline.0.as_os_str().to_os_string();
+    probe.push(".");
+    let ignores_trailing_dot = PathBuf::from(probe).exists();
+    let mut output = baseline.sidecar().into_os_string();
+    output.push(".");
+    let output = Output(output.into());
+    let prepared = prepare_capture(&output.0, Some(&baseline.0), target, &clock);
+    if ignores_trailing_dot {
+        assert_eq!(classification(&prepared.unwrap_err()), "invalidInput");
+        assert!(!baseline.sidecar().exists());
+        assert!(!output.sidecar().exists());
+    } else {
+        prepared
+            .unwrap()
+            .publish(&context, "2026-08-04T12:00:00.0000000Z")
+            .unwrap();
+        assert!(output.0.exists());
+        assert!(!baseline.sidecar().exists());
+    }
+    assert_eq!(
+        read_capture(&baseline.0, &clock).unwrap(),
+        baseline_document
+    );
+}
+
+#[test]
+fn comparison_reports_path_resolution_failures_before_provider_work() {
+    let clock = SystemClock::default();
+    let context = fixture("github-context.json");
+    let target = context["target"]["webUrl"].as_str().unwrap();
+    let baseline = Output::new();
+    fs::write(
+        &baseline.0,
+        serde_json::to_vec(&fixture("github-expected.json")).unwrap(),
+    )
+    .unwrap();
+    let blocker = Output::new();
+    fs::write(&blocker.0, b"not a directory").unwrap();
+    let error = prepare_capture(
+        &blocker.0.join("capture"),
+        Some(&baseline.0),
+        target,
+        &clock,
+    )
+    .unwrap_err();
+    assert_eq!(classification(&error), "io");
+    assert!(error.find_source::<std::io::Error>().is_some());
+    let mut lock = baseline.sidecar().into_os_string();
+    lock.push(".lock");
+    assert!(!PathBuf::from(lock).exists());
+}
+
+#[test]
+fn comparison_never_replaces_existing_hardlink_output() {
+    let clock = SystemClock::default();
+    let context = fixture("github-context.json");
+    let baseline_document = fixture("github-expected.json");
+    let target = context["target"]["webUrl"].as_str().unwrap();
+    let baseline = Output::new();
+    fs::write(&baseline.0, serde_json::to_vec(&baseline_document).unwrap()).unwrap();
+    let output = Output::new();
+    fs::hard_link(&baseline.0, &output.0).unwrap();
+    let error = prepare_capture(&output.0, Some(&baseline.0), target, &clock).unwrap_err();
+    assert_eq!(classification(&error), "invalidInput");
+    assert_eq!(
+        read_capture(&baseline.0, &clock).unwrap(),
+        baseline_document
+    );
+    assert!(!output.sidecar().exists());
 }
 
 #[test]

@@ -6,8 +6,10 @@
 )]
 
 use std::cell::RefCell;
+use std::env::current_dir;
 use std::fs;
 use std::path::PathBuf;
+use std::process::id;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::mpsc;
 use std::thread;
@@ -15,7 +17,7 @@ use std::time::Duration;
 
 use jiff::Timestamp;
 use ohno::AppError;
-use serde_json::{Value, json};
+use serde_json::{Value, from_slice, json, to_vec};
 use ss_ai_review_context::{read_capture, snapshot_id, write_comment_authorship};
 use ss_ai_runtime::{Clock, FileTransaction, SystemClock};
 
@@ -30,10 +32,10 @@ impl Files {
     fn new() -> Self {
         static NEXT: AtomicU64 = AtomicU64::new(0);
         // The atomic supplies unique names and does not synchronize other data.
-        let id = NEXT.fetch_add(1, Ordering::Relaxed);
-        let capture = std::env::current_dir()
+        let sequence = NEXT.fetch_add(1, Ordering::Relaxed);
+        let capture = current_dir()
             .unwrap()
-            .join(format!(".authorship-test-{}-{id}.json", std::process::id()));
+            .join(format!(".authorship-test-{}-{sequence}.json", id()));
         fs::write(
             &capture,
             include_bytes!("../../../tests/fixtures/ss-review-query-capture.json"),
@@ -54,7 +56,7 @@ impl Files {
 
     /// Reads the persisted semantic record.
     fn record(&self) -> Value {
-        serde_json::from_slice(&fs::read(&self.sidecar).unwrap()).unwrap()
+        from_slice(&fs::read(&self.sidecar).unwrap()).unwrap()
     }
 }
 
@@ -165,9 +167,9 @@ fn rejects_entire_batch_without_changing_existing_sidecar() {
 fn deterministic_authorship_cannot_be_overridden_and_missing_evidence_fails() {
     let files = Files::new();
     let clock = SystemClock::default();
-    let mut capture: Value = serde_json::from_slice(&fs::read(&files.capture).unwrap()).unwrap();
+    let mut capture: Value = from_slice(&fs::read(&files.capture).unwrap()).unwrap();
     capture["threads"][0]["comments"][0]["authorship"] = json!("human");
-    fs::write(&files.capture, serde_json::to_vec(&capture).unwrap()).unwrap();
+    fs::write(&files.capture, to_vec(&capture).unwrap()).unwrap();
     let snapshot = files.snapshot();
     assert!(
         write_comment_authorship(
@@ -191,7 +193,7 @@ fn deterministic_authorship_cannot_be_overridden_and_missing_evidence_fails() {
         .as_object_mut()
         .unwrap()
         .remove("authorshipEvidence");
-    fs::write(&files.capture, serde_json::to_vec(&capture).unwrap()).unwrap();
+    fs::write(&files.capture, to_vec(&capture).unwrap()).unwrap();
     assert!(write_comment_authorship(&files.capture, &snapshot, &json!([]), &clock).is_err());
 }
 
@@ -199,14 +201,14 @@ fn deterministic_authorship_cannot_be_overridden_and_missing_evidence_fails() {
 fn sequential_batches_preserve_matching_decisions_and_reject_stale_snapshots() {
     let files = Files::new();
     let clock = SystemClock::default();
-    let mut capture: Value = serde_json::from_slice(&fs::read(&files.capture).unwrap()).unwrap();
+    let mut capture: Value = from_slice(&fs::read(&files.capture).unwrap()).unwrap();
     let mut second = capture["threads"][0]["comments"][0].clone();
     second["id"] = json!("C2");
     capture["threads"][0]["comments"]
         .as_array_mut()
         .unwrap()
         .push(second);
-    fs::write(&files.capture, serde_json::to_vec(&capture).unwrap()).unwrap();
+    fs::write(&files.capture, to_vec(&capture).unwrap()).unwrap();
     let first_snapshot = files.snapshot();
     let first = json!([{"threadId":"T","commentId":"C","kind":"agent"}]);
     let result = write_comment_authorship(&files.capture, &first_snapshot, &first, &clock).unwrap();
@@ -231,7 +233,7 @@ fn old_policy_decisions_do_not_override_new_classification() {
     write_comment_authorship(&files.capture, &files.snapshot(), &first, &clock).unwrap();
     let mut record = files.record();
     record["policyVersion"] = json!("old");
-    fs::write(&files.sidecar, serde_json::to_vec(&record).unwrap()).unwrap();
+    fs::write(&files.sidecar, to_vec(&record).unwrap()).unwrap();
 
     let document = read_capture(&files.capture, &clock).unwrap();
     assert_eq!(
@@ -290,9 +292,9 @@ fn rejected_classifications_explain_the_specific_problem() {
         .to_string();
     assert!(error.contains("cannot be reclassified"));
 
-    let mut capture: Value = serde_json::from_slice(&fs::read(&files.capture).unwrap()).unwrap();
+    let mut capture: Value = from_slice(&fs::read(&files.capture).unwrap()).unwrap();
     capture["schemaVersion"] = json!(99);
-    fs::write(&files.capture, serde_json::to_vec(&capture).unwrap()).unwrap();
+    fs::write(&files.capture, to_vec(&capture).unwrap()).unwrap();
     let error = write_comment_authorship(&files.capture, &snapshot, &json!([]), &clock)
         .unwrap_err()
         .to_string();
@@ -308,20 +310,22 @@ fn writer_checks_snapshot_after_acquiring_the_sibling_lock() {
     let holder = FileTransaction::open(&files.sidecar, &clock).unwrap();
     let (reached_send, reached_receive) = mpsc::channel();
     let (release_send, release_receive) = mpsc::channel();
-    let capture = files.capture.clone();
-    let worker = thread::spawn(move || {
-        let clock = ContendedClock {
-            reached: reached_send,
-            release: RefCell::new(release_receive),
-        };
-        write_comment_authorship(&capture, &snapshot, &json!([]), &clock)
+    let worker = thread::spawn({
+        let capture = files.capture.clone();
+        move || {
+            let clock = ContendedClock {
+                reached: reached_send,
+                release: RefCell::new(release_receive),
+            };
+            write_comment_authorship(&capture, &snapshot, &json!([]), &clock)
+        }
     });
     reached_receive.recv().unwrap();
     let original = files.snapshot();
     let document = read_capture(&files.capture, &SystemClock::default()).unwrap();
     let mut changed = document;
     changed["threads"][0]["comments"][0]["content"] = json!("changed");
-    fs::write(&files.capture, serde_json::to_vec(&changed).unwrap()).unwrap();
+    fs::write(&files.capture, to_vec(&changed).unwrap()).unwrap();
     assert_ne!(original, files.snapshot());
     drop(holder);
     release_send.send(()).unwrap();

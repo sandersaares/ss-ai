@@ -2,6 +2,7 @@
 
 use std::collections::HashSet;
 use std::path::Path;
+use std::slice::from_ref;
 
 use ohno::AppError;
 use serde_json::{Value, json};
@@ -377,7 +378,7 @@ fn require_nullable_string(value: &Value, name: &str) -> Result<(), AppError> {
 fn required_list<'a>(value: &'a Value, name: &str) -> Result<&'a [Value], AppError> {
     let result = match value.get(name) {
         Some(Value::Array(values)) => values.as_slice(),
-        Some(value @ Value::Object(_)) => std::slice::from_ref(value),
+        Some(value @ Value::Object(_)) => from_ref(value),
         _ => return Err(fail("invalidInput", format!("Capture requires {name}"))),
     };
     if result.iter().any(|entry| !entry.is_object()) {
@@ -393,7 +394,7 @@ fn required_list<'a>(value: &'a Value, name: &str) -> Result<&'a [Value], AppErr
 fn list_values(value: &Value) -> &[Value] {
     match value {
         Value::Array(values) => values,
-        Value::Object(_) => std::slice::from_ref(value),
+        Value::Object(_) => from_ref(value),
         _ => &[],
     }
 }
@@ -601,10 +602,15 @@ pub(crate) fn property<'a>(value: &'a Value, name: &str) -> &'a Value {
 
 /// Treats a scalar as a singleton list, as the PowerShell model does.
 pub(crate) fn array_property(value: &Value, name: &str) -> Vec<Value> {
+    property_values(value, name).to_vec()
+}
+
+/// Borrows scalar or array properties without copying captured evidence.
+pub(crate) fn property_values<'a>(value: &'a Value, name: &str) -> &'a [Value] {
     match property(value, name) {
-        Value::Null => Vec::new(),
-        Value::Array(values) => values.clone(),
-        value => vec![value.clone()],
+        Value::Null => &[],
+        Value::Array(values) => values,
+        value => from_ref(value),
     }
 }
 
@@ -658,10 +664,22 @@ mod tests {
     use serde_json::{Value, json};
 
     use super::{
-        apply_decisions, comment_input_hash, evidence_hash, parse_file, snapshot_id,
-        validate_capture_keys, validate_capture_structure,
+        apply_decisions, comment_input_hash, evidence_hash, parse_file, property_values,
+        snapshot_id, validate_capture_keys, validate_capture_structure,
     };
     use crate::document_hash;
+
+    #[test]
+    fn property_values_preserves_powershell_scalar_and_array_shapes() {
+        let value = json!({"scalar": {"id": 1}, "array": [{"id": 2}, {"id": 3}], "null": null});
+        assert!(property_values(&value, "missing").is_empty());
+        assert!(property_values(&value, "null").is_empty());
+        assert_eq!(property_values(&value, "scalar"), &[json!({"id": 1})]);
+        assert_eq!(
+            property_values(&value, "array"),
+            &[json!({"id": 2}), json!({"id": 3})]
+        );
+    }
 
     fn fixture() -> Value {
         parse_file(include_bytes!(

@@ -9,12 +9,12 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 use ohno::AppError;
 use serde_json::{Value, json};
-use ss_ai_runtime::{Clock, FileTransaction, fail, read_bytes};
+use ss_ai_runtime::{Clock, FileTransaction, caused_by, fail, read_bytes};
 
 use crate::capture::{
     CAPTURE_VERSION, POLICY_VERSION, apply_decisions, array_property, comment_input_hash,
-    last_matching, parse_file, property, selected, string_id, validate_capture_keys,
-    validate_capture_structure, validate_decisions,
+    last_matching, parse_file, property, property_values, selected, string_id,
+    validate_capture_keys, validate_capture_structure, validate_decisions,
 };
 use crate::query::capture_delta;
 use crate::request::{full_path, path_string};
@@ -51,16 +51,34 @@ pub fn prepare_capture<'a>(
     let output_sidecar = sidecar_path(&path);
     if let Some(compare) = compare {
         let compare = full_path(compare)?;
-        if same_existing_path(&compare, &path) || same_existing_path(&compare, &output_sidecar) {
-            return Err(fail(
-                "invalidInput",
-                "Give the capture a distinct -OutputPrefix",
-            ));
+        let compare_sidecar = sidecar_path(&compare);
+        // Even an absent sidecar is reserved for the comparison's decisions.
+        for baseline in [&compare, &compare_sidecar] {
+            for output in [&path, &output_sidecar] {
+                if same_existing_path(baseline, output)? {
+                    return Err(fail(
+                        "invalidInput",
+                        "Give the capture a distinct -OutputPrefix",
+                    ));
+                }
+            }
         }
     }
     let (previous, previous_raw, decisions) = if let Some(compare) = compare {
         let compare = full_path(compare)?;
-        let lock = FileTransaction::open(&sidecar_path(&compare), clock)?;
+        let compare_sidecar = sidecar_path(&compare);
+        let lock = FileTransaction::open(&compare_sidecar, clock)?;
+        // The retained lock exists even when the sidecar does not, so the
+        // filesystem can resolve case and directory aliases without creating
+        // or modifying the sidecar itself.
+        for output in [&path, &output_sidecar] {
+            if same_lock_path(&compare_sidecar, output)? {
+                return Err(fail(
+                    "invalidInput",
+                    "Give the capture a distinct -OutputPrefix",
+                ));
+            }
+        }
         let bytes = read_bytes(&compare, clock)?
             .ok_or_else(|| fail("invalidInput", "Comparison capture is missing"))?;
         let raw = parse_file(&bytes)?;
@@ -75,10 +93,30 @@ pub fn prepare_capture<'a>(
             ));
         }
         validate_capture_structure(&raw)?;
-        let decisions = lock
-            .read_bytes()?
-            .map(|bytes| parse_file(&bytes))
-            .transpose()?;
+        let decisions = match lock.read_bytes()? {
+            Some(bytes) => Some(parse_file(&bytes)?),
+            None => {
+                // A dangling link is not an absent sidecar: publishing its
+                // target could make the baseline acquire unrelated decisions.
+                match fs::symlink_metadata(&compare_sidecar) {
+                    Ok(_) => {
+                        return Err(fail(
+                            "invalidInput",
+                            "Comparison authorship sidecar points to a missing file",
+                        ));
+                    }
+                    Err(error) if error.kind() == io::ErrorKind::NotFound => None,
+                    Err(error) => {
+                        return Err(caused_by(
+                            "io",
+                            format!("Cannot inspect {}", compare_sidecar.display()),
+                            error,
+                        )
+                        .into());
+                    }
+                }
+            }
+        };
         let mut previous = raw.clone();
         if let Some(decisions) = &decisions {
             apply_decisions(&mut previous, decisions)?;
@@ -196,11 +234,22 @@ impl CapturePreparation<'_> {
             .as_ref()
             .map(|previous| capture_delta(previous, &document))
             .transpose()?;
-        let threads = array_property(&document, "threads");
-        let comments: Vec<_> = threads
+        let threads = property_values(&document, "threads");
+        let (comment_count, indeterminate_count) = threads
             .iter()
-            .flat_map(|thread| array_property(thread, "comments"))
-            .collect();
+            .flat_map(|thread| property_values(thread, "comments"))
+            .fold((0_usize, 0_usize), |(comments, indeterminate), comment| {
+                (
+                    comments
+                        .checked_add(1)
+                        .expect("comment count is bounded by the in-memory capture"),
+                    indeterminate
+                        .checked_add(usize::from(
+                            property(comment, "authorship").as_str() == Some("indeterminate"),
+                        ))
+                        .expect("classification count is bounded by the in-memory capture"),
+                )
+            });
         let pull_request = property(&document, "pullRequest");
         let result = json!({
             "platform": property(&document, "platform"),
@@ -211,9 +260,9 @@ impl CapturePreparation<'_> {
             "reviewedSourceCommit": property(pull_request, "reviewedSourceCommit"),
             "reviewedMergeBaseCommit": property(pull_request, "reviewedMergeBaseCommit"),
             "threadCount": threads.len(),
-            "commentCount": comments.len(),
-            "reviewerCount": array_property(&document, "reviewers").len(),
-            "indeterminateCommentCount": comments.iter().filter(|comment| property(comment, "authorship").as_str() == Some("indeterminate")).count(),
+            "commentCount": comment_count,
+            "reviewerCount": property_values(&document, "reviewers").len(),
+            "indeterminateCommentCount": indeterminate_count,
             "reusedClassificationCount": reused.len(),
             "delta": delta
         });
@@ -227,18 +276,92 @@ impl CapturePreparation<'_> {
             &sidecar_path(&self.path),
             powershell_json(&decisions)?.as_bytes(),
         )?;
-        publish_new(&self.path, raw_text.as_bytes())?;
+        publish_new(&self.path, raw_text.as_bytes()).map_err(|error| {
+            caused_by(
+                "io",
+                format!(
+                    "Capture publication failed after publishing {}",
+                    sidecar_path(&self.path).display()
+                ),
+                error,
+            )
+        })?;
         Ok(result)
     }
 }
 
-/// Detects aliases when both existing paths refer to the same file.
-fn same_existing_path(left: &Path, right: &Path) -> bool {
-    left == right
-        || fs::canonicalize(left)
-            .ok()
-            .zip(fs::canonicalize(right).ok())
-            .is_some_and(|(left, right)| left == right)
+/// Detects aliases of existing files or absent names in the same directory.
+fn same_existing_path(left: &Path, right: &Path) -> Result<bool, AppError> {
+    if left == right {
+        return Ok(true);
+    }
+    Ok(resolved_path(left)?
+        .zip(resolved_path(right)?)
+        .is_some_and(|(left, right)| left == right))
+}
+
+/// Resolves directory aliases while preserving actual filesystem errors.
+fn resolved_path(path: &Path) -> Result<Option<PathBuf>, AppError> {
+    match canonical_path(path)? {
+        Some(path) => Ok(Some(path)),
+        None => {
+            let parent = path
+                .parent()
+                .ok_or_else(|| fail("invalidInput", "File path requires a parent"))?;
+            let name = path
+                .file_name()
+                .ok_or_else(|| fail("invalidInput", "File path requires a name"))?;
+            Ok(canonical_path(parent)?.map(|parent| parent.join(name)))
+        }
+    }
+}
+
+/// Resolves existing paths and reports failures other than missing paths.
+fn canonical_path(path: &Path) -> Result<Option<PathBuf>, AppError> {
+    match fs::canonicalize(path) {
+        Ok(path) => Ok(Some(path)),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(None),
+        Err(error) => {
+            Err(caused_by("io", format!("Cannot resolve {}", path.display()), error).into())
+        }
+    }
+}
+
+/// Compares retained sibling locks using the filesystem's name resolution.
+fn same_lock_path(baseline: &Path, output: &Path) -> Result<bool, AppError> {
+    let lock_name = |path: &Path| {
+        let mut name = path.as_os_str().to_os_string();
+        name.push(".lock");
+        PathBuf::from(name)
+    };
+    let baseline_lock_path = lock_name(baseline);
+    let baseline_lock = canonical_path(&baseline_lock_path)?
+        .ok_or_else(|| fail("io", "Comparison sidecar lock disappeared"))?;
+    if canonical_path(&lock_name(output))?.as_ref() == Some(&baseline_lock) {
+        return Ok(true);
+    }
+
+    // Appending ".lock" changes whether a trailing dot or space is significant.
+    // Probe the existing lock before comparing the trimmed output name.
+    let Some(name) = output.file_name().and_then(|name| name.to_str()) else {
+        return Ok(false);
+    };
+    let trimmed = name.trim_end_matches(['.', ' ']);
+    if trimmed == name || trimmed.is_empty() {
+        return Ok(false);
+    }
+    let suffix = name
+        .strip_prefix(trimmed)
+        .ok_or_else(|| fail("io", "Cannot compare output lock name"))?;
+    let mut probe = baseline_lock_path.as_os_str().to_os_string();
+    probe.push(suffix);
+    if canonical_path(Path::new(&probe))?.as_ref() != Some(&baseline_lock) {
+        return Ok(false);
+    }
+    Ok(
+        canonical_path(&lock_name(&output.with_file_name(trimmed)))?.as_ref()
+            == Some(&baseline_lock),
+    )
 }
 
 /// Publishes complete bytes without replacing even a non-cooperating creator.
@@ -263,21 +386,77 @@ fn publish_new(path: &Path, bytes: &[u8]) -> Result<(), AppError> {
                 break;
             }
             Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {}
-            Err(error) => return Err(error.into()),
+            Err(error) => {
+                return Err(caused_by(
+                    "io",
+                    format!("Cannot create staging file for {}", path.display()),
+                    error,
+                )
+                .into());
+            }
         }
     }
-    let (staging, mut file) =
-        created.ok_or_else(|| fail("io", "Cannot allocate a unique staging file"))?;
-    let result = (|| -> io::Result<()> {
-        file.write_all(bytes)?;
-        file.sync_all()?;
+    let (staging, mut file) = created.ok_or_else(|| {
+        fail(
+            "io",
+            format!("Cannot allocate staging file for {}", path.display()),
+        )
+    })?;
+    let result = (|| -> Result<(), AppError> {
+        file.write_all(bytes).map_err(|error| {
+            caused_by(
+                "io",
+                format!("Cannot write staging file for {}", path.display()),
+                error,
+            )
+        })?;
+        file.sync_all().map_err(|error| {
+            caused_by(
+                "io",
+                format!("Cannot sync staging file for {}", path.display()),
+                error,
+            )
+        })?;
         drop(file);
-        fs::hard_link(&staging, path)?;
+        fs::hard_link(&staging, path).map_err(|error| {
+            caused_by("io", format!("Cannot publish {}", path.display()), error)
+        })?;
         Ok(())
     })();
     let cleanup = fs::remove_file(&staging);
-    result?;
-    cleanup?;
+    finish_publication(path, result, cleanup)
+}
+
+/// Reports cleanup failures without obscuring whether publication succeeded.
+fn finish_publication(
+    path: &Path,
+    result: Result<(), AppError>,
+    cleanup: io::Result<()>,
+) -> Result<(), AppError> {
+    if let Err(error) = result {
+        return match cleanup {
+            Ok(()) => Err(error),
+            Err(cleanup) => Err(caused_by(
+                "io",
+                format!(
+                    "Publication of {} failed, and staging cleanup also failed: {cleanup}",
+                    path.display()
+                ),
+                error,
+            )
+            .into()),
+        };
+    }
+    cleanup.map_err(|error| {
+        caused_by(
+            "io",
+            format!(
+                "Published {}, but cannot remove its staging file",
+                path.display()
+            ),
+            error,
+        )
+    })?;
     Ok(())
 }
 
@@ -404,6 +583,8 @@ fn sort_key(value: &Value, timestamp: &str) -> Vec<u16> {
         .unwrap_or("9999-12-31T23:59:59.9999999Z");
     let id = string_id(property(value, "id"));
     let id = if !id.is_empty() && id.bytes().all(|byte| byte.is_ascii_digit()) {
+        // Padding preserves numeric order in text comparisons. The width exceeds
+        // realistic provider identifiers, matching PullRequestModel.ps1.
         format!("{id:0>20}")
     } else {
         id
@@ -452,10 +633,48 @@ fn ordinal_upper(character: char) -> char {
 }
 
 #[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
-    use serde_json::json;
+    use std::io;
+    use std::path::Path;
 
-    use super::identity_matches;
+    use serde_json::json;
+    use ss_ai_runtime::{caused_by, classification};
+
+    use super::{finish_publication, identity_matches};
+
+    #[test]
+    fn publication_classifies_failures_before_and_after_link() {
+        let path = Path::new("capture.json");
+        let error = finish_publication(
+            path,
+            Err(caused_by(
+                "io",
+                "Cannot publish capture.json",
+                io::Error::from(io::ErrorKind::AlreadyExists),
+            )
+            .into()),
+            Err(io::ErrorKind::PermissionDenied.into()),
+        )
+        .unwrap_err();
+        assert_eq!(classification(&error), "io");
+        assert!(error.to_string().contains("cleanup also failed"));
+        assert!(error.to_string().contains("Cannot publish capture.json"));
+        assert_eq!(
+            error.find_source::<io::Error>().unwrap().kind(),
+            io::ErrorKind::AlreadyExists
+        );
+
+        let error = finish_publication(path, Ok(()), Err(io::ErrorKind::PermissionDenied.into()))
+            .unwrap_err();
+        assert_eq!(classification(&error), "io");
+        assert!(error.to_string().contains("Published capture.json"));
+        assert!(error.to_string().contains("staging file"));
+        assert_eq!(
+            error.find_source::<io::Error>().unwrap().kind(),
+            io::ErrorKind::PermissionDenied
+        );
+    }
 
     #[test]
     fn identity_uses_strongest_shared_field_with_simple_case_matching() {

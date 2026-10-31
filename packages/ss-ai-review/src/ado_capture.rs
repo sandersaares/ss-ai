@@ -1,6 +1,7 @@
 //! Captures Azure DevOps review evidence without changing the pull request.
 
 use std::collections::HashSet;
+use std::num::NonZeroU64;
 
 use ohno::AppError;
 use serde_json::{Map, Value, json};
@@ -113,7 +114,7 @@ pub(crate) fn collect(transport: &mut Transport<'_>, target: &Target) -> Result<
     let threads = list(transport, &format!("{path}/threads"))?;
 
     let mut revision_ids = HashSet::new();
-    let mut latest: Option<(u64, Value)> = None;
+    let mut latest: Option<(NonZeroU64, Value)> = None;
     let mut revisions = Vec::new();
     for iteration in &iterations {
         let id = iteration_id(field(iteration, "id")?)?;
@@ -253,12 +254,9 @@ fn optional_object<'a>(node: &'a Value, name: &str) -> Result<Option<&'a Value>,
 }
 
 /// Iteration ordinals are ordered numerically even if represented as strings.
-fn iteration_id(value: &Value) -> Result<u64, AppError> {
-    let id = ordinal(value)?;
-    if id == 0 {
-        return Err(fail("service", "Invalid Azure DevOps iteration ID"));
-    }
-    Ok(id)
+fn iteration_id(value: &Value) -> Result<NonZeroU64, AppError> {
+    NonZeroU64::new(ordinal(value)?)
+        .ok_or_else(|| fail("service", "Invalid Azure DevOps iteration ID"))
 }
 
 /// Thread comparisons may refer to the common-commit baseline before iteration one.
@@ -399,20 +397,23 @@ fn context(node: Option<&Value>) -> Result<Value, AppError> {
 }
 
 /// The first comment owns thread-level machine-authorship evidence.
-fn opening_index(comments: &[Value]) -> Result<Option<usize>, AppError> {
-    if comments.is_empty() {
+fn opening_index<'a>(
+    comments: impl ExactSizeIterator<Item = &'a Value>,
+) -> Result<Option<usize>, AppError> {
+    if comments.len() == 0 {
         return Ok(None);
     }
+    let count = comments.len();
     let mut lowest: Option<(u64, usize)> = None;
     let mut ids = HashSet::new();
     let mut ordinals = HashSet::new();
-    for (index, comment) in comments.iter().enumerate() {
+    for (index, comment) in comments.enumerate() {
         let id = service_id(field(comment, "id")?)?;
         if !ids.insert(id.clone()) {
             return Err(fail("service", "Duplicate thread comment ID"));
         }
         let number = id.parse::<u64>().ok().filter(|number| *number > 0);
-        if number.is_none() && comments.len() > 1 {
+        if number.is_none() && count > 1 {
             return Err(fail("service", "Cannot establish thread opening comment"));
         }
         if let Some(number) = number {
@@ -432,7 +433,7 @@ fn convert_thread(
     node: &Value,
     target: &Target,
     properties: &Map<String, Value>,
-    latest: u64,
+    latest: NonZeroU64,
 ) -> Result<Value, AppError> {
     let id = field(node, "id")?;
     let url = format!(
@@ -492,21 +493,21 @@ fn convert_thread(
         ordinal(value)?;
     }
     let nodes = array(field(node, "comments")?)?;
-    let opener = opening_index(nodes)?;
+    let opener = opening_index(nodes.iter())?;
     let mut comments = Vec::new();
     let mut surviving = Vec::new();
     for (index, comment) in nodes.iter().enumerate() {
         if optional_bool(comment, "isDeleted")? {
             continue;
         }
-        surviving.push(comment.clone());
+        surviving.push(comment);
         comments.push(convert_comment(
             comment,
             &url,
             (opener == Some(index)).then_some(properties),
         )?);
     }
-    let opening_id = opening_index(&surviving)?
+    let opening_id = opening_index(surviving.iter().copied())?
         .and_then(|index| surviving.get(index))
         .and_then(|v| v.get("id"));
     let published = canonical_time(node.get("publishedDate"))?;
@@ -514,7 +515,7 @@ fn convert_thread(
         "id": id, "url": url, "publishedUtc": published,
         "lastUpdatedUtc": canonical_time(node.get("lastUpdatedDate"))?,
         "eventUtc": published, "rawStatus": node.get("status"), "resolution": resolution,
-        "kind": kind, "isOutdated": anchor_revision.is_some_and(|id| id < latest),
+        "kind": kind, "isOutdated": anchor_revision.is_some_and(|id| id < latest.get()),
         "context": context(node.get("threadContext"))?,
         "anchorKey": node.pointer("/pullRequestThreadContext/changeTrackingId"),
         "properties": properties, "openingCommentId": opening_id,
@@ -591,29 +592,70 @@ mod tests {
         clippy::needless_pass_by_value,
         reason = "Test fixtures use bounded JSON values and owned construction"
     )]
-    use std::cell::RefCell;
+    use std::cell::{RefCell, RefMut};
     use std::collections::{BTreeMap, VecDeque};
-    use std::io;
+    use std::io::Result as StdIoResult;
     use std::time::Duration;
 
     use jiff::Timestamp;
     use ohno::AppError;
-    use serde_json::{Value, json};
+    use serde_json::{Value, from_str, json, to_vec};
+    use ss_ai_runtime::Failure;
+    use url::Url;
 
-    use super::collect;
+    use super::{collect, list as collect_pages};
     use crate::clock::timestamp;
-    use crate::target::Target;
+    use crate::target::{Platform, Target};
     use crate::transport::Transport;
-    use crate::{Clock, Http, HttpResponse, Process, ProcessOutput};
+    use crate::{Clock, Http, HttpResponse, Process, ProcessOutput, classification};
 
-    /// Ordered responses verify that every provider request remains a read.
+    /// Scripts independent endpoints while preserving their page order.
     struct Recording {
-        replies: RefCell<VecDeque<(&'static str, Value, Option<&'static str>)>>,
+        endpoints: BTreeMap<String, &'static str>,
+        replies: RefCell<BTreeMap<&'static str, VecDeque<Reply>>>,
         requests: RefCell<Vec<String>>,
     }
 
+    /// Associates an expected continuation with its response and next token.
+    type Reply = (Option<&'static str>, Value, Option<&'static str>);
+
+    impl Recording {
+        fn new(target: &Target, replies: BTreeMap<&'static str, VecDeque<Reply>>) -> Self {
+            let collection = target
+                .collection_url
+                .as_deref()
+                .unwrap()
+                .trim_end_matches('/');
+            let pr = format!("{collection}/{}", target.pr_api());
+            Self {
+                endpoints: BTreeMap::from([
+                    (format!("{collection}/_apis/connectionData"), "connection"),
+                    (pr.clone(), "pr"),
+                    (format!("{pr}/iterations"), "iterations"),
+                    (format!("{pr}/reviewers"), "reviewers"),
+                    (format!("{pr}/threads"), "threads"),
+                ]),
+                replies: RefCell::new(replies),
+                requests: RefCell::new(Vec::new()),
+            }
+        }
+
+        fn page(&self, endpoint: &str, index: usize) -> RefMut<'_, Reply> {
+            RefMut::map(self.replies.borrow_mut(), |replies| {
+                &mut replies.get_mut(endpoint).unwrap()[index]
+            })
+        }
+
+        fn assert_complete(&self) {
+            assert!(
+                self.replies.borrow().values().all(VecDeque::is_empty),
+                "unconsumed endpoint responses"
+            );
+        }
+    }
+
     impl Process for Recording {
-        fn execute(&self, program: &str, _: &[String], _: &[u8]) -> io::Result<ProcessOutput> {
+        fn execute(&self, program: &str, _: &[String], _: &[u8]) -> StdIoResult<ProcessOutput> {
             assert_eq!(program, "az");
             Ok(ProcessOutput::new(true, b"fixture-token".to_vec(), vec![]))
         }
@@ -629,22 +671,35 @@ mod tests {
         ) -> Result<HttpResponse, AppError> {
             assert_eq!(method, "GET");
             assert!(body.is_none());
+            let mut parsed = Url::parse(url).unwrap();
+            let tokens: Vec<_> = parsed
+                .query_pairs()
+                .filter(|(key, _)| key == "continuationToken")
+                .map(|(_, value)| value.into_owned())
+                .collect();
+            parsed.set_query(None);
+            let endpoint = self
+                .endpoints
+                .get(parsed.as_str())
+                .expect("unexpected endpoint");
             let (expected, payload, continuation) = self
                 .replies
                 .borrow_mut()
+                .get_mut(endpoint)
+                .expect("unscripted endpoint")
                 .pop_front()
-                .expect("unexpected request");
-            assert!(url.contains(expected), "{url} does not contain {expected}");
+                .expect("unexpected extra request");
+            assert_eq!(
+                tokens.as_slice(),
+                expected.as_slice(),
+                "unexpected continuation for {url}"
+            );
             self.requests.borrow_mut().push(url.to_owned());
             let mut headers = BTreeMap::new();
             if let Some(continuation) = continuation {
                 headers.insert("x-ms-continuationtoken".to_owned(), continuation.to_owned());
             }
-            Ok(HttpResponse::new(
-                200,
-                headers,
-                serde_json::to_vec(&payload).unwrap(),
-            ))
+            Ok(HttpResponse::new(200, headers, to_vec(&payload).unwrap()))
         }
     }
 
@@ -659,7 +714,22 @@ mod tests {
             token: &str,
             body: Option<&[u8]>,
         ) -> Result<HttpResponse, AppError> {
+            assert_eq!(method, "GET");
+            assert!(body.is_none());
             if url.contains("continuationToken=next%2Btoken") {
+                let mut parsed = Url::parse(url).unwrap();
+                let tokens: Vec<_> = parsed
+                    .query_pairs()
+                    .filter(|(key, _)| key == "continuationToken")
+                    .map(|(_, value)| value.into_owned())
+                    .collect();
+                parsed.set_query(None);
+                assert_eq!(self.0.endpoints.get(parsed.as_str()), Some(&"iterations"));
+                assert_eq!(tokens, ["next+token"]);
+                assert_eq!(
+                    self.0.replies.borrow()["iterations"][0].0,
+                    Some("next+token")
+                );
                 return Ok(HttpResponse::new(
                     403,
                     BTreeMap::new(),
@@ -698,52 +768,125 @@ mod tests {
     }
 
     fn recording() -> Recording {
-        Recording {
-            replies: RefCell::new(VecDeque::from([
+        Recording::new(
+            &target(),
+            BTreeMap::from([
                 (
-                    "_apis/connectionData",
-                    json!({"authenticatedUser": {"id": "account", "subjectDescriptor": "aad.account"}}),
-                    None,
+                    "connection",
+                    VecDeque::from([(
+                        None,
+                        json!({"authenticatedUser": {"id": "account", "subjectDescriptor": "aad.account"}}),
+                        None,
+                    )]),
                 ),
                 (
-                    "pullRequests/7?",
-                    json!({"pullRequestId": 7, "createdBy": {"id": "author"}, "title": "Unicode λ", "description": null, "sourceRefName": "refs/heads/topic", "targetRefName": "refs/heads/main"}),
-                    None,
+                    "pr",
+                    VecDeque::from([(
+                        None,
+                        json!({"pullRequestId": 7, "createdBy": {"id": "author"}, "title": "Unicode λ", "description": null, "sourceRefName": "refs/heads/topic", "targetRefName": "refs/heads/main"}),
+                        None,
+                    )]),
                 ),
                 (
-                    "/iterations?",
-                    list(json!([iteration(2)])),
-                    Some("next+token"),
+                    "iterations",
+                    VecDeque::from([
+                        (None, list(json!([iteration(2)])), Some("next+token")),
+                        (Some("next+token"), list(json!([iteration(1)])), None),
+                    ]),
                 ),
                 (
-                    "continuationToken=next%2Btoken",
-                    list(json!([iteration(1)])),
-                    None,
+                    "reviewers",
+                    VecDeque::from([(
+                        None,
+                        list(json!([{"id":"reviewer", "isRequired":true}])),
+                        None,
+                    )]),
                 ),
                 (
-                    "/reviewers?",
-                    list(json!([{"id":"reviewer", "isRequired":true}])),
-                    None,
+                    "threads",
+                    VecDeque::from([(
+                        None,
+                        list(json!([
+                            {"id": 8, "properties":{"CodeReviewThreadType":{"$type":"String","$value":"VoteUpdate"}}, "comments":[]},
+                            {"id": 9, "status":"active", "publishedDate":"2026-01-01T01:00:00+01:00",
+                             "properties":{"review.LLMModel":{"$type":"String","$value":"model"}},
+                             "threadContext":{"filePath":"/src/a.rs","leftFileStart":{"line":2},"rightFileEnd":{"line":5}},
+                             "pullRequestThreadContext":{"changeTrackingId":42,"iterationContext":{"secondComparingIteration":1}},
+                             "comments":[
+                                {"id":2,"parentCommentId":0,"author":{"id":"a","descriptor":"aad.person"},"content":"Reply"},
+                                {"id":1,"parentCommentId":0,"author":{"id":"a","descriptor":"aad.person"},"content":"Opening\nλ"},
+                                {"id":3,"isDeleted":true,"author":{"id":"a"},"content":"removed"}
+                             ]}
+                        ])),
+                        None,
+                    )]),
                 ),
-                (
-                    "/threads?",
-                    list(json!([
-                        {"id": 8, "properties":{"CodeReviewThreadType":{"$type":"String","$value":"VoteUpdate"}}, "comments":[]},
-                        {"id": 9, "status":"active", "publishedDate":"2026-01-01T01:00:00+01:00",
-                         "properties":{"review.LLMModel":{"$type":"String","$value":"model"}},
-                         "threadContext":{"filePath":"/src/a.rs","leftFileStart":{"line":2},"rightFileEnd":{"line":5}},
-                         "pullRequestThreadContext":{"changeTrackingId":42,"iterationContext":{"secondComparingIteration":1}},
-                         "comments":[
-                            {"id":2,"parentCommentId":0,"author":{"id":"a","descriptor":"aad.person"},"content":"Reply"},
-                            {"id":1,"parentCommentId":0,"author":{"id":"a","descriptor":"aad.person"},"content":"Opening\nλ"},
-                            {"id":3,"isDeleted":true,"author":{"id":"a"},"content":"removed"}
-                         ]}
-                    ])),
-                    None,
-                ),
-            ])),
-            requests: RefCell::new(Vec::new()),
+            ]),
+        )
+    }
+
+    /// Successful capture must consume every scripted evidence page.
+    fn collect_complete(
+        transport: &mut Transport<'_>,
+        target: &Target,
+        recording: &Recording,
+    ) -> Value {
+        let result = collect(transport, target).unwrap();
+        recording.assert_complete();
+        result
+    }
+
+    #[test]
+    fn independent_endpoints_allow_either_order_with_ordered_pages() {
+        let target = target();
+        for endpoints in [["reviewers", "threads"], ["threads", "reviewers"]] {
+            let recording = Recording::new(
+                &target,
+                BTreeMap::from([
+                    (
+                        "reviewers",
+                        VecDeque::from([
+                            (None, list(json!(["reviewer-1"])), Some("reviewers-next")),
+                            (Some("reviewers-next"), list(json!(["reviewer-2"])), None),
+                        ]),
+                    ),
+                    (
+                        "threads",
+                        VecDeque::from([
+                            (None, list(json!(["thread-1"])), Some("threads-next")),
+                            (Some("threads-next"), list(json!(["thread-2"])), None),
+                        ]),
+                    ),
+                ]),
+            );
+            let mut transport = Transport::new(&target, None, &recording, &recording, &TestClock);
+            for endpoint in endpoints {
+                let values =
+                    collect_pages(&mut transport, &format!("{}/{endpoint}", target.pr_api()))
+                        .unwrap();
+                let expected = if endpoint == "reviewers" {
+                    json!(["reviewer-1", "reviewer-2"])
+                } else {
+                    json!(["thread-1", "thread-2"])
+                };
+                assert_eq!(json!(values), expected);
+            }
+            recording.assert_complete();
         }
+    }
+
+    #[test]
+    #[should_panic(expected = "unexpected continuation")]
+    fn rejects_out_of_order_endpoint_page() {
+        let recording = recording();
+        let endpoint = format!(
+            "{}/{}/iterations?continuationToken=next%2Btoken",
+            target().collection_url.unwrap(),
+            target().pr_api()
+        );
+        recording
+            .send("GET", &endpoint, "fixture-token", None)
+            .unwrap();
     }
 
     #[test]
@@ -751,8 +894,7 @@ mod tests {
         let target = target();
         let recording = recording();
         let mut transport = Transport::new(&target, None, &recording, &recording, &TestClock);
-        let result = collect(&mut transport, &target).unwrap();
-        assert!(recording.replies.borrow().is_empty());
+        let result = collect_complete(&mut transport, &target, &recording);
         assert_eq!(result["pullRequest"]["reviewedSourceCommit"], "source-2");
         assert_eq!(result["pullRequest"]["reviewedMergeBaseCommit"], "base-2");
         assert_eq!(result["revisions"].as_array().unwrap().len(), 2);
@@ -773,12 +915,12 @@ mod tests {
     fn rejects_nonadvancing_pagination_and_missing_merge_base() {
         let target = target();
         let recording = recording();
-        recording.replies.borrow_mut()[3].2 = Some("next+token");
+        recording.page("iterations", 1).2 = Some("next+token");
         let mut transport = Transport::new(&target, None, &recording, &recording, &TestClock);
         collect(&mut transport, &target).unwrap_err();
 
         let recording = self::recording();
-        recording.replies.borrow_mut()[2].1["value"][0]["commonRefCommit"] = Value::Null;
+        recording.page("iterations", 0).1["value"][0]["commonRefCommit"] = Value::Null;
         let mut transport = Transport::new(&target, None, &recording, &recording, &TestClock);
         collect(&mut transport, &target).unwrap_err();
     }
@@ -787,9 +929,9 @@ mod tests {
     fn deleted_opener_does_not_transfer_property_evidence() {
         let target = target();
         let recording = recording();
-        recording.replies.borrow_mut()[5].1["value"][1]["comments"][1]["isDeleted"] = json!(true);
+        recording.page("threads", 0).1["value"][1]["comments"][1]["isDeleted"] = json!(true);
         let mut transport = Transport::new(&target, None, &recording, &recording, &TestClock);
-        let result = collect(&mut transport, &target).unwrap();
+        let result = collect_complete(&mut transport, &target, &recording);
         assert_eq!(result["threads"][0]["openingCommentId"], 2);
         assert_eq!(
             result["threads"][0]["comments"][0]["authorship"],
@@ -798,19 +940,97 @@ mod tests {
     }
 
     #[test]
+    fn selects_surviving_openers_without_changing_comment_order() {
+        let target = target();
+        let recording = recording();
+        recording.page("threads", 0).1["value"][1]["comments"] = json!([
+            {"id": 10, "author": {"id": "a"}, "content": "ten"},
+            {"id": 1, "isDeleted": true},
+            {"id": "02", "author": {"id": "a"}, "content": "two"},
+            {"id": 5, "author": {"id": "a"}, "content": "five"}
+        ]);
+        let mut transport = Transport::new(&target, None, &recording, &recording, &TestClock);
+        let result = collect_complete(&mut transport, &target, &recording);
+        let thread = &result["threads"][0];
+        assert_eq!(thread["openingCommentId"], "02");
+        assert_eq!(thread["comments"][0]["id"], 10);
+        assert_eq!(thread["comments"][1]["id"], "02");
+        assert_eq!(thread["comments"][2]["id"], 5);
+        assert_eq!(thread["comments"][1]["authorship"], "indeterminate");
+    }
+
+    #[test]
+    fn handles_lone_opaque_and_empty_surviving_comments() {
+        let target = target();
+        for deleted in [false, true] {
+            let recording = recording();
+            recording.page("threads", 0).1["value"][1]["comments"] = json!([
+                {"id": "opaque/id", "isDeleted": deleted, "author": {"id": "a"}, "content": "text"}
+            ]);
+            let mut transport = Transport::new(&target, None, &recording, &recording, &TestClock);
+            let result = collect_complete(&mut transport, &target, &recording);
+            let thread = &result["threads"][0];
+            if deleted {
+                assert_eq!(thread["openingCommentId"], Value::Null);
+                assert_eq!(thread["comments"], json!([]));
+            } else {
+                assert_eq!(thread["openingCommentId"], "opaque/id");
+                assert_eq!(thread["comments"][0]["authorship"], "agent");
+            }
+        }
+    }
+
+    #[test]
+    fn validates_deleted_comment_ids_before_omitting_them() {
+        let target = target();
+        for deleted_id in [json!("01"), json!("opaque"), json!(0), Value::Null] {
+            let recording = recording();
+            recording.page("threads", 0).1["value"][1]["comments"] = json!([
+                {"id": 1, "author": {"id": "a"}},
+                {"id": deleted_id, "isDeleted": true}
+            ]);
+            let mut transport = Transport::new(&target, None, &recording, &recording, &TestClock);
+            collect(&mut transport, &target).unwrap_err();
+        }
+    }
+
+    #[test]
+    fn preserves_iteration_id_representations_and_baseline_comparisons() {
+        let target = target();
+        let recording = recording();
+        {
+            recording.page("iterations", 0).1["value"][0]["id"] = json!("002");
+            recording.page("threads", 0).1["value"][1]["pullRequestThreadContext"]["iterationContext"]
+                ["secondComparingIteration"] = json!("0");
+        }
+        let mut transport = Transport::new(&target, None, &recording, &recording, &TestClock);
+        let result = collect_complete(&mut transport, &target, &recording);
+        assert_eq!(result["revisions"][0]["id"], "002");
+        assert_eq!(result["pullRequest"]["reviewedSourceCommit"], "source-2");
+        assert_eq!(result["threads"][0]["isOutdated"], true);
+
+        for invalid_id in [json!(0), json!("0")] {
+            let recording = self::recording();
+            recording.page("iterations", 0).1["value"][0]["id"] = invalid_id;
+            let mut transport = Transport::new(&target, None, &recording, &recording, &TestClock);
+            collect(&mut transport, &target).unwrap_err();
+        }
+    }
+
+    #[test]
     fn preserves_opaque_thread_ids_and_baseline_anchors() {
         let target = target();
         let recording = recording();
         {
-            let mut replies = recording.replies.borrow_mut();
-            let thread = &mut replies[5].1["value"][1];
+            let mut page = recording.page("threads", 0);
+            let thread = &mut page.1["value"][1];
             thread["id"] = json!("opaque/id");
             thread["pullRequestThreadContext"]["iterationContext"]["secondComparingIteration"] =
                 json!(0);
             thread["publishedDate"] = json!("2026-01-01T00:00:00");
         }
         let mut transport = Transport::new(&target, None, &recording, &recording, &TestClock);
-        let result = collect(&mut transport, &target).unwrap();
+        let result = collect_complete(&mut transport, &target, &recording);
         assert_eq!(result["threads"][0]["id"], "opaque/id");
         assert!(
             result["threads"][0]["url"]
@@ -830,8 +1050,8 @@ mod tests {
         let target = target();
         let recording = recording();
         {
-            let mut replies = recording.replies.borrow_mut();
-            let thread = &mut replies[5].1["value"][1];
+            let mut page = recording.page("threads", 0);
+            let thread = &mut page.1["value"][1];
             thread["threadContext"] = json!({
                 "filePath": "/renamed.rs",
                 "leftFileStart": {"line": 7, "offset": 1},
@@ -842,7 +1062,7 @@ mod tests {
             thread["comments"][0]["parentCommentId"] = json!("00");
         }
         let mut transport = Transport::new(&target, None, &recording, &recording, &TestClock);
-        let result = collect(&mut transport, &target).unwrap();
+        let result = collect_complete(&mut transport, &target, &recording);
         let thread = &result["threads"][0];
         assert_eq!(thread["context"]["filePath"], "renamed.rs");
         assert_eq!(thread["context"]["side"], "left");
@@ -858,12 +1078,12 @@ mod tests {
     fn rejects_missing_or_ambiguous_collections_and_comment_order() {
         let target = target();
         let recording = recording();
-        recording.replies.borrow_mut()[4].1 = json!({});
+        recording.page("reviewers", 0).1 = json!({});
         let mut transport = Transport::new(&target, None, &recording, &recording, &TestClock);
         collect(&mut transport, &target).unwrap_err();
 
         let recording = self::recording();
-        recording.replies.borrow_mut()[5].1["value"][1]["comments"][0]["id"] = json!("opaque");
+        recording.page("threads", 0).1["value"][1]["comments"][0]["id"] = json!("opaque");
         let mut transport = Transport::new(&target, None, &recording, &recording, &TestClock);
         collect(&mut transport, &target).unwrap_err();
     }
@@ -874,31 +1094,27 @@ mod tests {
         let recording = recording();
         {
             let mut replies = recording.replies.borrow_mut();
-            replies[4].2 = Some("reviewers-next");
-            replies.insert(
-                5,
-                (
-                    "continuationToken=reviewers-next",
-                    list(json!([{"id":"other", "isContainer":true}])),
-                    None,
-                ),
-            );
-            replies[6].2 = Some("threads-next");
-            replies[6].1["value"][1]["comments"][0]["parentCommentId"] = json!(1);
-            replies.insert(
-                7,
-                (
-                    "continuationToken=threads-next",
-                    list(json!([{"id":10, "comments":[
-                        {"id":1, "author":{"id":"b"}, "content":" \n  β\r\n\n"}
-                    ]}])),
-                    None,
-                ),
-            );
+            let reviewers = replies.get_mut("reviewers").unwrap();
+            reviewers[0].2 = Some("reviewers-next");
+            reviewers.push_back((
+                Some("reviewers-next"),
+                list(json!([{"id":"other", "isContainer":true}])),
+                None,
+            ));
+            let threads = replies.get_mut("threads").unwrap();
+            threads[0].2 = Some("threads-next");
+            threads[0].1["value"][1]["comments"][0]["parentCommentId"] = json!(1);
+            threads.push_back((
+                Some("threads-next"),
+                list(json!([{"id":10, "comments":[
+                    {"id":1, "author":{"id":"b"}, "content":" \n  β\r\n\n"}
+                ]}])),
+                None,
+            ));
         }
         let mut transport = Transport::new(&target, None, &recording, &recording, &TestClock);
-        let result = collect(&mut transport, &target).unwrap();
-        assert!(recording.replies.borrow().is_empty());
+        let result = collect_complete(&mut transport, &target, &recording);
+        recording.assert_complete();
         assert_eq!(result["reviewers"].as_array().unwrap().len(), 2);
         assert_eq!(result["threads"].as_array().unwrap().len(), 2);
         assert_eq!(result["threads"][0]["comments"][0]["parentId"], 1);
@@ -912,17 +1128,17 @@ mod tests {
     fn refuses_incomplete_later_pages_and_numeric_identity_aliases() {
         let target = target();
         let recording = recording();
-        recording.replies.borrow_mut()[3].1 = json!({"count":1,"value":[]});
+        recording.page("iterations", 1).1 = json!({"count":1,"value":[]});
         let mut transport = Transport::new(&target, None, &recording, &recording, &TestClock);
         collect(&mut transport, &target).unwrap_err();
 
         let recording = self::recording();
-        recording.replies.borrow_mut()[5].1["value"][1]["comments"][0]["id"] = json!("01");
+        recording.page("threads", 0).1["value"][1]["comments"][0]["id"] = json!("01");
         let mut transport = Transport::new(&target, None, &recording, &recording, &TestClock);
         collect(&mut transport, &target).unwrap_err();
 
         let recording = self::recording();
-        recording.replies.borrow_mut()[5].1["value"][1]["id"] = json!("0");
+        recording.page("threads", 0).1["value"][1]["id"] = json!("0");
         let mut transport = Transport::new(&target, None, &recording, &recording, &TestClock);
         collect(&mut transport, &target).unwrap_err();
     }
@@ -934,7 +1150,11 @@ mod tests {
         let http = RefusedPage(&recording);
         let mut transport = Transport::new(&target, None, &recording, &http, &TestClock);
         let error = collect(&mut transport, &target).unwrap_err();
-        assert!(format!("{error:?}").contains("page access denied"));
+        assert_eq!(classification(&error), "permissionDenied");
+        let failure = error.find_source::<Failure>().expect("classified refusal");
+        let diagnostic = failure.to_string();
+        assert!(diagnostic.contains("403"));
+        assert!(diagnostic.contains("page access denied"));
         assert_eq!(recording.requests.borrow().len(), 3);
     }
 
@@ -942,31 +1162,36 @@ mod tests {
     fn rejects_malformed_commit_anchor_parent_and_prose_evidence() {
         let target = target();
         for (page, pointer, value) in [
-            (1, "/description", json!({"unexpected":"object"})),
-            (2, "/value/0/targetRefCommit", json!("not a commit")),
+            ("pr", "/description", json!({"unexpected":"object"})),
             (
-                5,
+                "iterations",
+                "/value/0/targetRefCommit",
+                json!("not a commit"),
+            ),
+            (
+                "threads",
                 "/value/1/threadContext/leftFileStart",
                 json!("not a position"),
             ),
-            (5, "/value/1/threadContext/rightFileEnd/line", json!([])),
             (
-                5,
+                "threads",
+                "/value/1/threadContext/rightFileEnd/line",
+                json!([]),
+            ),
+            (
+                "threads",
                 "/value/1/pullRequestThreadContext/iterationContext",
                 json!("not a comparison"),
             ),
             (
-                5,
+                "threads",
                 "/value/1/pullRequestThreadContext/changeTrackingId",
                 json!([]),
             ),
-            (5, "/value/1/comments/0/parentCommentId", json!({})),
+            ("threads", "/value/1/comments/0/parentCommentId", json!({})),
         ] {
             let recording = recording();
-            *recording.replies.borrow_mut()[page]
-                .1
-                .pointer_mut(pointer)
-                .unwrap() = value;
+            *recording.page(page, 0).1.pointer_mut(pointer).unwrap() = value;
             let mut transport = Transport::new(&target, None, &recording, &recording, &TestClock);
             assert!(collect(&mut transport, &target).is_err(), "{pointer}");
         }
@@ -976,7 +1201,7 @@ mod tests {
     fn refuses_incomplete_authenticated_account_property() {
         let target = target();
         let recording = recording();
-        recording.replies.borrow_mut()[0].1["authenticatedUser"]["properties"] =
+        recording.page("connection", 0).1["authenticatedUser"]["properties"] =
             json!({"Account": {"$type": "String"}});
         let mut transport = Transport::new(&target, None, &recording, &recording, &TestClock);
         collect(&mut transport, &target).unwrap_err();
@@ -984,32 +1209,43 @@ mod tests {
 
     #[test]
     fn shared_provider_fixture_retains_unicode_and_reviewed_commits() {
-        let fixture: Value = serde_json::from_str(include_str!(
+        let fixture: Value = from_str(include_str!(
             "../../../tests/fixtures/ss-review-native-capture/azure-devops.json"
         ))
         .unwrap();
         let responses = &fixture["responses"];
-        let recording = Recording {
-            replies: RefCell::new(VecDeque::from([
-                (
-                    "_apis/connectionData",
-                    responses["connectionData"].clone(),
-                    None,
-                ),
-                ("pullRequests/4242?", responses["pullRequest"].clone(), None),
-                ("/iterations?", responses["iterations"].clone(), None),
-                ("/reviewers?", responses["reviewers"].clone(), None),
-                ("/threads?", responses["threads"].clone(), None),
-            ])),
-            requests: RefCell::new(Vec::new()),
-        };
         let target = Target::pull_request(
             "https://example.visualstudio.com/Example%20Project/_git/example%20repo/pullrequest/4242",
-            Some(crate::target::Platform::AzureDevOps),
+            Some(Platform::AzureDevOps),
         ).unwrap();
+        let recording = Recording::new(
+            &target,
+            BTreeMap::from([
+                (
+                    "connection",
+                    VecDeque::from([(None, responses["connectionData"].clone(), None)]),
+                ),
+                (
+                    "pr",
+                    VecDeque::from([(None, responses["pullRequest"].clone(), None)]),
+                ),
+                (
+                    "iterations",
+                    VecDeque::from([(None, responses["iterations"].clone(), None)]),
+                ),
+                (
+                    "reviewers",
+                    VecDeque::from([(None, responses["reviewers"].clone(), None)]),
+                ),
+                (
+                    "threads",
+                    VecDeque::from([(None, responses["threads"].clone(), None)]),
+                ),
+            ]),
+        );
         let mut transport = Transport::new(&target, None, &recording, &recording, &TestClock);
-        let result = collect(&mut transport, &target).unwrap();
-        let expected: Value = serde_json::from_str(include_str!(
+        let result = collect_complete(&mut transport, &target, &recording);
+        let expected: Value = from_str(include_str!(
             "../../../tests/fixtures/ss-review-native-capture/azure-devops-context.json"
         ))
         .unwrap();

@@ -9,8 +9,10 @@ use crate::{Http, Process};
 use clap::builder::OsStringValueParser;
 use clap::error::ErrorKind;
 use clap::{Args, Parser, Subcommand};
+use jiff::Timestamp;
 use ohno::AppError;
 use serde_json::{Value, json};
+use ss_ai_review::{capture_target, collect_capture};
 use ss_ai_review_context::{
     increment_diagnostic, normalize_options, prepare, prepare_capture, prepare_failure, query,
     read_capture, read_diagnostics, read_saved, write_comment_authorship,
@@ -41,7 +43,7 @@ enum ContextCommand {
         #[arg(long)]
         repository: Option<String>,
         #[arg(long)]
-        pull_request_id: Option<u32>,
+        pull_request_id: Option<NonZeroU32>,
         #[arg(long)]
         collection_url: Option<String>,
         #[arg(long)]
@@ -245,7 +247,7 @@ where
                     .expect("input is an object")
                     .shift_remove("pullRequestId");
             }
-            let target = ss_ai_review::capture_target(&input)?;
+            let target = capture_target(&input)?;
             let output = output_directory.join(format!("{output_prefix}pr-context.json"));
             let url = target
                 .get("webUrl")
@@ -253,13 +255,13 @@ where
                 .ok_or_else(|| fail("invalidInput", "Capture target requires a URL"))?;
             let time = now_utc
                 .as_deref()
-                .map(str::parse::<jiff::Timestamp>)
-                .transpose()?
+                .map(str::parse::<Timestamp>)
+                .transpose()
+                .map_err(|error| caused_by("invalidInput", "Invalid --now-utc timestamp", error))?
                 .unwrap_or_else(|| clock.now());
             let fetched = capture_timestamp(time);
             let prepared = prepare_capture(&output, compare_path.as_deref(), url, clock)?;
-            let context =
-                ss_ai_review::collect_capture(&target, tenant.as_deref(), process, http, clock)?;
+            let context = collect_capture(&target, tenant.as_deref(), process, http, clock)?;
             Ok(serde_json::to_string(
                 &prepared.publish(&context, &fetched)?,
             )?)
@@ -274,7 +276,8 @@ where
                 Some(path) => read_utf8(&path)?,
                 None => classification.unwrap_or_default(),
             };
-            let value: Value = serde_json::from_str(&text)?;
+            let value: Value = serde_json::from_str(&text)
+                .map_err(|error| caused_by("invalidInput", "Invalid classification JSON", error))?;
             if !value.is_array() {
                 return Err(fail("invalidInput", "Classifications must be a JSON array"));
             }
@@ -392,7 +395,7 @@ where
     clippy::integer_division,
     reason = "The capture truncates nanoseconds to the PowerShell tick precision"
 )]
-fn capture_timestamp(time: jiff::Timestamp) -> String {
+fn capture_timestamp(time: Timestamp) -> String {
     format!(
         "{}.{:07}Z",
         time.strftime("%Y-%m-%dT%H:%M:%S"),

@@ -195,7 +195,7 @@ impl<'a> Transport<'a> {
         }
     }
 
-    /// Reads an optional GitHub resource only when HTTP proves it is absent.
+    /// Reads a GitHub resource, accepting an explicit HTTP 404 as absence.
     ///
     /// No diagnostic text or response body can turn another failure into absence.
     pub(crate) fn github_get_if_found(&self, path: &str) -> Result<Option<Value>, AppError> {

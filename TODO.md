@@ -27,7 +27,13 @@ Improvement ideas to revisit when the repo matures.
   rendering, coverage, worker-input, instruction preparation, and cache commands
   use native operations through PowerShell adapters. Retire the adapters after
   their callers migrate while preserving the hybrid workflow's records,
-  transaction boundaries and authority gates.
+  transaction boundaries and authority gates. Until retirement, consolidate
+  the capture and workflow process-launching logic while preserving their
+  distinct output contracts and instruction-cache dependencies.
+- **Detect hard-linked capture lock files.** Reject aliased retained sibling
+  locks before waiting when portable file identity can be checked without
+  interfering with other lock holders. Until then, self-contention fails
+  through the existing bounded lock-contention path.
 - **Type ss-review workflow errors.** Replace generic application errors at the
   finding, plan, audit, projection, anchor, rendering and diff-validation
   boundaries with typed invariant errors and aggregates, preserving command-level
