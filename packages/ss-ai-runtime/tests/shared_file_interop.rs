@@ -236,15 +236,17 @@ fn native_staging_names_identify_a_blocked_transaction() {
                 .map(|entry| entry.unwrap().file_name().into_string().unwrap())
                 .filter(|name| name.starts_with(".ss-ai-transaction-"))
                 .collect::<Vec<_>>();
-            assert_eq!(names.len(), 1);
-            let random = names[0]
+            let [name] = names.as_slice() else {
+                panic!("expected exactly one staging file, found {names:?}");
+            };
+            let random = name
                 .strip_prefix(".ss-ai-transaction-")
                 .unwrap()
                 .strip_suffix(".tmp")
                 .unwrap();
             assert_eq!(random.len(), 24);
             assert!(random.bytes().all(|byte| byte.is_ascii_alphanumeric()));
-            assert_eq!(fs::read(self.directory.join(&names[0])).unwrap(), b"new");
+            assert_eq!(fs::read(self.directory.join(name)).unwrap(), b"new");
             drop(self.blocker.borrow_mut().take());
             Ok(())
         }
