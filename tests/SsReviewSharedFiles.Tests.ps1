@@ -7,6 +7,74 @@ BeforeAll {
     . "$script:Scripts\lib\ReviewWork.ps1"
     . "$script:Scripts\lib\FocusAreaCacheDiagnostics.ps1"
     . "$PSScriptRoot\lib\ConcurrentReviewCommand.ps1"
+
+    # A native clock signals actual contention before the parent admits each retry.
+    function Invoke-ContendedAuditOperation {
+        param(
+            [Parameter(Mandatory)][string] $Path,
+            [Parameter(Mandatory)][ValidateSet('decision', 'feedback')][string] $Operation,
+            [Parameter(Mandatory)][object[]] $InputRecord,
+            [string] $FindingsPath,
+            [string] $FindingId
+        )
+        $executable = $env:SS_AI_AUDIT_TEST_EXECUTABLE
+        if ([string]::IsNullOrWhiteSpace($executable) -or -not [IO.File]::Exists($executable)) {
+            throw 'SS_AI_AUDIT_TEST_EXECUTABLE must name the prepared native audit test executable.'
+        }
+        $processes = [Collections.Generic.List[object]]::new()
+        $lock = Open-PullRequestFileLock -Path $Path
+        try {
+            foreach ($record in $InputRecord) {
+                $start = [Diagnostics.ProcessStartInfo]::new($executable)
+                $start.WorkingDirectory = Split-Path -Parent $PSScriptRoot
+                $start.UseShellExecute = $false
+                $start.RedirectStandardInput = $true
+                $start.RedirectStandardOutput = $true
+                $start.RedirectStandardError = $true
+                foreach ($argument in @('native_audit_lock_interop_helper', '--exact', '--nocapture')) {
+                    $start.ArgumentList.Add($argument)
+                }
+                $start.Environment['SS_AI_AUDIT_INTEROP_OPERATION'] = $Operation
+                $start.Environment['SS_AI_AUDIT_INTEROP_RECORD'] = $Path
+                $start.Environment['SS_AI_AUDIT_INTEROP_INPUT'] = $record.inputPath
+                if ($Operation -ceq 'feedback') {
+                    $start.Environment['SS_AI_AUDIT_INTEROP_FINDINGS'] = $FindingsPath
+                    $start.Environment['SS_AI_AUDIT_INTEROP_FINDING'] = $FindingId
+                    $start.Environment['SS_AI_AUDIT_INTEROP_RESPONSE'] = $record.responseId
+                }
+                $process = [Diagnostics.Process]::Start($start)
+                $processes.Add(@{ process = $process; output = $process.StandardOutput.ReadToEndAsync() })
+            }
+            foreach ($item in $processes) {
+                $diagnostics = [Collections.Generic.List[string]]::new()
+                while ($null -ne ($line = $item.process.StandardError.ReadLine())) {
+                    if ($line -ceq 'lock-contended') { break }
+                    $diagnostics.Add($line)
+                }
+                if ($null -eq $line) {
+                    throw "Native child exited before lock contention: $($diagnostics -join [Environment]::NewLine)"
+                }
+            }
+            $lock.Dispose()
+            foreach ($item in $processes) {
+                $item.process.StandardInput.WriteLine('retry')
+                $item.process.StandardInput.Close()
+                $errors = $item.process.StandardError.ReadToEnd()
+                $item.process.WaitForExit()
+                $item.process.ExitCode | Should -Be 0 -Because "$errors $($item.output.GetAwaiter().GetResult())"
+            }
+        } finally {
+            $lock.Dispose()
+            foreach ($item in $processes) { $item.process.StandardInput.Close() }
+            foreach ($item in $processes) {
+                if (-not $item.process.HasExited) {
+                    try { $item.process.Kill($true) } catch [InvalidOperationException] { }
+                }
+                $item.process.WaitForExit()
+                $item.process.Dispose()
+            }
+        }
+    }
 }
 
 Describe 'Shared workflow file transactions' {
@@ -172,18 +240,15 @@ Describe 'Shared workflow file transactions' {
 
     It 'initializes and appends the shared decision log without losing concurrent decisions' {
         $path = Get-FindingDecisionPath -OutputDirectory $script:Root
-        $commands = @(foreach ($id in @('F1', 'F2', 'F3')) {
-            @{
-                name = 'Add-FindingDecision.ps1'
-                parameters = @{
-                    OutputDirectory = $script:Root; FindingId = $id; Decision = 'needs-audit'
-                    Reason = 'Requires a human decision.'; NowUtc = '2026-10-08T00:00:00Z'
-                }
-            }
+        $inputs = @(foreach ($id in @('F1', 'F2', 'F3')) {
+            $planPath = Join-Path $script:Root "$id.json"
+            $plan = @{ schemaVersion = 1; decisions = @(@{
+                findingId = $id; decision = 'needs-audit'; reason = 'Requires a human decision.'
+            }) }
+            Write-PullRequestOutputFile -Path $planPath -Content (ConvertTo-JsonText -Value $plan)
+            @{ inputPath = $planPath }
         })
-        foreach ($result in @(Invoke-ContendedReviewCommand -Path $path -Command $commands)) {
-            $result.exitCode | Should -Be 0 -Because $result.errors
-        }
+        Invoke-ContendedAuditOperation -Path $path -Operation decision -InputRecord $inputs
         $saved = Read-FindingDecisionDocument -Path $path
         @($saved.decisions.findingId) | Should -Be @('F1', 'F2', 'F3')
     }
@@ -214,20 +279,13 @@ Describe 'Shared workflow file transactions' {
             recommendedAction = 'Initialize and append together.'; anchor = @{ kind = 'file'; path = 'source.ps1' }
         }
         Write-FindingArtifact -Path $artifactPath -Document $artifact
-        $commands = @(foreach ($response in @('first', 'second', 'third')) {
+        $inputs = @(foreach ($response in @('first', 'second', 'third')) {
             $textPath = Join-Path $script:Root "$response.txt"
             Write-PullRequestOutputFile -Path $textPath -Content $response
-            @{
-                name = 'Add-ReviewAuditFeedback.ps1'
-                parameters = @{
-                    OutputDirectory = $script:Root; FindingsPath = $artifactPath
-                    ResponseId = $response; FindingId = $id; TextPath = $textPath
-                }
-            }
+            @{ inputPath = $textPath; responseId = $response }
         })
-        foreach ($result in @(Invoke-ContendedReviewCommand -Path $path -Command $commands)) {
-            $result.exitCode | Should -Be 0 -Because $result.errors
-        }
+        Invoke-ContendedAuditOperation -Path $path -Operation feedback -InputRecord $inputs `
+            -FindingsPath $artifactPath -FindingId $id
         $record = Read-WorkflowData -Kind auditFeedback -Path $path
         @($record.feedback.responseId) | Should -Be @('first', 'second', 'third')
         @($record.feedback.text) | Should -Be @('first', 'second', 'third')

@@ -69,11 +69,13 @@ param(
 
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
+$PSNativeCommandUseErrorActionPreference = $true
 
 . "$PSScriptRoot\lib\JsonValue.ps1"
 . "$PSScriptRoot\lib\PullRequestModel.ps1"
 . "$PSScriptRoot\lib\WorkflowData.ps1"
 . "$PSScriptRoot\lib\FindingModel.ps1"
+. "$PSScriptRoot\lib\NativeWorkflowBridge.ps1"
 . "$PSScriptRoot\lib\FindingMarkdown.ps1"
 . "$PSScriptRoot\lib\TrackerItem.ps1"
 
@@ -107,42 +109,22 @@ $document = Read-RenderableFindingDocument -Path $Path
 $findings = Get-JsonArrayProperty -Node $document -Name 'findings'
 $selected = Select-FindingById -Finding $findings -FindingId (ConvertTo-FindingIdentifierList -Value $FindingId)
 
-$rendered = [System.Collections.Generic.List[object]]::new()
-foreach ($finding in $selected) {
-    $renderedId = [string] (Get-JsonProperty -Node $finding -Name 'id')
-    $renderedPath = Get-FindingMarkdownPath -OutputDirectory $OutputDirectory -FindingId $renderedId
-    $text = ConvertTo-FindingDestinationText -Finding $finding -Destination $Destination -Context $context
-    Write-PullRequestOutputFile -Path $renderedPath -Content $text
-    $rendered.Add([ordered]@{ findingId = $renderedId; path = $renderedPath })
+$request = @{
+    findings = @($findings)
+    selectedFindingIds = @($selected | ForEach-Object { [string] (Get-JsonProperty -Node $_ -Name 'id') })
+    destination = $Destination
+    outputDirectory = Resolve-PullRequestPath -Path $OutputDirectory
+    context = $context
 }
+if ($CombinedPath) { $request.combinedPath = Resolve-PullRequestPath -Path $CombinedPath }
+if ($AuditDocumentPath) { $request.auditDocumentPath = Resolve-PullRequestPath -Path $AuditDocumentPath }
+if ($null -ne $overview) { $request.overview = $overview }
 
-$combinedFullPath = $null
-if ($CombinedPath) {
-    $combinedFullPath = Resolve-PullRequestPath -Path $CombinedPath
-    $combined = ConvertTo-FindingDestinationDocument -Finding $findings -Destination $Destination -Context $context
-    Write-PullRequestOutputFile -Path $combinedFullPath -Content $combined
-}
-
-$auditDocumentFullPath = $null
-if ($AuditDocumentPath) {
-    $auditDocumentFullPath = Resolve-PullRequestPath -Path $AuditDocumentPath
-    $audit = ConvertTo-FindingAuditDocument -Finding $selected -Destination $Destination -Context $context
-    if ($null -ne $overview) {
-        $audit = if ([string]::IsNullOrWhiteSpace($audit)) {
-            $overview
-        } else {
-            Join-FindingMarkdownDocument -Text @($overview, $audit)
-        }
-    }
-
-    Write-PullRequestOutputFile -Path $auditDocumentFullPath -Content $audit
-}
-
-[ordered]@{
-    outputDirectory   = Resolve-PullRequestPath -Path $OutputDirectory
-    destination       = $Destination
-    combinedPath      = $combinedFullPath
-    auditDocumentPath = $auditDocumentFullPath
-    auditDocumentUri  = if ($auditDocumentFullPath) { ([uri] $auditDocumentFullPath).AbsoluteUri } else { $null }
-    findings          = $rendered.ToArray()
-} | ConvertTo-Json -Depth 32 -Compress
+$json = Invoke-NativeReviewWorkflowWithJson `
+    -Arguments @('render-markdown-files') -PathOption 'request-path' -Value $request
+$result = ConvertFrom-JsonVerbatim -Text $json
+$auditDocumentFullPath = $result['auditDocumentPath']
+$result['auditDocumentUri'] = if ($auditDocumentFullPath) {
+    ([uri]::new($auditDocumentFullPath, [UriKind]::Absolute)).AbsoluteUri
+} else { $null }
+ConvertTo-Json -InputObject $result -Depth 32 -Compress

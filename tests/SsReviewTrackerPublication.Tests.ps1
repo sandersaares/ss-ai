@@ -23,6 +23,7 @@ BeforeAll {
     . (Join-Path $script:LibraryRoot 'PullRequestModel.ps1')
     . (Join-Path $script:LibraryRoot 'WorkflowData.ps1')
     . (Join-Path $script:LibraryRoot 'FindingModel.ps1')
+    . (Join-Path $script:LibraryRoot 'NativeWorkflowBridge.ps1')
     . (Join-Path $script:LibraryRoot 'FindingMarkdown.ps1')
     . (Join-Path $script:LibraryRoot 'TrackerItem.ps1')
     . (Join-Path $script:LibraryRoot 'GitDiff.ps1')
@@ -140,6 +141,7 @@ BeforeAll {
             publishedUtc       = '2026-08-01T09:00:00.0000000Z'
             lastEditedUtc      = $null
             isEdited           = $false
+            isAuthoredBySelf   = $false
             authorship         = 'human'
             authorshipEvidence = @()
         }
@@ -160,10 +162,13 @@ BeforeAll {
             resolution       = 'active'
             kind             = 'text'
             isOutdated       = $false
-            context          = [ordered]@{ path = 'src/app.ps1'; rightLine = 3 }
+            isAuthoredBySelf = $false
+            eventUtc         = $null
+            lastUpdatedUtc   = $null
+            context          = [ordered]@{ filePath = 'src/app.ps1'; startLine = 3; endLine = 3; side = 'right' }
             anchorKey        = 'src/app.ps1:3'
             properties       = [ordered]@{}
-            openingCommentId = if ($Comment.Count -gt 0) { [string] $Comment[0]['id'] } else { '' }
+            openingCommentId = if ($Comment.Count -gt 0) { [string] $Comment[0]['id'] } else { $null }
             decision         = $null
             comments         = @($Comment)
         }
@@ -184,6 +189,8 @@ BeforeAll {
             target                = Resolve-PullRequestTarget -Url $PullRequestUrl
             authenticatedIdentity = [ordered]@{ uniqueName = 'runner' }
             pullRequest           = [ordered]@{
+                title                   = 'Review fixture'
+                description             = $null
                 reviewedSourceCommit    = $script:SourceCommit
                 reviewedMergeBaseCommit = $script:MergeBaseCommit
                 isDraft                 = $false
@@ -1082,6 +1089,13 @@ Describe 'Tracker item set' {
         ([string] $items[0]['body']).Contains('Description of F-9', [StringComparison]::Ordinal) | Should -BeTrue
     }
 
+    It 'preserves a timestamp-shaped finding title for publication' {
+        $title = '2026-10-07T00:00:00Z'
+        $items = New-TrackerItemSet -Finding @(New-TestFinding -Id 'F-9' -Title $title)
+
+        $items[0]['title'] | Should -BeExactly $title
+    }
+
     Context 'follow-up resolution' {
         BeforeAll {
             $script:LinkedContext = New-TestContext -Thread @(
@@ -1195,6 +1209,33 @@ Describe 'Audit document' {
         $document.Contains('**Finding `F-1`**', [StringComparison]::Ordinal) | Should -BeTrue
         $document.Contains('Title: Title of F-1', [StringComparison]::Ordinal) | Should -BeTrue
         $document.Contains('**Follows up on**: https://example.invalid/comment/C1', [StringComparison]::Ordinal) | Should -BeTrue
+    }
+
+    It 'renders numeric captured discussion identifiers through tracker document adapters' {
+        $comment = New-TestComment -Id '7'
+        $comment['id'] = 7
+        $thread = New-TestThread -Id '42' -Comment @($comment)
+        $thread['id'] = 42
+        $thread['openingCommentId'] = 7
+        $context = New-TestContext -Thread @($thread) `
+            -PullRequestUrl 'https://dev.azure.com/contoso/widgets/_git/widget/pullrequest/42'
+        $context['platform'] = 'azureDevOps'
+        $context['repositoryUrl'] = 'https://dev.azure.com/contoso/widgets/_git/widget'
+        $contextPath = Write-JsonFixture -Path (Join-Path (New-ScratchDirectory) 'capture.json') -Value $context
+        $context = Read-PullRequestContextDocument -Path $contextPath
+        $context['threads'][0]['id'] | Should -BeOfType [long]
+        $context['threads'][0]['comments'][0]['id'] | Should -BeOfType [long]
+
+        $followUp = New-TestFinding -Id 'F-1' -FollowUpThreadId '42' -FollowUpCommentId '7'
+        $plain = New-TestFinding -Id 'F-2'
+        $expected = '**Follows up on**: https://example.invalid/comment/7'
+        $combined = ConvertTo-FindingDestinationDocument -Finding @($plain, $followUp) -Destination 'tracker' -Context $context
+        $audit = ConvertTo-FindingAuditDocument -Finding @($plain, $followUp) -Destination 'tracker' -Context $context
+        $combined.Contains($expected, [StringComparison]::Ordinal) | Should -BeTrue
+        $audit.Contains($expected, [StringComparison]::Ordinal) | Should -BeTrue
+        $audit.Contains('**Finding `F-2`**', [StringComparison]::Ordinal) | Should -BeTrue
+        $withoutFollowUp = ConvertTo-FindingAuditDocument -Finding @($plain) -Destination 'tracker' -Context $context
+        $withoutFollowUp.Contains('**Follows up on**', [StringComparison]::Ordinal) | Should -BeFalse
     }
 
     It 'renders an empty set as an empty document' {

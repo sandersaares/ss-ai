@@ -11,9 +11,6 @@
 # Update-Finding.ps1 and records a decision once the user settles, carrying the user's own words as
 # feedback so that the pass which improves the review's instructions has them.
 #
-# This is a composition root: it dot-sources the libraries and reaches no decision a library could
-# reach, so every rule it enforces is exercisable offline.
-#
 # The only thing written to stdout is a single compressed JSON object, because the caller parses it;
 # any stray output would corrupt that result. The log goes to a file and errors to the error stream.
 
@@ -38,8 +35,7 @@ param(
     # Reloads durable user responses without making the workflow deserialize or join them.
     [string] $AuditFeedbackPath,
 
-    # A JSON file holding `{ decisions: [ { findingId, decision, reason, feedback } ] }`, where the
-    # reason and the feedback are optional.
+    # A versioned decisions plan. Reason and feedback are optional.
     [string] $PlanPath,
 
     # Restricts worker writes to policy classification, never user verdicts or feedback.
@@ -50,33 +46,30 @@ param(
 
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
+$PSNativeCommandUseErrorActionPreference = $true
 
-. "$PSScriptRoot\lib\JsonValue.ps1"
-. "$PSScriptRoot\lib\PullRequestModel.ps1"
-. "$PSScriptRoot\lib\WorkflowData.ps1"
-. "$PSScriptRoot\lib\FindingModel.ps1"
-. "$PSScriptRoot\lib\ReviewAuditState.ps1"
+. "$PSScriptRoot\lib\NativeWorkflowBridge.ps1"
 
-if ($AuditFeedbackPath) {
-    if ($PolicyClassification -or $Feedback -or $PlanPath -or -not $FindingId) {
-        throw '-AuditFeedbackPath requires an individual user decision without inline feedback.'
-    }
-    $Feedback = Get-ReviewAuditFeedback -Path $AuditFeedbackPath -FindingId $FindingId
+if ($AuditFeedbackPath -and ($PolicyClassification -or $Feedback -or $PlanPath -or -not $FindingId)) {
+    throw '-AuditFeedbackPath requires an individual user decision without inline feedback.'
 }
-
-$requests = Get-FindingDecisionRequest -FindingId $FindingId -Decision $Decision -Reason $Reason -Feedback $Feedback -PlanPath $PlanPath
-
-$decisionsPath = Get-FindingDecisionPath -OutputDirectory $OutputDirectory
-$lock = Open-WorkflowDataLock -Path $decisionsPath
-try {
-    $document = Open-FindingDecisionDocument -Path $decisionsPath
-    $recorded = Add-FindingDecisionBatch -Document $document -Request $requests -PolicyClassification:$PolicyClassification -NowUtc $NowUtc
-
-    # Rejected batches leave the previously committed decisions unchanged.
-    Write-FindingDecisionDocument -Path $decisionsPath -Document $document
-} finally { $lock.Dispose() }
-
-[ordered]@{
-    decisionsPath = $decisionsPath
-    recorded      = $recorded
-} | ConvertTo-Json -Depth 32 -Compress
+$decisionsPath = $ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath((Join-Path $OutputDirectory 'audit-decisions.json'))
+$arguments = @('audit-add-decisions', "--path=$decisionsPath", "--recorded-utc=$($NowUtc.UtcDateTime.ToString('o', [cultureinfo]::InvariantCulture))")
+if ($PolicyClassification) { $arguments += '--policy-classification' }
+if ($AuditFeedbackPath) {
+    $feedbackPath = $ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath($AuditFeedbackPath)
+    $arguments += "--audit-feedback-path=$feedbackPath"
+}
+if ($PlanPath) {
+    if ($FindingId -or $Decision -or $Reason -or $Feedback) { throw 'Supply either a plan or an individual decision, not both.' }
+    $plan = $ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath($PlanPath)
+    Invoke-NativeReviewWorkflow -Arguments ($arguments + "--plan-path=$plan")
+} else {
+    if (-not $FindingId -or -not $Decision) { throw 'Supply a finding and decision, or a plan.' }
+    # ValidateSet accepts mixed case; the decision journal uses canonical lowercase values.
+    $entry = [ordered]@{ findingId = $FindingId; decision = $Decision.ToLowerInvariant() }
+    if (-not [string]::IsNullOrWhiteSpace($Reason)) { $entry.reason = $Reason }
+    if (-not [string]::IsNullOrWhiteSpace($Feedback)) { $entry.feedback = $Feedback }
+    Invoke-NativeReviewWorkflowWithJson -Arguments $arguments -PathOption 'plan-path' `
+        -Value ([ordered]@{ schemaVersion = 1; decisions = @($entry) })
+}

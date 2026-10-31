@@ -577,6 +577,8 @@ Replacements start only after their predecessor stops, with the same
 artifact and log paths. Work allocation remains with the designated classification
 worker; shared decision-log updates are serialized independently. The orchestrator verifies exhaustion through
 the polling command rather than trusting the worker's completion report.
+The native workflow operation owns each complete decision-log transaction;
+PowerShell command adapters preserve the existing file-based interfaces.
 
 Approved-set construction and audit diagnostics treat `needs-audit` as
 undecided. The human audit uses the polling result's pending identifiers without
@@ -1061,6 +1063,8 @@ Pull request comments, tracker items, audit views, and combined documents share
 the same substantive block builder. Destination renderers add only their
 required wrappers. This makes "approved prose equals published prose" an
 architectural property rather than a convention between separate formatters.
+The native workflow renderer supplies this shared prose to the remaining
+PowerShell publication commands through adapters.
 
 Each prose section label is separated from its unchanged content by a blank line.
 This lets lists, code fences, and other Markdown blocks begin at the start of a

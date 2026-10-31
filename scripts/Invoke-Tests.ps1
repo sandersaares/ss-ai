@@ -49,14 +49,14 @@ if ($Suite -in @('All', 'Pester')) {
         'SsReviewPublicationGitHub.Tests.ps1', 'SsReviewPublicationPlan.Tests.ps1',
         'SsReviewPullRequestAnchor.Tests.ps1', 'SsReviewTrackerPublication.Tests.ps1',
         'SsReviewTrackerGitHub.Tests.ps1', 'SsReviewTrackerAzureDevOps.Tests.ps1',
-        'SsReviewPullRequestQuery.Tests.ps1', 'SsReviewSelfReview.Tests.ps1',
+        'SsReviewPullRequestQuery.Tests.ps1', 'SsReviewReports.Tests.ps1', 'SsReviewSelfReview.Tests.ps1',
         'SsReviewSharedFiles.Tests.ps1', 'SsReviewWorkflowData.Tests.ps1',
         'SsReviewWork.Tests.ps1', 'SsReviewWorkerInput.Tests.ps1'
     )
     $selected = @(Get-ChildItem -LiteralPath $Path -Recurse -File | Where-Object Name -In $nativeConsumers)
     $blockedPesterPaths = @()
     $nativeReady = $false
-    $findingTestExecutable = $null
+    $sharedTestExecutables = @{}
 
     if ($selected.Count -gt 0) {
         Push-Location -LiteralPath (Split-Path -Parent $PSScriptRoot)
@@ -87,20 +87,22 @@ if ($Suite -in @('All', 'Pester')) {
         Push-Location -LiteralPath (Split-Path -Parent $PSScriptRoot)
         try {
             # Prepare the process helper before tests acquire any shared locks.
-            $messages = @(& cargo test --package ss-ai-review-workflow --test finding_plans --no-run --locked --message-format json)
+            $messages = @(& cargo test --package ss-ai-review-workflow --test finding_plans --test audit --no-run --locked --message-format json)
             if ($LASTEXITCODE -ne 0) {
-                throw 'Building the finding concurrency test prerequisite failed.'
+                throw 'Building the concurrency test prerequisites failed.'
             }
-            $executables = @($messages | ForEach-Object {
-                $message = $_ | ConvertFrom-Json
-                if ($message.reason -eq 'compiler-artifact' -and $message.target.name -eq 'finding_plans' -and $message.executable) {
-                    $message.executable
+            foreach ($target in @('finding_plans', 'audit')) {
+                $executables = @($messages | ForEach-Object {
+                    $message = $_ | ConvertFrom-Json
+                    if ($message.reason -eq 'compiler-artifact' -and $message.target.name -eq $target -and $message.executable) {
+                        $message.executable
+                    }
+                })
+                if ($executables.Count -ne 1 -or -not (Test-Path -LiteralPath $executables[0] -PathType Leaf)) {
+                    throw "Could not identify the $target concurrency test executable."
                 }
-            })
-            if ($executables.Count -ne 1 -or -not (Test-Path -LiteralPath $executables[0] -PathType Leaf)) {
-                throw 'Could not identify the finding concurrency test executable.'
+                $sharedTestExecutables[$target] = $executables[0]
             }
-            $findingTestExecutable = $executables[0]
         } catch {
             Write-Host "Pester prerequisite failed: $_"
             $blockedPesterPaths += @($sharedFileTests.FullName)
@@ -133,28 +135,35 @@ if ($Suite -in @('All', 'Pester')) {
 
     $originalPath = $env:PATH
     $originalFindingTestExecutable = $env:SS_AI_FINDING_TEST_EXECUTABLE
-    $findingTestCopy = $null
+    $originalAuditTestExecutable = $env:SS_AI_AUDIT_TEST_EXECUTABLE
+    $sharedTestCopies = @{}
     try {
         if ($nativeReady) {
             $env:PATH = (Join-Path $metadata.target_directory 'debug') + [IO.Path]::PathSeparator + $env:PATH
         }
-        if ($findingTestExecutable) {
+        foreach ($target in $sharedTestExecutables.Keys) {
             # Each invocation retains its own immutable helper while Cargo may rebuild its output.
-            $extension = [IO.Path]::GetExtension($findingTestExecutable)
-            $findingTestCopy = Join-Path ([IO.Path]::GetTempPath()) "ss-ai-finding-test-$([guid]::NewGuid().ToString('N'))$extension"
-            [IO.File]::Copy($findingTestExecutable, $findingTestCopy)
+            $executable = $sharedTestExecutables[$target]
+            $extension = [IO.Path]::GetExtension($executable)
+            $copy = Join-Path ([IO.Path]::GetTempPath()) "ss-ai-$target-test-$([guid]::NewGuid().ToString('N'))$extension"
+            [IO.File]::Copy($executable, $copy)
+            $sharedTestCopies[$target] = $copy
             if (-not $IsWindows) {
-                [IO.File]::SetUnixFileMode($findingTestCopy, [IO.File]::GetUnixFileMode($findingTestExecutable))
+                [IO.File]::SetUnixFileMode($copy, [IO.File]::GetUnixFileMode($executable))
             }
-            $env:SS_AI_FINDING_TEST_EXECUTABLE = $findingTestCopy
+        }
+        if ($sharedTestCopies.Count -gt 0) {
+            $env:SS_AI_FINDING_TEST_EXECUTABLE = $sharedTestCopies['finding_plans']
+            $env:SS_AI_AUDIT_TEST_EXECUTABLE = $sharedTestCopies['audit']
         }
 
         $result = Invoke-Pester -Configuration $configuration
     } finally {
         $env:PATH = $originalPath
         $env:SS_AI_FINDING_TEST_EXECUTABLE = $originalFindingTestExecutable
-        if ($findingTestCopy -and [IO.File]::Exists($findingTestCopy)) {
-            [IO.File]::Delete($findingTestCopy)
+        $env:SS_AI_AUDIT_TEST_EXECUTABLE = $originalAuditTestExecutable
+        foreach ($copy in $sharedTestCopies.Values) {
+            if ([IO.File]::Exists($copy)) { [IO.File]::Delete($copy) }
         }
     }
     $failed = $failed -or $result.Result -ne 'Passed'

@@ -5,6 +5,7 @@ BeforeAll {
     . "$script:Scripts\lib\WorkflowData.ps1"
     . "$script:Scripts\lib\FindingModel.ps1"
     . "$script:Scripts\lib\ReviewWork.ps1"
+    . "$script:Scripts\lib\NativeWorkflowBridge.ps1"
     . "$script:Scripts\lib\ReviewAuditState.ps1"
     . "$script:Scripts\lib\FocusAreaPreparation.ps1"
     . "$script:Scripts\lib\FocusAreaExpansion.ps1"
@@ -471,6 +472,16 @@ Describe 'Human audit records' {
         { Add-ReviewAuditFeedback @feedbackArguments } | Should -Throw '*immutable*'
         $feedbackArguments.FindingId = 'missing'
         { Add-ReviewAuditFeedback @feedbackArguments } | Should -Throw
+    }
+
+    It 'returns timestamp-shaped feedback as the original string' {
+        $text = '2026-10-07T00:00:00Z'
+        Add-ReviewAuditFeedback -Path $script:FeedbackPath -FindingsPath $script:FindingsPath `
+            -ResponseId response-1 -FindingId $script:FindingId -Text $text
+
+        $feedback = Get-ReviewAuditFeedback -Path $script:FeedbackPath -FindingId $script:FindingId
+        $feedback | Should -BeOfType [string]
+        $feedback | Should -BeExactly $text
     }
 
     It 'loads accumulated feedback in the decision command rather than a shell-generated argument' {

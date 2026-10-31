@@ -73,19 +73,9 @@ function ConvertTo-FindingDestinationDocument {
         [System.Collections.IDictionary] $Context
     )
 
-    if ($Destination -ceq 'pullRequest') {
-        return ConvertTo-FindingMarkdownDocument -Finding $Finding
-    }
-
-    $ordered = Get-FindingPresentationOrder -Finding $Finding
-    if ($ordered.Count -eq 0) { return '' }
-
-    $texts = [System.Collections.Generic.List[string]]::new()
-    foreach ($entry in $ordered) {
-        $texts.Add((ConvertTo-FindingDestinationText -Finding $entry -Destination 'tracker' -Context $Context))
-    }
-
-    Join-FindingMarkdownDocument -Text $texts.ToArray()
+    $request = @{ operation = 'document'; findings = @($Finding); destination = $Destination }
+    if ($Destination -ceq 'tracker' -and $null -ne $Context) { $request.context = $Context }
+    Invoke-NativeReviewMarkdown -Request $request
 }
 
 # Renders the findings the audit must decide into one document (SKILL.md, "Phase 7: audit").
@@ -113,17 +103,9 @@ function ConvertTo-FindingAuditDocument {
         [System.Collections.IDictionary] $Context
     )
 
-    $ordered = Get-FindingPresentationOrder -Finding $Finding
-    if ($ordered.Count -eq 0) { return '' }
-
-    $sections = [System.Collections.Generic.List[string]]::new()
-    foreach ($entry in $ordered) {
-        $id = [string] (Get-JsonProperty -Node $entry -Name 'id')
-        $text = ConvertTo-FindingDestinationText -Finding $entry -Destination $Destination -Context $Context
-        $sections.Add((@("**Finding ``$id``**", $text) -join "`n`n"))
-    }
-
-    Join-FindingMarkdownDocument -Text $sections.ToArray()
+    $request = @{ operation = 'auditDocument'; findings = @($Finding); destination = $Destination }
+    if ($Destination -ceq 'tracker' -and $null -ne $Context) { $request.context = $Context }
+    Invoke-NativeReviewMarkdown -Request $request
 }
 
 # Builds the items for an approved set, in the order a reader meets them.

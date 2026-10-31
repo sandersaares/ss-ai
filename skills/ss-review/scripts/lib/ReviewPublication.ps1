@@ -9,10 +9,7 @@
 # the numbers it states. Those judgements live here so that both paths reach the same verdict on the
 # same inputs, rather than each carrying its own reading of what an approved set has to satisfy.
 #
-# This is a library file: it is dot-sourced rather than executed, defines only functions and
-# constants, and dot-sources nothing itself. It calls Get-JsonProperty and ConvertFrom-JsonVerbatim
-# from JsonValue.ps1, Resolve-PullRequestPath from PullRequestModel.ps1 and Assert-FindingShape from
-# FindingModel.ps1, which the composition roots load alongside this file.
+# The publication roots load the finding and capture model libraries alongside this adapter.
 
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
@@ -100,15 +97,22 @@ function Assert-ApprovedFindingContext {
         [AllowNull()][System.Collections.IDictionary] $Context
     )
 
-    $expected = Get-JsonProperty -Node $Approved -Name 'reviewedContextHash'
-    if ($null -eq $Context) {
-        if ($null -ne (Get-JsonProperty -Node $Approved -Name 'target') -or $null -ne $expected) {
-            throw 'PR-backed approved findings require -ContextPath naming the checked capture.'
+    try {
+        Invoke-NativeReviewWorkflowWithJson -Arguments @('approved', 'check-request') -PathOption 'request-path' -Value @{
+            approved = $Approved
+            context = $Context
+        } | Out-Null
+    } catch {
+        if ($null -eq $Context -and (
+            $null -ne (Get-JsonProperty -Node $Approved -Name 'target') -or
+            $null -ne (Get-JsonProperty -Node $Approved -Name 'reviewedContextHash')
+        )) {
+            throw "PR-backed approved findings require -ContextPath naming the checked capture. $($_.Exception.Message)"
         }
-        return
-    }
-    if ([string]::IsNullOrEmpty($expected) -or $expected -cne (Get-PullRequestEvidenceHash -Document $Context)) {
-        throw 'Approved findings are not bound to this checked capture. Rebuild after freshness revalidation.'
+        if ($null -eq $Context) {
+            throw "Approved findings cannot be validated. $($_.Exception.Message)"
+        }
+        throw "Approved findings are not bound to this checked capture. $($_.Exception.Message)"
     }
 }
 

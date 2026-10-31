@@ -147,6 +147,7 @@ BeforeAll {
             publishedUtc       = '2024-05-06T07:08:09.0000000Z'
             lastEditedUtc      = $null
             isEdited           = $false
+            isAuthoredBySelf   = $false
             authorship         = 'human'
             authorshipEvidence = @()
         }
@@ -177,6 +178,7 @@ BeforeAll {
             resolution       = 'active'
             kind             = $Kind
             isOutdated       = $false
+            isAuthoredBySelf = $false
             context          = [ordered]@{
                 filePath          = '/src/retry.rs'
                 side              = 'right'
@@ -234,6 +236,7 @@ BeforeAll {
             }
             pullRequest           = [ordered]@{
                 title                   = 'Add retry policy'
+                description             = $null
                 reviewedSourceCommit    = $SourceCommit
                 reviewedMergeBaseCommit = $MergeBaseCommit
             }
@@ -529,6 +532,24 @@ Describe 'Recording executable' {
         $recorded = Resolve-FindingDecision -Document $document -FindingId 'F1'
         $recorded['decision'] | Should -BeExactly 'auto-approved'
         $recorded['reason'] | Should -BeExactly 'Obvious: clarifies ambiguous documentation.'
+    }
+
+    It 'records mixed-case individual decisions in canonical form' -TestCases @(
+        @{ Decision = 'APPROVED'; Expected = 'approved' }
+        @{ Decision = 'Auto-Approved'; Expected = 'auto-approved' }
+    ) {
+        param($Decision, $Expected)
+
+        $result = Invoke-SkillExecutable -Name 'Add-FindingDecision.ps1' -ArgumentList @(
+            '-OutputDirectory', $script:WorkRoot
+            '-FindingId', 'F1'
+            '-Decision', $Decision
+            '-NowUtc', '2024-05-06T09:10:11.0000000Z'
+        )
+
+        $result['exitCode'] | Should -Be 0 -Because $result['standardError']
+        $document = Read-FindingDecisionDocument -Path $script:DecisionsPath
+        (Resolve-FindingDecision -Document $document -FindingId 'F1')['decision'] | Should -BeExactly $Expected
     }
 
     It 'records a batch named in a plan' {        Write-TestJsonFile -Path $script:PlanPath -Value ([ordered]@{

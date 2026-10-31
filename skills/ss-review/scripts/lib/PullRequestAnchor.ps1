@@ -37,14 +37,12 @@
 # carry, so that a finding whose anchor publication would reject is removed while the run can still
 # report it rather than during publication.
 #
-# This is a library file: it is dot-sourced rather than executed, defines only functions and
-# constants, and dot-sources nothing itself. It calls Get-JsonProperty, Get-JsonArrayProperty and
-# Set-JsonProperty from JsonValue.ps1, ConvertTo-CanonicalFindingPath from FindingModel.ps1, and
-# Get-GitDiffFile and Test-GitDiffLineInHunk from GitDiff.ps1, which the executable composition root
-# loads alongside this file.
+# The native resolver owns the shared anchor rules; this library adapts the
+# publication calls and keeps the existing document mutation interface.
 
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
+$PSNativeCommandUseErrorActionPreference = $true
 
 # The kinds of anchor a finding may carry. A line anchor addresses a range within a changed file; a
 # file anchor addresses the file as a whole.
@@ -72,48 +70,11 @@ function Resolve-PullRequestAnchor {
         [System.Collections.IDictionary] $DiffFile
     )
 
-    $kind = [string] (Get-JsonProperty -Node $Anchor -Name 'kind' -Default 'file')
-    if ($script:PullRequestAnchorKinds -notcontains $kind) {
-        throw "An anchor of kind '$kind' cannot be resolved. An anchor is either a line anchor or a file anchor."
+    $result = Invoke-NativeReviewWorkflowWithJson -Arguments @('resolve-anchor') -PathOption 'request-path' -Value @{
+        anchor = $Anchor
+        diffFile = $DiffFile
     }
-
-    $anchorPath = ConvertTo-CanonicalFindingPath -Path ([string] (Get-JsonProperty -Node $Anchor -Name 'path'))
-    $filePath = [string] (Get-JsonProperty -Node $DiffFile -Name 'path')
-
-    # The pairing is the caller's, and a mismatched pair would resolve one file's anchor against
-    # another file's hunks, which is the one way this function could produce a confidently wrong
-    # answer rather than a failure.
-    if (-not [string]::Equals($anchorPath, $filePath, [StringComparison]::OrdinalIgnoreCase)) {
-        throw "An anchor on '$anchorPath' cannot be resolved against the diff entry for '$filePath'."
-    }
-
-    if ($kind -eq 'file') {
-        return New-ResolvedPullRequestAnchor -Kind 'file' -Path $filePath
-    }
-
-    $startLine = [int] (Get-JsonProperty -Node $Anchor -Name 'startLine' -Default 0)
-    $endLine = [int] (Get-JsonProperty -Node $Anchor -Name 'endLine' -Default 0)
-    if ($endLine -le 0) { $endLine = $startLine }
-    if ($startLine -le 0) {
-        throw "A line anchor on '$filePath' names no line."
-    }
-    if ($endLine -lt $startLine) {
-        throw "A line anchor on '$filePath' ends at line $endLine, before it starts at line $startLine."
-    }
-
-    $side = [string] (Get-JsonProperty -Node $Anchor -Name 'side' -Default $script:PullRequestAnchorDefaultSide)
-    if ([string]::IsNullOrWhiteSpace($side)) { $side = $script:PullRequestAnchorDefaultSide }
-    $side = $side.ToLowerInvariant()
-    if ($script:PullRequestAnchorSides -notcontains $side) {
-        throw "A line anchor on '$filePath' names side '$side', which is neither the post-change nor the pre-change side."
-    }
-
-    if (Test-GitDiffLineInHunk -File $DiffFile -StartLine $startLine -EndLine $endLine -Side $side) {
-        return New-ResolvedPullRequestAnchor -Kind 'line' -Path $filePath -StartLine $startLine -EndLine $endLine -Side $side
-    }
-
-    $range = if ($startLine -eq $endLine) { "line $startLine" } else { "lines $startLine-$endLine" }
-    New-ResolvedPullRequestAnchor -Kind 'file' -Path $filePath -DowngradeReason "No hunk of the reviewed diff covers $range on the $side side of '$filePath', so the finding is reported against the file."
+    ConvertFrom-JsonVerbatim -Text $result
 }
 
 # Resolves one anchor against a whole diff, failing when the pull request does not change the file.
@@ -129,13 +90,49 @@ function Resolve-PullRequestAnchorInDiff {
         [System.Collections.IDictionary] $Diff
     )
 
-    $anchorPath = ConvertTo-CanonicalFindingPath -Path ([string] (Get-JsonProperty -Node $Anchor -Name 'path'))
-    $file = Get-GitDiffFile -Diff $Diff -Path $anchorPath
-    if ($null -eq $file) {
-        throw "The reviewed diff does not change '$anchorPath', so a finding cannot be anchored to it. Anchor the finding to a file the pull request changes."
+    $result = Invoke-NativeReviewWorkflowWithJson -Arguments @('resolve-anchor') -PathOption 'request-path' -Value @{
+        anchor = $Anchor
+        diff = $Diff
     }
+    ConvertFrom-JsonVerbatim -Text $result
+}
 
-    Resolve-PullRequestAnchor -Anchor $Anchor -DiffFile $file
+# Resolves a set of authored anchors with one validated copy of the diff.
+function Resolve-PullRequestAnchorsInDiff {
+    param(
+        [Parameter(Mandatory)][AllowEmptyCollection()][object[]] $Anchor,
+        [Parameter(Mandatory)][System.Collections.IDictionary] $Diff
+    )
+
+    $result = Invoke-NativeReviewWorkflowWithJson -Arguments @('resolve-anchor') -PathOption 'request-path' -Value @{
+        anchors = $Anchor
+        diff = $Diff
+    }
+    $response = ConvertFrom-JsonVerbatim -Text $result
+    if ($response -isnot [System.Collections.IDictionary] -or
+        $response.Count -ne 1 -or -not $response.Contains('results') -or
+        $response['results'] -isnot [array] -or $response['results'].Count -ne $Anchor.Count) {
+        throw 'Invalid native anchor resolution response.'
+    }
+    foreach ($entry in $response['results']) {
+        if ($entry -isnot [System.Collections.IDictionary] -or $entry.Count -ne 1) {
+            throw 'Invalid native anchor resolution result.'
+        }
+        if ($entry.Contains('anchor') -and $entry['anchor'] -is [System.Collections.IDictionary]) {
+            $resolved = $entry['anchor']
+            if ($resolved['kind'] -cin @('file', 'line') -and
+                $resolved['path'] -is [string] -and $resolved['path'].Length -gt 0 -and
+                $resolved['wasDowngraded'] -is [bool] -and
+                ($resolved['kind'] -cne 'line' -or
+                    ($resolved['startLine'] -is [long] -and $resolved['endLine'] -is [long] -and
+                        $resolved['side'] -cin @('left', 'right'))) -and
+                (-not $resolved['wasDowngraded'] -or $resolved['downgradeReason'] -is [string])) { continue }
+        }
+        if (($entry.Contains('error') -and $entry['error'] -is [string] -and $entry['error'].StartsWith('Unresolvable anchor:')) -or
+            ($entry.Contains('argumentError') -and $entry['argumentError'] -is [string] -and $entry['argumentError'].Length -gt 0)) { continue }
+        throw 'Invalid native anchor resolution result.'
+    }
+    , $response['results']
 }
 
 # Removes every approved finding the reviewed diff can no longer carry, reporting what it removed
@@ -166,6 +163,14 @@ function Remove-ApprovedFindingOutsideDiff {
     $removed = [System.Collections.Generic.List[object]]::new()
 
     $findings = Get-JsonArrayProperty -Node $Document -Name 'findings'
+    $anchors = [System.Collections.Generic.List[object]]::new()
+    foreach ($finding in $findings) {
+        if ($null -eq (Get-JsonProperty -Node $finding -Name 'followUp')) {
+            $anchors.Add((Get-JsonProperty -Node $finding -Name 'anchor'))
+        }
+    }
+    $results = if ($anchors.Count -gt 0) { Resolve-PullRequestAnchorsInDiff -Anchor $anchors.ToArray() -Diff $Diff } else { , @() }
+    $index = 0
     foreach ($finding in $findings) {
         if ($null -ne (Get-JsonProperty -Node $finding -Name 'followUp')) {
             $kept.Add($finding)
@@ -173,18 +178,18 @@ function Remove-ApprovedFindingOutsideDiff {
         }
 
         $findingId = [string] (Get-JsonProperty -Node $finding -Name 'id')
-        $anchor = $null
-        $path = ''
-
-        try {
-            $anchor = Get-JsonProperty -Node $finding -Name 'anchor'
-            $path = [string] (Get-JsonProperty -Node $anchor -Name 'path' -Default '')
-            Resolve-PullRequestAnchorInDiff -Anchor $anchor -Diff $Diff | Out-Null
+        $anchor = Get-JsonProperty -Node $finding -Name 'anchor'
+        $path = [string] (Get-JsonProperty -Node $anchor -Name 'path' -Default '')
+        $result = $results[$index]
+        $index++
+        if ($result.Contains('argumentError')) {
+            throw $result['argumentError']
+        }
+        if ($result.Contains('anchor')) {
             $kept.Add($finding)
             continue
-        } catch {
-            $reason = $_.Exception.Message
         }
+        $reason = $result['error']
 
         try {
             $path = ConvertTo-CanonicalFindingPath -Path $path -Context "finding '$findingId'"

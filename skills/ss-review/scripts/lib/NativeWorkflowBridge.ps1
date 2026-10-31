@@ -30,6 +30,16 @@ function Invoke-NativeReviewWorkflow {
     } finally { $process.Dispose() }
 }
 
+# Keeps native rendered prose verbatim and arrays intact for PowerShell publishers.
+# Callers load JsonValue.ps1 before invoking this function.
+function Invoke-NativeReviewMarkdown {
+    param([Parameter(Mandatory)][System.Collections.IDictionary] $Request)
+
+    $output = Invoke-NativeReviewWorkflowWithJson -Arguments @('render') -PathOption 'request-path' -Value $Request
+    $result = ConvertFrom-JsonVerbatim -Text $output
+    if ($result -is [array]) { , $result } else { $result }
+}
+
 # Keeps structured prose out of process arguments and removes each private request after use.
 function Invoke-NativeReviewWorkflowWithJson {
     param(

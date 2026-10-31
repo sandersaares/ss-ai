@@ -6,6 +6,7 @@ BeforeAll {
     . (Join-Path $script:LibraryRoot 'WorkflowData.ps1')
     . (Join-Path $script:LibraryRoot 'FindingModel.ps1')
     . (Join-Path $script:LibraryRoot 'GitDiff.ps1')
+    . (Join-Path $script:LibraryRoot 'NativeWorkflowBridge.ps1')
     . (Join-Path $script:LibraryRoot 'PullRequestAnchor.ps1')
 
     # The diff is parsed from recorded Git output, exactly as the composition root would parse the
@@ -135,6 +136,22 @@ index 4444444..0000000
 }
 
 Describe 'ss-review pull request anchor resolution' {
+    It 'preserves timestamp-shaped paths in native anchor responses' {
+        Mock Invoke-NativeReviewWorkflowWithJson {
+            param($Arguments, $PathOption, $Value)
+            if ($Value.ContainsKey('anchors')) {
+                return '{"results":[{"anchor":{"kind":"file","path":"2026-10-07T00:00:00Z","wasDowngraded":false}}]}'
+            }
+            return '{"kind":"file","path":"2026-10-07T00:00:00Z","wasDowngraded":false}'
+        }
+        $anchor = New-TestAnchor -Kind 'file' -Path '2026-10-07T00:00:00Z'
+
+        (Resolve-PullRequestAnchor -Anchor $anchor -DiffFile $script:DiffFiles[0])['path'] | Should -BeExactly $anchor['path']
+        (Resolve-PullRequestAnchorInDiff -Anchor $anchor -Diff $script:Diff)['path'] | Should -BeExactly $anchor['path']
+        (Resolve-PullRequestAnchorsInDiff -Anchor @($anchor) -Diff $script:Diff)[0]['anchor']['path'] |
+            Should -BeExactly $anchor['path']
+    }
+
     It 'passes a line anchor inside a hunk through unchanged' {
         $anchor = New-TestAnchor -Kind 'line' -Path 'src/lib.rs' -StartLine 14 -EndLine 15 -Side 'right'
 
@@ -319,6 +336,95 @@ Describe 'ss-review pull request anchor resolution' {
 }
 
 Describe 'ss-review approved finding freshness against the reviewed diff' {
+    It 'processes multiple anchors and follow-ups together without losing downgrades' {
+        $document = New-TestApprovedDocument -Finding @(
+            New-TestApprovedFinding -Id 'F1' -Anchor (New-TestAnchor -Kind 'file' -Path './src/lib.rs')
+            New-TestApprovedFinding -Id 'F2' -Anchor (New-TestAnchor -Kind 'file' -Path 'SRC/lib.rs')
+            New-TestApprovedFinding -Id 'F3' -Anchor (New-TestAnchor -Kind 'line' -Path 'src/lib.rs' -StartLine 300)
+            New-TestApprovedFinding -Id 'F4' -Anchor (New-TestAnchor -Kind 'file' -Path 'missing') -Override @{ followUp = @{ threadId = 'T' } }
+            New-TestApprovedFinding -Id 'F5' -Anchor (New-TestAnchor -Kind 'file' -Path './src/old-name.rs')
+        )
+
+        $unanchored = Remove-ApprovedFindingOutsideDiff -Document $document -Diff $script:Diff
+
+        @($unanchored | ForEach-Object { $_['findingId'] }) | Should -Be @('F2', 'F5')
+        $unanchored[1]['path'] | Should -BeExactly 'src/old-name.rs'
+        @($document['findings'] | ForEach-Object { $_['id'] }) | Should -Be @('F1', 'F3', 'F4')
+    }
+
+    It 'refuses a malformed diff without changing the approved document' {
+        $document = New-TestApprovedDocument -Finding @(
+            New-TestApprovedFinding -Id 'F1' -Anchor (New-TestAnchor -Kind 'file' -Path 'src/untouched.rs')
+            New-TestApprovedFinding -Id 'F2' -Anchor (New-TestAnchor -Kind 'file' -Path 'src/lib.rs')
+        )
+        $diff = @{ files = @($script:DiffFiles[0], @{ path = 'malformed' }) }
+
+        { Remove-ApprovedFindingOutsideDiff -Document $document -Diff $diff } | Should -Throw
+        @($document['findings'] | ForEach-Object { $_['id'] }) | Should -Be @('F1', 'F2')
+    }
+
+    It 'refuses missing and non-object anchors instead of discarding them' -TestCases @(
+        @{ value = $null }
+        @{ value = 'malformed' }
+    ) {
+        param($value)
+        $finding = New-TestApprovedFinding -Id 'F1' -Anchor (New-TestAnchor -Kind 'file' -Path 'src/lib.rs')
+        $finding['anchor'] = $value
+        $document = New-TestApprovedDocument -Finding @($finding)
+
+        { Remove-ApprovedFindingOutsideDiff -Document $document -Diff $script:Diff } | Should -Throw
+        $document['findings'].Count | Should -Be 1
+    }
+
+    It 'refuses malformed native results instead of dropping findings' {
+        Mock Invoke-NativeReviewWorkflowWithJson { '{"results":[]}' }
+        $document = New-TestApprovedDocument -Finding @(
+            New-TestApprovedFinding -Id 'F1' -Anchor (New-TestAnchor -Kind 'file' -Path 'src/lib.rs')
+        )
+        { Remove-ApprovedFindingOutsideDiff -Document $document -Diff $script:Diff } |
+            Should -Throw -ExpectedMessage '*Invalid native anchor resolution response*'
+        $document['findings'].Count | Should -Be 1
+        Should -Invoke Invoke-NativeReviewWorkflowWithJson -Times 1 -Exactly
+    }
+
+    It 'propagates a native failure without changing the document' {
+        Mock Invoke-NativeReviewWorkflowWithJson { throw 'native process failed' }
+        $document = New-TestApprovedDocument -Finding @(
+            New-TestApprovedFinding -Id 'F1' -Anchor (New-TestAnchor -Kind 'file' -Path 'src/lib.rs')
+            New-TestApprovedFinding -Id 'F2' -Anchor (New-TestAnchor -Kind 'file' -Path 'src/untouched.rs')
+        )
+        { Remove-ApprovedFindingOutsideDiff -Document $document -Diff $script:Diff } |
+            Should -Throw -ExpectedMessage '*native process failed*'
+        $document['findings'].Count | Should -Be 2
+        Should -Invoke Invoke-NativeReviewWorkflowWithJson -Times 1 -Exactly
+    }
+
+    It 'uses one native request for multiple findings and omits follow-ups' {
+        Mock Invoke-NativeReviewWorkflowWithJson {
+            '{"results":[{"anchor":{"kind":"file","path":"src/lib.rs","wasDowngraded":false}},{"error":"Unresolvable anchor: missing"}]}'
+        }
+        $document = New-TestApprovedDocument -Finding @(
+            New-TestApprovedFinding -Id 'F1' -Anchor (New-TestAnchor -Kind 'file' -Path 'src/lib.rs')
+            New-TestApprovedFinding -Id 'F2' -Anchor (New-TestAnchor -Kind 'file' -Path 'missing')
+            New-TestApprovedFinding -Id 'F3' -Anchor (New-TestAnchor -Kind 'file' -Path 'missing') -Override @{ followUp = @{ threadId = 'T' } }
+        )
+        $unanchored = Remove-ApprovedFindingOutsideDiff -Document $document -Diff $script:Diff
+        $unanchored[0]['findingId'] | Should -BeExactly 'F2'
+        Should -Invoke Invoke-NativeReviewWorkflowWithJson -Times 1 -Exactly -ParameterFilter {
+            $Value['anchors'].Count -eq 2
+        }
+    }
+
+    It 'skips native resolution when every finding is a follow-up' {
+        Mock Invoke-NativeReviewWorkflowWithJson { throw 'unexpected native invocation' }
+        $document = New-TestApprovedDocument -Finding @(
+            New-TestApprovedFinding -Id 'F1' -Anchor (New-TestAnchor -Kind 'file' -Path 'missing') -Override @{ followUp = @{ threadId = 'T' } }
+        )
+        $unanchored = Remove-ApprovedFindingOutsideDiff -Document $document -Diff @{ files = 'malformed' }
+        $unanchored.Count | Should -Be 0
+        Should -Invoke Invoke-NativeReviewWorkflowWithJson -Times 0 -Exactly
+    }
+
     # The pull request keeps moving while the review is produced, so a file that was under review
     # when a finding was written can be gone from the diff by the time the audit approves it.
     It 'reports a finding anchored to a file the reviewed diff does not change as unanchored' {
