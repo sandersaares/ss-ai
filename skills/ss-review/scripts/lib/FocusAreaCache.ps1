@@ -47,6 +47,10 @@ $script:FocusAreaGenerationFiles = @(
     'data-guides\focus-areas.md'
     'schemas\workflow-data.schema.json'
     'scripts\lib\WorkflowData.ps1'
+    'scripts\New-ReviewWorkerAssignment.ps1'
+    'scripts\Read-ReviewWorkerDocument.ps1'
+    'scripts\lib\NativeWorkflowBridge.ps1'
+    'pwsh-calls\prepare-worker-assignment.md'
     'scripts\lib\FocusAreaExpansion.ps1'
     'scripts\Update-FocusAreaExpansion.ps1'
     'scripts\Update-FocusAreaMap.ps1'
@@ -447,7 +451,7 @@ function Get-FileRecords {
 # "Cache inputs"):
 #   - the schema version, so entry-format changes partition the cache;
 #   - the generator profile, so output from one model is never served to another;
-#   - the recipe and generation tools, so edits invalidate everything they produced;
+#   - the recipe, generation tools, and native utility, so their edits invalidate prior output;
 #   - every source instruction file's path, length, and content hash;
 #   - a coarse time bucket.
 #
@@ -503,6 +507,14 @@ function Get-FocusAreaCacheDescriptor {
     }
     $generationRecords = @(
         $recipeRecord
+        # The native assignment builder affects generator inputs even when its adapter is unchanged.
+        $nativeProgram = Get-Command ss-ai -CommandType Application -ErrorAction Stop | Select-Object -First 1
+        $nativeFile = Get-Item -LiteralPath $nativeProgram.Source
+        [pscustomobject]@{
+            path = '__generation__/ss-ai'
+            length = $nativeFile.Length
+            sha256 = (Get-FileHash -LiteralPath $nativeFile.FullName -Algorithm SHA256).Hash.ToLowerInvariant()
+        }
         foreach ($relativePath in $script:FocusAreaGenerationFiles) {
             $file = Get-Item -LiteralPath (Join-Path $script:FocusAreaGenerationRoot $relativePath)
             if ($file.Attributes.HasFlag([IO.FileAttributes]::ReparsePoint)) {

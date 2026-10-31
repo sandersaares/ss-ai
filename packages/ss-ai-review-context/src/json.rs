@@ -106,7 +106,13 @@ pub fn powershell_json(value: &Value) -> Result<String, AppError> {
 /// Returns an error when the value cannot be serialized faithfully.
 pub fn document_hash(value: &Value) -> Result<String, AppError> {
     let bytes = powershell_json(value)?;
-    Ok(format!("{:X}", Sha256::digest(bytes.as_bytes())))
+    Ok(bytes_hash(bytes.as_bytes()))
+}
+
+/// Hashes exact input bytes using the workflow's uppercase SHA-256 form.
+#[must_use]
+pub fn bytes_hash(bytes: &[u8]) -> String {
+    format!("{:X}", Sha256::digest(bytes))
 }
 
 /// Hashes the fixed snapshot envelope without copying the capture.
@@ -315,7 +321,16 @@ mod tests {
     use serde_json::{Value, json};
     use sha2::{Digest, Sha256};
 
-    use super::{document_hash, parse_text, powershell_json, snapshot_hash};
+    use super::{bytes_hash, document_hash, parse_text, powershell_json, snapshot_hash};
+
+    #[test]
+    fn byte_hash_uses_exact_bytes_and_uppercase_hex() {
+        assert_eq!(
+            bytes_hash(b"abc"),
+            "BA7816BF8F01CFEA414140DE5DAE2223B00361A396177A9CB410FF61F20015AD"
+        );
+        assert_ne!(bytes_hash(b"abc"), bytes_hash(b"\xef\xbb\xbfabc"));
+    }
 
     #[test]
     fn borrowed_snapshot_envelope_matches_owned_envelope() {

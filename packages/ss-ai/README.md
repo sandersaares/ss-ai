@@ -183,6 +183,23 @@ manifest-based coverage. The [audit guide](../../skills/ss-review/data-guides/au
 describes decision and feedback records. Policy classification does not grant
 user or merge approval, and rendering does not publish or approve findings.
 
+## Worker inputs
+
+`ss-ai workflow worker-assignment` prepares an immutable assignment using the
+active skill directory supplied with `--skill-root`. Its result contains the
+assignment path and a dispatch prompt. The prompt includes recovery guidance
+and a ready-to-run `workflow worker-document` command for each registered
+shared Markdown document. The PowerShell command initializes its own version
+and error handling settings; copy the complete block for initial reads and
+reloads.
+
+The reader checks the registered bytes and emits an exact page, a UTF-16
+continuation offset, and an explicit completion flag. The complete encoded
+output, including its final newline, fits within 16 KiB. Canonical pull request
+captures use the local review context queries instead of the document reader.
+The [worker-input guide](../../skills/ss-review/data-guides/worker-inputs.md)
+describes the assignment and page records.
+
 ## Reapproval discovery
 
 Discovery collects open-PR metadata and complete commit timestamps before

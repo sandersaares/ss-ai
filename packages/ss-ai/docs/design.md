@@ -194,6 +194,13 @@ Approved projections require settled decisions and retain the evidence binding
 needed for freshness checks. Shared Markdown rendering supplies the same finding
 prose to audit and publication without granting approval or contacting a provider.
 
+## Worker inputs
+
+Local worker commands prepare phase-specific assignments from the active skill
+assets without granting orchestration or human decision authority. Workers read
+registered Markdown through bounded, integrity-checked pages with explicit
+continuation. Canonical pull request captures remain selective query inputs.
+
 ## Functional areas
 
 Skills invoke named commands and consume complete JSON results. The command

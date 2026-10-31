@@ -12,11 +12,7 @@ param(
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 $PSNativeCommandUseErrorActionPreference = $true
-. "$PSScriptRoot\lib\JsonValue.ps1"
-. "$PSScriptRoot\lib\PullRequestModel.ps1"
-. "$PSScriptRoot\lib\WorkflowData.ps1"
-. "$PSScriptRoot\lib\FindingModel.ps1"
-. "$PSScriptRoot\lib\ReviewWork.ps1"
-$batch = ConvertFrom-JsonVerbatim -Text ((Read-PullRequestFileText -Path ((Resolve-PullRequestPath -Path $BatchPath))))
-Set-ReviewAssessmentBatch -QueuePath $QueuePath -InventoryPath $InventoryPath -FileGroupsPath $FileGroupsPath -ArtifactPath $ArtifactPath -Batch $batch |
-    ConvertTo-Json -Depth 32 -Compress
+. "$PSScriptRoot\lib\NativeWorkflowBridge.ps1"
+Invoke-NativeReviewWorkflow -Arguments @('complete-review-batch', "--queue-path=$QueuePath",
+    "--inventory-path=$InventoryPath", "--file-groups-path=$FileGroupsPath",
+    "--artifact-path=$ArtifactPath", "--batch-path=$BatchPath")

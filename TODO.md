@@ -25,15 +25,12 @@ Improvement ideas to revisit when the repo matures.
 ## Skill design
 
 - **Migrate ss-review command families to Rust.** Replace the remaining complete
-  families in order: coverage and worker inputs; instruction
-  preparation and cache; provider capture; report tooling; overview publication;
-  final review publication; and trackers. Local context, finding, audit, and
-  rendering commands use native operations through PowerShell adapters. Retire
-  the adapters after their callers
-  migrate while preserving the hybrid workflow's records, transaction boundaries
-  and authority gates. Keep manifest-based review-work and coverage orchestration
-  in PowerShell until the coverage and worker-input migration; finding validation
-  must remain available to that orchestration.
+  families in order: instruction preparation and cache; provider capture;
+  report tooling; overview publication; final review publication; and trackers.
+  Local context, finding, audit, rendering, coverage, and worker-input commands
+  use native operations through PowerShell adapters. Retire the adapters after
+  their callers migrate while preserving the hybrid workflow's records,
+  transaction boundaries and authority gates.
 - **Type ss-review workflow errors.** Replace generic application errors at the
   finding, plan, audit, projection, anchor, rendering and diff-validation
   boundaries with typed invariant errors and aggregates, preserving command-level

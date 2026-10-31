@@ -1142,7 +1142,7 @@ fn same_lock(path: &Path, queue_path: &Path) -> bool {
 }
 
 /// Validates the journal schema and every persisted batch receipt.
-fn validate_queue(
+pub(crate) fn validate_queue(
     queue: &Value,
     require_complete: bool,
     clock: &dyn Clock,

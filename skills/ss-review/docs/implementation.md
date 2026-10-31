@@ -111,8 +111,8 @@ the cache key, so incompatible instruction provenance produces a miss.
 Runtime scripts, report templates, and pinned npm manifests stay together in
 the skill tree so installed links and checkout-relative use share assets.
 
-`New-ReviewWorkerAssignment.ps1` is the common builder for bounded preparation
-and focus-area reviewer tasks. It renders phase instructions, states the
+`New-ReviewWorkerAssignment.ps1` invokes the native builder for bounded preparation
+and focus-area reviewer tasks using the active skill's assets. It renders phase instructions, states the
 delegation authorization without granting orchestration or user authority, and
 selects reviewer paths directly from the immutable work manifest. Prepared
 assignments use resume semantics on first dispatch to retain their findings and
@@ -120,7 +120,7 @@ scope exclusions; entirely excluded assignments have no worker. A replacement
 uses a new assignment with the same reviewer and resume semantics; assignment
 creation never resets a finding artifact or journal.
 
-`Get-ReviewWorkerDataGuidePath` selects a canonical guide by phase. Grouping,
+The builder selects a canonical guide by phase. Grouping,
 focus-area preparation, and review receive `workflow-data.md` followed by their
 respective guide from `data-guides/`. The builder snapshots that text with the
 shared writer's LF normalization into one attempt-local `workflowData` document
@@ -404,18 +404,22 @@ their findings.
 per-file recovery path and normal batch persistence using the inventory size
 reported in issue #125. It generates a fresh fixture with deleted and rename-side
 entries, uses bounded groups, and verifies complete coverage after each run.
-Each persistence call launches a fresh PowerShell process; claims run in the
-driver. Initialization is outside the measured interval.
+The driver invokes the native workflow commands for claims and persistence.
+Initialization and final validation are outside the measured interval.
 
-The `coverageMeasurement` output separates persistence process launches,
-committed journal writes (including claims), schema-validation time, and worker
-elapsed time. Schema timing measures the actual `Assert-WorkflowData` calls;
-elapsed time also includes startup, semantic checks, serialization, and I/O.
-Do not interpret the difference as isolated process startup or as a prediction
-of model-review time. Run without concurrent test workloads when comparing
-elapsed values.
+The `coverageMeasurement` output records the native workflow processes the
+driver starts during the interval, the subset for persistence, and elapsed
+time. The elapsed time includes process startup, draft serialization,
+validation, and I/O. It does not isolate startup or predict model-review time.
+Run without concurrent test workloads when comparing elapsed values.
 
 ```powershell
+#Requires -Version 7.6
+
+Set-StrictMode -Version Latest
+$ErrorActionPreference = 'Stop'
+$PSNativeCommandUseErrorActionPreference = $true
+
 .\dev\ss-review\Measure-ReviewCoverage.ps1 -StateDirectory "{{MEASUREMENT_DIRECTORY}}"
 ```
 
@@ -426,17 +430,8 @@ elapsed values.
 The directory must be new. The command retains its fixture for inspection and
 emits the measurements only after both journals pass coverage validation.
 
-Reference measurement on Windows with PowerShell 7.6.6, using a 121-file
-inventory split at the permitted group bound:
-
-| Persistence path | Process launches | Journal writes | Schema validation | Worker elapsed |
-| --- | ---: | ---: | ---: | ---: |
-| Per-file | 128 | 135 | 36.06 s | 133.88 s |
-| Batch | 7 | 14 | 2.05 s | 8.08 s |
-
-Elapsed values depend on the host and its load. The structural guarantee is
-one persistence process and one journal replacement per completed batch, not
-per assessed file; each group also has its own claim write.
+Elapsed values depend on the host and its load. Batch persistence uses one
+process per completed group rather than one per assessed file.
 
 ## Machine-readable handoffs
 
@@ -663,8 +658,8 @@ The focus-area cache memoizes instruction expansion, not review results.
 
 Its key represents every input capable of changing the generated guidance:
 materialized instruction sources, their stable paths and contents, the
-generation recipe, common and focus-area data guides, format, schema, rendering tools and profile, the cache
-schema, and the external-reference freshness policy. Review files, discussion, and session identity are excluded
+generation recipe, common and focus-area data guides, format, schema, rendering tools and profile, the installed
+native utility's bytes, the cache schema, and the external-reference freshness policy. Review files, discussion, and session identity are excluded
 because they do not define the guidance corpus.
 
 The default generator profile identifies the model that verifies the final

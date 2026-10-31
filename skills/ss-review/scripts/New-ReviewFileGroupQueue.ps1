@@ -16,11 +16,8 @@ param(
 
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
-
-. "$PSScriptRoot\lib\JsonValue.ps1"
-. "$PSScriptRoot\lib\PullRequestModel.ps1"
-. "$PSScriptRoot\lib\WorkflowData.ps1"
-. "$PSScriptRoot\lib\ReviewWork.ps1"
-
-New-ReviewFileGroupQueue -InventoryPath $InventoryPath -FileGroupsPath $FileGroupsPath -QueuePath $QueuePath -Resume:$Resume |
-    ConvertTo-Json -Depth 32 -Compress
+$PSNativeCommandUseErrorActionPreference = $true
+. "$PSScriptRoot\lib\NativeWorkflowBridge.ps1"
+$arguments = @('initialize-review-queue', "--inventory-path=$InventoryPath", "--file-groups-path=$FileGroupsPath", "--queue-path=$QueuePath")
+if ($Resume) { $arguments += '--resume' }
+Invoke-NativeReviewWorkflow -Arguments $arguments

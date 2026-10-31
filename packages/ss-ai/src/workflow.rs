@@ -9,7 +9,9 @@ use clap::{Parser, Subcommand, ValueEnum};
 use jiff::Timestamp;
 use ohno::AppError;
 use serde_json::json;
-use ss_ai_review_workflow::{anchors, approved, audit, findings, markdown, workflow_plan};
+use ss_ai_review_workflow::{
+    anchors, approved, audit, findings, markdown, review_work, worker_input, workflow_plan,
+};
 use ss_ai_runtime::{Clock, Process, caused_by, fail, read_bytes};
 
 /// Exposes local workflow operations without provider access.
@@ -20,9 +22,150 @@ struct WorkflowCli {
     command: WorkflowCommand,
 }
 
-/// Selects an operation and its file-based inputs.
+/// Keeps clap's generated command construction within a bounded stack frame.
 #[derive(Debug, Subcommand)]
 enum WorkflowCommand {
+    #[command(flatten)]
+    Review(ReviewCommand),
+    #[command(flatten)]
+    Worker(WorkerCommand),
+    #[command(flatten)]
+    Audit(AuditCommand),
+    #[command(flatten)]
+    Finding(FindingCommand),
+}
+
+/// Selects review preparation and coverage operations.
+#[derive(Debug, Subcommand)]
+enum ReviewCommand {
+    /// Validate and publish review inventory or file groups.
+    SetReviewInput {
+        #[arg(long)]
+        kind: ReviewInputKind,
+        #[arg(long)]
+        input_path: PathBuf,
+        #[arg(long)]
+        path: PathBuf,
+        #[arg(long)]
+        inventory_path: Option<PathBuf>,
+        #[arg(long)]
+        replace: bool,
+    },
+    /// Prepare immutable review work and its private journals.
+    CreateReviewWork {
+        #[arg(long)]
+        inventory_path: PathBuf,
+        #[arg(long)]
+        file_groups_path: PathBuf,
+        #[arg(long)]
+        focus_area_directory: PathBuf,
+        #[arg(long)]
+        output_directory: PathBuf,
+        #[arg(long)]
+        repository_root: Option<PathBuf>,
+        #[arg(long)]
+        artifact_directory: Option<PathBuf>,
+    },
+    /// Create or explicitly resume a file-group journal.
+    InitializeReviewQueue {
+        #[arg(long)]
+        inventory_path: PathBuf,
+        #[arg(long)]
+        file_groups_path: PathBuf,
+        #[arg(long)]
+        queue_path: PathBuf,
+        #[arg(long)]
+        resume: bool,
+    },
+    /// Dispatch the next focus area or claim a file group.
+    NextReviewItem {
+        #[arg(long)]
+        queue_path: PathBuf,
+    },
+    /// Complete a claimed file group.
+    CompleteReviewGroup {
+        #[arg(long)]
+        queue_path: PathBuf,
+        #[arg(long)]
+        group_id: String,
+    },
+    /// Record one file assessment.
+    SetReviewAssessment {
+        #[arg(long)]
+        queue_path: PathBuf,
+        #[arg(long)]
+        inventory_path: PathBuf,
+        #[arg(long)]
+        file_groups_path: PathBuf,
+        #[arg(long)]
+        assessment_path: PathBuf,
+    },
+    /// Commit a complete assessment batch and receipt.
+    CompleteReviewBatch {
+        #[arg(long)]
+        queue_path: PathBuf,
+        #[arg(long)]
+        inventory_path: PathBuf,
+        #[arg(long)]
+        file_groups_path: PathBuf,
+        #[arg(long)]
+        artifact_path: PathBuf,
+        #[arg(long)]
+        batch_path: PathBuf,
+    },
+    /// Block a failed reviewer until explicit resume.
+    FailReviewWorker {
+        #[arg(long)]
+        queue_path: PathBuf,
+        #[arg(long)]
+        reason: String,
+    },
+    /// Validate findings and coverage against the immutable manifest.
+    ValidateReviewWork {
+        #[arg(long)]
+        manifest_path: PathBuf,
+        #[arg(long)]
+        artifact_directory: PathBuf,
+    },
+}
+
+/// Selects worker input and rendering operations.
+#[derive(Debug, Subcommand)]
+enum WorkerCommand {
+    /// Prepare a bounded worker assignment from installed skill assets.
+    WorkerAssignment {
+        #[arg(long)]
+        phase: String,
+        #[arg(long)]
+        session_state: PathBuf,
+        #[arg(long)]
+        scope_path: PathBuf,
+        #[arg(long)]
+        output_directory: PathBuf,
+        #[arg(long)]
+        skill_root: PathBuf,
+        #[arg(long)]
+        manifest_path: Option<PathBuf>,
+        #[arg(long)]
+        reviewer_id: Option<String>,
+        #[arg(long)]
+        context_path: Option<PathBuf>,
+        #[arg(long)]
+        resume: bool,
+        #[arg(long)]
+        repository_instructions: bool,
+        #[arg(long)]
+        include_pre_existing: bool,
+    },
+    /// Read one bounded page of an assigned document.
+    WorkerDocument {
+        #[arg(long)]
+        assignment_path: PathBuf,
+        #[arg(long)]
+        document_id: String,
+        #[arg(long, default_value_t = 0)]
+        offset: usize,
+    },
     /// Render shared finding prose from a file-based request.
     Render {
         #[arg(long)]
@@ -38,6 +181,11 @@ enum WorkflowCommand {
         #[arg(long)]
         request_path: PathBuf,
     },
+}
+
+/// Selects audit and approved-set operations.
+#[derive(Debug, Subcommand)]
+enum AuditCommand {
     /// Append an audit decision batch.
     AuditAddDecisions {
         #[arg(long)]
@@ -118,6 +266,11 @@ enum WorkflowCommand {
         #[command(subcommand)]
         command: ApprovedCommand,
     },
+}
+
+/// Selects plan and finding artifact operations.
+#[derive(Debug, Subcommand)]
+enum FindingCommand {
     /// Create an empty workflow plan.
     PlanInitialize {
         #[arg(long, value_enum)]
@@ -292,6 +445,15 @@ impl PlanKind {
     }
 }
 
+/// Selects the review preparation input schema.
+#[derive(Clone, Copy, Debug, ValueEnum)]
+enum ReviewInputKind {
+    /// Complete changed-file inventory.
+    Inventory,
+    /// File groups covering the inventory.
+    Groups,
+}
+
 /// Runs a local workflow command using the supplied external boundaries.
 pub fn run<I, T>(arguments: I, process: &dyn Process, clock: &dyn Clock) -> Result<String, AppError>
 where
@@ -315,28 +477,190 @@ where
         }
     };
     match cli.command {
-        WorkflowCommand::Render { request_path } => {
+        WorkflowCommand::Review(ReviewCommand::SetReviewInput {
+            kind,
+            input_path,
+            path,
+            inventory_path,
+            replace,
+        }) => {
+            let input_path = absolute(input_path)?;
+            let path = absolute(path)?;
+            let result = match kind {
+                ReviewInputKind::Inventory => {
+                    review_work::set_input_inventory(&input_path, &path, replace, clock)?
+                }
+                ReviewInputKind::Groups => {
+                    let inventory = inventory_path
+                        .ok_or_else(|| fail("invalidInput", "Groups require an inventory path"))?;
+                    review_work::set_input_groups(
+                        &absolute(inventory)?,
+                        &input_path,
+                        &path,
+                        replace,
+                        clock,
+                    )?
+                }
+            };
+            Ok(serde_json::to_string(&result)?)
+        }
+        WorkflowCommand::Review(ReviewCommand::CreateReviewWork {
+            inventory_path,
+            file_groups_path,
+            focus_area_directory,
+            output_directory,
+            repository_root,
+            artifact_directory,
+        }) => {
+            let repository_root = repository_root.map(absolute).transpose()?;
+            let artifact_directory = artifact_directory.map(absolute).transpose()?;
+            Ok(serde_json::to_string(&review_work::create(
+                &absolute(inventory_path)?,
+                &absolute(file_groups_path)?,
+                &absolute(focus_area_directory)?,
+                &absolute(output_directory)?,
+                repository_root.as_deref(),
+                artifact_directory.as_deref(),
+                clock,
+            )?)?)
+        }
+        WorkflowCommand::Review(ReviewCommand::InitializeReviewQueue {
+            inventory_path,
+            file_groups_path,
+            queue_path,
+            resume,
+        }) => Ok(serde_json::to_string(&review_work::initialize_queue(
+            &absolute(inventory_path)?,
+            &absolute(file_groups_path)?,
+            &absolute(queue_path)?,
+            resume,
+            clock,
+        )?)?),
+        WorkflowCommand::Review(ReviewCommand::NextReviewItem { queue_path }) => Ok(
+            serde_json::to_string(&review_work::next(&absolute(queue_path)?, clock)?)?,
+        ),
+        WorkflowCommand::Review(ReviewCommand::CompleteReviewGroup {
+            queue_path,
+            group_id,
+        }) => Ok(serde_json::to_string(&review_work::complete_group(
+            &absolute(queue_path)?,
+            &group_id,
+            clock,
+        )?)?),
+        WorkflowCommand::Review(ReviewCommand::SetReviewAssessment {
+            queue_path,
+            inventory_path,
+            file_groups_path,
+            assessment_path,
+        }) => Ok(serde_json::to_string(
+            &review_work::set_assessment_from_file(
+                &absolute(queue_path)?,
+                &absolute(inventory_path)?,
+                &absolute(file_groups_path)?,
+                &absolute(assessment_path)?,
+                clock,
+            )?,
+        )?),
+        WorkflowCommand::Review(ReviewCommand::CompleteReviewBatch {
+            queue_path,
+            inventory_path,
+            file_groups_path,
+            artifact_path,
+            batch_path,
+        }) => Ok(serde_json::to_string(
+            &review_work::complete_batch_from_file(
+                &absolute(queue_path)?,
+                &absolute(inventory_path)?,
+                &absolute(file_groups_path)?,
+                &absolute(artifact_path)?,
+                &absolute(batch_path)?,
+                clock,
+            )?,
+        )?),
+        WorkflowCommand::Review(ReviewCommand::FailReviewWorker { queue_path, reason }) => {
+            Ok(serde_json::to_string(&review_work::set_failure(
+                &absolute(queue_path)?,
+                &reason,
+                clock,
+            )?)?)
+        }
+        WorkflowCommand::Review(ReviewCommand::ValidateReviewWork {
+            manifest_path,
+            artifact_directory,
+        }) => Ok(serde_json::to_string(&review_work::validate(
+            &absolute(manifest_path)?,
+            &absolute(artifact_directory)?,
+            clock,
+        )?)?),
+        WorkflowCommand::Worker(WorkerCommand::WorkerAssignment {
+            phase,
+            session_state,
+            scope_path,
+            output_directory,
+            skill_root,
+            manifest_path,
+            reviewer_id,
+            context_path,
+            resume,
+            repository_instructions,
+            include_pre_existing,
+        }) => {
+            let skill_root = absolute(skill_root)?;
+            let manifest_path = manifest_path.map(absolute).transpose()?;
+            let context_path = context_path.map(absolute).transpose()?;
+            let result = worker_input::create_assignment(
+                &worker_input::AssignmentOptions {
+                    phase: &phase,
+                    session_state: &absolute(session_state)?,
+                    scope_path: &absolute(scope_path)?,
+                    output_directory: &absolute(output_directory)?,
+                    skill_root: &skill_root,
+                    manifest_path: manifest_path.as_deref(),
+                    reviewer_id: reviewer_id.as_deref(),
+                    context_path: context_path.as_deref(),
+                    resume,
+                    repository_instructions,
+                    include_pre_existing,
+                },
+                clock,
+            )?;
+            Ok(serde_json::to_string(&result)?)
+        }
+        WorkflowCommand::Worker(WorkerCommand::WorkerDocument {
+            assignment_path,
+            document_id,
+            offset,
+        }) => Ok(serde_json::to_string(&worker_input::read_document(
+            &absolute(assignment_path)?,
+            &document_id,
+            offset,
+            clock,
+        )?)?),
+        WorkflowCommand::Worker(WorkerCommand::Render { request_path }) => {
             let bytes = read_bytes(&absolute(request_path)?, clock)?
                 .ok_or_else(|| fail("invalidInput", "Rendering request is missing"))?;
             Ok(serde_json::to_string(&markdown::render_json(&bytes)?)?)
         }
-        WorkflowCommand::RenderMarkdownFiles { request_path } => {
+        WorkflowCommand::Worker(WorkerCommand::RenderMarkdownFiles { request_path }) => {
             let bytes = read_bytes(&absolute(request_path)?, clock)?
                 .ok_or_else(|| fail("invalidInput", "Rendering request is missing"))?;
             Ok(serde_json::to_string(&markdown::render_files_json(
                 &bytes, clock,
             )?)?)
         }
-        WorkflowCommand::ResolveAnchor { request_path } => Ok(serde_json::to_string(
-            &anchors::resolve_request_path(&absolute(request_path)?, clock)?,
-        )?),
-        WorkflowCommand::AuditAddDecisions {
+        WorkflowCommand::Worker(WorkerCommand::ResolveAnchor { request_path }) => {
+            Ok(serde_json::to_string(&anchors::resolve_request_path(
+                &absolute(request_path)?,
+                clock,
+            )?)?)
+        }
+        WorkflowCommand::Audit(AuditCommand::AuditAddDecisions {
             path,
             plan_path,
             audit_feedback_path,
             policy_classification,
             recorded_utc,
-        } => {
+        }) => {
             let audit_feedback_path = audit_feedback_path.map(absolute).transpose()?;
             Ok(serde_json::to_string(&audit::add_decisions(
                 &absolute(path)?,
@@ -347,21 +671,21 @@ where
                 clock,
             )?)?)
         }
-        WorkflowCommand::AuditPollClassification {
+        WorkflowCommand::Audit(AuditCommand::AuditPollClassification {
             artifact_path,
             decisions_path,
-        } => Ok(serde_json::to_string(&audit::poll_classification(
+        }) => Ok(serde_json::to_string(&audit::poll_classification(
             &absolute(artifact_path)?,
             &absolute(decisions_path)?,
             clock,
         )?)?),
-        WorkflowCommand::AuditAddFeedback {
+        WorkflowCommand::Audit(AuditCommand::AuditAddFeedback {
             path,
             findings_path,
             response_id,
             finding_id,
             text_path,
-        } => {
+        }) => {
             audit::add_feedback(
                 &absolute(path)?,
                 &absolute(findings_path)?,
@@ -374,26 +698,26 @@ where
                 "status": "Recorded", "findingId": finding_id, "responseId": response_id
             }))?)
         }
-        WorkflowCommand::AuditGetFeedback { path, finding_id } => Ok(serde_json::to_string(
-            &audit::get_feedback(&absolute(path)?, &finding_id, clock)?,
-        )?),
-        WorkflowCommand::AuditTestMergeApproval {
+        WorkflowCommand::Audit(AuditCommand::AuditGetFeedback { path, finding_id }) => Ok(
+            serde_json::to_string(&audit::get_feedback(&absolute(path)?, &finding_id, clock)?)?,
+        ),
+        WorkflowCommand::Audit(AuditCommand::AuditTestMergeApproval {
             path,
             pull_request_url,
             source_commit,
-        } => Ok(serde_json::to_string(&audit::test_merge_approval(
+        }) => Ok(serde_json::to_string(&audit::test_merge_approval(
             &absolute(path)?,
             &pull_request_url,
             &source_commit,
             clock,
         )?)?),
-        WorkflowCommand::AuditSetMergeApproval {
+        WorkflowCommand::Audit(AuditCommand::AuditSetMergeApproval {
             path,
             context_path,
             approve,
             carry_forward,
             previous_context_path,
-        } => {
+        }) => {
             let context_path = absolute(context_path)?;
             let previous_context_path = previous_context_path.map(absolute).transpose()?;
             let result = audit::set_merge_approval(
@@ -406,13 +730,13 @@ where
             )?;
             Ok(serde_json::to_string(&result)?)
         }
-        WorkflowCommand::AuditSetMergeApprovalValues {
+        WorkflowCommand::Audit(AuditCommand::AuditSetMergeApprovalValues {
             path,
             context_path,
             approve,
             carry_forward,
             previous_context_path,
-        } => {
+        }) => {
             let previous_context_path = previous_context_path.map(absolute).transpose()?;
             let result = audit::set_merge_approval_from_files(
                 &absolute(path)?,
@@ -424,7 +748,7 @@ where
             )?;
             Ok(serde_json::to_string(&result)?)
         }
-        WorkflowCommand::Approved { command } => match command {
+        WorkflowCommand::Audit(AuditCommand::Approved { command }) => match command {
             ApprovedCommand::Build {
                 path,
                 decisions_path,
@@ -454,19 +778,19 @@ where
                 Ok(serde_json::to_string(&json!({"status": "Valid"}))?)
             }
         },
-        WorkflowCommand::PlanInitialize { kind, path } => {
+        WorkflowCommand::Finding(FindingCommand::PlanInitialize { kind, path }) => {
             let path = absolute(path)?;
             workflow_plan::initialize(kind.native(), &path, clock)?;
             Ok(serde_json::to_string(&json!({
                 "status": "Created", "path": path, "kind": kind.name()
             }))?)
         }
-        WorkflowCommand::PlanAppend {
+        WorkflowCommand::Finding(FindingCommand::PlanAppend {
             kind,
             path,
             item_path,
             replace_index,
-        } => {
+        }) => {
             let path = absolute(path)?;
             let item_path = absolute(item_path)?;
             workflow_plan::append(kind.native(), &path, &item_path, replace_index, clock)?;
@@ -474,14 +798,14 @@ where
                 "status": "Recorded", "path": path, "kind": kind.name()
             }))?)
         }
-        WorkflowCommand::InitializeFinding {
+        WorkflowCommand::Finding(FindingCommand::InitializeFinding {
             output_directory,
             reviewer_id,
             focus_area,
             force,
             resume,
             queue_path,
-        } => {
+        }) => {
             let artifact_path = absolute(output_directory)?.join(format!("{reviewer_id}.json"));
             let (document, resumed_existing) = match queue_path {
                 Some(queue_path) => {
@@ -512,13 +836,13 @@ where
                 "findingCount": count, "resumedExisting": resumed_existing
             }))?)
         }
-        WorkflowCommand::AddFinding {
+        WorkflowCommand::Finding(FindingCommand::AddFinding {
             artifact_path,
             finding_path,
             context_path,
             origin,
             source_id,
-        } => {
+        }) => {
             let artifact_path = absolute(artifact_path)?;
             let finding_path = absolute(finding_path)?;
             let context_path = context_path.map(absolute).transpose()?;
@@ -534,10 +858,10 @@ where
                 "artifactPath": artifact_path, "findingId": finding_id
             }))?)
         }
-        WorkflowCommand::CompleteFinding {
+        WorkflowCommand::Finding(FindingCommand::CompleteFinding {
             artifact_path,
             queue_path,
-        } => {
+        }) => {
             let artifact_path = absolute(artifact_path)?;
             let document = findings::complete(&artifact_path, &absolute(queue_path)?, clock)?;
             let count = document
@@ -552,20 +876,24 @@ where
                 "artifactPath": artifact_path, "findingCount": count, "status": status
             }))?)
         }
-        WorkflowCommand::ValidateCandidates { path, index_path } => {
+        WorkflowCommand::Finding(FindingCommand::ValidateCandidates { path, index_path }) => {
             let count =
                 findings::validate_candidates(&absolute(path)?, &absolute(index_path)?, clock)?;
             Ok(serde_json::to_string(
                 &json!({"status": "Valid", "clusterCount": count}),
             )?)
         }
-        WorkflowCommand::ValidateFindings { path, reviewer_id } => Ok(serde_json::to_string(
-            &findings::validate_artifacts(&absolute(path)?, &reviewer_id, clock)?,
-        )?),
-        WorkflowCommand::FindingIndex {
+        WorkflowCommand::Finding(FindingCommand::ValidateFindings { path, reviewer_id }) => {
+            Ok(serde_json::to_string(&findings::validate_artifacts(
+                &absolute(path)?,
+                &reviewer_id,
+                clock,
+            )?)?)
+        }
+        WorkflowCommand::Finding(FindingCommand::FindingIndex {
             reviewer_directory,
             output_path,
-        } => {
+        }) => {
             let result = findings::build_index_result(
                 &absolute(reviewer_directory)?,
                 &absolute(output_path)?,
@@ -576,11 +904,11 @@ where
                 "findingCount": result.finding_count
             }))?)
         }
-        WorkflowCommand::ConsolidateFindings {
+        WorkflowCommand::Finding(FindingCommand::ConsolidateFindings {
             reviewer_directory,
             output_path,
             plan_path,
-        } => {
+        }) => {
             let plan_path = plan_path.map(absolute).transpose()?;
             let result = findings::consolidate_result(
                 &absolute(reviewer_directory)?,
@@ -593,12 +921,12 @@ where
                 "mergedCount": result.merged_count, "carriedOverCount": result.carried_over_count
             }))?)
         }
-        WorkflowCommand::UpdateFinding {
+        WorkflowCommand::Finding(FindingCommand::UpdateFinding {
             artifact_path,
             finding_id,
             finding_path,
             plan_path,
-        } => {
+        }) => {
             let artifact_path = absolute(artifact_path)?;
             let updates = match (finding_id, finding_path, plan_path) {
                 (Some(id), Some(path), None) => vec![(id, absolute(path)?)],
@@ -635,11 +963,11 @@ where
                 &json!({"artifactPath": artifact_path, "updated": ids}),
             )?)
         }
-        WorkflowCommand::RemoveFinding {
+        WorkflowCommand::Finding(FindingCommand::RemoveFinding {
             artifact_path,
             plan_path,
             now_utc,
-        } => {
+        }) => {
             let artifact_path = absolute(artifact_path)?;
             let plan = workflow_plan::read(
                 workflow_plan::PlanKind::Removals,

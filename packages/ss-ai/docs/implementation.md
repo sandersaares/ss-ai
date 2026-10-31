@@ -14,8 +14,8 @@ The nonpublished workspace packages implement the utility-wide [design](design.m
 - `ss-ai-review-context` owns local captured evidence, bounded queries, saved
   requests, and input diagnostics.
 - `ss-ai-review-workflow` owns local finding artifacts, consolidation, audit
-  records, approved projections, shared Markdown rendering, and their workflow
-  plans.
+  records, approved projections, shared Markdown rendering, worker assignments,
+  bounded shared-document reads, and their workflow plans.
 
 Dependencies flow from command composition toward focused operations and shared
 runtime boundaries, never back to the executable. Review selection, provider
