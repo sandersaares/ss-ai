@@ -1793,6 +1793,24 @@ impl GitHubApproval {
     }
 }
 
+/// Matches `gh --paginate --slurp`, including an empty response page.
+fn github_slurped_pages(values: &Value) -> Value {
+    let values = values.as_array().unwrap();
+    if values.is_empty() {
+        return json!([[]]);
+    }
+    Value::Array(values.iter().map(|value| json!([value])).collect())
+}
+
+#[test]
+fn github_approval_pages_include_an_empty_response_page() {
+    assert_eq!(github_slurped_pages(&json!([])), json!([[]]));
+    assert_eq!(
+        github_slurped_pages(&json!([{"id": 1}, {"id": 2}])),
+        json!([[{"id": 1}], [{"id": 2}]])
+    );
+}
+
 impl Process for GitHubApproval {
     fn execute(
         &self,
@@ -1808,16 +1826,6 @@ impl Process for GitHubApproval {
             "Inspection must not write remotely"
         );
         self.calls.borrow_mut().push(path.to_owned());
-        let pages = |values: &Value| {
-            Value::Array(
-                values
-                    .as_array()
-                    .unwrap()
-                    .iter()
-                    .map(|value| json!([value]))
-                    .collect(),
-            )
-        };
         let response = match path {
             "user" => {
                 self.identity_reads.set(self.identity_reads.get() + 1);
@@ -1850,7 +1858,7 @@ impl Process for GitHubApproval {
                 if self.fault == "restPage" {
                     json!([self.evidence["reviews"], null])
                 } else {
-                    pages(&self.evidence["reviews"])
+                    github_slurped_pages(&self.evidence["reviews"])
                 }
             }
             "repos/example/widgets/issues/1/comments?per_page=100" => {
@@ -1858,10 +1866,10 @@ impl Process for GitHubApproval {
                 if self.fault == "discussion" && self.pr_reads.get() > 1 {
                     comments[0]["body"] = json!("Changed discussion.");
                 }
-                pages(&comments)
+                github_slurped_pages(&comments)
             }
             "repos/example/widgets/pulls/1/comments?per_page=100" => {
-                pages(&self.evidence["reviewComments"])
+                github_slurped_pages(&self.evidence["reviewComments"])
             }
             "repos/example/widgets/rules/branches/fixture-target?per_page=100" => {
                 assert!(arguments.iter().any(|argument| argument == "--paginate"));

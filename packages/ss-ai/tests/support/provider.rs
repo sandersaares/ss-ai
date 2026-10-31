@@ -48,6 +48,11 @@ fn main() {
 
 /// Keeps remote responses and mutable claim files inside the caller's private fixture.
 fn github(args: &[String]) {
+    if env::var_os("FIXTURE_CAPTURE").is_some() {
+        github_capture(args);
+        return;
+    }
+
     let path = &args[1];
     let method = &args[args.iter().position(|arg| arg == "--method").unwrap() + 1];
     let root = env::var_os("FIXTURE_ROOT").unwrap();
@@ -116,4 +121,49 @@ fn github(args: &[String]) {
         _ => panic!("Unexpected fixture operation: {method} {path}"),
     };
     print!("{response}");
+}
+
+/// Serves capture reads from caller-owned responses and rejects all provider writes.
+fn github_capture(args: &[String]) {
+    let path = &args[1];
+    let method = &args[args.iter().position(|arg| arg == "--method").unwrap() + 1];
+    let response = match (method.as_str(), path.as_str()) {
+        ("GET", "user") => "user",
+        ("GET", "repos/octo/widget/pulls/7") => "pullRequest",
+        ("GET", "repos/octo/widget/pulls/7/reviews?per_page=100") => "reviews",
+        ("GET", "repos/octo/widget/issues/7/comments?per_page=100") => "issueComments",
+        ("GET", "repos/octo/widget/pulls/7/requested_reviewers?per_page=100") => {
+            "requestedReviewers"
+        }
+        (
+            "GET",
+            "repos/octo/widget/compare/bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb...aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        ) => "compare",
+        ("POST", "graphql") => {
+            let mut input = String::new();
+            io::stdin().read_to_string(&mut input).unwrap();
+            assert!(input.contains("\"query\":\"query"));
+            assert!(!input.contains("mutation"));
+            if input.contains("reviewThreads(") {
+                "reviewThreads"
+            } else if input.contains("reviews(first:") {
+                "reviewEdits"
+            } else if input.contains("timelineItems(") {
+                "timeline"
+            } else if input.contains("comments(first:") {
+                "issueEdits"
+            } else {
+                panic!("Unexpected capture GraphQL query: {input}");
+            }
+        }
+        _ => panic!("Unexpected capture request: {method} {path}"),
+    };
+    let root = env::var_os("FIXTURE_ROOT").unwrap();
+    let bytes = fs::read(
+        Path::new(&root)
+            .join("responses")
+            .join(format!("{response}.json")),
+    )
+    .unwrap();
+    io::stdout().write_all(&bytes).unwrap();
 }

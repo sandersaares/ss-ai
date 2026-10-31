@@ -634,8 +634,21 @@ fn map(value: Value) -> Map<String, Value> {
     }
 }
 
-/// Produces freshness records in the same category and capture order as the model.
-fn changes<'a>(previous: &'a Value, current: &'a Value) -> Result<Vec<Record<'a>>, AppError> {
+/// Identifies a change without constructing its detailed JSON representation.
+enum Change<'a> {
+    Thread(&'static str, &'static str, &'a str),
+    Comment(&'static str, &'static str, &'a str, &'a str),
+    Resolution(&'a str, Value, Value),
+    Commit(&'static str, Value, Value),
+    Evidence,
+}
+
+/// Visits changes once, preserving capture order within each category.
+fn visit_changes(
+    previous: &Value,
+    current: &Value,
+    mut visit: impl FnMut(Change<'_>),
+) -> Result<(), AppError> {
     let before = indexed(array(previous, "threads"));
     let after = indexed(array(current, "threads"));
     let before_lookup: HashMap<Cow<'_, str>, &Value> = before
@@ -646,17 +659,11 @@ fn changes<'a>(previous: &'a Value, current: &'a Value) -> Result<Vec<Record<'a>
         .iter()
         .map(|value| (identifier(value, "id"), *value))
         .collect();
-    let mut added_threads = Vec::new();
-    let mut removed_threads = Vec::new();
-    let mut added_comments = Vec::new();
-    let mut removed_comments = Vec::new();
-    let mut edited_comments = Vec::new();
-    let mut resolutions = Vec::new();
     for thread in &after {
         let id = identifier(thread, "id");
         let matching = before_lookup.get(id.as_ref()).copied();
         if matching.is_none() {
-            added_threads.push(json!({"threadId": id}));
+            visit(Change::Thread("threadsAdded", "current", &id));
         }
         let previous_comments =
             indexed(matching.map_or(&[][..], |thread| array(thread, "comments")));
@@ -678,68 +685,171 @@ fn changes<'a>(previous: &'a Value, current: &'a Value) -> Result<Vec<Record<'a>
                 if property(old, "lastEditedUtc") != property(comment, "lastEditedUtc")
                     || old_hash != new_hash
                 {
-                    edited_comments.push(json!({"threadId": id, "commentId": comment_id}));
+                    visit(Change::Comment("commentsEdited", "both", &id, &comment_id));
                 }
             } else {
-                added_comments.push(json!({"threadId": id, "commentId": comment_id}));
+                visit(Change::Comment(
+                    "commentsAdded",
+                    "current",
+                    &id,
+                    &comment_id,
+                ));
             }
         }
         if let Some(old_thread) = matching {
             for comment in &previous_comments {
                 if !current_lookup.contains_key(identifier(comment, "id").as_ref()) {
-                    removed_comments
-                        .push(json!({"threadId": id, "commentId": identifier(comment, "id")}));
+                    visit(Change::Comment(
+                        "commentsRemoved",
+                        "baseline",
+                        &id,
+                        &identifier(comment, "id"),
+                    ));
                 }
             }
             let old = property(old_thread, "resolution");
             let new = property(thread, "resolution");
             if !case_insensitive_equal(&old, &new)? {
-                resolutions.push(json!({"threadId": id, "from": old, "to": new}));
+                visit(Change::Resolution(&id, old, new));
             }
         }
     }
     for thread in &before {
         let id = identifier(thread, "id");
         if !after_lookup.contains_key(id.as_ref()) {
-            removed_threads.push(json!({"threadId": id}));
+            visit(Change::Thread("threadsRemoved", "baseline", &id));
             for comment in indexed(array(thread, "comments")) {
-                removed_comments
-                    .push(json!({"threadId": id, "commentId": identifier(comment, "id")}));
+                visit(Change::Comment(
+                    "commentsRemoved",
+                    "baseline",
+                    &id,
+                    &identifier(comment, "id"),
+                ));
             }
-        }
-    }
-    let mut result = Vec::new();
-    for (name, capture, values) in [
-        ("threadsAdded", "current", added_threads),
-        ("threadsRemoved", "baseline", removed_threads),
-        ("commentsAdded", "current", added_comments),
-        ("commentsRemoved", "baseline", removed_comments),
-        ("commentsEdited", "both", edited_comments),
-        ("resolutionChanged", "both", resolutions),
-    ] {
-        for value in values {
-            let mut data = map(json!({"change": name, "capture": capture}));
-            data.extend(map(value));
-            result.push(Record { data, text: None });
         }
     }
     for key in ["reviewedSourceCommit", "reviewedMergeBaseCommit"] {
         let old = property(&previous["pullRequest"], key);
         let new = property(&current["pullRequest"], key);
         if !case_insensitive_equal(&old, &new)? {
-            result.push(Record {
-                data: map(json!({"change": key, "capture": "both", "from": old, "to": new})),
-                text: None,
-            });
+            visit(Change::Commit(key, old, new));
         }
     }
     if evidence_hash(previous)? != evidence_hash(current)? {
-        result.push(Record {
-            data: map(json!({"change": "reviewEvidence", "capture": "both"})),
-            text: None,
-        });
+        visit(Change::Evidence);
+    }
+    Ok(())
+}
+
+/// Produces freshness records in category order while retaining capture order.
+fn changes<'a>(previous: &'a Value, current: &'a Value) -> Result<Vec<Record<'a>>, AppError> {
+    let mut categories: HashMap<&str, Vec<Record<'a>>> = HashMap::new();
+    visit_changes(previous, current, |change| {
+        let (name, data) = match change {
+            Change::Thread(name, capture, id) => (
+                name,
+                map(json!({"change": name, "capture": capture, "threadId": id})),
+            ),
+            Change::Comment(name, capture, thread, comment) => (
+                name,
+                map(
+                    json!({"change": name, "capture": capture, "threadId": thread, "commentId": comment}),
+                ),
+            ),
+            Change::Resolution(id, old, new) => (
+                "resolutionChanged",
+                map(
+                    json!({"change": "resolutionChanged", "capture": "both", "threadId": id, "from": old, "to": new}),
+                ),
+            ),
+            Change::Commit(name, old, new) => (
+                name,
+                map(json!({"change": name, "capture": "both", "from": old, "to": new})),
+            ),
+            Change::Evidence => (
+                "reviewEvidence",
+                map(json!({"change": "reviewEvidence", "capture": "both"})),
+            ),
+        };
+        categories
+            .entry(name)
+            .or_default()
+            .push(Record { data, text: None });
+    })?;
+    let mut result = Vec::new();
+    for name in [
+        "threadsAdded",
+        "threadsRemoved",
+        "commentsAdded",
+        "commentsRemoved",
+        "commentsEdited",
+        "resolutionChanged",
+        "reviewedSourceCommit",
+        "reviewedMergeBaseCommit",
+        "reviewEvidence",
+    ] {
+        if let Some(records) = categories.remove(name) {
+            result.extend(records);
+        }
     }
     Ok(result)
+}
+
+/// Summarizes the same changes exposed by bounded queries without returning bodies.
+#[expect(
+    clippy::arithmetic_side_effects,
+    reason = "each category count is bounded by the input values held in memory"
+)]
+pub(crate) fn capture_delta(previous: &Value, current: &Value) -> Result<Value, AppError> {
+    let mut counts = HashMap::<&str, usize>::new();
+    let mut source_changed = false;
+    let mut base_changed = false;
+    let mut evidence_changed = false;
+    visit_changes(previous, current, |change| match change {
+        Change::Thread(name, _, _) | Change::Comment(name, _, _, _) => {
+            *counts.entry(name).or_default() += 1;
+        }
+        Change::Resolution(..) => *counts.entry("resolutionChanged").or_default() += 1,
+        Change::Commit("reviewedSourceCommit", ..) => source_changed = true,
+        Change::Commit(..) => base_changed = true,
+        Change::Evidence => evidence_changed = true,
+    })?;
+    let mut result = Map::new();
+    for name in [
+        "threadsAdded",
+        "threadsRemoved",
+        "commentsAdded",
+        "commentsRemoved",
+        "commentsEdited",
+        "resolutionChanged",
+    ] {
+        let count = counts.get(name).copied().unwrap_or_default();
+        result.insert(format!("{name}Count"), json!(count));
+    }
+    let old = property(previous, "pullRequest");
+    let new = property(current, "pullRequest");
+    for key in ["reviewedSourceCommit", "reviewedMergeBaseCommit"] {
+        let before = property(&old, key);
+        let after = property(&new, key);
+        let changed = if key == "reviewedSourceCommit" {
+            source_changed
+        } else {
+            base_changed
+        };
+        result.insert(format!("{key}Changed"), json!(changed));
+        let previous_key = match key {
+            "reviewedSourceCommit" => "previousReviewedSourceCommit",
+            _ => "previousReviewedMergeBaseCommit",
+        };
+        result.insert(previous_key.to_owned(), before);
+        result.insert(key.to_owned(), after);
+    }
+    result.insert("evidenceChanged".to_owned(), json!(evidence_changed));
+    result.insert(
+        "hasChanges".to_owned(),
+        json!(evidence_changed || source_changed || base_changed),
+    );
+    Ok(Value::Object(result))
 }
 
 /// Indexes identifiers in capture order, retaining the last value for duplicates.
@@ -1007,8 +1117,11 @@ fn serialize_page(
 )]
 mod tests {
     use serde_json::{Value, json};
+    use ss_ai_runtime::{Failure, classification};
 
-    use super::{LiteralSearch, case_insensitive_equal, normalize_options, query};
+    use super::{
+        LiteralSearch, capture_delta, case_insensitive_equal, changes, normalize_options, query,
+    };
     use crate::powershell_json;
 
     /// Loads the shared migration capture as an in-process test fixture.
@@ -1300,5 +1413,125 @@ mod tests {
                 "reviewEvidence"
             ]
         );
+    }
+
+    #[test]
+    fn summarizes_the_same_ordered_changes_with_duplicate_identifiers() {
+        let mut previous = fixture();
+        let original = previous["threads"][0].clone();
+        let mut removed = original.clone();
+        removed["id"] = json!("removed");
+        let mut stale = original.clone();
+        stale["comments"][0]["content"] = json!("ignored duplicate");
+        previous["threads"] = json!([stale, removed, original]);
+
+        let mut current = previous.clone();
+        let mut edited = current["threads"][2].clone();
+        let mut stale_comment = edited["comments"][0].clone();
+        stale_comment["content"] = json!("ignored duplicate comment");
+        let mut latest_comment = edited["comments"][0].clone();
+        latest_comment["content"] = json!("edited");
+        let mut added_comment = latest_comment.clone();
+        added_comment["id"] = json!("added-comment");
+        edited["comments"] = json!([stale_comment, added_comment, latest_comment]);
+        edited["resolution"] = json!("active");
+        let mut added = edited.clone();
+        added["id"] = json!("added");
+        added["comments"] = json!([added_comment]);
+        // The last duplicate supplies the value while the first fixes its position.
+        current["threads"] = json!([stale, added, edited]);
+        current["pullRequest"]["reviewedSourceCommit"] = json!("new source");
+        current["pullRequest"]["reviewedMergeBaseCommit"] = json!("new base");
+
+        let items: Vec<Value> = changes(&previous, &current)
+            .unwrap()
+            .into_iter()
+            .map(|record| Value::Object(record.data))
+            .collect();
+        assert_eq!(items, json!([
+            {"change":"threadsAdded","capture":"current","threadId":"added"},
+            {"change":"threadsRemoved","capture":"baseline","threadId":"removed"},
+            {"change":"commentsAdded","capture":"current","threadId":"T","commentId":"added-comment"},
+            {"change":"commentsAdded","capture":"current","threadId":"added","commentId":"added-comment"},
+            {"change":"commentsRemoved","capture":"baseline","threadId":"removed","commentId":"C"},
+            {"change":"commentsEdited","capture":"both","threadId":"T","commentId":"C"},
+            {"change":"resolutionChanged","capture":"both","threadId":"T","from":"resolved","to":"active"},
+            {"change":"reviewedSourceCommit","capture":"both","from":"source","to":"new source"},
+            {"change":"reviewedMergeBaseCommit","capture":"both","from":"base","to":"new base"},
+            {"change":"reviewEvidence","capture":"both"}
+        ]).as_array().unwrap().clone());
+        assert_eq!(
+            powershell_json(&items[6]).unwrap(),
+            r#"{"change":"resolutionChanged","capture":"both","threadId":"T","from":"resolved","to":"active"}"#
+        );
+        let output = query(&current, &json!({"query":"changes"}), Some(&previous), None).unwrap();
+        let page: Value = serde_json::from_str(&output).unwrap();
+        assert_eq!(page["items"], json!(items));
+        assert_eq!(page["totalCount"], 10);
+        assert_eq!(page["complete"], true);
+        assert_eq!(
+            capture_delta(&previous, &current).unwrap(),
+            json!({
+                "threadsAddedCount":1, "threadsRemovedCount":1,
+                "commentsAddedCount":2, "commentsRemovedCount":1, "commentsEditedCount":1,
+                "resolutionChangedCount":1,
+                "reviewedSourceCommitChanged":true, "previousReviewedSourceCommit":"source",
+                "reviewedSourceCommit":"new source", "reviewedMergeBaseCommitChanged":true,
+                "previousReviewedMergeBaseCommit":"base", "reviewedMergeBaseCommit":"new base",
+                "evidenceChanged":true, "hasChanges":true
+            })
+        );
+    }
+
+    #[test]
+    fn summary_keeps_evidence_and_commit_comparison_semantics() {
+        let previous = fixture();
+        let mut current = previous.clone();
+        current["pullRequest"]["reviewedSourceCommit"] = json!("SOURCE");
+        current["threads"][0]["comments"][0]["authorship"] = json!("agent");
+        current["threads"][0]["comments"][0]["authorshipEvidence"] =
+            json!(["classification:reviewed"]);
+        let summary = capture_delta(&previous, &current).unwrap();
+        assert_eq!(summary["reviewedSourceCommitChanged"], false);
+        assert_eq!(summary["evidenceChanged"], true);
+        assert_eq!(summary["hasChanges"], true);
+        assert_eq!(summary["commentsEditedCount"], 0);
+
+        current["pullRequest"]["reviewedSourceCommit"] = json!("source");
+        let summary = capture_delta(&previous, &current).unwrap();
+        assert_eq!(summary["evidenceChanged"], false);
+        assert_eq!(summary["hasChanges"], false);
+        assert!(changes(&previous, &current).unwrap().is_empty());
+
+        current["pullRequest"]["reviewedSourceCommit"] = json!("é");
+        for error in [
+            capture_delta(&previous, &current).unwrap_err(),
+            changes(&previous, &current).err().unwrap(),
+        ] {
+            assert_eq!(classification(&error), "invalidInput");
+            assert!(
+                error
+                    .find_source::<Failure>()
+                    .unwrap()
+                    .to_string()
+                    .starts_with("invalidInput: Cannot compare these values exactly")
+            );
+        }
+
+        current["pullRequest"]["reviewedSourceCommit"] = json!("source");
+        current["threads"][0]["comments"][0]["authorshipEvidence"] = json!(null);
+        for error in [
+            capture_delta(&previous, &current).unwrap_err(),
+            changes(&previous, &current).err().unwrap(),
+        ] {
+            assert_eq!(classification(&error), "invalidInput");
+            assert!(
+                error
+                    .find_source::<Failure>()
+                    .unwrap()
+                    .to_string()
+                    .starts_with("invalidInput: Capture comment requires authorship evidence")
+            );
+        }
     }
 }

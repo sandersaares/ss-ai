@@ -7,8 +7,7 @@
 # feedback it sees is what was written. Pre-audit and publication refreshes compare against the
 # last checked capture, preserving the initial baseline for follow-up accounting.
 #
-# This is the composition root for the capture: it dot-sources the libraries and does nothing else
-# that a library could do, so that every decision it reaches is reachable by the test suite.
+# The native context command owns provider reads and immutable publication.
 #
 # The only thing written to stdout is a single compressed JSON object, because the caller parses it;
 # any stray output would corrupt that result. The captured document goes to a file and errors to the
@@ -50,54 +49,21 @@ param(
 
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
+$PSNativeCommandUseErrorActionPreference = $true
+. "$PSScriptRoot\lib\NativeCaptureBridge.ps1"
 
-. "$PSScriptRoot\lib\JsonValue.ps1"
-. "$PSScriptRoot\lib\PublicationFailure.ps1"
-. "$PSScriptRoot\lib\PullRequestTarget.ps1"
-. "$PSScriptRoot\lib\PullRequestIdentity.ps1"
-. "$PSScriptRoot\lib\AdoRestTransport.ps1"
-. "$PSScriptRoot\lib\AdoPullRequestApi.ps1"
-. "$PSScriptRoot\lib\GitHubCliTransport.ps1"
-. "$PSScriptRoot\lib\GitHubPullRequestApi.ps1"
-. "$PSScriptRoot\lib\PullRequestModel.ps1"
-. "$PSScriptRoot\lib\PullRequestTransportHost.ps1"
-. "$PSScriptRoot\lib\PullRequestPlatform.ps1"
-
-$targetParameters = Get-PullRequestTargetParameter -BoundParameter $PSBoundParameters
-$target = Resolve-PullRequestTarget @targetParameters
-
-$contextPath = Resolve-PullRequestPath -Path (Join-Path $OutputDirectory "${OutputPrefix}pr-context.json")
-
-# The earlier capture is validated and read before anything is captured or written, so that a run
-# which cannot produce a usable comparison costs nothing and cannot be affected by its own output.
-$previous = $null
-$previousDecisions = $null
-if ($ComparePath) {
-    Assert-PullRequestComparisonPath -ComparePath $ComparePath -OutputPath @($contextPath)
-    $previous = Read-PullRequestContextDocument -Path $ComparePath
-    $previousRaw = Read-PullRequestContextDocument -Path $ComparePath -WithoutAuthorship
-    $previousDecisions = Read-CommentAuthorship -Path $ComparePath -Document $previousRaw
+$arguments = [Collections.Generic.List[string]]::new()
+$arguments.Add('create')
+$arguments.Add("--output-directory=$OutputDirectory")
+$arguments.Add("--output-prefix=$OutputPrefix")
+foreach ($entry in @(
+    @('Url', 'url'), @('Platform', 'platform'), @('Organization', 'organization'),
+    @('Project', 'project'), @('Repository', 'repository'), @('PullRequestId', 'pull-request-id'),
+    @('CollectionUrl', 'collection-url'), @('ComparePath', 'compare-path'), @('Tenant', 'tenant')
+)) {
+    if ($PSBoundParameters.ContainsKey($entry[0])) { $arguments.Add("--$($entry[1])=$($PSBoundParameters[$entry[0]])") }
 }
-
-$transport = New-PullRequestTransport -Target $target -Tenant $Tenant
-$context = Get-PullRequestContextForTarget -Transport $transport -Target $target
-
-$document = New-PullRequestContextDocument -Context $context -NowUtc $NowUtc
-
-if ($previous -and $previous['pullRequestUrl'] -cne $document['pullRequestUrl']) {
-    throw 'Cannot compare captures of different pull requests.'
+if ($PSBoundParameters.ContainsKey('NowUtc')) {
+    $arguments.Add("--now-utc=$($NowUtc.ToString('o', [cultureinfo]::InvariantCulture))")
 }
-$reused = Write-PullRequestCapture -Path $contextPath -Document $document -PreviousDecisions $previousDecisions
-
-$delta = $null
-if ($previous) {
-    $delta = Get-PullRequestContextDelta -Previous $previous -Current $document
-}
-
-$result = New-PullRequestCaptureResult `
-    -Document $document `
-    -ContextPath $contextPath `
-    -Delta $delta `
-    -ReusedClassificationCount $reused
-
-$result | ConvertTo-Json -Depth 32 -Compress
+Invoke-NativeCaptureContext -Arguments $arguments.ToArray()

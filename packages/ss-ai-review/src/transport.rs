@@ -195,6 +195,16 @@ impl<'a> Transport<'a> {
         }
     }
 
+    /// Reads a GitHub resource, accepting an explicit HTTP 404 as absence.
+    ///
+    /// No diagnostic text or response body can turn another failure into absence.
+    pub(crate) fn github_get_if_found(&self, path: &str) -> Result<Option<Value>, AppError> {
+        if self.platform != Platform::GitHub {
+            return Err(fail("invalidInput", "A GitHub transport is required"));
+        }
+        self.github_optional(path, "GET", None, false, true, true)
+    }
+
     /// Renewal writes cannot retry even an explicit rate refusal without a new freshness check.
     pub(crate) fn github_write_once(&self, path: &str, body: &Value) -> Result<Value, AppError> {
         self.github(path, "POST", Some(body), false, false)
@@ -229,6 +239,11 @@ impl<'a> Transport<'a> {
                 let Value::Array(pages) = pages else {
                     return Err(fail("service", "Expected an array in service evidence"));
                 };
+                // A successful slurped response contains at least one page, even
+                // when the provider returned an empty collection.
+                if pages.is_empty() {
+                    return Err(fail("service", "GitHub list has no response pages"));
+                }
                 let mut values = Vec::new();
                 for page in pages {
                     match page {
@@ -282,6 +297,20 @@ impl<'a> Transport<'a> {
         paginated: bool,
         retry_refusals: bool,
     ) -> Result<Value, AppError> {
+        self.github_optional(path, method, body, paginated, retry_refusals, false)?
+            .ok_or_else(|| fail("service", "Unexpected absent GitHub response"))
+    }
+
+    /// Retains explicit HTTP absence separately from other request failures.
+    fn github_optional(
+        &self,
+        path: &str,
+        method: &str,
+        body: Option<&Value>,
+        paginated: bool,
+        retry_refusals: bool,
+        allow_not_found: bool,
+    ) -> Result<Option<Value>, AppError> {
         let mut arguments = vec![
             "api".to_owned(),
             path.to_owned(),
@@ -319,6 +348,11 @@ impl<'a> Transport<'a> {
                 )
             })?;
             let (headers, payload) = split_headers(&stdout);
+            // Only a failed request with an actual status line can establish
+            // absence. Error prose and JSON bodies are not status evidence.
+            if allow_not_found && !output.success && response_status(headers) == Some(404) {
+                return Ok(None);
+            }
             let stderr = String::from_utf8_lossy(&output.stderr);
             let error_text = format!("{stderr}\n{payload}");
             let status_text = format!("{headers}\n{stderr}");
@@ -347,9 +381,9 @@ impl<'a> Transport<'a> {
             }
             if output.success {
                 if payload.trim().is_empty() && method == "DELETE" {
-                    return Ok(Value::Null);
+                    return Ok(Some(Value::Null));
                 }
-                return json.map_err(|error| {
+                return json.map(Some).map_err(|error| {
                     crate::error::caused_by(
                         if read { "service" } else { "ambiguousWrite" },
                         "GitHub returned invalid JSON".to_owned(),
@@ -679,6 +713,23 @@ fn split_headers(output: &str) -> (&str, &str) {
         }
     }
     ("", output)
+}
+
+/// Reads only the HTTP status line supplied by `gh --include`.
+fn response_status(headers: &str) -> Option<u16> {
+    let mut parts = headers.lines().next()?.split_whitespace();
+    let version = parts.next()?;
+    if !matches!(
+        version,
+        "HTTP/1.0" | "HTTP/1.1" | "HTTP/2" | "HTTP/2.0" | "HTTP/3" | "HTTP/3.0"
+    ) {
+        return None;
+    }
+    let status = parts.next()?;
+    if status.len() != 3 || !status.bytes().all(|byte| byte.is_ascii_digit()) {
+        return None;
+    }
+    status.parse().ok()
 }
 
 /// Identifies transport and server failures eligible for bounded read retries.

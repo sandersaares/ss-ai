@@ -752,11 +752,11 @@ queries, registration, authorship enrichment, and publication remain separate
 operations so a read-only command cannot gain a remote or mutating behavior
 through a mistaken option.
 
-Reviewer registration runs through the shared `ss-ai` executable on
-`PATH`, independently of these review-only PowerShell libraries. Its native
-transport and identity operations also serve proactor selection and confirmation.
-The remaining capture, analysis, and publication operations stay within this
-skill. See the utility's [implementation guide](../../../packages/ss-ai/docs/implementation.md)
+Capture, authorship enrichment, local queries, and reviewer registration run
+through the shared `ss-ai` executable on `PATH`. Its native transport and
+identity operations also serve proactor selection and confirmation. PowerShell
+adapters preserve the skill's existing command interfaces, and publication
+remains separate. See the utility's [implementation guide](../../../packages/ss-ai/docs/implementation.md)
 for its transaction and provider boundaries.
 
 ## Target resolution

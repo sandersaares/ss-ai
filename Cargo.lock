@@ -1568,6 +1568,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "ss-ai-review-fuzz"
+version = "0.1.0"
+dependencies = [
+ "jiff",
+ "libfuzzer-sys",
+ "ohno",
+ "serde_json",
+ "ss-ai-review",
+]
+
+[[package]]
 name = "ss-ai-review-workflow"
 version = "0.1.0"
 dependencies = [

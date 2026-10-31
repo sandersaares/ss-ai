@@ -35,7 +35,7 @@ use crate::{Clock, Http, Process};
     version,
     about = "Shared native operations for ss-ai skills",
     long_about = None,
-    after_help = "Local commands: ss-ai git --help; ss-ai cargo --help"
+    after_help = "Local commands: ss-ai git --help; ss-ai cargo --help; ss-ai context --help; ss-ai workflow --help"
 )]
 struct Cli {
     /// Selects the functional area without exposing provider request details.

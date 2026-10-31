@@ -853,6 +853,7 @@ fn github_owned_pages_preserve_order_objects_and_shape_errors() {
     for response in [
         Value::Null,
         json!({}),
+        json!([]),
         json!([null]),
         json!([true]),
         json!([42]),
