@@ -1,5 +1,6 @@
 //! Exact source documents and captured-side context, independent of provider authority.
 
+use std::fmt::{self, Debug, Formatter};
 use std::num::NonZeroUsize;
 
 use clap::ValueEnum;
@@ -7,11 +8,11 @@ use serde::{Deserialize, Serialize};
 use ss_ai_git::{Hunk, blob_patch, validate_patch};
 
 use crate::assessment::{document_digest, hash};
-use crate::error::{self, AssessmentError};
-use crate::{Change, Content, Inventory, Side, required_optional};
+use crate::error;
+use crate::{AssessmentError, Change, Content, Inventory, Side, required_optional};
 
 /// Required operation evidence binds exact hunks to the authoritative inventory.
-#[derive(Debug, Deserialize, Serialize)]
+#[derive(Deserialize, Serialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub(crate) struct SourceEvidence {
     snapshot_digest: String,
@@ -25,54 +26,6 @@ pub(crate) struct SourceEvidence {
     pub(crate) hunks: Vec<Hunk>,
 }
 
-/// Source identity is metadata, never a second copy of the captured body.
-#[derive(Debug, Deserialize, PartialEq, Eq, Serialize)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
-struct SourceBinding {
-    path: String,
-    object: String,
-    mode: String,
-    content_kind: String,
-}
-
-/// Selects an exact captured endpoint rather than a working-tree file.
-#[derive(Clone, Copy, Debug, Deserialize, PartialEq, Eq, Serialize, ValueEnum)]
-#[serde(rename_all = "camelCase")]
-pub enum SourceSide {
-    /// Original external-approved source.
-    Old,
-    /// Captured current source.
-    New,
-}
-
-/// A named line range registers additional mandatory evidence.
-#[derive(Clone, Debug, Deserialize, PartialEq, Eq, Serialize)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
-pub struct ContextRequest {
-    /// Stable inventory identity.
-    pub change_id: String,
-    /// Captured endpoint.
-    pub side: SourceSide,
-    /// One-based first line.
-    pub start_line: NonZeroUsize,
-    /// Positive number of complete lines.
-    pub line_count: NonZeroUsize,
-}
-
-/// Exact range identity survives paging and binds completion without duplicating text.
-#[derive(Debug, Deserialize, PartialEq, Eq, Serialize)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
-pub(crate) struct SourceContext {
-    pub(crate) request: ContextRequest,
-    snapshot_digest: String,
-    source: SourceBinding,
-    start_byte: usize,
-    end_byte: usize,
-    start_character: usize,
-    end_character: usize,
-    content_digest: String,
-}
-
 impl SourceEvidence {
     /// Fixed Git output is validated before it becomes required model evidence.
     pub(crate) fn new(
@@ -80,14 +33,13 @@ impl SourceEvidence {
         snapshot: &str,
         diff: &str,
     ) -> Result<Self, AssessmentError> {
-        let patch =
-            blob_patch(diff).map_err(|error| error::InvalidSourcePatch::from_error(&error))?;
+        let patch = blob_patch(diff).map_err(error::InvalidSourcePatch::from_error)?;
         let hunks = validate_patch(
             patch,
             readable_text(change.old.as_ref()),
             readable_text(change.new.as_ref()),
         )
-        .map_err(|error| error::InvalidSourcePatch::from_error(&error))?;
+        .map_err(error::InvalidSourcePatch::from_error)?;
         Ok(Self {
             snapshot_digest: snapshot.to_owned(),
             change_id: change.id.clone(),
@@ -114,21 +66,29 @@ impl SourceEvidence {
     }
 }
 
-impl SourceBinding {
-    fn new(side: &Side) -> Self {
-        Self {
-            path: side.path.clone(),
-            object: side.object.clone(),
-            mode: side.mode.clone(),
-            content_kind: match side.content {
-                Content::Text { .. } => "text",
-                Content::Binary { .. } => "binary",
-                Content::TooLarge { .. } => "tooLarge",
-                Content::Submodule => "submodule",
-            }
-            .to_owned(),
-        }
+impl Debug for SourceEvidence {
+    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
+        f.debug_struct(std::any::type_name::<Self>())
+            .field("snapshot_digest", &self.snapshot_digest)
+            .field("change_id", &self.change_id)
+            .field("patch_bytes", &self.patch.len())
+            .field("hunk_count", &self.hunks.len())
+            .finish_non_exhaustive()
     }
+}
+
+/// Exact range identity survives paging and binds completion without duplicating text.
+#[derive(Debug, Deserialize, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub(crate) struct SourceContext {
+    pub(crate) request: ContextRequest,
+    snapshot_digest: String,
+    source: SourceBinding,
+    start_byte: usize,
+    end_byte: usize,
+    start_character: usize,
+    end_character: usize,
+    content_digest: String,
 }
 
 impl SourceContext {
@@ -212,6 +172,57 @@ impl SourceContext {
         };
         text.get(self.start_byte..self.end_byte)
             .ok_or_else(error::InvalidContextRange::classified)
+    }
+}
+
+/// A named line range registers additional mandatory evidence.
+#[derive(Clone, Debug, Deserialize, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ContextRequest {
+    /// Stable inventory identity.
+    pub change_id: String,
+    /// Captured endpoint.
+    pub side: SourceSide,
+    /// One-based first line.
+    pub start_line: NonZeroUsize,
+    /// Positive number of complete lines.
+    pub line_count: NonZeroUsize,
+}
+
+/// Selects an exact captured endpoint rather than a working-tree file.
+#[derive(Clone, Copy, Debug, Deserialize, PartialEq, Eq, Serialize, ValueEnum)]
+#[serde(rename_all = "camelCase")]
+pub enum SourceSide {
+    /// Original external-approved source.
+    Old,
+    /// Captured current source.
+    New,
+}
+
+/// Source identity is metadata, never a second copy of the captured body.
+#[derive(Debug, Deserialize, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct SourceBinding {
+    path: String,
+    object: String,
+    mode: String,
+    content_kind: String,
+}
+
+impl SourceBinding {
+    fn new(side: &Side) -> Self {
+        Self {
+            path: side.path.clone(),
+            object: side.object.clone(),
+            mode: side.mode.clone(),
+            content_kind: match side.content {
+                Content::Text { .. } => "text",
+                Content::Binary { .. } => "binary",
+                Content::TooLarge { .. } => "tooLarge",
+                Content::Submodule => "submodule",
+            }
+            .to_owned(),
+        }
     }
 }
 

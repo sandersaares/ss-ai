@@ -6,6 +6,40 @@ use serde::{Deserialize, Serialize};
 
 use ss_ai_runtime::fail;
 
+/// Exact patch reconstruction errors stay distinct from command-level diagnostics.
+#[ohno::error]
+pub struct ExactPatchError;
+
+macro_rules! patch_error {
+    ($name:ident, $message:literal) => {
+        #[ohno::error]
+        #[display($message)]
+        struct $name;
+
+        impl From<$name> for ExactPatchError {
+            fn from(error: $name) -> Self {
+                Self::caused_by(error)
+            }
+        }
+    };
+}
+
+patch_error!(PatchBoundary, "Invalid patch boundary");
+patch_error!(BlobHeader, "Unexpected isolated blob diff header");
+patch_error!(UnterminatedHeader, "Unterminated patch header");
+patch_error!(MalformedHunk, "Invalid exact patch hunk");
+patch_error!(InvalidRange, "Invalid exact patch range");
+patch_error!(OmittedGap, "Patch omits or reorders changed source");
+patch_error!(TruncatedPatch, "Truncated exact patch");
+patch_error!(MissingIndicator, "Missing patch line indicator");
+patch_error!(UnterminatedBody, "Unterminated patch body");
+patch_error!(InvalidMarker, "Invalid newline marker");
+patch_error!(InvalidBody, "Invalid exact patch body");
+patch_error!(UnchangedHunk, "Patch hunk contains no edit");
+patch_error!(OmittedTail, "Patch omits changed source tail");
+patch_error!(MismatchedLine, "Patch text differs from captured source");
+patch_error!(LineOffsetOverflow, "Patch line offset overflow");
+
 /// Changed path and commentable ranges in an exact unified comparison.
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -276,20 +310,20 @@ fn parse_hunk(line: &str) -> Result<Hunk, AppError> {
 }
 
 /// Retains exact hunk bytes from an isolated blob comparison, without synthetic paths.
-pub fn blob_patch(diff: &str) -> Result<&str, AppError> {
+pub fn blob_patch(diff: &str) -> Result<&str, ExactPatchError> {
     let mut offset = 0_usize;
     for line in diff.split_inclusive('\n') {
         if line.starts_with("@@ ") {
             return diff
                 .get(offset..)
-                .ok_or_else(|| fail("invalidState", "Invalid patch boundary"));
+                .ok_or_else(|| PatchBoundary::new().into());
         }
         if !line.ends_with('\n')
             || !["diff --git ", "index ", "--- ", "+++ "]
                 .iter()
                 .any(|prefix| line.starts_with(prefix))
         {
-            return Err(fail("invalidState", "Unexpected isolated blob diff header"));
+            return Err(BlobHeader::new().into());
         }
         offset = offset.saturating_add(line.len());
     }
@@ -300,94 +334,99 @@ pub fn blob_patch(diff: &str) -> Result<&str, AppError> {
 ///
 /// Unlike the service range parser, this retains CRLF and requires exact missing-newline
 /// markers. Unchanged gaps must match on both sides, so omitted edits cannot pass.
-pub fn validate_patch(patch: &str, old: &str, new: &str) -> Result<Vec<Hunk>, AppError> {
-    let old = old.split_inclusive('\n').collect::<Vec<_>>();
-    let new = new.split_inclusive('\n').collect::<Vec<_>>();
+pub fn validate_patch(patch: &str, old: &str, new: &str) -> Result<Vec<Hunk>, ExactPatchError> {
+    let mut old = old.split_inclusive('\n');
+    let mut new = new.split_inclusive('\n');
     let mut lines = patch.split_inclusive('\n').peekable();
     let mut cursors = (0_usize, 0_usize);
     let mut hunks = Vec::new();
     while let Some(header) = lines.next() {
         let header = header
             .strip_suffix('\n')
-            .ok_or_else(|| fail("invalidState", "Unterminated patch header"))?;
-        let hunk = parse_hunk(header)?;
-        let start = |line: u32, count: u32| -> Result<usize, AppError> {
-            Ok(usize::try_from(if count == 0 {
+            .ok_or_else(UnterminatedHeader::new)?;
+        let hunk =
+            parse_hunk(header).map_err(|error| MalformedHunk::caused_by(error.into_std_error()))?;
+        let start = |line: u32, count: u32| -> Result<usize, ExactPatchError> {
+            usize::try_from(if count == 0 {
                 line
             } else {
                 line.saturating_sub(1)
-            })?)
+            })
+            .map_err(|error| InvalidRange::caused_by(error).into())
         };
         let starts = (
             start(hunk.old_start, hunk.old_count)?,
             start(hunk.new_start, hunk.new_count)?,
         );
-        if old.get(cursors.0..starts.0).is_none()
-            || old.get(cursors.0..starts.0) != new.get(cursors.1..starts.1)
-        {
-            return Err(fail(
-                "invalidState",
-                "Patch omits or reorders changed source",
-            ));
+        let old_gap = starts
+            .0
+            .checked_sub(cursors.0)
+            .ok_or_else(OmittedGap::new)?;
+        let new_gap = starts
+            .1
+            .checked_sub(cursors.1)
+            .ok_or_else(OmittedGap::new)?;
+        if old_gap != new_gap {
+            return Err(OmittedGap::new().into());
+        }
+        for _ in 0..old_gap {
+            let left = old.next().ok_or_else(OmittedGap::new)?;
+            if new.next() != Some(left) {
+                return Err(OmittedGap::new().into());
+            }
         }
         cursors = starts;
         let mut remaining = (hunk.old_count, hunk.new_count);
         let mut changed = false;
         while remaining != (0, 0) {
-            let line = lines
-                .next()
-                .ok_or_else(|| fail("invalidState", "Truncated exact patch"))?;
-            let (kind, mut text) = line
-                .split_at_checked(1)
-                .ok_or_else(|| fail("invalidState", "Missing patch line indicator"))?;
+            let line = lines.next().ok_or_else(TruncatedPatch::new)?;
+            let (kind, mut text) = line.split_at_checked(1).ok_or_else(MissingIndicator::new)?;
             if !text.ends_with('\n') {
-                return Err(fail("invalidState", "Unterminated patch body"));
+                return Err(UnterminatedBody::new().into());
             }
             if lines.peek() == Some(&"\\ No newline at end of file\n") {
                 lines.next();
-                text = text
-                    .strip_suffix('\n')
-                    .ok_or_else(|| fail("invalidState", "Invalid newline marker"))?;
+                text = text.strip_suffix('\n').ok_or_else(InvalidMarker::new)?;
             }
-            remaining = consume_line(line, remaining)?;
+            remaining = consume_line(line, remaining)
+                .map_err(|error| InvalidBody::caused_by(error.into_std_error()))?;
             match kind {
                 " " => {
-                    exact_line(&old, &mut cursors.0, text)?;
-                    exact_line(&new, &mut cursors.1, text)?;
+                    exact_line(&mut old, &mut cursors.0, text)?;
+                    exact_line(&mut new, &mut cursors.1, text)?;
                 }
                 "-" => {
-                    exact_line(&old, &mut cursors.0, text)?;
+                    exact_line(&mut old, &mut cursors.0, text)?;
                     changed = true;
                 }
                 "+" => {
-                    exact_line(&new, &mut cursors.1, text)?;
+                    exact_line(&mut new, &mut cursors.1, text)?;
                     changed = true;
                 }
-                _ => return Err(fail("invalidState", "Invalid exact patch line")),
+                _ => return Err(InvalidBody::new().into()),
             }
         }
         if !changed {
-            return Err(fail("invalidState", "Patch hunk contains no edit"));
+            return Err(UnchangedHunk::new().into());
         }
         hunks.push(hunk);
     }
-    if old.get(cursors.0..) != new.get(cursors.1..) {
-        return Err(fail("invalidState", "Patch omits changed source tail"));
+    if !old.eq(new) {
+        return Err(OmittedTail::new().into());
     }
     Ok(hunks)
 }
 
 /// Checks a body line against its captured side before advancing.
-fn exact_line(lines: &[&str], cursor: &mut usize, text: &str) -> Result<(), AppError> {
-    if lines.get(*cursor).copied() != Some(text) {
-        return Err(fail(
-            "invalidState",
-            "Patch text differs from captured source",
-        ));
+fn exact_line<'a>(
+    lines: &mut impl Iterator<Item = &'a str>,
+    cursor: &mut usize,
+    text: &str,
+) -> Result<(), ExactPatchError> {
+    if lines.next() != Some(text) {
+        return Err(MismatchedLine::new().into());
     }
-    *cursor = cursor
-        .checked_add(1)
-        .ok_or_else(|| fail("invalidState", "Patch line offset overflow"))?;
+    *cursor = cursor.checked_add(1).ok_or_else(LineOffsetOverflow::new)?;
     Ok(())
 }
 
@@ -431,6 +470,29 @@ mod tests {
             "new\nchanged\n",
         )
         .unwrap_err();
+    }
+
+    #[test]
+    fn exact_patch_failures_preserve_distinct_reconstruction_causes() {
+        fn has_cause<T: std::error::Error + 'static>(error: ExactPatchError) {
+            let error: AppError = error.into();
+            assert!(error.find_source::<T>().is_some());
+        }
+        has_cause::<OmittedGap>(
+            validate_patch("@@ -2 +2 @@\n-old\n+new\n", "a\nold\n", "b\nnew\n").unwrap_err(),
+        );
+        has_cause::<OmittedTail>(
+            validate_patch("@@ -1 +1 @@\n-old\n+new\n", "old\na\n", "new\nb\n").unwrap_err(),
+        );
+        has_cause::<MismatchedLine>(
+            validate_patch("@@ -1 +1 @@\n-bad\n+new\n", "old\n", "new\n").unwrap_err(),
+        );
+        has_cause::<TruncatedPatch>(
+            validate_patch("@@ -1 +1 @@\n-old\n", "old\n", "new\n").unwrap_err(),
+        );
+        has_cause::<UnchangedHunk>(
+            validate_patch("@@ -1 +1 @@\n same\n", "same\n", "same\n").unwrap_err(),
+        );
     }
 
     #[test]
