@@ -475,7 +475,15 @@ fn comparison_reports_path_resolution_failures_before_provider_work() {
     )
     .unwrap_err();
     assert_eq!(classification(&error), "io");
-    assert!(error.find_source::<std::io::Error>().is_some());
+    assert_eq!(
+        error.find_source::<std::io::Error>().unwrap().kind(),
+        std::io::ErrorKind::NotADirectory
+    );
+    assert_eq!(fs::read(&blocker.0).unwrap(), b"not a directory");
+    assert_eq!(
+        fs::read(&baseline.0).unwrap(),
+        serde_json::to_vec(&fixture("github-expected.json")).unwrap()
+    );
     let mut lock = baseline.sidecar().into_os_string();
     lock.push(".lock");
     assert!(!PathBuf::from(lock).exists());

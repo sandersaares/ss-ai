@@ -302,18 +302,30 @@ fn same_existing_path(left: &Path, right: &Path) -> Result<bool, AppError> {
 
 /// Resolves directory aliases while preserving actual filesystem errors.
 fn resolved_path(path: &Path) -> Result<Option<PathBuf>, AppError> {
-    match canonical_path(path)? {
-        Some(path) => Ok(Some(path)),
-        None => {
-            let parent = path
-                .parent()
-                .ok_or_else(|| fail("invalidInput", "File path requires a parent"))?;
-            let name = path
-                .file_name()
-                .ok_or_else(|| fail("invalidInput", "File path requires a name"))?;
-            Ok(canonical_path(parent)?.map(|parent| parent.join(name)))
-        }
+    let parent = path
+        .parent()
+        .ok_or_else(|| fail("invalidInput", "File path requires a parent"))?;
+    let name = path
+        .file_name()
+        .ok_or_else(|| fail("invalidInput", "File path requires a name"))?;
+    let Some(parent) = canonical_path(parent)? else {
+        return Ok(None);
+    };
+    let metadata = fs::metadata(&parent)
+        .map_err(|error| caused_by("io", format!("Cannot inspect {}", parent.display()), error))?;
+    // Some filesystems report a child of a regular file as missing rather than
+    // not-a-directory; reject it before acquiring comparison locks either way.
+    if !metadata.is_dir() {
+        return Err(caused_by(
+            "io",
+            format!("Cannot resolve {}", path.display()),
+            io::Error::from(io::ErrorKind::NotADirectory),
+        )
+        .into());
     }
+    Ok(Some(
+        canonical_path(path)?.unwrap_or_else(|| parent.join(name)),
+    ))
 }
 
 /// Resolves existing paths and reports failures other than missing paths.
