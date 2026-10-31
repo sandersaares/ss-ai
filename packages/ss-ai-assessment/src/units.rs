@@ -40,6 +40,7 @@ pub(crate) struct EvidenceRange {
 struct Segment {
     start: usize,
     end: usize,
+    start_character: usize,
     identity: String,
     binding: Value,
 }
@@ -47,15 +48,33 @@ struct Segment {
 impl EvidenceUnit {
     /// Ordered ranges preserve original bytes even when a thread's replies are interleaved.
     pub(crate) fn content(&self, document: &str) -> String {
-        self.ranges
-            .iter()
-            .flat_map(|range| {
-                document
-                    .chars()
-                    .skip(range.start_character)
-                    .take(range.end_character.saturating_sub(range.start_character))
-            })
-            .collect()
+        if self.ranges.iter().any(|range| range.end_character < range.start_character)
+            || self
+                .ranges
+                .windows(2)
+                .any(|ranges| matches!(ranges, [first, second] if first.end_character > second.start_character))
+        {
+            return self
+                .ranges
+                .iter()
+                .flat_map(|range| {
+                    document
+                        .chars()
+                        .skip(range.start_character)
+                        .take(range.end_character.saturating_sub(range.start_character))
+                })
+                .collect();
+        }
+        let mut characters = document.chars();
+        let mut offset = 0;
+        let mut content = String::new();
+        for range in &self.ranges {
+            let skip = range.start_character.saturating_sub(offset);
+            let length = range.end_character.saturating_sub(range.start_character);
+            content.extend(characters.by_ref().skip(skip).take(length));
+            offset = range.end_character;
+        }
+        content
     }
 
     pub(crate) fn reference(&self) -> String {
@@ -87,7 +106,19 @@ pub(crate) fn partition(
 ) -> Result<Vec<EvidenceUnit>, AssessmentError> {
     let segments = segments(document, reference)?;
     let mut groups = BTreeMap::<String, Vec<Segment>>::new();
-    for segment in segments {
+    let mut previous_byte = 0;
+    let mut character = 0_usize;
+    for mut segment in segments {
+        // Segments arrive in document order; count each intervening byte range only once.
+        character = character.saturating_add(
+            document
+                .get(previous_byte..segment.start)
+                .ok_or_else(error::InvalidUnitManifest::classified)?
+                .chars()
+                .count(),
+        );
+        segment.start_character = character;
+        previous_byte = segment.start;
         groups
             .entry(segment.identity.clone())
             .or_default()
@@ -97,22 +128,20 @@ pub(crate) fn partition(
     for (identity, segments) in groups {
         let parent = format!("{parent}/{}", hash(&identity)?);
         let mut unit = new_unit(snapshot, &parent, reference);
+        let mut unit_text = String::new();
         for segment in segments {
             let mut remaining = document
                 .get(segment.start..segment.end)
                 .ok_or_else(error::InvalidUnitManifest::classified)?;
-            let mut character = document
-                .get(..segment.start)
-                .ok_or_else(error::InvalidUnitManifest::classified)?
-                .chars()
-                .count();
+            let mut character = segment.start_character;
             let length = remaining.chars().count();
             // Do not split a complete ordinary hunk/thread record merely to fill a unit.
             if !unit.ranges.is_empty()
                 && (unit.total_characters.saturating_add(length) > UNIT_CHARACTERS
                     || unit.ranges.len() >= UNIT_RANGES)
             {
-                finish_unit(&mut units, unit, document)?;
+                finish_unit(&mut units, unit, &unit_text)?;
+                unit_text.clear();
                 unit = new_unit(snapshot, &parent, reference);
             }
             loop {
@@ -120,21 +149,24 @@ pub(crate) fn partition(
                 let text = remaining
                     .get(..bytes)
                     .ok_or_else(error::InvalidUnitManifest::classified)?;
-                let end_character = character.saturating_add(text.chars().count());
+                let text_length = text.chars().count();
+                let end_character = character.saturating_add(text_length);
                 unit.ranges.push(EvidenceRange {
                     start_character: character,
                     end_character,
                     content_digest: document_digest(text),
                 });
-                unit.total_characters = unit.total_characters.saturating_add(text.chars().count());
+                unit.total_characters = unit.total_characters.saturating_add(text_length);
                 unit.bindings.push(segment.binding.clone());
+                unit_text.push_str(text);
                 if bytes == remaining.len() {
                     break;
                 }
                 if bytes == 0 {
                     return Err(error::InvalidUnitManifest::classified());
                 }
-                finish_unit(&mut units, unit, document)?;
+                finish_unit(&mut units, unit, &unit_text)?;
+                unit_text.clear();
                 unit = new_unit(snapshot, &parent, reference);
                 remaining = remaining
                     .get(bytes..)
@@ -143,7 +175,7 @@ pub(crate) fn partition(
             }
         }
         if !unit.ranges.is_empty() {
-            finish_unit(&mut units, unit, document)?;
+            finish_unit(&mut units, unit, &unit_text)?;
         }
     }
     // Ordering by the first original range makes default progress follow the source document.
@@ -167,9 +199,9 @@ fn new_unit(snapshot: &str, parent: &str, reference: &str) -> EvidenceUnit {
 fn finish_unit(
     units: &mut Vec<EvidenceUnit>,
     mut unit: EvidenceUnit,
-    document: &str,
+    content: &str,
 ) -> Result<(), AssessmentError> {
-    unit.content_digest = document_digest(&unit.content(document));
+    unit.content_digest = document_digest(content);
     unit.id = hash(&unit)?;
     units.push(unit);
     Ok(())
@@ -181,6 +213,7 @@ fn segments(document: &str, reference: &str) -> Result<Vec<Segment>, AssessmentE
         return Ok(vec![Segment {
             start: 0,
             end: document.len(),
+            start_character: 0,
             identity: String::new(),
             binding: Value::Null,
         }]);
@@ -277,6 +310,7 @@ fn segments(document: &str, reference: &str) -> Result<Vec<Segment>, AssessmentE
             let segment = Segment {
                 start,
                 end,
+                start_character: 0,
                 identity,
                 binding,
             };
@@ -436,4 +470,96 @@ fn split_at(text: &str) -> usize {
         })
         .map(|(offset, _)| offset.saturating_add(2));
     newline.into_iter().chain(escaped).max().unwrap_or(end)
+}
+
+#[cfg(test)]
+mod tests {
+    use std::fmt::Write;
+
+    use serde_json::json;
+
+    use super::{document_digest, hash, partition};
+
+    #[test]
+    fn unicode_manifests_keep_existing_ranges_and_digests() {
+        let discussion = json!({
+            "pullRequest": {"body": format!("😀\r\n{}", "é".repeat(4_200))},
+            "reviewComments": [
+                {"id": 1, "body": "first 😀"},
+                {"id": 2, "body": "other é"},
+                {"id": 3, "in_reply_to_id": 1, "body": "reply\r\n終"}
+            ],
+            "hunks": {"h": "@@ -1 +1 @@\n-é\n+😀\n"}
+        })
+        .to_string();
+        let patch = json!({
+            "patch": format!("@@ -1 +1 @@\n-é\n+😀\n@@ -3 +3 @@\n-{}\n+終\n", "a".repeat(4_200)),
+            "hunks": []
+        })
+        .to_string();
+        // These digests bind the established serialized units, ranges, and provenance.
+        for (reference, document, expected) in [
+            (
+                "discussion",
+                discussion,
+                "4b6a22e41c9f798b0665ca032f1975c5f48fb3305da908661dd91a364b0987ed",
+            ),
+            (
+                "change:patch",
+                patch,
+                "b7bca585e6aed20387890c7005d9d503374f37357f0a8e8baeb790d8070ff50d",
+            ),
+        ] {
+            let units = partition("snapshot", "parent", reference, &document).unwrap();
+            assert_eq!(hash(&units).unwrap(), expected);
+            for unit in units {
+                let expected = unit
+                    .ranges
+                    .iter()
+                    .flat_map(|range| {
+                        document
+                            .chars()
+                            .skip(range.start_character)
+                            .take(range.end_character.saturating_sub(range.start_character))
+                    })
+                    .collect::<String>();
+                assert_eq!(unit.content(&document), expected);
+            }
+        }
+    }
+
+    #[test]
+    fn many_hunks_preserve_all_offsets_content_and_digests() {
+        let mut patch = String::new();
+        for index in 0..256 {
+            write!(patch, "@@ -{index} +{index} @@\n-entrée\r\n+😀{index}\r\n").unwrap();
+        }
+        let document = json!({"patch": patch, "hunks": []}).to_string();
+        let units = partition("snapshot", "parent", "change:patch", &document).unwrap();
+        assert!(units.len() > 1);
+        let mut ranges = Vec::new();
+        for unit in &units {
+            let content = unit.content(&document);
+            assert_eq!(unit.content_digest, document_digest(&content));
+            for range in &unit.ranges {
+                let text = document
+                    .chars()
+                    .skip(range.start_character)
+                    .take(range.end_character.saturating_sub(range.start_character))
+                    .collect::<String>();
+                assert_eq!(range.content_digest, document_digest(&text));
+                ranges.push((range.start_character, range.end_character, text));
+            }
+        }
+        ranges.sort_by_key(|range| range.0);
+        let mut cursor = 0;
+        let mut reconstructed = String::new();
+        for (start, end, text) in ranges {
+            assert_eq!(start, cursor);
+            cursor = end;
+            reconstructed.push_str(&text);
+        }
+        assert_eq!(reconstructed, document);
+        assert_eq!(cursor, document.chars().count());
+    }
 }
