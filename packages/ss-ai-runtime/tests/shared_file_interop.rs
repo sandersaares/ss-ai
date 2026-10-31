@@ -201,3 +201,75 @@ fn complete_publications_are_readable_in_both_directions() {
         br#"{"version":"powershell"}"#
     );
 }
+
+/// Observes the actual staging file while Windows blocks atomic replacement.
+#[cfg(windows)]
+#[test]
+#[cfg_attr(miri, ignore = "requires Windows file sharing and replacement")]
+fn native_staging_names_identify_a_blocked_transaction() {
+    use std::os::windows::fs::OpenOptionsExt;
+
+    use windows_sys::Win32::Storage::FileSystem::{FILE_SHARE_READ, FILE_SHARE_WRITE};
+
+    struct Directory(PathBuf);
+    impl Drop for Directory {
+        fn drop(&mut self) {
+            fs::remove_dir_all(&self.0).unwrap();
+        }
+    }
+
+    struct InspectClock {
+        directory: PathBuf,
+        blocker: RefCell<Option<fs::File>>,
+        waits: Cell<u32>,
+    }
+    impl Clock for InspectClock {
+        fn now(&self) -> Timestamp {
+            panic!("file operations do not use wall-clock time")
+        }
+
+        fn wait(&self, _duration: Duration) -> Result<(), AppError> {
+            assert_eq!(self.waits.get(), 0, "unexpected repeated contention");
+            self.waits.set(1);
+            let names = fs::read_dir(&self.directory)
+                .unwrap()
+                .map(|entry| entry.unwrap().file_name().into_string().unwrap())
+                .filter(|name| name.starts_with(".ss-ai-transaction-"))
+                .collect::<Vec<_>>();
+            assert_eq!(names.len(), 1);
+            let random = names[0]
+                .strip_prefix(".ss-ai-transaction-")
+                .unwrap()
+                .strip_suffix(".tmp")
+                .unwrap();
+            assert_eq!(random.len(), 24);
+            assert!(random.bytes().all(|byte| byte.is_ascii_alphanumeric()));
+            assert_eq!(fs::read(self.directory.join(&names[0])).unwrap(), b"new");
+            drop(self.blocker.borrow_mut().take());
+            Ok(())
+        }
+    }
+
+    let directory = Directory(
+        PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join(format!(".staging-interop-{}", std::process::id())),
+    );
+    #[expect(clippy::create_dir, reason = "The test directory must be exclusive")]
+    fs::create_dir(&directory.0).unwrap();
+    let path = directory.0.join("reviewer.json");
+    fs::write(&path, b"old").unwrap();
+    let blocker = fs::OpenOptions::new()
+        .read(true)
+        .share_mode(FILE_SHARE_READ | FILE_SHARE_WRITE)
+        .open(&path)
+        .unwrap();
+    let clock = InspectClock {
+        directory: directory.0.clone(),
+        blocker: RefCell::new(Some(blocker)),
+        waits: Cell::new(0),
+    };
+    let transaction = FileTransaction::open(&path, &clock).unwrap();
+    transaction.write_bytes(b"new").unwrap();
+    assert_eq!(clock.waits.get(), 1);
+    assert_eq!(fs::read(&path).unwrap(), b"new");
+}

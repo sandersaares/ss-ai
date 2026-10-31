@@ -258,6 +258,8 @@ impl<'de> Deserialize<'de> for StrictValue {
 
 /// Parses JSON without discarding conflicting object keys.
 pub(crate) fn parse_json(bytes: &[u8]) -> Result<Value, AppError> {
+    // PowerShell's BOM-detecting reader accepts UTF-8 BOMs before strict parsing.
+    let bytes = bytes.strip_prefix(&[0xEF, 0xBB, 0xBF]).unwrap_or(bytes);
     let StrictValue(value) = serde_json::from_slice(bytes)
         .map_err(|error| caused_by("invalidInput", "Invalid JSON", error))?;
     Ok(value)

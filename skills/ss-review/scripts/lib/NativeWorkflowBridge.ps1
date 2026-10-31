@@ -39,7 +39,8 @@ function Invoke-NativeReviewWorkflowWithJson {
     )
 
     $name = ".ss-ai-workflow-$([guid]::NewGuid().ToString('N')).json"
-    $path = Join-Path (Get-Location).ProviderPath $name
+    # The caller's working directory need not permit creating request files.
+    $path = Join-Path ([IO.Path]::GetTempPath()) $name
     $options = [IO.FileStreamOptions]::new()
     $options.Mode = [IO.FileMode]::CreateNew
     $options.Access = [IO.FileAccess]::Write

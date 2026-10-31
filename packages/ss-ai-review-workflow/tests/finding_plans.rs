@@ -902,7 +902,7 @@ fn synchronized_updates_preserve_both_rewrites() {
     assert_eq!(artifact["findings"][1]["title"], "Second rewrite");
 }
 
-/// Isolates controlled locks from unrelated process creation in this test
+/// Isolates lock-sensitive tests from unrelated process creation in this test
 /// binary: a forked child can retain a lock descriptor until it executes.
 fn isolated_writer_test(name: &str) -> bool {
     const MARKER: &str = "SS_AI_ISOLATED_WRITER_TEST";
@@ -1304,6 +1304,11 @@ fn finding_anchor_cases_match_the_predecessor_corpus() {
             true,
         ),
         (
+            "internal location kind",
+            json!({"kind":"location","path":"src/retry.rs"}),
+            false,
+        ),
+        (
             "file with position",
             json!({"kind":"file","path":"src/retry.rs","startLine":1}),
             false,
@@ -1364,6 +1369,159 @@ fn finding_anchor_cases_match_the_predecessor_corpus() {
         let result = findings::add(&artifact, &content, "reviewer", &[], &clock);
         assert_eq!(result.is_ok(), valid, "Rust case {name}: {result:?}");
     }
+
+    let mut finding = baseline;
+    finding["impactedLocations"] = json!([
+        {"path":"src/other.rs"},
+        {"path":"src/retry.rs","startLine":8,"endLine":10,"side":"left"}
+    ]);
+    fs::write(&content, serde_json::to_vec(&finding).unwrap()).unwrap();
+    assert!(
+        powershell_output(
+            "ValidateFinding",
+            &["-FindingPath", content.to_str().unwrap()],
+            &directory.0,
+        )
+        .status
+        .success()
+    );
+    findings::add(&artifact, &content, "reviewer", &[], &clock).unwrap();
+    let mut stored = findings::read_artifact(&artifact, &clock).unwrap();
+    stored["findings"][0]["anchor"]["kind"] = json!("location");
+    fs::write(&artifact, serde_json::to_vec(&stored).unwrap()).unwrap();
+    assert!(findings::read_artifact(&artifact, &clock).is_err());
+    let report = findings::validate_artifacts(&artifact, &[], &clock).unwrap();
+    assert_eq!(report["isValid"], false);
+}
+
+/// UTF-8 BOMs are accepted at each file boundary without relaxing JSON checks.
+#[test]
+#[cfg_attr(miri, ignore = "The predecessor model runs in a separate process")]
+fn bom_prefixed_finding_artifact_and_plan_inputs_interoperate() {
+    let directory = TestDirectory::new("bom-inputs");
+    let clock = SystemClock::default();
+    let artifact = directory.path("reviewer.json");
+    let content = directory.path("finding.json");
+    let plan = directory.path("updates.json");
+    let draft = directory.path("draft.json");
+    let bom = |text: &[u8]| [b"\xef\xbb\xbf".as_slice(), text].concat();
+    let finding = br#"{"title":"Problem","description":"What fails","reasoning":"Why","consequence":"Impact","recommendedAction":"Fix","anchor":{"kind":"file","path":"src/lib.rs"}}"#;
+    fs::write(&content, bom(finding)).unwrap();
+    assert!(
+        powershell_output(
+            "ValidateFinding",
+            &["-FindingPath", content.to_str().unwrap()],
+            &directory.0
+        )
+        .status
+        .success()
+    );
+    findings::initialize(&artifact, "g1", "correctness", false, &clock).unwrap();
+    findings::add(&artifact, &content, "reviewer", &[], &clock).unwrap();
+    fs::write(&artifact, bom(&fs::read(&artifact).unwrap())).unwrap();
+    assert_eq!(
+        findings::read_artifact(&artifact, &clock).unwrap()["findings"]
+            .as_array()
+            .unwrap()
+            .len(),
+        1
+    );
+    assert!(
+        powershell_output(
+            "Add-Finding.ps1",
+            &[
+                "-ArtifactPath",
+                artifact.to_str().unwrap(),
+                "-FindingPath",
+                content.to_str().unwrap()
+            ],
+            &directory.0
+        )
+        .status
+        .success()
+    );
+
+    fs::write(&plan, bom(br#"{"schemaVersion":1,"updates":[]}"#)).unwrap();
+    fs::write(
+        &draft,
+        bom(br#"{"findingId":"g1-1","findingPath":"finding.json"}"#),
+    )
+    .unwrap();
+    assert!(workflow_plan::read(workflow_plan::PlanKind::Updates, &plan, &clock).is_ok());
+    workflow_plan::append(
+        workflow_plan::PlanKind::Updates,
+        &plan,
+        &draft,
+        None,
+        &clock,
+    )
+    .unwrap();
+    assert_eq!(
+        workflow_plan::read(workflow_plan::PlanKind::Updates, &plan, &clock)
+            .unwrap()
+            .items()
+            .len(),
+        1
+    );
+
+    fs::write(
+        &draft,
+        bom(br#"{"findingId":"g1-1","FindingId":"g1-2","findingPath":"finding.json"}"#),
+    )
+    .unwrap();
+    assert!(
+        workflow_plan::append(
+            workflow_plan::PlanKind::Updates,
+            &plan,
+            &draft,
+            None,
+            &clock
+        )
+        .is_err()
+    );
+    fs::write(
+        &plan,
+        bom(br#"{"schemaVersion":1,"updates":[],"updates":[]}"#),
+    )
+    .unwrap();
+    assert!(workflow_plan::read(workflow_plan::PlanKind::Updates, &plan, &clock).is_err());
+    fs::write(&content, bom(br#"{"title":"Problem","title":"Other"}"#)).unwrap();
+    assert!(findings::add(&artifact, &content, "reviewer", &[], &clock).is_err());
+}
+
+/// Windows does not hide dot-prefixed staging names, unlike Unix providers.
+#[cfg(windows)]
+#[test]
+fn validation_excludes_only_recognized_staging_files() {
+    let directory = TestDirectory::new("powershell-staging");
+    let clock = SystemClock::default();
+    let staging = ".reviewer.json.0123456789abcdef0123456789abcdef.tmp";
+    fs::write(directory.path(staging), b"partial").unwrap();
+    let native_staging = ".ss-ai-transaction-aB1234567890abcdefgh1234.tmp";
+    fs::write(directory.path(native_staging), b"partial").unwrap();
+    fs::write(directory.path("reviewer.JSON.LOCK"), b"lock").unwrap();
+    let report = findings::validate_artifacts(&directory.0, &[], &clock).unwrap();
+    assert!(report["errors"].as_array().unwrap().is_empty(), "{report}");
+    let foreign = ".reviewer.json.0123456789abcdef0123456789abcdeg.tmp";
+    fs::write(directory.path(foreign), b"foreign").unwrap();
+    let generic_temporary = ".tmp123456";
+    fs::write(directory.path(generic_temporary), b"foreign").unwrap();
+    let malformed_native = ".ss-ai-transaction-aB1234567890abcdefgh123.tmp";
+    fs::write(directory.path(malformed_native), b"foreign").unwrap();
+    let stage_directory = ".other.json.0123456789abcdef0123456789abcdef.tmp";
+    #[expect(clippy::create_dir, reason = "The entry must not already exist")]
+    fs::create_dir(directory.path(stage_directory)).unwrap();
+    #[expect(clippy::create_dir, reason = "The entry must not already exist")]
+    fs::create_dir(directory.path("foreign.json.lock")).unwrap();
+    let report = findings::validate_artifacts(&directory.0, &[], &clock).unwrap();
+    let errors = report["errors"].to_string();
+    assert!(errors.contains(foreign), "{errors}");
+    assert!(errors.contains(generic_temporary), "{errors}");
+    assert!(errors.contains(malformed_native), "{errors}");
+    assert!(errors.contains(stage_directory), "{errors}");
+    assert!(errors.contains("foreign.json.lock"), "{errors}");
+    assert!(!errors.contains(staging), "{errors}");
+    assert!(!errors.contains(native_staging), "{errors}");
 }
 
 /// Damaged reviewer evidence remains visible in equivalent validation reports.
@@ -1465,7 +1623,11 @@ impl Clock for FixedClock {
 }
 
 #[test]
+#[cfg_attr(miri, ignore = "requires an isolated native subprocess")]
 fn removal_timestamp_uses_dotnet_round_trip_precision() {
+    if !isolated_writer_test("removal_timestamp_uses_dotnet_round_trip_precision") {
+        return;
+    }
     let directory = TestDirectory::new("removal-time");
     let artifact = directory.path("reviewer.json");
     let finding = directory.path("finding.json");
