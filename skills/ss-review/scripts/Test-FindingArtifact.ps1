@@ -33,6 +33,24 @@ param(
 
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
+$PSNativeCommandUseErrorActionPreference = $true
+
+if ($PSCmdlet.ParameterSetName -eq 'Identifiers') {
+    . "$PSScriptRoot\lib\NativeWorkflowBridge.ps1"
+    $fullPath = $ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath($Path)
+    $arguments = @('validate-findings', "--path=$fullPath")
+    foreach ($entry in $ExpectedReviewerId) {
+        foreach ($part in $entry.Split(',')) {
+            $id = $part.Trim()
+            if ($id) { $arguments += "--reviewer-id=$id" }
+        }
+    }
+    $output = Invoke-NativeReviewWorkflow -Arguments $arguments
+    $valid = (ConvertFrom-Json -InputObject $output -AsHashtable)['isValid']
+    Write-Output $output
+    if (-not $valid) { exit 1 }
+    return
+}
 
 . "$PSScriptRoot\lib\JsonValue.ps1"
 . "$PSScriptRoot\lib\PullRequestModel.ps1"
@@ -40,11 +58,7 @@ $ErrorActionPreference = 'Stop'
 . "$PSScriptRoot\lib\FindingModel.ps1"
 . "$PSScriptRoot\lib\ReviewWork.ps1"
 
-$result = if ($PSCmdlet.ParameterSetName -eq 'Manifest') {
-    Get-ReviewWorkValidation -ManifestPath $ManifestPath -ArtifactDirectory $Path
-} else {
-    Get-FindingArtifactValidation -Path $Path -ExpectedReviewerId (ConvertTo-FindingIdentifierList -Value $ExpectedReviewerId)
-}
+$result = Get-ReviewWorkValidation -ManifestPath $ManifestPath -ArtifactDirectory $Path
 
 $result | ConvertTo-Json -Depth 32 -Compress
 

@@ -1,5 +1,5 @@
 [workspace]
-members = ["packages/ss-ai-assessment", "packages/ss-ai-cargo", "packages/ss-ai-cargo-fuzz", "packages/ss-ai-git", "packages/ss-ai-review", "packages/ss-ai-review-context", "packages/ss-ai-review-context-fuzz", "packages/ss-ai-runtime", "packages/ss-ai"]
+members = ["packages/ss-ai-assessment", "packages/ss-ai-cargo", "packages/ss-ai-cargo-fuzz", "packages/ss-ai-git", "packages/ss-ai-review", "packages/ss-ai-review-context", "packages/ss-ai-review-context-fuzz", "packages/ss-ai-review-workflow", "packages/ss-ai-runtime", "packages/ss-ai"]
 resolver = "3"
 
 [workspace.package]
@@ -29,6 +29,7 @@ ss-ai-cargo = { path = "packages/ss-ai-cargo", default-features = false }
 ss-ai-git = { path = "packages/ss-ai-git", default-features = false }
 ss-ai-review = { path = "packages/ss-ai-review", default-features = false }
 ss-ai-review-context = { path = "packages/ss-ai-review-context", default-features = false }
+ss-ai-review-workflow = { path = "packages/ss-ai-review-workflow", default-features = false }
 ss-ai-runtime = { path = "packages/ss-ai-runtime", default-features = false }
 static_assertions = { version = "1.1.0", default-features = false }
 tempfile = { version = "3.20.0", default-features = false }

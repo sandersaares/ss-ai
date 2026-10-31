@@ -35,23 +35,17 @@ param(
 
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
+$PSNativeCommandUseErrorActionPreference = $true
 
-. "$PSScriptRoot\lib\JsonValue.ps1"
-. "$PSScriptRoot\lib\PullRequestModel.ps1"
-. "$PSScriptRoot\lib\WorkflowData.ps1"
-. "$PSScriptRoot\lib\FindingModel.ps1"
-
-$removals = Get-FindingRemovalRequest -FindingId $FindingId -Reason $Reason -PlanPath $PlanPath
-$lock = Open-WorkflowDataLock -Path $ArtifactPath
-try {
-    $document = Read-FindingArtifact -Path $ArtifactPath
-    $removed = Remove-FindingBatchFromArtifact -Document $document -Removal $removals -NowUtc $NowUtc
-
-    # Rejected batches leave the previously committed artifact unchanged.
-    Write-FindingArtifact -Path $ArtifactPath -Document $document
-} finally { $lock.Dispose() }
-
-[ordered]@{
-    artifactPath = Resolve-PullRequestPath -Path $ArtifactPath
-    removed      = $removed
-} | ConvertTo-Json -Depth 32 -Compress
+. "$PSScriptRoot\lib\NativeWorkflowBridge.ps1"
+$artifact = $ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath($ArtifactPath)
+$arguments = @('remove-finding', "--artifact-path=$artifact", "--now-utc=$($NowUtc.ToUniversalTime().ToString('o'))")
+if ($PlanPath) {
+    if ($FindingId -or $Reason) { throw 'Supply either -PlanPath or -FindingId with -Reason, not both.' }
+    $plan = $ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath($PlanPath)
+    Invoke-NativeReviewWorkflow -Arguments ($arguments + "--plan-path=$plan")
+} else {
+    if (-not $FindingId -or -not $Reason) { throw 'Supply -FindingId with -Reason, or -PlanPath.' }
+    $request = [ordered]@{ schemaVersion = 1; removals = @([ordered]@{ findingId = $FindingId; reason = $Reason }) }
+    Invoke-NativeReviewWorkflowWithJson -Arguments $arguments -PathOption 'plan-path' -Value $request
+}

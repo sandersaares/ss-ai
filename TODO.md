@@ -27,13 +27,23 @@ Improvement ideas to revisit when the repo matures.
 
 ## Skill design
 
-- **Migrate ss-review command families to Rust.** Replace complete families in
-  order: findings, audit and Markdown; coverage and worker inputs; instruction
+- **Migrate ss-review command families to Rust.** Replace the remaining complete
+  families in order: audit and Markdown; coverage and worker inputs; instruction
   preparation and cache; provider capture; report tooling; overview publication;
   final review publication; and trackers. Local context queries use native
   operations through PowerShell adapters. Retire the adapters after their callers
   migrate while preserving the hybrid workflow's records, transaction boundaries
-  and authority gates.
+  and authority gates. Keep manifest-based review-work and coverage orchestration
+  in PowerShell until the coverage and worker-input migration; finding validation
+  must remain available to that orchestration.
+- **Type ss-review workflow errors.** Replace generic application errors at the
+  finding and plan library boundary with typed invariant errors and an aggregate,
+  preserving command-level error categories and diagnostics. Complete this when
+  focused tests can distinguish rejected invariants without matching prose.
+- **Type validated finding artifacts.** Keep validated persisted artifacts
+  distinct from raw JSON throughout finding mutations and consolidation.
+  Complete this when those operations accept the validated representation rather
+  than repeatedly recovering artifact fields from unrestricted values.
 - **Deduplicate the workspace-flag exception list** (`std`, `alloc`,
   `clap/default`, `argh/default`, ...). Currently described twice in
   [`skills/ss-cargo-deps-tidy/SKILL.md`](skills/ss-cargo-deps-tidy/SKILL.md)

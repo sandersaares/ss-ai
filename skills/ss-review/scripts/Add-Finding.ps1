@@ -42,33 +42,20 @@ param(
 
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
+$PSNativeCommandUseErrorActionPreference = $true
 
-. "$PSScriptRoot\lib\JsonValue.ps1"
-. "$PSScriptRoot\lib\PullRequestModel.ps1"
-. "$PSScriptRoot\lib\WorkflowData.ps1"
-. "$PSScriptRoot\lib\FindingModel.ps1"
-
-$finding = Read-FindingContent -Path $FindingPath
-
+. "$PSScriptRoot\lib\NativeWorkflowBridge.ps1"
+$artifact = $ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath($ArtifactPath)
+$finding = $ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath($FindingPath)
+$arguments = @('add-finding', "--artifact-path=$artifact", "--finding-path=$finding", "--origin=$Origin")
 if ($ContextPath) {
-    Assert-FindingFollowUpTarget -Context (Read-PullRequestContextDocument -Path $ContextPath) -Finding $finding
+    $context = $ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath($ContextPath)
+    $arguments += "--context-path=$context"
 }
-
-$lock = Open-WorkflowDataLock -Path $ArtifactPath
-try {
-    $document = Read-FindingArtifact -Path $ArtifactPath
-    $findingId = Add-FindingToArtifact `
-        -Document $document `
-        -Finding $finding `
-        -Origin $Origin `
-        -SourceFindingId (ConvertTo-FindingIdentifierList -Value $SourceFindingId) `
-        -SourceDescription "'$FindingPath'"
-
-    # Rejected findings leave the previously committed artifact unchanged.
-    Write-FindingArtifact -Path $ArtifactPath -Document $document
-} finally { $lock.Dispose() }
-
-[ordered]@{
-    findingId    = $findingId
-    artifactPath = Resolve-PullRequestPath -Path $ArtifactPath
-} | ConvertTo-Json -Depth 32 -Compress
+foreach ($entry in $SourceFindingId) {
+    foreach ($part in $entry.Split(',')) {
+        $id = $part.Trim()
+        if ($id) { $arguments += "--source-id=$id" }
+    }
+}
+Invoke-NativeReviewWorkflow -Arguments $arguments
