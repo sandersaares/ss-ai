@@ -1,6 +1,6 @@
 //! Lossless bounded work manifests retain exact offsets into immutable evidence.
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -227,11 +227,7 @@ fn segments(document: &str, reference: &str) -> Result<Vec<Segment>, AssessmentE
             ) {
                 continue;
             }
-            let thread_records = if matches!(field.as_str(), "comments" | "reviewComments") {
-                value_array(Some(&span.value)).to_vec()
-            } else {
-                Vec::new()
-            };
+            let is_array = span.value.is_array();
             let records = match &span.value {
                 Value::Array(_) => array_spans(document, span.start)?
                     .into_iter()
@@ -241,9 +237,19 @@ fn segments(document: &str, reference: &str) -> Result<Vec<Segment>, AssessmentE
                 Value::Object(_) if field == "hunks" => object_spans(document, span.start)?,
                 _ => vec![(String::new(), span)],
             };
-            for (index, span) in records {
+            let thread_records =
+                if is_array && matches!(field.as_str(), "comments" | "reviewComments") {
+                    records
+                        .iter()
+                        .map(|(_, span)| &span.value)
+                        .collect::<Vec<_>>()
+                } else {
+                    Vec::new()
+                };
+            let mut thread_roots = ThreadRoots::new(&thread_records);
+            for (index, span) in &records {
                 let identity = if matches!(field.as_str(), "comments" | "reviewComments") {
-                    thread_identity(&field, &index, &span.value, &thread_records)?
+                    thread_roots.identity(&field, index, &span.value, &thread_records)?
                 } else {
                     format!(
                         "/{field}/{}",
@@ -254,7 +260,7 @@ fn segments(document: &str, reference: &str) -> Result<Vec<Segment>, AssessmentE
                 };
                 let binding = json!({
                     "collection": field,
-                    "indexDigest": hash(&index)?,
+                    "indexDigest": hash(index)?,
                     "identityDigest": hash(&identity)?
                 });
                 boundaries.push((span.end, identity, binding));
@@ -408,41 +414,85 @@ fn array_spans(document: &str, start: usize) -> Result<Vec<JsonSpan>, Assessment
     }
 }
 
-fn value_array(value: Option<&Value>) -> &[Value] {
-    value.and_then(Value::as_array).map_or(&[], Vec::as_slice)
+/// An id-less root uses the original record's index, not the root's index.
+#[derive(Clone)]
+enum ThreadRoot {
+    Id(String),
+    MissingId,
 }
 
-/// Reply chains retain thread identity even when provider ordering interleaves threads.
-fn thread_identity(
-    field: &str,
-    index: &str,
-    value: &Value,
-    records: &[Value],
-) -> Result<String, AssessmentError> {
-    let mut current = value;
-    let mut visited = BTreeSet::new();
-    while let Some(parent) = current
-        .get("in_reply_to_id")
-        .filter(|value| !value.is_null())
-    {
-        if !visited.insert(parent.to_string()) {
-            return Err(error::InvalidUnitManifest::classified());
+/// Index and memoize reply chains without changing provider thread bindings.
+struct ThreadRoots<'a> {
+    by_id: HashMap<&'a Value, usize>,
+    roots: Vec<Option<ThreadRoot>>,
+}
+
+impl<'a> ThreadRoots<'a> {
+    fn new(records: &[&'a Value]) -> Self {
+        let mut by_id = HashMap::new();
+        for (index, record) in records.iter().enumerate() {
+            if let Some(id) = record.get("id") {
+                // Duplicate IDs resolve to the first matching provider record.
+                by_id.entry(id).or_insert(index);
+            }
         }
-        let Some(record) = records
-            .iter()
-            .find(|record| record.get("id") == Some(parent))
-        else {
-            // A retained parent ID still binds the thread when the provider omits its body.
-            return Ok(format!("/{field}/thread/{parent}"));
-        };
-        current = record;
+        Self {
+            by_id,
+            roots: vec![None; records.len()],
+        }
     }
-    Ok(format!(
-        "/{field}/thread/{}",
-        current
-            .get("id")
-            .map_or_else(|| index.to_owned(), Value::to_string)
-    ))
+
+    fn identity(
+        &mut self,
+        field: &str,
+        index: &str,
+        value: &Value,
+        records: &[&Value],
+    ) -> Result<String, AssessmentError> {
+        let mut current = value;
+        let mut position = index.parse::<usize>().ok().filter(|i| *i < records.len());
+        let mut visited = BTreeSet::new();
+        let mut path = Vec::new();
+        let root = loop {
+            if let Some(position) = position {
+                if let Some(root) = self.roots.get(position).and_then(Option::as_ref) {
+                    break root.clone();
+                }
+                if !visited.insert(position) {
+                    return Err(error::InvalidUnitManifest::classified());
+                }
+                path.push(position);
+            }
+            let Some(parent) = current
+                .get("in_reply_to_id")
+                .filter(|value| !value.is_null())
+            else {
+                break current
+                    .get("id")
+                    .map_or(ThreadRoot::MissingId, |id| ThreadRoot::Id(id.to_string()));
+            };
+            let Some(parent_index) = self.by_id.get(parent).copied() else {
+                // A retained parent ID binds the thread even when its body is absent.
+                break ThreadRoot::Id(parent.to_string());
+            };
+            current = records
+                .get(parent_index)
+                .ok_or_else(error::InvalidUnitManifest::classified)?;
+            position = Some(parent_index);
+        };
+        for position in path {
+            let slot = self
+                .roots
+                .get_mut(position)
+                .ok_or_else(error::InvalidUnitManifest::classified)?;
+            *slot = Some(root.clone());
+        }
+        let root = match root {
+            ThreadRoot::Id(id) => id,
+            ThreadRoot::MissingId => index.to_owned(),
+        };
+        Ok(format!("/{field}/thread/{root}"))
+    }
 }
 
 /// Prefer complete physical/JSON-escaped lines, but never stall on a long single line.
@@ -474,11 +524,106 @@ fn split_at(text: &str) -> usize {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::BTreeSet;
     use std::fmt::Write;
 
-    use serde_json::json;
+    use serde_json::{Value, json};
 
-    use super::{document_digest, hash, partition};
+    use super::{ThreadRoots, document_digest, hash, partition, segments};
+
+    /// Reference the original lookup semantics independently of the indexed traversal.
+    fn original_thread_identity(index: &str, value: &Value, records: &[Value]) -> Option<String> {
+        let mut current = value;
+        let mut visited = BTreeSet::new();
+        while let Some(parent) = current
+            .get("in_reply_to_id")
+            .filter(|value| !value.is_null())
+        {
+            if !visited.insert(parent.to_string()) {
+                return None;
+            }
+            let Some(record) = records
+                .iter()
+                .find(|record| record.get("id") == Some(parent))
+            else {
+                return Some(format!("/comments/thread/{parent}"));
+            };
+            current = record;
+        }
+        Some(format!(
+            "/comments/thread/{}",
+            current
+                .get("id")
+                .map_or_else(|| index.to_owned(), Value::to_string)
+        ))
+    }
+
+    #[test]
+    fn indexed_threads_preserve_original_identity_and_cycle_handling() {
+        let mut chains = (0..256)
+            .map(|id| {
+                if id == 0 {
+                    json!({"id": id, "body": "root 😀"})
+                } else {
+                    json!({"id": id, "in_reply_to_id": id - 1, "body": "reply"})
+                }
+            })
+            .collect::<Vec<_>>();
+        chains.reverse();
+        let cases = [
+            chains,
+            vec![
+                json!({"id": "a", "in_reply_to_id": "missing"}),
+                json!({"id": "b", "in_reply_to_id": "a"}),
+                json!({"id": 2, "body": "first"}),
+                json!({"id": 2, "in_reply_to_id": "a"}),
+                json!({"id": 3, "in_reply_to_id": 2}),
+                json!({"in_reply_to_id": 2}),
+                json!({"id": null, "in_reply_to_id": null}),
+                json!({"id": -0.0, "body": "signed zero"}),
+                json!({"id": "zero-reply", "in_reply_to_id": 0.0}),
+            ],
+            vec![
+                json!({"id": 1, "in_reply_to_id": 2}),
+                json!({"id": 2, "in_reply_to_id": 1}),
+                json!({"id": 3, "in_reply_to_id": 1}),
+                json!({"id": 4}),
+            ],
+        ];
+        for records in cases {
+            let references = records.iter().collect::<Vec<_>>();
+            let mut roots = ThreadRoots::new(&references);
+            for (position, value) in records.iter().enumerate() {
+                let index = position.to_string();
+                let expected = original_thread_identity(&index, value, &records);
+                let actual = roots.identity("comments", &index, value, &references).ok();
+                assert_eq!(actual, expected);
+            }
+        }
+    }
+
+    #[test]
+    fn large_interleaved_discussion_keeps_each_thread_and_all_original_text() {
+        let mut records = Vec::new();
+        for id in 0..128 {
+            records.push(json!({"id": id, "body": "root 😀"}));
+            records.push(json!({"id": id + 128, "in_reply_to_id": id, "body": "reply\r\n終"}));
+        }
+        for field in ["comments", "reviewComments"] {
+            let document = json!({field: records}).to_string();
+            let result = segments(&document, "discussion").unwrap();
+            assert_eq!(result.len(), records.len());
+            let mut reconstructed = String::new();
+            for (index, (segment, record)) in result.iter().zip(&records).enumerate() {
+                let expected = original_thread_identity(&index.to_string(), record, &records)
+                    .unwrap()
+                    .replace("/comments/", &format!("/{field}/"));
+                assert_eq!(segment.identity, expected);
+                reconstructed.push_str(document.get(segment.start..segment.end).unwrap());
+            }
+            assert_eq!(reconstructed, document);
+        }
+    }
 
     #[test]
     fn unicode_manifests_keep_existing_ranges_and_digests() {
