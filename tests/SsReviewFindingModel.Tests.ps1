@@ -228,7 +228,9 @@ BeforeAll {
             [Parameter(Mandatory)]
             [string] $Name,
 
-            [string[]] $ArgumentList = @()
+            [string[]] $ArgumentList = @(),
+
+            [string] $WorkingDirectory
         )
 
         $executablePath = Join-Path $script:ExecutableRoot $Name
@@ -238,6 +240,7 @@ BeforeAll {
 
         $startInfo = [System.Diagnostics.ProcessStartInfo]::new()
         $startInfo.FileName = $script:PowerShellPath
+        if ($WorkingDirectory) { $startInfo.WorkingDirectory = $WorkingDirectory }
         $arguments = @('-NoProfile', '-NonInteractive', '-File', $executablePath) + $ArgumentList
         foreach ($argument in $arguments) {
             $startInfo.ArgumentList.Add($argument)
@@ -1191,6 +1194,46 @@ Describe 'Artifact set validation' {
         $result['findingCount'] | Should -Be 3
     }
 
+    It 'recognizes only staging names produced by the shared writers' {
+        Test-FindingArtifactStagingName -Name '.reviewer.json.0123456789abcdef0123456789abcdef.tmp' | Should -BeTrue
+        Test-FindingArtifactStagingName -Name '.ss-ai-transaction-aB1234567890abcdefgh1234.tmp' | Should -BeTrue
+        foreach ($name in @(
+            '.tmp123456'
+            '.ss-ai-transaction-aB1234567890abcdefgh123.tmp'
+            '.ss-ai-transaction-aB1234567890abcdefgh12345.tmp'
+            '.ss-ai-transaction-aB1234567890abcdefghi-34.tmp'
+            '.ss-ai-transaction-aB1234567890abcdefgh1234.TMP'
+            '.ss-ai-transaction-aB1234567890abcdefgh1234.tmp.bak'
+            '.reviewer.json.0123456789abcdef0123456789abcdeg.tmp'
+        )) {
+            Test-FindingArtifactStagingName -Name $name | Should -BeFalse -Because $name
+        }
+    }
+
+    It 'ignores writer staging files but reports unrelated Windows entries' -Skip:(-not $IsWindows) {
+        $directory = New-TestArtifactSet -Root (Join-Path $TestDrive 'concurrent-staging') -Reviewer @(
+            @{ reviewerId = 'g1-correctness'; findingCount = 0; isComplete = $true }
+        )
+        $native = '.ss-ai-transaction-aB1234567890abcdefgh1234.tmp'
+        $powershell = '.reviewer.json.0123456789abcdef0123456789abcdef.tmp'
+        $foreign = '.ss-ai-transaction-aB1234567890abcdefgh123.tmp'
+        $foreignDirectory = '.ss-ai-transaction-zB1234567890abcdefgh1234.tmp'
+        Set-Content -LiteralPath (Join-Path $directory $native) -Value 'partial'
+        Set-Content -LiteralPath (Join-Path $directory $powershell) -Value 'partial'
+        Set-Content -LiteralPath (Join-Path $directory 'reviewer.JSON.LOCK') -Value 'lock'
+        $result = Get-FindingArtifactValidation -Path $directory -ExpectedReviewerId @('g1-correctness')
+        $result['isValid'] | Should -BeTrue
+
+        Set-Content -LiteralPath (Join-Path $directory $foreign) -Value 'foreign'
+        New-Item -ItemType Directory -Path (Join-Path $directory $foreignDirectory) | Out-Null
+        $result = Get-FindingArtifactValidation -Path $directory -ExpectedReviewerId @('g1-correctness')
+        $result['isValid'] | Should -BeFalse
+        ($result['errors'] -join ' ') | Should -BeLike "*$foreign*"
+        ($result['errors'] -join ' ') | Should -BeLike "*$foreignDirectory*"
+        ($result['errors'] -join ' ') | Should -Not -BeLike "*'$native'*"
+        ($result['errors'] -join ' ') | Should -Not -BeLike "*'$powershell'*"
+    }
+
     # A session-state directory is not sealed, so the gate states what it found rather than passing
     # a set it only partly read or reporting the reviewer as simply missing.
     It 'refuses a directory holding anything but reviewer artifacts' {
@@ -1298,6 +1341,75 @@ Describe 'Content fidelity' {
             Should -BeExactly 'security'
         @(Get-ChildItem -LiteralPath (Split-Path -Parent $path) -Force -Filter '*.tmp').Count |
             Should -Be 0
+    }
+}
+
+Describe 'Native workflow private requests' {
+    BeforeAll {
+        . (Join-Path $script:LibraryRoot 'NativeWorkflowBridge.ps1')
+    }
+
+    BeforeEach {
+        $script:RequestPath = $null
+        $script:RequestContent = $null
+        $script:RequestMode = $null
+        $script:ExclusiveCreationRejected = $false
+        Mock Invoke-NativeReviewWorkflow {
+            param([string[]] $Arguments)
+
+            $script:RequestPath = $Arguments[-1].Substring('--plan-path='.Length)
+            $script:RequestContent = [IO.File]::ReadAllText($script:RequestPath) | ConvertFrom-Json
+            if (-not $IsWindows) {
+                $script:RequestMode = [IO.File]::GetUnixFileMode($script:RequestPath)
+            }
+            try {
+                $collision = [IO.File]::Open($script:RequestPath, [IO.FileMode]::CreateNew)
+                $collision.Dispose()
+            } catch [IO.IOException] {
+                $script:ExclusiveCreationRejected = $true
+            }
+            if ($script:FailNativeRequest) { throw 'native request failed' }
+            'ok'
+        }
+    }
+
+    It 'creates a private request outside a read-only working directory and cleans it up' {
+        $script:FailNativeRequest = $false
+        $directory = Join-Path $TestDrive 'read-only-working-directory'
+        [IO.Directory]::CreateDirectory($directory) | Out-Null
+        if (-not $IsWindows) {
+            $originalMode = [IO.File]::GetUnixFileMode($directory)
+            [IO.File]::SetUnixFileMode($directory, [IO.UnixFileMode]::UserRead -bor [IO.UnixFileMode]::UserExecute)
+        }
+        Push-Location -LiteralPath $directory
+        try {
+            $result = Invoke-NativeReviewWorkflowWithJson -Arguments @('remove-finding') -PathOption 'plan-path' -Value @{
+                removals = @(@{ findingId = 'F1'; reason = 'Duplicate.' })
+            }
+        } finally {
+            Pop-Location
+            if (-not $IsWindows) { [IO.File]::SetUnixFileMode($directory, $originalMode) }
+        }
+
+        $result | Should -BeExactly 'ok'
+        [IO.Path]::GetDirectoryName($script:RequestPath) | Should -BeExactly ([IO.Path]::TrimEndingDirectorySeparator([IO.Path]::GetTempPath()))
+        $script:RequestContent.removals[0].reason | Should -BeExactly 'Duplicate.'
+        $script:ExclusiveCreationRejected | Should -BeTrue
+        if (-not $IsWindows) {
+            $otherPermissions = [IO.UnixFileMode]::GroupRead -bor [IO.UnixFileMode]::GroupWrite -bor [IO.UnixFileMode]::GroupExecute -bor
+                [IO.UnixFileMode]::OtherRead -bor [IO.UnixFileMode]::OtherWrite -bor [IO.UnixFileMode]::OtherExecute
+            ($script:RequestMode -band $otherPermissions) | Should -Be 0
+        }
+        [IO.File]::Exists($script:RequestPath) | Should -BeFalse
+        @(Get-ChildItem -LiteralPath $directory -Force).Count | Should -Be 0
+    }
+
+    It 'cleans up the request when the native operation fails' {
+        $script:FailNativeRequest = $true
+        { Invoke-NativeReviewWorkflowWithJson -Arguments @('remove-finding') -PathOption 'plan-path' -Value @{ removals = @() } } |
+            Should -Throw '*native request failed*'
+        $script:RequestPath | Should -Not -BeNullOrEmpty
+        [IO.File]::Exists($script:RequestPath) | Should -BeFalse
     }
 }
 
@@ -1717,19 +1829,29 @@ Describe 'Finding executables' {
         (Get-JsonProperty -Node $stored -Name 'title') | Should -BeExactly 'Original'
     }
 
-    It 'discards a finding with a reason and a moment' {
+    It 'discards a finding with a reason and a moment from a read-only working directory' {
         Initialize-TestArtifact | Out-Null
         Invoke-SkillExecutable -Name 'Add-Finding.ps1' -ArgumentList @(
             '-ArtifactPath', $script:ArtifactPath
             '-FindingPath', (New-TestFindingFile -Name 'finding.json')
         ) | Out-Null
 
-        $result = Invoke-SkillExecutable -Name 'Remove-Finding.ps1' -ArgumentList @(
-            '-ArtifactPath', $script:ArtifactPath
-            '-FindingId', 'g1-correctness-1'
-            '-Reason', 'Duplicates a finding from another reviewer.'
-            '-NowUtc', '2024-05-06T07:08:09Z'
-        )
+        $directory = Join-Path $script:WorkRoot 'read-only-working-directory'
+        [IO.Directory]::CreateDirectory($directory) | Out-Null
+        if (-not $IsWindows) {
+            $originalMode = [IO.File]::GetUnixFileMode($directory)
+            [IO.File]::SetUnixFileMode($directory, [IO.UnixFileMode]::UserRead -bor [IO.UnixFileMode]::UserExecute)
+        }
+        try {
+            $result = Invoke-SkillExecutable -Name 'Remove-Finding.ps1' -WorkingDirectory $directory -ArgumentList @(
+                '-ArtifactPath', $script:ArtifactPath
+                '-FindingId', 'g1-correctness-1'
+                '-Reason', 'Duplicates a finding from another reviewer.'
+                '-NowUtc', '2024-05-06T07:08:09Z'
+            )
+        } finally {
+            if (-not $IsWindows) { [IO.File]::SetUnixFileMode($directory, $originalMode) }
+        }
 
         $result['exitCode'] | Should -Be 0
         $emitted = ConvertFrom-JsonVerbatim -Text $result['standardOutput']

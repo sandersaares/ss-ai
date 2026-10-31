@@ -8,9 +8,10 @@
 use std::cell::Cell;
 use std::env;
 use std::fs;
-use std::io::{self, BufRead, BufReader, Write};
+use std::io::{self, BufRead, BufReader, Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Child, ChildStdin, ChildStdout, Command, Stdio};
+use std::sync::Mutex;
 use std::time::Duration;
 
 use jiff::Timestamp;
@@ -21,6 +22,9 @@ use ss_ai_review_workflow::audit::{
     set_merge_approval, set_merge_approval_from_files, test_merge_approval,
 };
 use ss_ai_runtime::{Clock, FileTransaction, SystemClock, caused_by, fail};
+
+/// Prevents a concurrent subprocess launch from temporarily inheriting a test's held lock.
+static PROCESS_LAUNCH: Mutex<()> = Mutex::new(());
 
 /// Keeps each integration test's files in the checkout, away from other tests.
 struct Workspace(PathBuf);
@@ -272,6 +276,7 @@ fn audit_interop_helper_reports_real_contention_for_each_operation() {
             &json!({"schemaVersion":1, "kind":"consolidated",
                 "findings":[finding("F-1","a.rs")], "removed":[]}),
         );
+        let launch = PROCESS_LAUNCH.lock().unwrap();
         let lock = FileTransaction::open(&record, &clock).unwrap();
         let mut child = Command::new(env::current_exe().unwrap())
             .args(["native_audit_lock_interop_helper", "--exact", "--nocapture"])
@@ -291,14 +296,17 @@ fn audit_interop_helper_reports_real_contention_for_each_operation() {
         error.read_line(&mut signal).unwrap();
         assert_eq!(signal.trim_end(), "lock-contended");
         drop(lock);
+        drop(launch);
         let mut input = child.stdin.take().unwrap();
         writeln!(input, "retry").unwrap();
         drop(input);
         let output = child.wait_with_output().unwrap();
+        let mut diagnostics = String::new();
+        error.read_to_string(&mut diagnostics).unwrap();
         assert!(
             output.status.success(),
-            "child failed: {}",
-            String::from_utf8_lossy(&output.stdout)
+            "child failed: {}\n{diagnostics}",
+            String::from_utf8_lossy(&output.stdout),
         );
         assert!(record.exists());
     }
@@ -471,6 +479,7 @@ fn feedback_text_matches_predecessor_for_bom_encodings() {
     let script = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/audit_predecessor.ps1");
     for (index, bytes) in encoded(text).iter().enumerate() {
         fs::write(&text_path, bytes).unwrap();
+        let launch = PROCESS_LAUNCH.lock().unwrap();
         let output = Command::new("pwsh")
             .args(["-NoLogo", "-NoProfile", "-NonInteractive", "-File"])
             .arg(&script)
@@ -486,6 +495,7 @@ fn feedback_text_matches_predecessor_for_bom_encodings() {
             .arg(&text_path)
             .output()
             .unwrap();
+        drop(launch);
         assert!(
             output.status.success(),
             "{}",
@@ -763,11 +773,13 @@ fn overlapping_predecessor_and_native_updates_keep_both_transactions() {
         let diff = workspace.put("diff.json", &json!({"files":[]}));
         let record = workspace.path("record.json");
         let clock = SystemClock::default();
+        let launch = PROCESS_LAUNCH.lock().unwrap();
         let transaction = FileTransaction::open(&record, &clock).unwrap();
         let mut contender =
             PredecessorWriter::start(&workspace, mode, &artifact, &record, &context, &diff);
         contender.expect("contended");
         drop(transaction);
+        drop(launch);
         if mode == "feedback-contender" {
             let text = workspace.path("text.txt");
             fs::write(&text, "Native response").unwrap();
