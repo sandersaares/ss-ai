@@ -36,6 +36,7 @@ $ErrorActionPreference = 'Stop'
 $PSNativeCommandUseErrorActionPreference = $true
 
 if ($PSCmdlet.ParameterSetName -eq 'Identifiers') {
+    . "$PSScriptRoot\lib\JsonValue.ps1"
     . "$PSScriptRoot\lib\NativeWorkflowBridge.ps1"
     $fullPath = $ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath($Path)
     $arguments = @('validate-findings', "--path=$fullPath")
@@ -46,7 +47,7 @@ if ($PSCmdlet.ParameterSetName -eq 'Identifiers') {
         }
     }
     $output = Invoke-NativeReviewWorkflow -Arguments $arguments
-    $valid = (ConvertFrom-Json -InputObject $output -AsHashtable)['isValid']
+    $valid = (ConvertFrom-JsonVerbatim -Text $output)['isValid']
     Write-Output $output
     if (-not $valid) { exit 1 }
     return

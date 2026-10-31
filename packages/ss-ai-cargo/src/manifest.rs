@@ -376,7 +376,7 @@ mod tests {
 
     #[test]
     fn fuzz_adapter_uses_the_same_parser_and_preserves_spans() {
-        let input = include_str!("../fuzz/seeds/dependencies.toml");
+        let input = include_str!("../../ss-ai-cargo-fuzz/seeds/dependencies.toml");
         let dependencies = super::parse_fuzz_manifest(input).unwrap();
         assert_eq!(dependencies.len(), 7);
         for dependency in dependencies {
@@ -388,7 +388,8 @@ mod tests {
             let tail = input.get(line_start..).unwrap();
             assert!(tail.find(&dependency.raw).unwrap() <= tail.find('\n').unwrap_or(tail.len()));
         }
-        super::parse_fuzz_manifest(include_str!("../fuzz/seeds/malformed.toml")).unwrap_err();
+        super::parse_fuzz_manifest(include_str!("../../ss-ai-cargo-fuzz/seeds/malformed.toml"))
+            .unwrap_err();
     }
 
     #[test]

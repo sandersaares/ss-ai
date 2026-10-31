@@ -486,6 +486,49 @@ fn structured_anchor_requests_validate_diff_and_match_native_resolution() {
 }
 
 #[test]
+fn batched_anchor_requests_preserve_results_and_validate_the_whole_diff() {
+    let diff = ss_ai_git::compare(&Git, Path::new("."), &"a".repeat(40), &"b".repeat(40)).unwrap();
+    let files = serde_json::to_value(diff.files()).unwrap();
+    let anchors = json!([
+        {"kind":"line","path":"./src/lib.rs","startLine":1},
+        {"kind":"line","path":"src/lib.rs","startLine":100},
+        {"kind":"file","path":"SRC/lib.rs"},
+        {"kind":"file","path":"old"},
+        null,
+        "malformed"
+    ]);
+    let request = json!({"anchors":anchors,"diff":{"files":files}});
+    let result = anchors::resolve_request(&request).unwrap();
+    assert_eq!(
+        result["results"][0]["anchor"],
+        anchors::resolve_anchor_in_diff(&anchors[0], &diff).unwrap()
+    );
+    assert_eq!(result["results"][1]["anchor"]["wasDowngraded"], true);
+    for index in [2, 3] {
+        assert!(
+            result["results"][index]["error"]
+                .as_str()
+                .unwrap()
+                .contains("Unresolvable anchor:")
+        );
+    }
+    assert!(result["results"][4]["argumentError"].is_string());
+    assert!(result["results"][5]["argumentError"].is_string());
+
+    let mut invalid = request;
+    invalid["diff"]["files"][2]["hunks"][0]["oldCount"] = json!(u32::MAX);
+    invalid["diff"]["files"][2]["hunks"][0]["oldStart"] = json!(2);
+    assert!(anchors::resolve_request(&invalid).is_err());
+    invalid["diff"]["files"] = json!([files[0], files[0]]);
+    assert!(anchors::resolve_request(&invalid).is_err());
+    assert!(anchors::resolve_request(&json!({"anchors": {}, "diff":{"files":[]}})).is_err());
+    assert!(
+        anchors::resolve_request(&json!({"anchors": [], "diff":{"files":[]}, "anchor":{}}))
+            .is_err()
+    );
+}
+
+#[test]
 #[cfg_attr(miri, ignore = "requires PowerShell subprocesses")]
 fn reviewed_context_hash_matches_powershell_for_discussion() {
     let workspace = Workspace::new("evidence-parity");

@@ -17,7 +17,7 @@ use std::os::windows::fs::OpenOptionsExt;
 use std::panic::catch_unwind;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
-use std::sync::mpsc;
+use std::sync::{Mutex, mpsc};
 use std::thread;
 use std::time::Duration;
 
@@ -30,6 +30,9 @@ use ss_ai::{
 };
 use tempfile::TempDir;
 
+/// Keeps subprocess launches from temporarily inheriting another test's transaction lock.
+static PROCESS_LAUNCH: Mutex<()> = Mutex::new(());
+
 #[test]
 fn system_clock_drives_tick_without_requiring_an_ambient_runtime() {
     // A zero delay exercises runtime ownership without measuring or waiting on real time.
@@ -38,6 +41,7 @@ fn system_clock_drives_tick_without_requiring_an_ambient_runtime() {
 
 #[test]
 fn isolated_azure_git_scopes_oauth_to_the_repository_without_writing_config() {
+    let _launch = PROCESS_LAUNCH.lock().unwrap();
     let root = TempDir::new().unwrap();
     let process = NativeProcess::new(root.path());
     // Synthetic credentials prove URL scoping without contacting any provider.
@@ -322,6 +326,7 @@ fn value(output: &Output) -> Value {
     ignore = "Real subprocess retries use SystemClock; deterministic retries have unit coverage"
 )]
 fn executable_github_selection_confirmation_and_registration() {
+    let _launch = PROCESS_LAUNCH.lock().unwrap();
     let fixture = Fixture::new();
     let claimed = value(&fixture.review("select").output().unwrap());
     assert_eq!(claimed["status"], "claimed");
@@ -374,6 +379,7 @@ fn executable_github_selection_confirmation_and_registration() {
     ignore = "Real subprocess retries use SystemClock; deterministic retries have unit coverage"
 )]
 fn executable_failed_writes_leave_nonreplayable_complete_journal() {
+    let _launch = PROCESS_LAUNCH.lock().unwrap();
     let fixture = Fixture::new();
     let failed = fixture
         .review("select")
@@ -405,6 +411,7 @@ fn executable_failed_writes_leave_nonreplayable_complete_journal() {
     ignore = "Real process pipes can block under mutations; no timeout substitutes for progress"
 )]
 fn executable_discovery_reads_metadata_without_remote_effects_in_either_mode() {
+    let _launch = PROCESS_LAUNCH.lock().unwrap();
     let fixture = Fixture::new();
     let policy = fixture.root.path().join("policy.md");
     fs::write(&policy, "Trusted fixture policy").unwrap();
@@ -454,6 +461,7 @@ fn executable_discovery_reads_metadata_without_remote_effects_in_either_mode() {
     ignore = "Real process pipes can block under mutations; no timeout substitutes for progress"
 )]
 fn native_pipe_and_launcher_arguments_are_lossless() {
+    let _launch = PROCESS_LAUNCH.lock().unwrap();
     let fixture = Fixture::new();
     let process = NativeProcess::new(fixture.root.path());
     let input = "\u{4e16}\u{754c}\"\\&".repeat(32 * 1024).into_bytes();
@@ -503,6 +511,7 @@ fn native_pipe_and_launcher_arguments_are_lossless() {
     ignore = "Real subprocess retries use SystemClock; deterministic retries have unit coverage"
 )]
 fn unix_provider_lookup_skips_nonexecutable_path_entries() {
+    let _launch = PROCESS_LAUNCH.lock().unwrap();
     let fixture = Fixture::new();
     let shadow = fixture.root.path().join("nonexecutable");
     fs::create_dir_all(&shadow).unwrap();
@@ -529,6 +538,7 @@ fn unix_provider_lookup_skips_nonexecutable_path_entries() {
 
 #[test]
 fn executable_requires_named_complete_inputs_before_provider_access() {
+    let _launch = PROCESS_LAUNCH.lock().unwrap();
     for arguments in [
         vec![],
         vec!["review", "select"],
@@ -619,6 +629,7 @@ fn respond(stream: &mut TcpStream, body: &Value) {
     ignore = "Live HTTP and subprocess waits cannot enforce deterministic mutation progress"
 )]
 fn executable_ado_registration_uses_native_oauth_shim_and_http_without_erasing_votes() {
+    let _launch = PROCESS_LAUNCH.lock().unwrap();
     for existing in [false, true] {
         let fixture = Fixture::new();
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
@@ -787,6 +798,7 @@ fn selection(path: &Path) -> Vec<OsString> {
     ignore = "A mutated missing synchronization signal blocks real threads"
 )]
 fn overlapping_native_transactions_and_open_readers_preserve_exact_records() {
+    let _launch = PROCESS_LAUNCH.lock().unwrap();
     let root = tempfile::tempdir().unwrap();
     let path = root.path().join("state.json");
     let (initialized_tx, initialized_rx) = mpsc::channel();
@@ -1015,6 +1027,7 @@ impl Clock for Timeline {
 
 #[test]
 fn ado_command_selection_and_confirmation_preserve_resolved_threads_and_schema_two() {
+    let _launch = PROCESS_LAUNCH.lock().unwrap();
     for legacy in [false, true] {
         let root = tempfile::tempdir().unwrap();
         // A long path also exercises native Windows extended-path replacement.
