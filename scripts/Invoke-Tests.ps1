@@ -52,7 +52,7 @@ if ($Suite -in @('All', 'Pester')) {
         'SsReviewTrackerGitHub.Tests.ps1', 'SsReviewTrackerAzureDevOps.Tests.ps1',
         'SsReviewPullRequestAuthorship.Tests.ps1', 'SsReviewPullRequestExecutables.Tests.ps1',
         'SsReviewNativeCaptureParity.Tests.ps1', 'SsReviewPullRequestQuery.Tests.ps1',
-        'SsReviewReports.Tests.ps1', 'SsReviewSelfReview.Tests.ps1',
+        'SsReviewReports.Tests.ps1', 'SsReviewReportTools.Tests.ps1', 'SsReviewOverviewApi.Tests.ps1', 'SsReviewSelfReview.Tests.ps1',
         'SsReviewSharedFiles.Tests.ps1', 'SsReviewWorkflowData.Tests.ps1',
         'SsReviewWork.Tests.ps1', 'SsReviewWorkerInput.Tests.ps1'
     )

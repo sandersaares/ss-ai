@@ -88,19 +88,35 @@ Installation does not authenticate clients, enable schedules, or approve reviews
 
 ### Review reports and scheduled work
 
-Review HTML requires Pandoc, Node.js, and the skill's pinned Mermaid/browser
-dependencies. Inspect readiness without installing anything:
+Review HTML requires Pandoc, Node.js, and the active skill's pinned Mermaid/browser
+dependencies. After installing `ss-ai` and the skill with the root `Install.ps1`,
+inspect readiness without installing anything. Replace `SKILL_ROOT` with the
+absolute directory containing the active `SKILL.md`:
 
 ```powershell
-pwsh -NoProfile -File ./skills/ss-review/scripts/Test-ReviewReportTools.ps1
+#Requires -Version 7.6
+
+Set-StrictMode -Version Latest
+$ErrorActionPreference = 'Stop'
+$PSNativeCommandUseErrorActionPreference = $true
+
+& (Join-Path "{{SKILL_ROOT}}" 'scripts/Test-ReviewReportTools.ps1')
 ```
 
 After explicitly approving dependency installation:
 
 ```powershell
-pwsh -NoProfile -File ./skills/ss-review/scripts/Install-ReviewReportTools.ps1
+#Requires -Version 7.6
+
+Set-StrictMode -Version Latest
+$ErrorActionPreference = 'Stop'
+$PSNativeCommandUseErrorActionPreference = $true
+
+& (Join-Path "{{SKILL_ROOT}}" 'scripts/Install-ReviewReportTools.ps1')
 ```
 
+The adapters select `%LOCALAPPDATA%/ss-review/tools` when `LOCALAPPDATA` is set,
+or `~/.local/share/ss-review/tools` otherwise, and use the active skill directory.
 The setup and readiness commands exercise a real embedded Mermaid diagram.
 See the [platform setup guide](skills/ss-review/report-tool-setup.md) for
 Node/Pandoc versions and Ubuntu browser system dependencies. Without HTML

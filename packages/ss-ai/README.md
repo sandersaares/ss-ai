@@ -197,6 +197,64 @@ manifest-based coverage. The [audit guide](../../skills/ss-review/data-guides/au
 describes decision and feedback records. Policy classification does not grant
 user or merge approval, and rendering does not publish or approve findings.
 
+## Review report tools
+
+Report commands use the active `ss-review` skill directory for its locked
+dependencies and HTML template. Install the executable and skill together with
+the repository's root `Install.ps1`. The report-tool installer requires explicit
+user approval; it does not run as part of the readiness check or rendering.
+
+```powershell
+#Requires -Version 7.6
+
+Set-StrictMode -Version Latest
+$ErrorActionPreference = 'Stop'
+$PSNativeCommandUseErrorActionPreference = $true
+
+& (Join-Path "{{SKILL_ROOT}}" 'scripts/Test-ReviewReportTools.ps1')
+```
+
+Only after explicit approval, install the dependencies:
+
+```powershell
+#Requires -Version 7.6
+
+Set-StrictMode -Version Latest
+$ErrorActionPreference = 'Stop'
+$PSNativeCommandUseErrorActionPreference = $true
+
+& (Join-Path "{{SKILL_ROOT}}" 'scripts/Install-ReviewReportTools.ps1')
+```
+
+To render a document after readiness succeeds:
+
+```powershell
+#Requires -Version 7.6
+
+Set-StrictMode -Version Latest
+$ErrorActionPreference = 'Stop'
+$PSNativeCommandUseErrorActionPreference = $true
+
+& (Join-Path "{{SKILL_ROOT}}" 'scripts/ConvertTo-ReviewHtml.ps1') `
+  -Path "{{MARKDOWN_PATH}}" -OutputPath "{{HTML_PATH}}" -Title "{{TITLE}}"
+```
+
+`SKILL_ROOT` is the absolute directory containing the active skill's `SKILL.md`.
+`MARKDOWN_PATH` identifies the canonical Markdown document, `HTML_PATH` its HTML
+reading view, and `TITLE` is optional; omit `-Title` to use `Review report`.
+The adapters select `%LOCALAPPDATA%/ss-review/tools` when `LOCALAPPDATA` is set,
+or `~/.local/share/ss-review/tools` otherwise, and supply the active skill
+directory to the native executable. The render adapter writes the title to a
+UTF-8 file beside the resolved HTML output and removes it afterward. The output
+directory must be writable. The native process keeps the caller's working directory.
+On Ubuntu, pass `-InstallBrowserDependencies` to the approved installer when
+browser system dependencies are needed. The check and installer exercise a real HTML/Mermaid
+probe. Check results include tool paths, `missing`, and `diagnostics`; rendering
+returns the source and HTML paths and hashes, HTML URI, and diagram count.
+The [platform setup guide](../../skills/ss-review/report-tool-setup.md) describes
+versions, consent, system dependencies, and recovery. The review workflow keeps
+Markdown as the fallback and controls presentation and publication.
+
 ## Focus-area preparation
 
 The focus-area workflow records reference expansion and agent-authored maps

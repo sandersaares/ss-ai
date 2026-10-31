@@ -1300,7 +1300,7 @@ installations. A complete dependency tree is reused while browser setup can stil
 repair a missing browser download. Checkout-local dependencies are neither used
 nor deleted, and the skill directory requires no write access.
 
-The PowerShell tool check reports missing Pandoc, Node.js, Mermaid CLI, and
+The native tool check reports missing Pandoc, Node.js, Mermaid CLI, and
 Mermaid's browser explicitly, retaining browser-discovery diagnostics. Its JSON
 record always contains `pandoc` and `mermaid` paths, nullable `node` and `browser`
 paths, a `missing` array of tool identifiers, and a `diagnostics` array of strings.
@@ -1327,7 +1327,8 @@ request. Browser-install failures also point to the guide's targeted incomplete-
 procedure. Cache deletion remains a separately approved user action with exclusive
 cache access; the installer never infers deletion targets from error text.
 
-On Ubuntu, `-InstallBrowserDependencies` explicitly opts into system package
+On Ubuntu, the adapter's `-InstallBrowserDependencies` switch passes
+`--install-browser-dependencies` to the native installer to explicitly opt into system package
 installation. Under the same tools lock, the installer reads `deb.deps` beside
 the resolved Chrome executable and passes its dependency relations to
 `apt-get satisfy`, following Puppeteer's dependency-installation mechanism.
@@ -1357,8 +1358,13 @@ user's decision is retained for the run to prevent repeated installation prompts
 
 ## HTML report rendering
 
-`ConvertTo-ReviewHtml.ps1` reads canonical Markdown and uses Pandoc's GFM syntax
-tree, transformed in PowerShell. Source raw nodes become visible text/code, while
+The `ConvertTo-ReviewHtml.ps1` adapter supplies the active skill root and shared tools directory
+to `ss-ai workflow render-review-html`. It resolves the output path against the caller's
+location, creates its parent directory if necessary, writes the title to a UTF-8 file beside
+the output, passes its path as `--title-path`, and removes the file afterward. The output
+directory must be writable; the native process keeps the caller's working directory.
+The native renderer reads canonical Markdown and uses Pandoc's GFM syntax
+tree. Source raw nodes become visible text/code, while
 only the renderer's Mermaid transformation inserts controlled raw HTML.
 Repository-relative finding references remain visible as labels and destinations
 rather than linking relative to the session directory. External images and

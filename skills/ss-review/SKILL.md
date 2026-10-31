@@ -101,7 +101,7 @@ The workflow is split into multiple phases:
 
 Execute all phases in sequence for ordinary review. Self-review takes the explicit route above.
 
-Invoke every skill script through `pwsh` with `-NonInteractive`, so that a missing required parameter fails immediately instead of waiting for input that will never arrive.
+Invoke every skill script through `pwsh` with `-NonInteractive`, so that a missing required parameter fails immediately instead of waiting for input that will never arrive. Report-tool recipes invoke `ss-ai workflow` directly with the active skill root; the PowerShell report commands remain compatibility adapters.
 
 Read the short common rules in `workflow-data.md` before preparing machine-readable handoffs, together with only the data guide needed for that work:
 

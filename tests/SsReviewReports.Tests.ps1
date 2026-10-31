@@ -122,42 +122,87 @@ Describe 'Safe report presentation' {
         $node.c[1][3].c[1] | Should -Be 'docs/design.md'
     }
 
-    It 'preserves Markdown and old HTML when a renderer fails' {
-        $source = Join-Path $TestDrive 'input.md'
-        $output = Join-Path $TestDrive 'output.html'
-        Set-Content -LiteralPath $source -Value '# Canonical text'
-        Set-Content -LiteralPath $output -Value 'old view'
-        $tools = @{ missing = @(); pandoc = 'fake-pandoc'; node = 'fake-node'; mermaid = 'fake-mermaid' }
-        { Write-ReviewHtml -Path $source -OutputPath $output -SkillRoot $script:SkillRoot -Tools $tools `
-            -InvokeProcess { @{ exitCode = 1; standardOutputBytes = [byte[]]@(); standardErrorText = 'Renderer unavailable' } }
-        } | Should -Throw '*Renderer unavailable*'
-        Get-Content -LiteralPath $source | Should -Be '# Canonical text'
-        Get-Content -LiteralPath $output | Should -Be 'old view'
-        @(Get-ChildItem -LiteralPath $TestDrive -Directory -Force -Filter '.report-*').Count | Should -Be 0
+    It 'passes Unicode title through a private file and preserves the report result' {
+        $script:TitleFile = $null
+        Mock Invoke-NativeReviewWorkflow {
+            param($Arguments)
+            $Arguments[0] | Should -BeExactly 'render-review-html'
+            $titleOption = @($Arguments | Where-Object { $_ -like '--title-path=*' })[0]
+            $script:TitleFile = $titleOption.Substring('--title-path='.Length)
+            [IO.File]::ReadAllText($script:TitleFile, [Text.Encoding]::UTF8) | Should -BeExactly "Review – overview`nTitle"
+            if (-not $IsWindows) {
+                $mode = [IO.File]::GetUnixFileMode($script:TitleFile)
+                $allowed = [IO.UnixFileMode]::UserRead -bor [IO.UnixFileMode]::UserWrite
+                ($mode -band (-bnot $allowed)) | Should -Be 0
+            }
+            '{"sourcePath":"source","sourceHash":"abc","htmlPath":"output","htmlUri":"file:///output","htmlHash":"def","diagramCount":2}'
+        }
+        $result = Write-ReviewHtml -Path 'source' -OutputPath (Join-Path $TestDrive 'output') -SkillRoot $script:SkillRoot -Title "Review – overview`nTitle" `
+            -Tools @{ missing = @() } -InvokeProcess { throw 'Legacy process invocation must not run' }
+        $result.diagramCount | Should -Be 2
+        $result.htmlUri | Should -BeExactly 'file:///output'
+        Test-Path -LiteralPath $script:TitleFile | Should -BeFalse
     }
 
-    It 'waits for a shared output and protects tool files throughout rendering' {
-        $source = Join-Path $TestDrive 'input.md'
-        $script:HtmlOutput = Join-Path $TestDrive 'output.html'
-        Write-PullRequestOutputFile -Path $source -Content '# Canonical text'
-        $script:HtmlLock = Open-PullRequestFileLock -Path $script:HtmlOutput
-        Mock Start-Sleep { $script:HtmlLock.Dispose() }
-        $tools = @{ missing = @(); pandoc = 'fake-pandoc'; node = 'fake-node'; mermaid = 'fake-mermaid' }
-        $invoke = {
-            param($FilePath, $ArgumentList, $StandardInput)
-            { [IO.File]::Open("$script:HtmlOutput.lock", 'Open', 'ReadWrite', 'None') } | Should -Throw
-            { [IO.File]::Open("$(Get-ReportToolsLockPath).lock", 'Open', 'ReadWrite', 'None') } | Should -Throw
-            $otherRenderer = Open-PullRequestFileLock -Path (Get-ReportToolsLockPath) -Shared
-            $otherRenderer.Dispose()
-            $output = if ($ArgumentList -contains '--to=json') { '{"meta":{},"blocks":[]}' }
-                else { '<!DOCTYPE html><html><meta http-equiv="Content-Security-Policy"></html>' }
-            @{ exitCode = 0; standardOutputBytes = [Text.Encoding]::UTF8.GetBytes($output); standardErrorText = '' }
+    It 'propagates native rendering failures and removes its title file' {
+        $script:TitleFile = $null
+        Mock Invoke-NativeReviewWorkflow {
+            param($Arguments)
+            $titleOption = @($Arguments | Where-Object { $_ -like '--title-path=*' })[0]
+            $script:TitleFile = $titleOption.Substring('--title-path='.Length)
+            throw 'Renderer unavailable'
         }
+        { Write-ReviewHtml -Path 'source' -OutputPath (Join-Path $TestDrive 'output') -SkillRoot $script:SkillRoot } | Should -Throw '*Renderer unavailable*'
+        Test-Path -LiteralPath $script:TitleFile | Should -BeFalse
+    }
+
+    It 'stages the title beside a relative output without changing the invocation location' {
+        $root = Join-Path $TestDrive ([guid]::NewGuid().ToString('N'))
+        $invocation = Join-Path $root 'invocation'
+        $destination = Join-Path $root 'reports'
+        [void] [IO.Directory]::CreateDirectory($invocation)
+        $previousLocation = Get-Location
+        $previousMode = if (-not $IsWindows) { [IO.File]::GetUnixFileMode($invocation) } else { $null }
+        $script:TitleFile = $null
         try {
-            $result = Write-ReviewHtml -Path $source -OutputPath $script:HtmlOutput -SkillRoot $script:SkillRoot -Tools $tools -InvokeProcess $invoke
-        } finally { $script:HtmlLock.Dispose() }
-        $result.htmlHash | Should -BeExactly (Get-ReviewReportHash -Bytes (Read-PullRequestFileBytes -Path $script:HtmlOutput))
-        Should -Invoke Start-Sleep -Times 1 -Exactly
+            if (-not $IsWindows) {
+                [IO.File]::SetUnixFileMode($invocation, [IO.UnixFileMode]::UserRead -bor [IO.UnixFileMode]::UserExecute)
+            }
+            Set-Location -LiteralPath $invocation
+            Mock Invoke-NativeReviewWorkflow {
+                param($Arguments)
+                (Get-Location).ProviderPath | Should -BeExactly $invocation
+                $titleOption = @($Arguments | Where-Object { $_ -like '--title-path=*' })[0]
+                $script:TitleFile = $titleOption.Substring('--title-path='.Length)
+                [IO.Path]::GetDirectoryName($script:TitleFile) | Should -BeExactly $destination
+                [IO.File]::ReadAllText($script:TitleFile) | Should -BeExactly 'Private title'
+                '{"diagramCount":0}'
+            }
+            $result = Write-ReviewHtml -Path 'source' -OutputPath '../reports/report.html' `
+                -SkillRoot $script:SkillRoot -Title 'Private title'
+            $result.diagramCount | Should -Be 0
+            (Get-Location).ProviderPath | Should -BeExactly $invocation
+            Test-Path -LiteralPath $script:TitleFile | Should -BeFalse
+        } finally {
+            Set-Location -LiteralPath $previousLocation
+            if (-not $IsWindows) { [IO.File]::SetUnixFileMode($invocation, $previousMode) }
+        }
+    }
+
+    It 'does not fall back when the output directory cannot be created' {
+        $blocker = Join-Path $TestDrive ([guid]::NewGuid().ToString('N'))
+        [IO.File]::WriteAllText($blocker, 'not a directory')
+        Mock Invoke-NativeReviewWorkflow { throw 'Unexpected renderer invocation' }
+        { Write-ReviewHtml -Path 'source' -OutputPath (Join-Path $blocker 'report.html') -SkillRoot $script:SkillRoot } |
+            Should -Throw
+        Should -Invoke Invoke-NativeReviewWorkflow -Times 0 -Exactly
+    }
+
+    It 'rejects a caller-held installation lock before rendering' {
+        Mock Invoke-NativeReviewWorkflow { throw 'Unexpected renderer invocation' }
+        { Write-ReviewHtml -Path 'source' -OutputPath (Join-Path $TestDrive 'output') -SkillRoot $script:SkillRoot -InstallationLocked } |
+            Should -Throw '*cannot reuse*'
+        Should -Invoke Invoke-NativeReviewWorkflow -Times 0 -Exactly
     }
 
     It 'identifies missing tools and requires user installation permission' {
@@ -165,91 +210,6 @@ Describe 'Safe report presentation' {
         try { Assert-ReviewReportTools -Tools @{ missing = @('pandoc', 'mermaid-browser') } } catch { $caught = $_.Exception }
         $caught.Message | Should -Match 'Ask the user'
         $caught.Data['missingTools'] | Should -Contain 'mermaid-browser'
-    }
-}
-
-Describe 'Report prerequisite readiness' {
-    BeforeEach {
-        Mock Get-ReportToolsLockPath { Join-Path $TestDrive 'report-tools' }
-        $script:ProbeScratch = $null
-        $script:ProbeFailure = ''
-        $script:ProbeCalls = [Collections.Generic.List[string]]::new()
-        $script:ProbeTools = @{ missing = @(); pandoc = 'fake-pandoc'; node = 'fake-node'; mermaid = 'fake-mermaid' }
-        $script:ProbeInvoker = {
-            param($FilePath, $ArgumentList, $StandardInput)
-            { [IO.File]::Open("$(Get-ReportToolsLockPath).lock", 'Open', 'ReadWrite', 'None') } | Should -Throw
-            $errorText = ''
-            $output = if ($ArgumentList -contains '--to=json') {
-                $script:ProbeCalls.Add('markdown')
-                $StandardInput | Should -Match '(?m)^```mermaid'
-                '{"meta":{},"blocks":[{"t":"CodeBlock","c":[["",["mermaid"],[]],"flowchart LR; A-->B"]}]}'
-            } elseif ($FilePath -eq 'fake-node') {
-                $script:ProbeCalls.Add('mermaid')
-                $svg = $ArgumentList[[Array]::IndexOf($ArgumentList, '--output') + 1]
-                $script:ProbeScratch = Split-Path -Parent (Split-Path -Parent $svg)
-                $ArgumentList | Should -Not -Contain '--no-sandbox'
-                if ($script:ProbeFailure -match 'libnss3|libnspr4|sandbox') { $errorText = $script:ProbeFailure }
-                else { Write-PullRequestOutputFile -Path $svg -Content '<svg><text>Report</text></svg>' }
-                ''
-            } else {
-                $script:ProbeCalls.Add('html')
-                $ArgumentList | Should -Contain '--syntax-highlighting=pygments'
-                if ($script:ProbeFailure -eq 'Unknown option --syntax-highlighting') { $errorText = $script:ProbeFailure }
-                $ast = ConvertFrom-JsonVerbatim -Text $StandardInput
-                $body = if ($script:ProbeFailure -eq 'no embedded diagram') { '' } else { $ast.blocks[0].c[1] }
-                "<!DOCTYPE html><html><meta http-equiv=`"Content-Security-Policy`">$body</html>"
-            }
-            @{
-                exitCode = if ($errorText) { 1 } else { 0 }
-                standardOutputBytes = [Text.Encoding]::UTF8.GetBytes($output)
-                standardErrorText = $errorText
-            }
-        }
-    }
-
-    AfterEach {
-        if ($script:ProbeScratch) { Test-Path -LiteralPath $script:ProbeScratch | Should -BeFalse }
-    }
-
-    It 'proves readiness with the actual HTML pipeline and an embedded diagram' {
-        Assert-ReviewReportRendering -SkillRoot $script:SkillRoot -Tools $script:ProbeTools -InvokeProcess $script:ProbeInvoker
-        $script:ProbeCalls | Should -Be @('markdown', 'mermaid', 'html')
-    }
-
-    It 'checks setup under the retained exclusive installation lock without reacquiring it' {
-        $lock = Open-PullRequestFileLock -Path (Get-ReportToolsLockPath)
-        Mock Start-Sleep { throw 'The probe tried to reacquire its installation lock.' }
-        try {
-            Assert-ReviewReportRendering -SkillRoot $script:SkillRoot -Tools $script:ProbeTools `
-                -InvokeProcess $script:ProbeInvoker -InstallationLocked
-            { [IO.File]::Open("$(Get-ReportToolsLockPath).lock", 'Open', 'ReadWrite', 'None') } | Should -Throw
-        } finally { $lock.Dispose() }
-        $script:ProbeCalls | Should -Be @('markdown', 'mermaid', 'html')
-        Should -Invoke Start-Sleep -Times 0 -Exactly
-    }
-
-    It 'rejects installed files that cannot render and preserves the reason: <Failure>' -ForEach @(
-        @{ Failure = 'libnss3.so: cannot open shared object file' }
-        @{ Failure = 'libnspr4.so: cannot open shared object file' }
-        @{ Failure = 'No usable sandbox!' }
-        @{ Failure = 'Unknown option --syntax-highlighting' }
-    ) {
-        $script:ProbeFailure = $Failure
-        { Assert-ReviewReportRendering -SkillRoot $script:SkillRoot -Tools $script:ProbeTools -InvokeProcess $script:ProbeInvoker } |
-            Should -Throw "*$Failure*"
-    }
-
-    It 'rejects nominally successful HTML conversion without an embedded diagram' {
-        $script:ProbeFailure = 'no embedded diagram'
-        { Assert-ReviewReportRendering -SkillRoot $script:SkillRoot -Tools $script:ProbeTools -InvokeProcess $script:ProbeInvoker } |
-            Should -Throw '*expected embedded Mermaid diagram*'
-    }
-
-    It 'does not launch tools when discovery already reports an incomplete installation' {
-        $script:ProbeTools.missing = @('mermaid-browser')
-        { Assert-ReviewReportRendering -SkillRoot $script:SkillRoot -Tools $script:ProbeTools -InvokeProcess $script:ProbeInvoker } |
-            Should -Throw '*Missing report tools*'
-        $script:ProbeCalls.Count | Should -Be 0
     }
 }
 
