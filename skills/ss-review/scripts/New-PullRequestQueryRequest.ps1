@@ -25,40 +25,66 @@ param(
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 $PSNativeCommandUseErrorActionPreference = $true
-. "$PSScriptRoot\lib\JsonValue.ps1"
-. "$PSScriptRoot\lib\PullRequestModel.ps1"
-. "$PSScriptRoot\lib\PullRequestContextQuery.ps1"
-. "$PSScriptRoot\lib\WorkflowData.ps1"
-. "$PSScriptRoot\lib\ReviewInput.ps1"
-. "$PSScriptRoot\lib\PullRequestQueryRequest.ps1"
 
-Add-ReviewInputDiagnostic -Path $DiagnosticsPath -Name setupCalls
-$lock = Open-WorkflowDataLock -Path $RequestPath
-try {
-    if ([IO.File]::Exists($RequestPath)) {
-        Add-ReviewInputDiagnostic -Path $DiagnosticsPath -Name repeatedSetupCalls
-        throw 'Query request already exists. Read it again instead of repeating setup, or use a new path for a different query.'
+# Match the query excerpt limit because parser errors can include captured evidence.
+function Get-NativeContextErrorExcerpt {
+    param([AllowEmptyString()][string] $Text)
+    $message = $Text.Trim() -replace '^(?:(?:invalidInput|service): )+', ''
+    $length = [Math]::Min(240, $message.Length)
+    if ($length -lt $message.Length -and $length -gt 0 -and [char]::IsHighSurrogate($message[$length - 1])) {
+        $length--
     }
+    $message.Substring(0, $length)
+}
+
+# Preserve JSON on PowerShell's success stream for callers that parse it.
+function Invoke-NativeContext {
+    param([string[]] $Arguments)
+    $program = Get-Command ss-ai -CommandType Application -ErrorAction Stop | Select-Object -First 1
+    $start = [Diagnostics.ProcessStartInfo]::new($program.Source)
+    $start.WorkingDirectory = (Get-Location).ProviderPath
+    $start.UseShellExecute = $false
+    $start.RedirectStandardOutput = $true
+    $start.RedirectStandardError = $true
+    $start.StandardOutputEncoding = [Text.UTF8Encoding]::new($false, $true)
+    $start.StandardErrorEncoding = [Text.UTF8Encoding]::new($false, $true)
+    foreach ($argument in @('context') + $Arguments) { $start.ArgumentList.Add($argument) }
+    $process = [Diagnostics.Process]::Start($start)
     try {
-        if ($PSBoundParameters.ContainsKey('TextPath')) {
-            if ($PSBoundParameters.ContainsKey('Text')) { throw 'Supply either Text or TextPath, not both.' }
-            $Text = (Read-PullRequestFileText -Path ((Resolve-PullRequestPath -Path $TextPath)) -Encoding ([Text.UTF8Encoding]::new($false, $true)))
+        $output = $process.StandardOutput.ReadToEndAsync()
+        $errors = $process.StandardError.ReadToEndAsync()
+        $process.WaitForExit()
+        $text = $output.GetAwaiter().GetResult()
+        $errorText = $errors.GetAwaiter().GetResult()
+        if ($process.ExitCode -ne 0) {
+            $excerpt = Get-NativeContextErrorExcerpt -Text $errorText
+            [Console]::Error.WriteLine("Query preparation failed: $excerpt")
+            exit $process.ExitCode
         }
-        if ($PSBoundParameters.ContainsKey('Files') -and $Files.Count -eq 0) { throw 'An explicit Files selector must not be empty.' }
-        $options = New-PullRequestQueryOptions -Query $Query -Field $Field -Files $Files -Scope $Scope `
-            -Kind $Kind -Resolution $Resolution -ThreadId $ThreadId -CommentId $CommentId `
-            -Authorship $Authorship -IndexOnly:$IndexOnly -Text $Text -PageSize $PageSize
-        $request = New-PullRequestQueryRequest -Path $Path -ComparePath $ComparePath -Options $options -DiagnosticsPath $DiagnosticsPath
-    } catch {
-        Add-ReviewInputDiagnostic -Path $DiagnosticsPath -Name malformedQueryFailures
-        throw
+        [Console]::OutputEncoding = [Text.UTF8Encoding]::new($false)
+        Write-Output $text.TrimEnd([char[]]@("`r", "`n"))
+    } finally { $process.Dispose() }
+}
+
+$arguments = [Collections.Generic.List[string]]::new()
+foreach ($argument in @('prepare', "--path=$Path", "--request-path=$RequestPath",
+    "--diagnostics-path=$DiagnosticsPath", "--query=$Query", "--scope=$Scope", "--page-size=$PageSize")) {
+    $arguments.Add($argument)
+}
+foreach ($entry in @(
+    @('Field', 'field'), @('Kind', 'kind'), @('Resolution', 'resolution'),
+    @('ThreadId', 'thread-id'), @('CommentId', 'comment-id'), @('Authorship', 'authorship'),
+    @('Text', 'text'), @('TextPath', 'text-path'), @('ComparePath', 'compare-path')
+)) {
+    if ($PSBoundParameters.ContainsKey($entry[0])) {
+        $arguments.Add("--$($entry[1])=$($PSBoundParameters[$entry[0]])")
     }
-    Write-PullRequestOutputFileAtomically -Path $RequestPath -Content (ConvertTo-JsonText -Value $request)
-    [ordered]@{ requestPath = Resolve-PullRequestPath -Path $RequestPath; requestId = $request['requestId']; snapshotId = $request['snapshotId'] } |
-        ConvertTo-Json -Compress
-} catch {
-    # A capture parser can include source text in its error; keep diagnostics bounded like the reader.
-    $excerpt = Get-PullRequestQueryExcerpt -Text $_.Exception.Message
-    [Console]::Error.WriteLine("Query preparation failed: $($excerpt['excerpt'])")
-    exit 1
-} finally { $lock.Dispose() }
+}
+if ($PSBoundParameters.ContainsKey('Files') -and $Files.Count -eq 0) {
+    # An explicit empty selection must not become an unrestricted query.
+    $arguments.Add('--file=')
+} else {
+    foreach ($file in $Files) { $arguments.Add("--file=$file") }
+}
+if ($IndexOnly) { $arguments.Add('--index-only') }
+Invoke-NativeContext -Arguments $arguments.ToArray()

@@ -170,6 +170,16 @@ spaces, and literal backslashes. Git's external diff and text conversion
 programs cannot replace source evidence. The review workflow retains ownership
 of deciding whether a finding falls within those ranges.
 
+## Local review context
+
+Local context commands read captured pull request evidence without contacting
+the provider. They select bounded pages of metadata, discussion, search
+results, or changes between captures. Saved requests bind their selectors and
+capture identities, replay the last page by default, and require an explicit
+continuation or restart. Authorship decisions remain separate from captured
+evidence. Invalid or changed inputs produce errors rather than incomplete
+results.
+
 ## Functional areas
 
 Skills invoke named commands and consume complete JSON results. The command

@@ -119,6 +119,35 @@ The comparison reads committed objects without changing the checkout.
 It reports commentable ranges, not an approval decision or a complete
 automatic-reapproval assessment.
 
+## Local review context
+
+```powershell
+#Requires -Version 7.6
+
+Set-StrictMode -Version Latest
+$ErrorActionPreference = 'Stop'
+$PSNativeCommandUseErrorActionPreference = $true
+
+ss-ai context prepare --path "{{CONTEXT_PATH}}" --request-path "{{REQUEST_PATH}}" `
+  --diagnostics-path "{{DIAGNOSTICS_PATH}}" --query metadata --field title
+ss-ai context read-saved --request-path "{{REQUEST_PATH}}"
+```
+
+| Input | Contract |
+| --- | --- |
+| `CONTEXT_PATH` | Local canonical pull request capture. |
+| `REQUEST_PATH` | New path for the saved query and its continuation state. |
+| `DIAGNOSTICS_PATH` | Private input-diagnostics record for the worker. |
+
+Saved reads replay the last page unless `--next` explicitly advances it.
+`--restart` binds the same selectors to current evidence after a capture changes.
+The commands do not contact a provider. Their pages contain at most 16 KiB of
+serialized UTF-8 output including the final newline; long text continues at
+UTF-16 code-unit offsets. Literal search uses Unicode simple case folding,
+without normalization or multi-character expansion. The skill's
+`pwsh-calls/query-pr-context.md` describes the selection and consumption of
+bounded pages.
+
 ## Reapproval discovery
 
 Discovery collects open-PR metadata and complete commit timestamps before
