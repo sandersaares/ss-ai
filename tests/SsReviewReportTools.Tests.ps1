@@ -562,6 +562,8 @@ Describe 'Ubuntu browser system dependencies' {
                     standardOutputBytes = [byte[]]@()
                     standardErrorText = if ($script:FailedOperation) { 'System package installation refused.' } else { '' }
                 }
+
+
             }
         }
     }
@@ -609,5 +611,47 @@ Describe 'Ubuntu browser system dependencies' {
         $script:FailedOperation = $Operation
         { Install-ReviewBrowserDependencies -BrowserPath $script:BrowserPath } | Should -Throw '*System package installation refused*'
         $script:AptCalls.Count | Should -Be $Calls
+    }
+}
+
+Describe 'Native report script boundary' {
+    BeforeEach {
+        $script:OriginalPath = $env:PATH
+        $script:OriginalLocalAppData = $env:LOCALAPPDATA
+        $script:OriginalNvmDir = $env:NVM_DIR
+        $script:OriginalNvmBin = $env:NVM_BIN
+        $script:OriginalNvmSymlink = $env:NVM_SYMLINK
+        $program = Get-Command ss-ai -CommandType Application -ErrorAction Stop | Select-Object -First 1
+        # Restrict discovery to the prepared executable and an empty, private tool store.
+        $env:PATH = Split-Path -Parent $program.Source
+        $env:LOCALAPPDATA = Join-Path $TestDrive ([guid]::NewGuid().ToString('N'))
+        $env:NVM_DIR = Join-Path $env:LOCALAPPDATA 'no-nvm'
+        $env:NVM_BIN = ''
+        $env:NVM_SYMLINK = ''
+        $script:ReportScripts = Join-Path (Split-Path -Parent $PSScriptRoot) 'skills/ss-review/scripts'
+    }
+
+    AfterEach {
+        $env:PATH = $script:OriginalPath
+        $env:LOCALAPPDATA = $script:OriginalLocalAppData
+        $env:NVM_DIR = $script:OriginalNvmDir
+        $env:NVM_BIN = $script:OriginalNvmBin
+        $env:NVM_SYMLINK = $script:OriginalNvmSymlink
+    }
+
+    It 'reports missing tools as one JSON record without installation' {
+        $output = @(& (Join-Path $script:ReportScripts 'Test-ReviewReportTools.ps1'))
+        $output.Count | Should -Be 1
+        $tools = ConvertFrom-Json -InputObject $output[0] -AsHashtable
+        $tools.missing | Should -Contain 'pandoc'
+        $tools.missing | Should -Contain 'node'
+        $tools.missing | Should -Contain 'mermaid-cli'
+        $tools.diagnostics | Should -BeNullOrEmpty
+    }
+
+    It 'fails explicitly instead of installing without a runtime' {
+        { & (Join-Path $script:ReportScripts 'Install-ReviewReportTools.ps1') } |
+            Should -Throw '*Node.js*'
+        @(Get-ChildItem -LiteralPath $env:LOCALAPPDATA -Filter node_modules -Directory -Recurse).Count | Should -Be 0
     }
 }

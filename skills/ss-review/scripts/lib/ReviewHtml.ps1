@@ -4,6 +4,7 @@
 # Ref: docs/implementation.md, "HTML report rendering".
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
+$PSNativeCommandUseErrorActionPreference = $true
 
 function Get-ReviewReportHash {
     param([Parameter(Mandatory)][AllowEmptyCollection()][byte[]] $Bytes)
@@ -123,117 +124,47 @@ function Convert-ReviewReportNode {
     }
 }
 
+# Keeps the overview publisher's object contract while native code owns the transaction.
 function Write-ReviewHtml {
     param(
         [Parameter(Mandatory)][string] $Path,
         [Parameter(Mandatory)][string] $OutputPath,
         [Parameter(Mandatory)][string] $SkillRoot,
-        [Parameter(Mandatory)][System.Collections.IDictionary] $Tools,
-        [Parameter(Mandatory)][scriptblock] $InvokeProcess,
+        # Retained for callers of the PowerShell renderer; native code discovers and runs tools.
+        [System.Collections.IDictionary] $Tools,
+        [scriptblock] $InvokeProcess,
         [string] $Title = 'Review report',
-        # Only the installer may reuse its retained exclusive lock during its readiness probe.
         [switch] $InstallationLocked
     )
 
-    $toolsLock = if (-not $InstallationLocked) { Open-PullRequestFileLock -Path (Get-ReportToolsLockPath) -Shared }
+    # A PowerShell-held lock cannot transfer to the native process, which acquires its own.
+    if ($InstallationLocked) { throw 'Report rendering cannot reuse a PowerShell installation lock.' }
+    # Resolve relative to the PowerShell location, as the native child uses that location too.
+    $output = $ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath($OutputPath)
+    $directory = [IO.Path]::GetDirectoryName($output)
+    [void] [IO.Directory]::CreateDirectory($directory)
+    # Keep title prose out of process arguments without changing the renderer's working directory.
+    $titlePath = Join-Path $directory ".ss-ai-title-$([guid]::NewGuid().ToString('N')).txt"
+    $created = $false
     try {
-        $transactionLock = Open-PullRequestFileLock -Path $OutputPath
-        try {
-            Assert-ReviewReportTools -Tools $Tools
-            $sourcePath = Resolve-PullRequestPath -Path $Path
-            $htmlPath = Resolve-PullRequestPath -Path $OutputPath
-            if ($sourcePath -eq $htmlPath) { throw 'HTML output must not replace the canonical Markdown file.' }
-            $markdown = (Read-PullRequestFileText -Path ($sourcePath) -Encoding ([Text.Encoding]::UTF8))
-            if ([string]::IsNullOrWhiteSpace($markdown)) { throw 'The report Markdown is empty.' }
-            $sourceHash = Get-ReviewReportHash -Bytes ([Text.Encoding]::UTF8.GetBytes($markdown))
-            $scratch = Join-Path ([IO.Path]::GetDirectoryName($htmlPath)) ".report-$([guid]::NewGuid().ToString('N'))"
-            [IO.Directory]::CreateDirectory($scratch) | Out-Null
-            try {
-                $astText = Invoke-ReportProcess -InvokeProcess $InvokeProcess -FilePath $Tools['pandoc'] `
-                    -ArgumentList @('--from=gfm-raw_html', '--to=json') -StandardInput $markdown
-                $ast = ConvertFrom-JsonVerbatim -Text $astText
-                $ast['meta'] = [ordered]@{}
-                $diagramState = @{ index = 0 }
-                # The traversal is synchronous; keep helper lookup in the loaded script's scope.
-                $renderDiagram = {
-                    param([string] $source)
-                    $diagramState.index++
-                    $inputPath = Join-Path $scratch "diagram-$($diagramState.index).mmd"
-                    $outputPath = Join-Path $scratch "diagram-$($diagramState.index).svg"
-                    $configPath = Join-Path $scratch 'mermaid.json'
-                    $config = @{
-                        securityLevel = 'strict'
-                        htmlLabels = $false
-                        flowchart = @{ htmlLabels = $false }
-                        fontFamily = 'Arial, sans-serif'
-                        deterministicIds = $true
-                        deterministicIDSeed = "$sourceHash-$($diagramState.index)"
-                        theme = 'neutral'
-                    }
-                    Write-PullRequestOutputFile -Path $inputPath -Content $source
-                    Write-PullRequestOutputFile -Path $configPath -Content (ConvertTo-JsonText -Value $config)
-                    Invoke-ReportProcess -InvokeProcess $InvokeProcess -FilePath $Tools['node'] `
-                        -ArgumentList @($Tools['mermaid'], '--input', $inputPath, '--output', $outputPath, '--configFile', $configPath, '--quiet') | Out-Null
-                    (Read-PullRequestFileText -Path ($outputPath) -Encoding ([Text.Encoding]::UTF8))
-                }
-                Convert-ReviewReportNode -Node $ast -RenderDiagram $renderDiagram
-                $template = Join-Path $SkillRoot 'templates\report.html'
-                $html = Invoke-ReportProcess -InvokeProcess $InvokeProcess -FilePath $Tools['pandoc'] `
-                    -ArgumentList @('--from=json', '--to=html5', '--standalone', '--toc', '--wrap=none', '--syntax-highlighting=pygments',
-                        '--template', $template, '--metadata', "title=$Title") `
-                    -StandardInput (ConvertTo-JsonText -Value $ast -Depth 100)
-                if ($html -notmatch '<!DOCTYPE html>' -or $html -notmatch 'Content-Security-Policy' -or
-                    $html -match '(?is)<script\b|<[a-z][^>]*\son[a-z]+\s*=|<[a-z][^>]*\s(?:src|href)\s*=\s*["''](?:javascript:|file:)') {
-                    throw 'The HTML renderer did not produce a safe standalone report.'
-                }
-                Write-PullRequestOutputFileAtomically -Path $htmlPath -Content $html
-                [ordered]@{
-                    sourcePath = $sourcePath
-                    sourceHash = $sourceHash
-                    htmlPath = $htmlPath
-                    htmlUri = ([uri] $htmlPath).AbsoluteUri
-                    htmlHash = Get-ReviewReportHash -Bytes ((Read-PullRequestFileBytes -Path ($htmlPath)))
-                    diagramCount = $diagramState.index
-                }
-            } finally {
-                Remove-Item -LiteralPath $scratch -Recurse -Force
-            }
-        } finally { $transactionLock.Dispose() }
-    } finally { if ($null -ne $toolsLock) { $toolsLock.Dispose() } }
-}
-
-# Exercise the production pipeline, including a browser launch, before claiming setup is ready.
-# Ref: docs/implementation.md, "Report tools".
-function Assert-ReviewReportRendering {
-    param(
-        [Parameter(Mandatory)][string] $SkillRoot,
-        [Parameter(Mandatory)][System.Collections.IDictionary] $Tools,
-        [scriptblock] $InvokeProcess = (Get-ReportProcessInvoker),
-        [switch] $InstallationLocked
-    )
-
-    Assert-ReviewReportTools -Tools $Tools
-    $scratch = Join-Path ([IO.Path]::GetTempPath()) "ss-review-report-check-$([guid]::NewGuid().ToString('N'))"
-    [IO.Directory]::CreateDirectory($scratch) | Out-Null
-    try {
-        $source = Join-Path $scratch 'check.md'
-        $output = Join-Path $scratch 'check.html'
-        # A plain-text probe would never launch Chrome and could miss absent system libraries.
-        Write-PullRequestOutputFile -Path $source -Content @'
-# Renderer prerequisite check
-
-```mermaid
-flowchart LR
-    A[Prerequisites] --> B[Report]
-```
-'@
-        $result = Write-ReviewHtml -Path $source -OutputPath $output -SkillRoot $SkillRoot -Tools $Tools `
-            -InvokeProcess $InvokeProcess -InstallationLocked:$InstallationLocked
-        $html = Read-PullRequestFileText -Path $output -Encoding ([Text.Encoding]::UTF8)
-        if ($result.diagramCount -ne 1 -or $html -notmatch '<img\b[^>]*src="data:image/svg\+xml;base64,') {
-            throw 'The report readiness check did not produce the expected embedded Mermaid diagram.'
+        $options = [IO.FileStreamOptions]::new()
+        $options.Mode = [IO.FileMode]::CreateNew
+        $options.Access = [IO.FileAccess]::Write
+        $options.Share = [IO.FileShare]::None
+        if (-not $IsWindows) {
+            $options.UnixCreateMode = [IO.UnixFileMode]::UserRead -bor [IO.UnixFileMode]::UserWrite
         }
+        $stream = [IO.FileStream]::new($titlePath, $options)
+        $created = $true
+        try {
+            $bytes = [Text.UTF8Encoding]::new($false).GetBytes($Title)
+            $stream.Write($bytes, 0, $bytes.Length)
+        } finally { $stream.Dispose() }
+        $json = Invoke-NativeReviewWorkflow -Arguments @('render-review-html', "--path=$Path",
+            "--output-path=$OutputPath", "--skill-root=$SkillRoot", "--tools-directory=$(Get-ReportToolsDirectory)",
+            "--title-path=$titlePath")
+        ConvertFrom-Json -InputObject $json -AsHashtable -NoEnumerate -ErrorAction Stop
     } finally {
-        Remove-Item -LiteralPath $scratch -Recurse -Force
+        if ($created) { [IO.File]::Delete($titlePath) }
     }
 }

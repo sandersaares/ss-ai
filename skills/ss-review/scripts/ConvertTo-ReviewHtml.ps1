@@ -8,13 +8,14 @@ param(
 
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
+$PSNativeCommandUseErrorActionPreference = $true
 . "$PSScriptRoot\lib\JsonValue.ps1"
 . "$PSScriptRoot\lib\PullRequestModel.ps1"
 . "$PSScriptRoot\lib\PullRequestTransportHost.ps1"
+. "$PSScriptRoot\lib\NativeWorkflowBridge.ps1"
 . "$PSScriptRoot\lib\ReportTools.ps1"
 . "$PSScriptRoot\lib\ReviewHtml.ps1"
 
 $skillRoot = Split-Path -Parent $PSScriptRoot
-Write-ReviewHtml -Path $Path -OutputPath $OutputPath -Title $Title -SkillRoot $skillRoot `
-    -Tools (Get-ReviewReportTools -SkillRoot $skillRoot) -InvokeProcess (Get-ReportProcessInvoker) |
+Write-ReviewHtml -Path $Path -OutputPath $OutputPath -Title $Title -SkillRoot $skillRoot |
     ConvertTo-Json -Depth 8 -Compress

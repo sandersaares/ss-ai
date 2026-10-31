@@ -22,9 +22,9 @@ Improvement ideas to revisit when the repo matures.
 ## Skill design
 
 - **Migrate ss-review command families to Rust.** Replace the remaining complete
-  families in order: report tooling; overview publication; final review
+  families in order: overview publication; final review
   publication; and trackers. Provider capture, local context, finding, audit,
-  rendering, coverage, worker-input, instruction preparation, and cache commands
+  rendering, report tooling, coverage, worker-input, instruction preparation, and cache commands
   use native operations through PowerShell adapters. Retire the adapters after
   their callers migrate while preserving the hybrid workflow's records,
   transaction boundaries and authority gates. Until retirement, consolidate

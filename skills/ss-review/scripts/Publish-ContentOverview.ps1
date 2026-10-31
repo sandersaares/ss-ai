@@ -46,8 +46,11 @@ $remote = {
 }.GetNewClosure()
 $render = {
     param($path, $output)
-    Write-ReviewHtml -Path $path -OutputPath $output -SkillRoot $skillRoot -Title 'Initial review overview' `
-        -Tools (Get-ReviewReportTools -SkillRoot $skillRoot) -InvokeProcess $processInvoker
+    $tools = ConvertFrom-Json -InputObject (Invoke-NativeReviewWorkflow -Arguments @(
+        'test-review-report-tools', "--skill-root=$skillRoot", "--tools-directory=$(Get-ReportToolsDirectory)"
+    )) -AsHashtable -NoEnumerate
+    Assert-ReviewReportTools -Tools $tools
+    Write-ReviewHtml -Path $path -OutputPath $output -SkillRoot $skillRoot -Title 'Initial review overview'
 }.GetNewClosure()
 Invoke-InitialOverviewPublication -Context $context -OverviewPath $OverviewPath `
     -OutputDirectory (Resolve-PullRequestPath -Path $OutputDirectory) -SkillRoot $skillRoot `

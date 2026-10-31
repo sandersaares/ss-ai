@@ -11,10 +11,10 @@ use ohno::AppError;
 use serde_json::json;
 use ss_ai_review_workflow::{
     anchors, approved, audit, findings, focus_area_expansion, focus_area_generation,
-    focus_area_map, focus_cache, instruction_sources, markdown, review_work, worker_input,
-    workflow_plan,
+    focus_area_map, focus_cache, instruction_sources, markdown, report_html, report_tools,
+    review_work, worker_input, workflow_plan,
 };
-use ss_ai_runtime::{Clock, Process, caused_by, fail, read_bytes};
+use ss_ai_runtime::{Clock, LockMode, Process, caused_by, fail, read_bytes};
 
 /// Exposes local workflow operations without provider access.
 #[derive(Debug, Parser)]
@@ -39,6 +39,42 @@ enum WorkflowCommand {
     Audit(AuditCommand),
     #[command(flatten)]
     Finding(FindingCommand),
+    #[command(flatten)]
+    Report(ReportCommand),
+}
+
+/// Routes report rendering and explicit prerequisite setup.
+#[derive(Debug, Subcommand)]
+enum ReportCommand {
+    /// Render a standalone report from canonical Markdown.
+    RenderReviewHtml {
+        #[arg(long)]
+        path: PathBuf,
+        #[arg(long)]
+        output_path: PathBuf,
+        #[arg(long)]
+        skill_root: PathBuf,
+        #[arg(long)]
+        tools_directory: PathBuf,
+        #[arg(long)]
+        title_path: PathBuf,
+    },
+    /// Check report prerequisites and exercise the renderer when present.
+    TestReviewReportTools {
+        #[arg(long)]
+        skill_root: PathBuf,
+        #[arg(long)]
+        tools_directory: PathBuf,
+    },
+    /// Install report prerequisites after the caller obtains consent.
+    InstallReviewReportTools {
+        #[arg(long)]
+        skill_root: PathBuf,
+        #[arg(long)]
+        tools_directory: PathBuf,
+        #[arg(long)]
+        install_browser_dependencies: bool,
+    },
 }
 
 /// Selects focus-area cache and generation transactions.
@@ -669,6 +705,87 @@ enum MapOperation {
     Regroup,
 }
 
+/// Keeps the tools lock across discovery and each complete native report operation.
+fn run_report(
+    command: ReportCommand,
+    process: &dyn Process,
+    clock: &dyn Clock,
+) -> Result<String, AppError> {
+    match command {
+        ReportCommand::RenderReviewHtml {
+            path,
+            output_path,
+            skill_root,
+            tools_directory,
+            title_path,
+        } => {
+            let skill_root = absolute(skill_root)?;
+            let tools_directory = absolute(tools_directory)?;
+            // A file preserves Unicode and multiline prose without exposing it in process arguments.
+            let title = read_bytes(&absolute(title_path)?, clock)?
+                .ok_or_else(|| fail("invalidInput", "Report title file is missing"))?;
+            let title = String::from_utf8(title)
+                .map_err(|error| caused_by("invalidInput", "Report title is not UTF-8", error))?;
+            let guard = report_tools::tools_lock(&tools_directory, LockMode::Shared, clock)?;
+            let tools = report_tools::discover(&skill_root, &tools_directory, process, &guard)?;
+            let result = report_html::write_report(
+                &path,
+                &output_path,
+                &skill_root,
+                &title,
+                &tools,
+                &guard,
+                process,
+                clock,
+            )?;
+            Ok(serde_json::to_string(&json!({
+                "sourcePath": result.source_path,
+                "sourceHash": result.source_hash,
+                "htmlPath": result.html_path,
+                "htmlUri": result.html_uri,
+                "htmlHash": result.html_hash,
+                "diagramCount": result.diagram_count
+            }))?)
+        }
+        ReportCommand::TestReviewReportTools {
+            skill_root,
+            tools_directory,
+        } => {
+            let skill_root = absolute(skill_root)?;
+            let tools_directory = absolute(tools_directory)?;
+            let tools = report_tools::readiness(
+                &skill_root,
+                &tools_directory,
+                process,
+                clock,
+                |tools, guard| {
+                    report_html::probe(&tools_directory, &skill_root, tools, guard, process, clock)
+                },
+            )?;
+            Ok(serde_json::to_string(&tools)?)
+        }
+        ReportCommand::InstallReviewReportTools {
+            skill_root,
+            tools_directory,
+            install_browser_dependencies,
+        } => {
+            let skill_root = absolute(skill_root)?;
+            let tools_directory = absolute(tools_directory)?;
+            let tools = report_tools::install(
+                &skill_root,
+                &tools_directory,
+                process,
+                clock,
+                install_browser_dependencies,
+                |tools, guard| {
+                    report_html::probe(&tools_directory, &skill_root, tools, guard, process, clock)
+                },
+            )?;
+            Ok(serde_json::to_string(&tools)?)
+        }
+    }
+}
+
 /// Loads an authored input before handing it to the native transaction.
 fn focus_input(path: Option<PathBuf>, clock: &dyn Clock) -> Result<Vec<u8>, AppError> {
     let path = path.ok_or_else(|| fail("invalidInput", "Operation requires an input path"))?;
@@ -759,6 +876,7 @@ where
         }
     };
     match cli.command {
+        WorkflowCommand::Report(command) => run_report(command, process, clock),
         WorkflowCommand::FocusCache(FocusCacheCommand::RestoreFocusAreaCache {
             options,
             snapshot_identity,

@@ -239,6 +239,8 @@ Describe 'Repository test entry point' {
         @{ Name = 'SsReviewFindingModel.Tests.ps1' }
         @{ Name = 'SsReviewFindingConsolidation.Tests.ps1' }
         @{ Name = 'SsReviewReports.Tests.ps1' }
+        @{ Name = 'SsReviewReportTools.Tests.ps1' }
+        @{ Name = 'SsReviewOverviewApi.Tests.ps1' }
         @{ Name = 'SsReviewSelfReview.Tests.ps1' }
         @{ Name = 'SsReviewSharedFiles.Tests.ps1' }
         @{ Name = 'SsReviewWorkflowData.Tests.ps1' }

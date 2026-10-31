@@ -199,6 +199,15 @@ Approved projections require settled decisions and retain the evidence binding
 needed for freshness checks. Shared Markdown rendering supplies the same finding
 prose to audit and publication without granting approval or contacting a provider.
 
+## Review reports
+
+Report commands check and install prerequisites and render a Markdown document
+as an HTML reading view using assets from the active review skill. Readiness
+requires an HTML and Mermaid rendering probe, not just tool discovery. Installation
+is explicit and separate from checking and rendering. Report rendering does not
+grant approval or publish review content; the review workflow retains its
+Markdown fallback and publication decisions.
+
 ## Worker inputs
 
 Local worker commands prepare phase-specific assignments from the active skill

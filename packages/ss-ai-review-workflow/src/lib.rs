@@ -12,6 +12,8 @@ pub mod focus_area_source;
 pub mod focus_cache;
 pub mod instruction_sources;
 pub mod markdown;
+pub mod report_html;
+pub mod report_tools;
 pub mod review_work;
 pub mod worker_input;
 pub mod workflow_plan;

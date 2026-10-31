@@ -11,6 +11,7 @@ Chrome does not install its Ubuntu system packages.
 | Component | Requirement |
 | --- | --- |
 | PowerShell | The stable release line required by the skill scripts, currently 7.6. Use `pwsh`, not Windows PowerShell. |
+| ss-ai | Install the native executable and active skill together using the repository's root `Install.ps1`. |
 | Node.js and npm | A supported Node.js LTS release with npm; the locked Puppeteer dependency requires Node.js 22.12.0 or later. Mermaid CLI's own lower Node requirement is not sufficient. |
 | Pandoc | 3.8 or later with `--syntax-highlighting` support. The portable installer pins 3.11. Ubuntu's repository version may be too old; the render probe checks the actual executable. |
 | JavaScript packages | The active skill's `tools/package-lock.json`, installed user-wide with `npm ci` and strict engine checking. Skill copies with the same lockfile share an installation. Do not substitute an unrelated Mermaid CLI, install a different Puppeteer version, or regenerate the lockfile. |
@@ -64,19 +65,29 @@ There are no placeholders. Run only the command for a missing prerequisite and i
 status. Refresh the session environment if the new installation is not visible, then rerun the
 report-tool check. Node.js discovery also recognizes nvm-windows' `NVM_SYMLINK`.
 
-Chrome extraction needs Windows `tar.exe` or PowerShell's archive support. Puppeteer runs Chrome's
+Portable Pandoc installation needs `curl.exe` and `tar.exe` available to the review user. Chrome
+extraction needs Windows `tar.exe` or PowerShell's archive support. Puppeteer runs Chrome's
 `setup.exe` to configure sandbox permissions on the downloaded browser. Ubuntu libraries such as
 `libnss3` and `libnspr4` have no Windows installation equivalent in this workflow.
 
 Install the report tools:
 
 ```powershell
-pwsh -NoProfile -NonInteractive -File "{{SKILL_ROOT}}/scripts/Install-ReviewReportTools.ps1"
+#Requires -Version 7.6
+
+Set-StrictMode -Version Latest
+$ErrorActionPreference = 'Stop'
+$PSNativeCommandUseErrorActionPreference = $true
+
+& (Join-Path "{{SKILL_ROOT}}" 'scripts/Install-ReviewReportTools.ps1')
 ```
 
 | Placeholder | Description |
 | --- | --- |
 | `SKILL_ROOT` | Absolute path of the active skill. |
+
+The adapter passes the active skill directory and selected shared tools directory to
+`ss-ai workflow install-review-report-tools`.
 
 The installer downloads digest-verified portable Pandoc into user-local storage when Pandoc is
 absent, installs the pinned npm packages in shared user-local storage and the browser in its
@@ -174,7 +185,13 @@ the renderer's options.
 Install the user-wide JavaScript packages, browser, and its system dependencies together:
 
 ```powershell
-pwsh -NoProfile -NonInteractive -File "{{SKILL_ROOT}}/scripts/Install-ReviewReportTools.ps1" `
+#Requires -Version 7.6
+
+Set-StrictMode -Version Latest
+$ErrorActionPreference = 'Stop'
+$PSNativeCommandUseErrorActionPreference = $true
+
+& (Join-Path "{{SKILL_ROOT}}" 'scripts/Install-ReviewReportTools.ps1') `
   -InstallBrowserDependencies
 ```
 
@@ -182,7 +199,10 @@ pwsh -NoProfile -NonInteractive -File "{{SKILL_ROOT}}/scripts/Install-ReviewRepo
 | --- | --- |
 | `SKILL_ROOT` | Absolute path of the active skill inside the Ubuntu environment. |
 
-Run this as the review user, not through `sudo pwsh` or `sudo npm`. Only apt operations elevate.
+The adapter passes the active skill directory and selected shared tools directory to
+`ss-ai workflow install-review-report-tools`.
+
+Run this as the review user, not through `sudo ss-ai` or `sudo npm`. Only apt operations elevate.
 The switch reads `deb.deps` beside the downloaded Chrome executable, refreshes apt indexes,
 uses `apt-get satisfy` for that exact browser build's dependency relations, and installs
 Liberation fonts for diagram text. This follows Puppeteer's system-dependency mechanism without
