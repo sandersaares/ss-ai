@@ -1,5 +1,5 @@
 [workspace]
-members = ["packages/ss-ai-assessment", "packages/ss-ai-cargo", "packages/ss-ai-cargo/fuzz", "packages/ss-ai-git", "packages/ss-ai-review", "packages/ss-ai-runtime", "packages/ss-ai"]
+members = ["packages/ss-ai-assessment", "packages/ss-ai-assessment/fuzz", "packages/ss-ai-cargo", "packages/ss-ai-cargo/fuzz", "packages/ss-ai-git", "packages/ss-ai-review", "packages/ss-ai-runtime", "packages/ss-ai"]
 resolver = "3"
 
 [workspace.package]

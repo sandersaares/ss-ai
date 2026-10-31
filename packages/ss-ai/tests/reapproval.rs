@@ -8,19 +8,22 @@
 use std::cell::{Cell, RefCell};
 use std::collections::BTreeMap;
 use std::ffi::OsString;
+use std::fmt::Write;
 use std::fs;
 use std::io;
 use std::num::NonZeroUsize;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::rc::Rc;
-use std::sync::{Mutex, PoisonError};
+use std::sync::{Mutex, PoisonError, mpsc};
+use std::thread;
 use std::time::Duration;
 
 use jiff::Timestamp;
 use ohno::AppError;
 use serde_json::{Value, json};
 use ss_ai::{Clock, Http, HttpResponse, NativeProcess, Process, ProcessOutput, run_in};
+use ss_ai_runtime::FileTransaction;
 use tempfile::TempDir;
 use url::Url;
 
@@ -1065,11 +1068,7 @@ fn assess_as(
     let mut references = vec!["policy".to_owned(), "discussion".to_owned()];
     for change in prepared["changes"].as_array().unwrap() {
         let id = change["id"].as_str().unwrap();
-        for side in ["old", "new"] {
-            if !change[side].is_null() {
-                references.push(format!("{id}:{side}"));
-            }
-        }
+        references.push(format!("{id}:patch"));
     }
     for reference in references {
         read_evidence(root, provider, snapshot, &reference, None, None);
@@ -1089,11 +1088,7 @@ fn assess_as(
             )
             .into(),
         ];
-        for side in ["old", "new"] {
-            if !change[side].is_null() {
-                arguments.extend(["--evidence".into(), format!("{id}:{side}")]);
-            }
-        }
+        arguments.extend(["--evidence".into(), format!("{id}:patch")]);
         work(root, provider, "judge", snapshot, &arguments).unwrap();
     }
 
@@ -1127,12 +1122,8 @@ fn assess_as(
 /// Acquires readable evidence for structural fixtures without treating opaque sides as empty.
 fn read_available_source(root: &Path, provider: &Provider, snapshot: &str, changes: &[Value]) {
     for change in changes {
-        for side in ["old", "new"] {
-            if change[side]["content"]["kind"] == "text" {
-                let reference = format!("{}:{side}", change["id"].as_str().unwrap());
-                read_evidence(root, provider, snapshot, &reference, None, None);
-            }
-        }
+        let reference = format!("{}:patch", change["id"].as_str().unwrap());
+        read_evidence(root, provider, snapshot, &reference, None, None);
     }
 }
 
@@ -1200,6 +1191,22 @@ fn read_evidence(
 
 /// Bounds command paging from captured input, without fabricating any read receipts.
 fn evidence_length(root: &Path, provider: &Provider, snapshot: &str, reference: &str) -> usize {
+    if reference.ends_with(":patch") || reference.contains(":context:") {
+        let first = work(
+            root,
+            provider,
+            "read",
+            snapshot,
+            &[
+                "--reference".into(),
+                reference.into(),
+                "--limit".into(),
+                "1".into(),
+            ],
+        )
+        .unwrap();
+        return usize::try_from(first["totalCharacters"].as_u64().unwrap()).unwrap();
+    }
     if reference == "discussion" {
         let metadata = work(root, provider, "assessment", snapshot, &[]).unwrap();
         return usize::try_from(
@@ -2662,7 +2669,7 @@ fn pagination_requires_complete_contiguous_snapshot_bound_unicode_evidence() {
         let references = if change == "cumulative" {
             vec!["policy".to_owned(), "discussion".to_owned()]
         } else {
-            vec![format!("{id}:old"), reference.clone()]
+            vec![format!("{id}:patch"), reference.clone()]
         };
         let mut arguments = vec![
             "--change-id".into(),
@@ -2677,7 +2684,7 @@ fn pagination_requires_complete_contiguous_snapshot_bound_unicode_evidence() {
         }
         if change == id {
             let error = work(&root, &provider, "judge", &snapshot, &arguments).unwrap_err();
-            assert!(error.to_string().contains("readable changed-source reads"));
+            assert!(error.to_string().contains("required patch"));
             work(&root, &provider, "complete", &snapshot, &[]).unwrap_err();
             publish(&root, &provider, &snapshot).unwrap_err();
             text.clear();
@@ -2690,6 +2697,14 @@ fn pagination_requires_complete_contiguous_snapshot_bound_unicode_evidence() {
                 Some(&mut text),
             );
             assert_eq!(text, new_text);
+            read_evidence(
+                &root,
+                &provider,
+                &snapshot,
+                &format!("{id}:patch"),
+                None,
+                None,
+            );
         }
         work(&root, &provider, "judge", &snapshot, &arguments).unwrap();
     }
@@ -3109,12 +3124,7 @@ fn risk_judgments_and_uncertainty_prevent_publication(repository: &Sources) {
         let provider = repository.provider(false);
         let (snapshot, prepared) = prepare(&root, &provider, false);
         let id = prepared["changes"][0]["id"].as_str().unwrap();
-        for reference in [
-            "policy".into(),
-            "discussion".into(),
-            format!("{id}:old"),
-            format!("{id}:new"),
-        ] {
+        for reference in ["policy".into(), "discussion".into(), format!("{id}:patch")] {
             read_evidence(&root, &provider, &snapshot, &reference, None, None);
         }
         work(
@@ -3130,7 +3140,7 @@ fn risk_judgments_and_uncertainty_prevent_publication(repository: &Sources) {
                 "--rationale".into(),
                 rationale.into(),
                 "--evidence".into(),
-                format!("{id}:new"),
+                format!("{id}:patch"),
             ],
         )
         .unwrap();
@@ -3196,7 +3206,7 @@ fn incomplete_evidence_does_not_authorize_approval_or_needs_review_publication()
                     "--rationale".into(),
                     "The source has not been examined.".into(),
                     "--evidence".into(),
-                    format!("{id}:new"),
+                    format!("{id}:patch"),
                 ],
             )
             .unwrap_err();
@@ -3222,6 +3232,520 @@ fn incomplete_evidence_does_not_authorize_approval_or_needs_review_publication()
         publish(scope.path(), &provider, &snapshot).unwrap_err();
         assert_eq!(provider.writes.get(), 1);
     }
+}
+
+/// Sparse edits save mandatory input without losing merge-derived paths or exact context.
+#[test]
+fn source_patch_volume_and_captured_context_preserve_endpoint_scope() {
+    let _guard = PROCESS_TEST_LOCK
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner);
+    let repository = TempDir::new().unwrap();
+    git(
+        repository.path(),
+        &["init", "--quiet", "--initial-branch=main"],
+    );
+    git(repository.path(), &["config", "core.autocrlf", "false"]);
+    let mut sparse = String::new();
+    for index in 0..10_000 {
+        write!(
+            &mut sparse,
+            "line {index}: shared routine definition and invariant\r\n"
+        )
+        .unwrap();
+    }
+    let dense = "old dense definition\n".repeat(256);
+    fs::write(repository.path().join("sparse.txt"), &sparse).unwrap();
+    fs::write(repository.path().join("dense.txt"), &dense).unwrap();
+    fs::write(
+        repository.path().join("rename old"),
+        "first\r\nsecond\r\nlast",
+    )
+    .unwrap();
+    git(repository.path(), &["add", "."]);
+    git(
+        repository.path(),
+        &["commit", "--quiet", "-m", "Approved source"],
+    );
+    let old = git(repository.path(), &["rev-parse", "HEAD"]);
+    fs::write(
+        repository.path().join("main-only.txt"),
+        "Merged target content must be examined.\n",
+    )
+    .unwrap();
+    git(repository.path(), &["add", "."]);
+    git(
+        repository.path(),
+        &["commit", "--quiet", "-m", "Target content"],
+    );
+    git(
+        repository.path(),
+        &["checkout", "--quiet", "-b", "feature", &old],
+    );
+    let changed = sparse
+        .replace("line 5000:", "line 5000 \u{1f916}:")
+        .replace("line 6000:", "line 6000 changed:");
+    fs::write(repository.path().join("sparse.txt"), &changed).unwrap();
+    fs::write(
+        repository.path().join("dense.txt"),
+        "new dense definition\n".repeat(256),
+    )
+    .unwrap();
+    git(repository.path(), &["mv", "rename old", "renamed \u{e9}"]);
+    fs::write(
+        repository.path().join("renamed \u{e9}"),
+        "first\r\nchanged\r\nlast",
+    )
+    .unwrap();
+    git(repository.path(), &["add", "."]);
+    git(
+        repository.path(),
+        &["commit", "--quiet", "-m", "Changed source"],
+    );
+    git(
+        repository.path(),
+        &["merge", "--quiet", "--no-edit", "main"],
+    );
+    let new = git(repository.path(), &["rev-parse", "HEAD"]);
+    let scope = TempDir::new().unwrap();
+    let provider = Provider::new(repository.path(), &old, &new);
+    let (snapshot, prepared) = prepare(scope.path(), &provider, true);
+    assert_eq!(prepared["oldCommit"], old);
+    assert_eq!(prepared["newCommit"], new);
+    assert!(
+        prepared["changes"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|change| change["new"]["path"] == "main-only.txt")
+    );
+    let mut measurements = Vec::new();
+    let mut sparse_id = String::new();
+    for change in prepared["changes"].as_array().unwrap() {
+        let id = change["id"].as_str().unwrap();
+        let mut document = String::new();
+        let (bytes, responses) = measured_read(
+            scope.path(),
+            &provider,
+            &snapshot,
+            &format!("{id}:patch"),
+            &mut document,
+        );
+        let parsed: Value = serde_json::from_str(&document).unwrap();
+        assert_eq!(parsed["changeId"], id);
+        assert_eq!(parsed["snapshotDigest"], snapshot);
+        let path = change["new"]["path"]
+            .as_str()
+            .or_else(|| change["old"]["path"].as_str())
+            .unwrap();
+        if path == "sparse.txt" {
+            sparse_id = id.to_owned();
+            assert_eq!(parsed["hunks"].as_array().unwrap().len(), 2);
+            assert_eq!(parsed["hunks"][0]["oldCount"], 7);
+            assert_eq!(parsed["hunks"][1]["oldCount"], 7);
+            assert!(
+                document.chars().count() * 10 < sparse.chars().count() + changed.chars().count()
+            );
+        }
+        measurements.push(
+            json!({"path": path, "mandatoryCharacters": document.chars().count(),
+            "hunkCharacters": parsed["patch"].as_str().unwrap().chars().count(),
+            "serializedDeliveredBytes": bytes, "responses": responses}),
+        );
+    }
+    let refreshed = work(scope.path(), &provider, "assessment", &snapshot, &[]).unwrap();
+    assert!(refreshed["nextOffset"].is_null());
+    for original in prepared["changes"].as_array().unwrap() {
+        let change = refreshed["changes"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|change| change["id"] == original["id"])
+            .unwrap();
+        assert_eq!(change["requiredPatch"]["complete"], true);
+        for side in ["old", "new"] {
+            if change[side]["content"]["kind"] == "text" {
+                assert!(change[side]["content"]["progress"]["readOffset"].is_null());
+            }
+        }
+    }
+    // Neither another checkout write nor another provider read participates in captured context.
+    fs::write(
+        repository.path().join("sparse.txt"),
+        "unrelated checkout content",
+    )
+    .unwrap();
+    let context_args = [
+        "--change-id".into(),
+        sparse_id,
+        "--side".into(),
+        "old".into(),
+        "--start-line".into(),
+        "100".into(),
+        "--line-count".into(),
+        "200".into(),
+        "--limit".into(),
+        "3".into(),
+    ];
+    let first = work(
+        scope.path(),
+        &provider,
+        "source-context",
+        &snapshot,
+        &context_args,
+    )
+    .unwrap();
+    assert_eq!(
+        work(
+            scope.path(),
+            &provider,
+            "source-context",
+            &snapshot,
+            &context_args
+        )
+        .unwrap(),
+        first
+    );
+    let reference = first["reference"].as_str().unwrap();
+    let resumed = work(scope.path(), &provider, "prepare", &snapshot, &[]).unwrap();
+    assert_eq!(resumed["nextContextReference"], reference);
+    assert_eq!(resumed["requestedContextCount"], 1);
+    let mut context = String::new();
+    let (context_bytes, context_responses) =
+        measured_read(scope.path(), &provider, &snapshot, reference, &mut context);
+    assert_eq!(
+        context,
+        sparse
+            .split_inclusive('\n')
+            .skip(99)
+            .take(200)
+            .collect::<String>()
+    );
+    assert_eq!(provider.writes.get(), 0);
+    eprintln!(
+        "Source volume: {}",
+        json!({"changes": measurements,
+        "sparseFullSideCharacters": sparse.chars().count() + changed.chars().count(),
+        "denseFullSideCharacters": dense.chars().count() * 2,
+        "requestedContextCharacters": context.chars().count(),
+        "contextSerializedBytes": context_bytes, "contextResponses": context_responses,
+        "replayedCharacters": first["text"].as_str().unwrap().chars().count() * 2,
+        "replayedBytes": (serde_json::to_vec_pretty(&first).unwrap().len() + 1) * 2})
+    );
+}
+
+/// Measures every actual native response, including JSON escaping rather than just the first page.
+fn measured_read(
+    root: &Path,
+    provider: &Provider,
+    snapshot: &str,
+    reference: &str,
+    text: &mut String,
+) -> (usize, usize) {
+    let mut offset = 0;
+    let mut bytes = 0;
+    let mut responses = 0;
+    loop {
+        let page = work(
+            root,
+            provider,
+            "read",
+            snapshot,
+            &[
+                "--reference".into(),
+                reference.into(),
+                "--offset".into(),
+                offset.to_string(),
+            ],
+        )
+        .unwrap();
+        let size = serde_json::to_vec_pretty(&page).unwrap().len() + 1;
+        assert!(size <= 16_384);
+        bytes += size;
+        responses += 1;
+        let delivered = page["text"].as_str().unwrap();
+        text.push_str(delivered);
+        if page["complete"] == true {
+            assert_eq!(
+                text.chars().count(),
+                usize::try_from(page["totalCharacters"].as_u64().unwrap()).unwrap()
+            );
+            break;
+        }
+        let next = usize::try_from(page["nextOffset"].as_u64().unwrap()).unwrap();
+        assert!(next > offset);
+        assert_eq!(next, offset + delivered.chars().count());
+        assert!(next < usize::try_from(page["totalCharacters"].as_u64().unwrap()).unwrap());
+        offset = next;
+    }
+    (bytes, responses)
+}
+
+/// Requests are required work on both providers; acquisition failure is never notice authority.
+#[test]
+fn source_context_missing_delivery_and_failed_acquisition_cannot_authorize_effects() {
+    let _guard = PROCESS_TEST_LOCK
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner);
+    let sources = Sources::new();
+    for ado in [false, true] {
+        for invalid in [false, true] {
+            let scope = TempDir::new().unwrap();
+            let provider = sources.provider(ado);
+            let (snapshot, prepared) = prepare(scope.path(), &provider, false);
+            let id = prepared["changes"][0]["id"].as_str().unwrap();
+            for reference in ["policy".into(), "discussion".into(), format!("{id}:patch")] {
+                read_evidence(scope.path(), &provider, &snapshot, &reference, None, None);
+            }
+            let request = work(
+                scope.path(),
+                &provider,
+                "source-context",
+                &snapshot,
+                &[
+                    "--change-id".into(),
+                    id.into(),
+                    "--side".into(),
+                    "new".into(),
+                    "--start-line".into(),
+                    if invalid { "2" } else { "1" }.into(),
+                    "--line-count".into(),
+                    "1".into(),
+                    "--limit".into(),
+                    "1".into(),
+                ],
+            );
+            if invalid {
+                request.unwrap_err();
+            } else {
+                let page = request.unwrap();
+                assert_eq!(page["complete"], false);
+                assert_eq!(page["context"]["request"]["changeId"], id);
+            }
+            for disposition in ["insignificant", "significant", "uncertain"] {
+                for (judgment, evidence) in [
+                    (id, format!("{id}:patch")),
+                    ("cumulative", "discussion".into()),
+                ] {
+                    work(
+                        scope.path(),
+                        &provider,
+                        "judge",
+                        &snapshot,
+                        &[
+                            "--change-id".into(),
+                            judgment.into(),
+                            "--disposition".into(),
+                            disposition.into(),
+                            "--rationale".into(),
+                            "Unfinished captured context.".into(),
+                            "--evidence".into(),
+                            evidence,
+                            "--evidence".into(),
+                            "policy".into(),
+                        ],
+                    )
+                    .unwrap_err();
+                }
+                work(scope.path(), &provider, "complete", &snapshot, &[]).unwrap_err();
+                notify(scope.path(), &provider, &snapshot).unwrap_err();
+                publish(scope.path(), &provider, &snapshot).unwrap_err();
+            }
+            let result = invoke(scope.path(), &provider, "results", &[]).unwrap();
+            assert!(result["items"][0]["assessmentDigest"].is_null());
+            if invalid {
+                assert!(!result["items"][0]["error"].is_null());
+            }
+            assert_eq!(provider.writes.get(), 0);
+        }
+    }
+}
+
+/// A later required range makes earlier conclusions incomplete across journal reloads.
+#[test]
+fn newly_requested_context_requires_new_judgments_on_both_providers() {
+    let _guard = PROCESS_TEST_LOCK
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner);
+    let sources = Sources::new();
+    for ado in [false, true] {
+        let scope = TempDir::new().unwrap();
+        let provider = sources.provider(ado);
+        let (snapshot, prepared) = prepare(scope.path(), &provider, true);
+        let id = prepared["changes"][0]["id"].as_str().unwrap();
+        for reference in ["policy".into(), "discussion".into(), format!("{id}:patch")] {
+            read_evidence(scope.path(), &provider, &snapshot, &reference, None, None);
+        }
+        let judgment = |id: &str, evidence: String| {
+            vec![
+                "--change-id".into(),
+                id.into(),
+                "--disposition".into(),
+                "insignificant".into(),
+                "--rationale".into(),
+                "The examined evidence is editorial.".into(),
+                "--evidence".into(),
+                evidence,
+                "--evidence".into(),
+                "policy".into(),
+            ]
+        };
+        let change_judgment = judgment(id, format!("{id}:patch"));
+        let cumulative = judgment("cumulative", "discussion".into());
+        work(
+            scope.path(),
+            &provider,
+            "judge",
+            &snapshot,
+            &change_judgment,
+        )
+        .unwrap();
+        work(scope.path(), &provider, "judge", &snapshot, &cumulative).unwrap();
+        let context = work(
+            scope.path(),
+            &provider,
+            "source-context",
+            &snapshot,
+            &[
+                "--change-id".into(),
+                id.into(),
+                "--side".into(),
+                "new".into(),
+                "--start-line".into(),
+                "1".into(),
+                "--line-count".into(),
+                "1".into(),
+            ],
+        )
+        .unwrap();
+        let reference = context["reference"].as_str().unwrap();
+        read_evidence(scope.path(), &provider, &snapshot, reference, None, None);
+        let resumed = work(scope.path(), &provider, "prepare", &snapshot, &[]).unwrap();
+        assert!(resumed["changes"][0]["decision"].is_null());
+        assert!(resumed["cumulative"].is_null());
+        work(scope.path(), &provider, "complete", &snapshot, &[]).unwrap_err();
+        work(
+            scope.path(),
+            &provider,
+            "judge",
+            &snapshot,
+            &change_judgment,
+        )
+        .unwrap();
+        work(scope.path(), &provider, "complete", &snapshot, &[]).unwrap_err();
+        work(scope.path(), &provider, "judge", &snapshot, &cumulative).unwrap();
+        assert_eq!(
+            work(scope.path(), &provider, "complete", &snapshot, &[]).unwrap()["status"],
+            "wouldReapprove"
+        );
+        assert_eq!(provider.writes.get(), 0);
+    }
+}
+
+/// Contending commands advance only when the test releases the previous transaction.
+struct ContextClock {
+    worker: usize,
+    events: mpsc::Sender<(usize, bool)>,
+    permit: mpsc::Receiver<()>,
+}
+
+impl Clock for ContextClock {
+    fn now(&self) -> Timestamp {
+        FixedClock.now()
+    }
+    fn wait(&self, _: Duration) -> Result<(), AppError> {
+        self.events.send((self.worker, true)).unwrap();
+        self.permit.recv().unwrap();
+        Ok(())
+    }
+}
+
+#[test]
+#[cfg_attr(
+    mutants,
+    ignore = "Mutated synchronization may remove the real thread's continuation signal"
+)]
+fn overlapping_context_requests_retain_both_ranges_and_read_progress() {
+    let _guard = PROCESS_TEST_LOCK
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner);
+    let sources = Sources::new();
+    let scope = TempDir::new().unwrap();
+    let provider = sources.provider(false);
+    let (snapshot, prepared) = prepare(scope.path(), &provider, true);
+    let id = prepared["changes"][0]["id"].as_str().unwrap();
+    let run_path = scope.path().join("run.json");
+    let owner = FileTransaction::open(&run_path, &FixedClock).unwrap();
+    let (events, receiver) = mpsc::channel();
+    thread::scope(|threads| {
+        let mut workers = Vec::new();
+        let mut permits = Vec::new();
+        for (worker, side) in ["old", "new"].into_iter().enumerate() {
+            let (release, permit) = mpsc::channel();
+            permits.push(release);
+            let clock = ContextClock {
+                worker,
+                events: events.clone(),
+                permit,
+            };
+            let arguments = vec![
+                OsString::from("ss-ai"),
+                "autoreapprove".into(),
+                "source-context".into(),
+                "--state-path".into(),
+                run_path.as_os_str().to_owned(),
+                "--pull-request-id".into(),
+                provider.number.to_string().into(),
+                "--snapshot-digest".into(),
+                snapshot.clone().into(),
+                "--change-id".into(),
+                id.into(),
+                "--side".into(),
+                side.into(),
+                "--start-line".into(),
+                "1".into(),
+                "--line-count".into(),
+                "1".into(),
+                "--limit".into(),
+                "1".into(),
+            ];
+            let repository = sources.path();
+            let (old, new) = sources.commits();
+            let root = scope.path();
+            workers.push(threads.spawn(move || {
+                let provider = Provider::new(repository, &old, &new);
+                let result = run_in(&arguments, &provider, &provider, &clock, &root.join("host"));
+                clock.events.send((worker, false)).unwrap();
+                result
+            }));
+        }
+        let first = receiver.recv().unwrap();
+        let second = receiver.recv().unwrap();
+        drop(owner);
+        for (worker, handle) in workers.into_iter().enumerate() {
+            let contended = [first, second].contains(&(worker, true));
+            if contended {
+                permits[worker].send(()).unwrap();
+            }
+            let page = handle.join().unwrap().unwrap();
+            let page: Value = serde_json::from_str(&page).unwrap();
+            assert_eq!(page["complete"], false);
+            assert!(contended);
+        }
+    });
+    let record: Value = serde_json::from_slice(&fs::read(&run_path).unwrap()).unwrap();
+    let contexts = record["inventory"][0]["assessment"]["contexts"]
+        .as_object()
+        .unwrap();
+    assert_eq!(contexts.len(), 2);
+    for reference in contexts.keys() {
+        assert_eq!(record["inventory"][0]["assessment"]["reads"][reference], 1);
+    }
+    assert_eq!(
+        work(scope.path(), &provider, "assessment", &snapshot, &[]).unwrap()["requestedContextCount"],
+        2
+    );
+    assert!(scope.path().join("run.json.lock").is_file());
 }
 
 /// Native reads deliver the semantic projection while retained authority stays unchanged.
@@ -3591,7 +4115,7 @@ fn force_push_inventory_preserves_every_path_kind_and_rejects_missing_objects() 
                     "--rationale".into(),
                     "Not permitted.".into(),
                     "--evidence".into(),
-                    format!("{id}:{side}"),
+                    format!("{id}:patch"),
                 ],
             )
             .unwrap_err();
@@ -3609,7 +4133,7 @@ fn force_push_inventory_preserves_every_path_kind_and_rejects_missing_objects() 
                 "--rationale".into(),
                 "Unsupported content or structural change requires review.".into(),
                 "--evidence".into(),
-                format!("{id}:{side}"),
+                format!("{id}:patch"),
             ],
         )
         .unwrap();

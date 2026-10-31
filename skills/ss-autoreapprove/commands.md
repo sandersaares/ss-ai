@@ -16,7 +16,11 @@ command finish rather than starting a duplicate.
 | `SNAPSHOT` | Exact `snapshotDigest` returned by inspection. |
 | `AFTER_PR` | `nextAfter` from the previous results page. |
 | `AFTER_CHANGE` | `nextOffset` from the previous assessment page. |
-| `REFERENCE` | `policy`, `discussion`, or a returned change ID followed by `:old` or `:new`. |
+| `REFERENCE` | `policy`, `discussion`, a returned `CHANGE_ID:patch`, optional full-side `CHANGE_ID:old` / `CHANGE_ID:new`, or an exact context reference returned by `source-context`. |
+| `SOURCE_CHANGE` | Exact changed-path ID; never `cumulative`. |
+| `SIDE` | `old` or `new`, selecting a captured readable side. |
+| `START_LINE` | Positive one-based first line in that side. |
+| `LINE_COUNT` | Positive count of complete existing lines to examine. |
 | `OFFSET` | `nextOffset` from the previous evidence read, initially zero. |
 | `CHANGE` | Exact returned change ID, or `cumulative`. |
 | `DISPOSITION` | `insignificant`, `significant`, or `uncertain`. |
@@ -44,9 +48,16 @@ assess or report that PR.
 # Stage 2: preparation and evidence
 
 ```powershell
+#Requires -Version 7.6
+
+Set-StrictMode -Version Latest
+$ErrorActionPreference = 'Stop'
+$PSNativeCommandUseErrorActionPreference = $true
+
 ss-ai autoreapprove prepare --state-path "{{RUN}}" --pull-request-id "{{PR}}" --snapshot-digest "{{SNAPSHOT}}"
 ss-ai autoreapprove assessment --state-path "{{RUN}}" --pull-request-id "{{PR}}" --snapshot-digest "{{SNAPSHOT}}" --after "{{AFTER_CHANGE}}"
 ss-ai autoreapprove read --state-path "{{RUN}}" --pull-request-id "{{PR}}" --snapshot-digest "{{SNAPSHOT}}" --reference "{{REFERENCE}}" --offset "{{OFFSET}}"
+ss-ai autoreapprove source-context --state-path "{{RUN}}" --pull-request-id "{{PR}}" --snapshot-digest "{{SNAPSHOT}}" --change-id "{{SOURCE_CHANGE}}" --side "{{SIDE}}" --start-line "{{START_LINE}}" --line-count "{{LINE_COUNT}}"
 ```
 
 Preparation returns the selected context and the first bounded metadata page.
@@ -64,11 +75,30 @@ and `complete` for policy and discussion. Each present source side exposes its
 offset means no receipt, including for an empty document. Use this progress
 to find missing work, not to infer another worker's knowledge.
 `pendingChangeCount` and `nextChangeOffset` locate unjudged source.
-Read the captured policy
-and discussion plus both readable sides of each changed source. Evidence
+Each change exposes `requiredPatch` with the same progress fields and `hunkCount`.
+Read the captured policy, discussion, and every required patch document. Evidence
 responses contain `text`, `totalCharacters`, `complete`, and `nextOffset`; consume contiguous
 pages until complete. A side without readable text cannot support an
 insignificant decision. Do not substitute an arbitrary checkout or target tip.
+
+Patch documents bind the snapshot, change ID, endpoint objects, paths, modes,
+and content classifications to complete exact hunks. Additions/deletions include
+all available text; rename/mode-only changes still have required documents.
+The comparison includes merge-derived content and force-push removals, never
+a three-dot PR diff. `sourceEvidenceDigest` binds the manifest.
+
+Use `source-context` when surrounding captured code is necessary. It registers
+the range and returns its first bounded page plus a stable `reference` and
+exact `context` binding. Continue through `read` using that reference and
+`nextOffset`. Repeated identical requests are idempotent. Inspect
+`requestedContextCount` and `nextContextReference` at assessment and change level
+to resume required context. Full `:old` / `:new` reads remain available as
+optional context. All offsets count Unicode scalar values, not UTF-8 bytes.
+Registering a new range removes that change's judgment and the cumulative
+judgment. After reading the range, record both again as new judgments.
+Invalid or unavailable requested context is a retained incomplete-evidence
+failure, never a reason to publish a needs-review notice. Finalized assessments
+allow replay of existing evidence but no new ranges.
 
 Discussion is a compact semantic document, not approval bookkeeping. Preserve
 the distinction between review bodies, comments, and replies. GitHub comments
@@ -102,15 +132,17 @@ ss-ai autoreapprove complete --state-path "{{RUN}}" --pull-request-id "{{PR}}" -
 ```
 
 Repeat `--evidence` for additional returned references. A change judgment must
-cite that change. The cumulative judgment must cite both `policy` and
-`discussion`. Every change judgment requires a complete policy read and both
-readable source sides, regardless of disposition. A cumulative judgment requires
-complete policy and discussion reads. Opaque source can retain uncertainty, but
+cite its `CHANGE_ID:patch`. The cumulative judgment must cite both `policy` and
+`discussion`. Every change judgment requires complete policy, required patch,
+and applicable requested context reads, regardless of disposition. Cited optional
+evidence also requires complete delivery. A cumulative judgment requires
+complete policy, discussion, and all requested context reads. Opaque source can retain uncertainty, but
 unexamined readable content cannot become a completed semantic refusal.
 Omit `--previous-digest` for a new judgment; replacement requires
 the current digest from `assessment` and rejects conflicting updates.
 Missing work is not an empty successful assessment. Completion
-requires all readable evidence for every disposition. Delivery, context, and
+requires all readable evidence for every disposition: mandatory patches,
+requested ranges, policy, and discussion. Delivery, context, and
 worker limits leave incomplete work; do not loop over the inventory to invent
 uncertain judgments. An `evidenceDelivery` diagnostic is a tooling failure,
 not a completed nonqualifying assessment.
