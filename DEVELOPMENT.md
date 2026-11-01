@@ -75,7 +75,9 @@ contains spaces; commas in paths and filters remain literal. Direct PowerShell
 runner calls use PowerShell arrays, for example `-RustTest native,git`.
 An explicit Pester path does not run Rust checks, but builds the local
 native utility when selected review suites need it. The runner never uses
-the user's installed utility as the test prerequisite. It propagates
+the user's installed utility as the test prerequisite. Each Pester invocation
+builds its prerequisites in a separate temporary Cargo target so concurrent
+builds cannot replace its executables. It propagates
 failure status; `All` retains Rust failures after Pester completes.
 
 Rust checks report separate Clippy, preparation, and execution elapsed times.
@@ -118,10 +120,11 @@ flag records instead of building a missing helper. Cargo still checks freshness;
 ordinary execution uses its prepared target directory and preserves
 `CARGO_BIN_EXE` and doctest behavior.
 Prerequisite schema version 3 binds source content and last-write timestamps,
-including manifests, Cargo configuration, and embedded inputs. A touch or
-byte-identical save requires preparation again, because Cargo can rebuild from
-timestamps alone. Execution rejects older records explicitly. Keep these inputs
-unchanged throughout preparation and execution.
+including manifests, Cargo configuration, embedded provider and query fixtures,
+and review schemas used by the build. A touch or byte-identical save requires
+preparation again, because Cargo can rebuild from timestamps alone. Execution
+rejects older records explicitly. Keep these inputs unchanged throughout
+preparation and execution.
 The identity also binds Cargo home selection and effective Cargo configuration
 from the workspace root, its ancestors, and Cargo home, including absent files.
 It follows Cargo's preference for `config` over `config.toml` in each directory.

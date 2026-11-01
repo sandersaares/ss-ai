@@ -70,8 +70,10 @@ pub(crate) fn state(
     }
     let types = transport.list(&format!("{project_segment}/_apis/wit/workitemtypes"))?;
     let mut resolved_type = None;
+    let mut available_types = Vec::new();
     for candidate in &types {
         let name = service_text(candidate, "name")?;
+        available_types.push(name);
         if name.eq_ignore_ascii_case(requested_type)
             && resolved_type.replace(name.to_owned()).is_some()
         {
@@ -79,10 +81,14 @@ pub(crate) fn state(
         }
     }
     let resolved_type = resolved_type.ok_or_else(|| {
-        fail(
-            "invalidInput",
-            "The project does not define the work item type",
-        )
+        let message = if available_types.is_empty() {
+            format!("The project does not define work item type {requested_type:?}")
+        } else {
+            format!(
+                "The project does not define work item type {requested_type:?}; available work item types: {available_types:?}"
+            )
+        };
+        fail("invalidInput", message)
     })?;
     let type_record = get(
         transport,
@@ -109,7 +115,7 @@ pub(crate) fn state(
     let resolved_field = resolved_field.ok_or_else(|| {
         fail(
             "invalidInput",
-            "The work item type does not carry the description field",
+            format!("The work item type does not carry the description field {requested_field:?}"),
         )
     })?;
     if has_repro && description.is_none() {
@@ -688,6 +694,81 @@ mod tests {
                 .iter()
                 .all(|request| request.0 == "GET")
         );
+    }
+
+    #[test]
+    fn unknown_type_reports_only_available_service_names_without_writes() {
+        for names in [vec![], vec!["Bug", "Task", "User Story"]] {
+            let replies = vec![
+                json!({"name":"Prøject"}),
+                json!({"count":names.len(),"value":names.iter().map(|name| json!({"name":name})).collect::<Vec<_>>()}),
+            ];
+            let mock = Mock::new(replies);
+            let transport_target = transport_target();
+            let mut transport = Transport::new(&transport_target, None, &mock, &mock, &NoWait);
+            let mut input = metadata();
+            input["workItemType"] = json!("Defect");
+            let error = state(&mut transport, &target(), &input).unwrap_err();
+            assert_eq!(crate::classification(&error), "invalidInput");
+            let message = error.to_string();
+            assert!(message.contains("Defect"));
+            for name in &names {
+                assert!(message.contains(name), "{message}");
+            }
+            assert_eq!(
+                message.contains("available work item types"),
+                !names.is_empty()
+            );
+            assert_eq!(mock.requests.borrow().len(), 2);
+            assert!(
+                mock.requests
+                    .borrow()
+                    .iter()
+                    .all(|request| request.0 == "GET")
+            );
+        }
+
+        let mock = Mock::new(vec![
+            json!({"name":"Prøject"}),
+            json!({"count":1,"value":[{}]}),
+        ]);
+        let transport_target = transport_target();
+        let mut transport = Transport::new(&transport_target, None, &mock, &mock, &NoWait);
+        let error = state(&mut transport, &target(), &metadata()).unwrap_err();
+        assert_eq!(crate::classification(&error), "service");
+        assert!(!error.to_string().contains("available work item types"));
+        assert!(
+            mock.requests
+                .borrow()
+                .iter()
+                .all(|request| request.0 == "GET")
+        );
+    }
+
+    #[test]
+    fn missing_description_reports_the_selected_field_without_writes() {
+        for (requested, expected) in [
+            (Value::Null, DESCRIPTION),
+            (json!("Custom.Missing"), "Custom.Missing"),
+        ] {
+            let mut replies = preflight();
+            replies[2]["fields"] = json!([]);
+            let mock = Mock::new(replies);
+            let transport_target = transport_target();
+            let mut transport = Transport::new(&transport_target, None, &mock, &mock, &NoWait);
+            let mut input = metadata();
+            input["descriptionField"] = requested;
+            let error = state(&mut transport, &target(), &input).unwrap_err();
+            assert_eq!(crate::classification(&error), "invalidInput");
+            assert!(error.to_string().contains(expected));
+            assert_eq!(mock.requests.borrow().len(), 3);
+            assert!(
+                mock.requests
+                    .borrow()
+                    .iter()
+                    .all(|request| request.0 == "GET")
+            );
+        }
     }
 
     #[test]

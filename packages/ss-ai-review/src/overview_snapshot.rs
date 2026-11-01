@@ -272,6 +272,41 @@ fn validate_snapshot(
 
 /// Applies the same ordered heading, placeholder, and private-path gate as PowerShell.
 fn validate_overview(text: &str, output: &Path, skill: &Path) -> Result<(), SnapshotError> {
+    validate_overview_structure(text).map_err(SnapshotError::invalid_input)?;
+    // PowerShell's `-match` is case-insensitive by default.
+    let placeholder =
+        Regex::new(r"\{\{[A-Za-z_][A-Za-z_0-9]*\}\}").expect("Fixed placeholder expression");
+    let mut paths = vec![
+        output.to_string_lossy().into_owned(),
+        skill.to_string_lossy().into_owned(),
+    ];
+    if let Some(home) = env::var_os("HOME").or_else(|| env::var_os("USERPROFILE")) {
+        paths.push(home.to_string_lossy().into_owned());
+    }
+    let folded = text.to_lowercase();
+    if paths.iter().filter(|path| !path.is_empty()).any(|path| {
+        folded.contains(&path.to_lowercase())
+            || folded.contains(&path.replace('\\', "/").to_lowercase())
+    }) {
+        return Err(SnapshotError::invalid_input(
+            "Overview contains a private path",
+        ));
+    }
+    if placeholder.is_match(text) {
+        return Err(SnapshotError::invalid_input(
+            "Overview contains a workflow placeholder",
+        ));
+    }
+    Ok(())
+}
+
+/// Checks the section structure shared by preparation and publication.
+///
+/// # Errors
+///
+/// Rejects missing, duplicate, empty, or unordered required sections.
+#[doc(hidden)]
+pub fn validate_overview_structure(text: &str) -> Result<(), String> {
     let required = [
         "Mission",
         "Substance",
@@ -283,9 +318,6 @@ fn validate_overview(text: &str, output: &Path, skill: &Path) -> Result<(), Snap
         "Related history",
         "Related work",
     ];
-    // PowerShell's `-match` is case-insensitive by default.
-    let placeholder =
-        Regex::new(r"\{\{[A-Za-z_][A-Za-z_0-9]*\}\}").expect("Fixed placeholder expression");
     let mut sections: Vec<(String, String)> = Vec::new();
     let mut open: Option<String> = None;
     for line in text.split(['\r', '\n']) {
@@ -319,37 +351,12 @@ fn validate_overview(text: &str, output: &Path, skill: &Path) -> Result<(), Snap
             .filter(|(_, section)| section.0 == name)
             .collect();
         let [(position, (_, body))] = matches.as_slice() else {
-            return Err(SnapshotError::invalid_input(format!(
-                "Missing, empty, or unordered {name} section"
-            )));
+            return Err(format!("Missing, empty, or unordered {name} section"));
         };
         if previous.is_some_and(|index| *position <= index) || body.trim().is_empty() {
-            return Err(SnapshotError::invalid_input(format!(
-                "Missing, empty, or unordered {name} section"
-            )));
+            return Err(format!("Missing, empty, or unordered {name} section"));
         }
         previous = Some(*position);
-    }
-    let mut paths = vec![
-        output.to_string_lossy().into_owned(),
-        skill.to_string_lossy().into_owned(),
-    ];
-    if let Some(home) = env::var_os("HOME").or_else(|| env::var_os("USERPROFILE")) {
-        paths.push(home.to_string_lossy().into_owned());
-    }
-    let folded = text.to_lowercase();
-    if paths.iter().filter(|path| !path.is_empty()).any(|path| {
-        folded.contains(&path.to_lowercase())
-            || folded.contains(&path.replace('\\', "/").to_lowercase())
-    }) {
-        return Err(SnapshotError::invalid_input(
-            "Overview contains a private path",
-        ));
-    }
-    if placeholder.is_match(text) {
-        return Err(SnapshotError::invalid_input(
-            "Overview contains a workflow placeholder",
-        ));
     }
     Ok(())
 }

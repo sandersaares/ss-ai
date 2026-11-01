@@ -74,7 +74,7 @@ Group completion requires an assessment for every member. Resume and the final
 coverage gate validate assessments against the immutable inventory. Use
 `pwsh-calls/record-file-assessment.md` for targeted repair; it replaces only the
 named file's assessment. Repair can
-replace completed files' assessments without resetting the journal. Scripts can
+replace completed files' assessments without resetting the journal. Commands can
 verify recorded coverage and evidence presence, not the truth of an analysis
 declaration or scope judgment. Keep freeform recovery notes in Markdown, with a
 pointer to the journal rather than duplicated exclusion records.

@@ -198,16 +198,37 @@ manifest-based coverage. The [audit guide](../../skills/ss-review/data-guides/au
 describes decision and feedback records. Policy classification does not grant
 user or merge approval, and rendering does not publish or approve findings.
 
+`ss-ai workflow audit-add-decisions` accepts either `--plan-path` for a decision
+batch or `--item-path` for one decision object. An individual decision accepts
+surrounding whitespace and mixed case in its `decision` value; the journal
+stores the canonical lowercase value. Decision plans and journals use the
+canonical vocabulary. The policy classification restriction applies to either
+input.
+
+`ss-ai workflow validate-findings --path "{{DIRECTORY}}"` reports validation
+in `isValid`; repeat `--reviewer-id` for the expected reviewers. Add
+`--fail-on-invalid` to make an invalid result exit nonzero. The report is
+emitted on standard output; without that switch, an invalid report leaves the
+exit status successful.
+`ss-ai workflow validate-overview --path "{{OVERVIEW_PATH}}"` checks the
+overview structure; `--context-path` also checks its pull request link against
+the capture.
+
+`ss-ai workflow prepare-markdown` validates and renders an artifact or approved
+finding set supplied with `--path`, writing to `--output-directory`. Repeat
+`--finding-id` or supply comma-separated identifiers to select findings; omit
+it to render all. Optional
+`--combined-path` and `--audit-document-path` select additional outputs, and
+`--overview-path` prepends an overview to the audit document. Use
+`--destination tracker` with an optional `--context-path` for tracker prose.
+The result includes `auditDocumentUri` when an audit document is requested.
+
 ## Final pull request review
 
 `ss-ai review publish-final-review` publishes the approved review through the
-native provider transaction. The existing
-[`Publish-PullRequestReview.ps1` recipe](../../skills/ss-review/pwsh-calls/publish-pull-request-review.md)
-retains its named PowerShell interface and delegates to this command. The
-recipe supplies the pull request URL, approved findings, checked capture,
-diagnostics, local repository and output directory; its optional merge-decision
-path carries the user's commit-bound decision. The corresponding native
-invocation is:
+native provider transaction. The
+[publication recipe](../../skills/ss-review/pwsh-calls/publish-pull-request-review.md)
+describes the workflow inputs and decision boundaries:
 
 ```powershell
 #Requires -Version 7.6
@@ -232,9 +253,8 @@ ss-ai review publish-final-review --url "{{PR_URL}}" `
 | `OUTPUT_DIRECTORY` | Session directory for `publication-result.json`. |
 
 Optional named arguments are `--merge-approval-path`, `--tenant`, `--now-utc`,
-`--discard-pending-review`, and `--publish-to-closed-pull-request`. The
-PowerShell entry point maps its corresponding named parameters to these
-arguments. Discard and closed-PR publication require the user's explicit
+`--discard-pending-review`, and `--publish-to-closed-pull-request`.
+Discard and closed-PR publication require the user's explicit
 decision; a merge-decision path is validated rather than converted to an
 approval switch by the caller.
 
@@ -262,8 +282,8 @@ retain their separate workflows and authority boundaries.
 `ss-ai review publish-tracker-items` files approved findings as GitHub issues
 or Azure DevOps work items. The tracker destination is independent of the
 reviewed pull request. The
-[`Publish-ReviewTrackerItems.ps1` recipe](../../skills/ss-review/pwsh-calls/file-tracker-items.md)
-retains the named PowerShell interface.
+[tracker recipe](../../skills/ss-review/pwsh-calls/file-tracker-items.md)
+describes the workflow inputs and decision boundaries.
 
 ```powershell
 #Requires -Version 7.6
@@ -316,7 +336,8 @@ Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 $PSNativeCommandUseErrorActionPreference = $true
 
-& (Join-Path "{{SKILL_ROOT}}" 'scripts/Test-ReviewReportTools.ps1')
+ss-ai workflow test-review-report-tools --skill-root "{{SKILL_ROOT}}" `
+  --tools-directory "{{TOOLS_DIRECTORY}}"
 ```
 
 Only after explicit approval, install the dependencies:
@@ -328,7 +349,8 @@ Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 $PSNativeCommandUseErrorActionPreference = $true
 
-& (Join-Path "{{SKILL_ROOT}}" 'scripts/Install-ReviewReportTools.ps1')
+ss-ai workflow install-review-report-tools --skill-root "{{SKILL_ROOT}}" `
+  --tools-directory "{{TOOLS_DIRECTORY}}"
 ```
 
 To render a document after readiness succeeds:
@@ -340,19 +362,18 @@ Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 $PSNativeCommandUseErrorActionPreference = $true
 
-& (Join-Path "{{SKILL_ROOT}}" 'scripts/ConvertTo-ReviewHtml.ps1') `
-  -Path "{{MARKDOWN_PATH}}" -OutputPath "{{HTML_PATH}}" -Title "{{TITLE}}"
+ss-ai workflow render-review-html --path "{{MARKDOWN_PATH}}" `
+  --output-path "{{HTML_PATH}}" --skill-root "{{SKILL_ROOT}}" `
+  --tools-directory "{{TOOLS_DIRECTORY}}" --title-path "{{TITLE_PATH}}"
 ```
 
 `SKILL_ROOT` is the absolute directory containing the active skill's `SKILL.md`.
 `MARKDOWN_PATH` identifies the canonical Markdown document, `HTML_PATH` its HTML
-reading view, and `TITLE` is optional; omit `-Title` to use `Review report`.
-The adapters select `%LOCALAPPDATA%/ss-review/tools` when `LOCALAPPDATA` is set,
-or `~/.local/share/ss-review/tools` otherwise, and supply the active skill
-directory to the native executable. The render adapter writes the title to a
-UTF-8 file beside the resolved HTML output and removes it afterward. The output
-directory must be writable. The native process keeps the caller's working directory.
-On Ubuntu, pass `-InstallBrowserDependencies` to the approved installer when
+reading view, `TITLE_PATH` identifies a UTF-8 file containing the title, and
+`TOOLS_DIRECTORY` identifies the private tool installation directory.
+The output directory must be writable. The native process keeps the caller's
+working directory.
+On Ubuntu, pass `--install-browser-dependencies` to the approved installer when
 browser system dependencies are needed. The check and installer exercise a real HTML/Mermaid
 probe. Check results include tool paths, `missing`, and `diagnostics`; rendering
 returns the source and HTML paths and hashes, HTML URI, and diagram count.
@@ -401,10 +422,9 @@ prefix separately in `repositoryRoot`; `roots` contains configured user roots.
 `ss-ai workflow worker-assignment` prepares an immutable assignment using the
 active skill directory supplied with `--skill-root`. Its result contains the
 assignment path and a dispatch prompt. The prompt includes recovery guidance
-and a ready-to-run `workflow worker-document` command for each registered
-shared Markdown document. The PowerShell command initializes its own version
-and error handling settings; copy the complete block for initial reads and
-reloads.
+and PowerShell and Bash calling-shell blocks for `workflow worker-document`.
+Use the block for the calling shell and replace the document ID for initial
+reads and reloads. Both blocks stop on a failed native command.
 
 The reader checks the registered bytes and emits an exact page, a UTF-16
 continuation offset, and an explicit completion flag. The complete encoded

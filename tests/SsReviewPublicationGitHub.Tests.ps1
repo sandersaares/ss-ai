@@ -1,1379 +1,498 @@
-BeforeAll {
-    $script:RepoRoot = Split-Path -Parent $PSScriptRoot
-    $script:LibraryRoot = Join-Path $script:RepoRoot 'skills\ss-review\scripts\lib'
+Describe 'Native GitHub follow-up publication' {
+    foreach ($scenario in @(
+            @{ Scenario = 'first reopen fails and second succeeds'; Mode = 'normal'; FailSecond = $false }
+            @{ Scenario = 'both reopens fail'; Mode = 'normal'; FailSecond = $true }
+            @{ Scenario = 'successful reopens retain a succeeded review'; Mode = 'successReopen'; FailSecond = $false }
+            @{ Scenario = 'open follow-up threads are not reopened'; Mode = 'openFollowups'; FailSecond = $false }
+            @{ Scenario = 'out-of-range anchor is published and recorded at file level'; Mode = 'downgrade'; FailSecond = $false }
+            @{ Scenario = 'single-line anchor is sent without a range'; Mode = 'singleLine'; FailSecond = $false }
+            @{ Scenario = 'submission failure never reopens threads'; Mode = 'submitFailure'; FailSecond = $false }
+            @{ Scenario = 'missing draft findings prevent submission'; Mode = 'missingDraft'; FailSecond = $false }
+            @{ Scenario = 'draft discard failure preserves the original readback failure'; Mode = 'missingDraftDiscardFailure'; FailSecond = $false }
+            @{ Scenario = 'missing completed findings prevent reopening'; Mode = 'missingCompleted'; FailSecond = $false }
+            @{ Scenario = 'pending completed review prevents reopening'; Mode = 'pendingCompleted'; FailSecond = $false }
+            @{ Scenario = 'explicit approval publishes a summary without findings'; Mode = 'emptyApproval'; FailSecond = $false }
+            @{ Scenario = 'Unicode finding survives publication and journal readback'; Mode = 'unicode'; FailSecond = $false }
+            @{ Scenario = 'closed pull request without authorization'; Mode = 'closed'; FailSecond = $false }
+            @{ Scenario = 'closed pull request with explicit authorization'; Mode = 'closedAllowed'; FailSecond = $false }
+            @{ Scenario = 'closed pull request with a changed source'; Mode = 'closedSourceChanged'; FailSecond = $false }
+            @{ Scenario = 'source changed before publication'; Mode = 'sourceChanged'; FailSecond = $false }
+            @{ Scenario = 'merge base changed on an open pull request'; Mode = 'baseChanged'; FailSecond = $false }
+            @{ Scenario = 'closed-publication option does not waive open merge-base freshness'; Mode = 'baseChangedAllowed'; FailSecond = $false }
+            @{ Scenario = 'discussion evidence changed before publication'; Mode = 'evidenceChanged'; FailSecond = $false }
+            @{ Scenario = 'existing draft without discard authority'; Mode = 'pending'; FailSecond = $false }
+            @{ Scenario = 'existing draft with discard authority'; Mode = 'pendingAllowed'; FailSecond = $false }
+            @{ Scenario = 'changed evidence never discards an existing draft'; Mode = 'evidenceChangedPending'; FailSecond = $false }
+            @{ Scenario = 'changed source never discards an existing draft'; Mode = 'sourceChangedPending'; FailSecond = $false }
+            @{ Scenario = 'changed merge base never discards an existing draft'; Mode = 'baseChangedPending'; FailSecond = $false }
+            @{ Scenario = 'new discussion never discards an existing draft'; Mode = 'newThreadPending'; FailSecond = $false }
+            @{ Scenario = 'unplaceable anchor never discards an existing draft'; Mode = 'badAnchorPending'; FailSecond = $false }
+            @{ Scenario = 'malformed finding never discards an existing draft'; Mode = 'badFindingPending'; FailSecond = $false }
+        )) {
+        It "enforces the native publication scenario $($scenario.Scenario)" -Skip:$IsWindows -ForEach @($scenario) {
+            $root = Join-Path $PSScriptRoot ('.publication-followups-' + [guid]::NewGuid().ToString('N'))
+            [void] [IO.Directory]::CreateDirectory($root)
+            try {
+                $ssAi = (Get-Command ss-ai -CommandType Application -ErrorAction Stop | Select-Object -First 1).Source
+                $pwsh = (Get-Process -Id $PID).Path
+                $source = Join-Path $PSScriptRoot 'fixtures/ss-review-native-capture/github.json'
+                $fixture = ConvertFrom-Json -AsHashtable -DateKind String -InputObject ([IO.File]::ReadAllText($source))
+                $nodes = $fixture.responses.reviewThreads.data.repository.pullRequest.reviewThreads.nodes
+                $nodes[0].isResolved = $Mode -ne 'openFollowups'
+                $second = ConvertFrom-Json -AsHashtable -DateKind String -InputObject (
+                    ConvertTo-Json -InputObject $nodes[0] -Depth 100 -Compress
+                )
+                $second.id = 'PRRT_2'
+                $second.comments.nodes[0].id = 'PRRC_2'
+                $second.comments.nodes[0].databaseId = 900002
+                $second.comments.nodes[0].url = 'https://github.com/octo/widget/pull/7#discussion_PRRC_2'
+                $fixture.responses.reviewThreads.data.repository.pullRequest.reviewThreads.nodes = @($nodes[0], $second)
+                $fixturePath = Join-Path $root 'provider.json'
+                $statePath = Join-Path $root 'provider-state.json'
+                [IO.File]::WriteAllText($fixturePath, (ConvertTo-Json -InputObject $fixture -Depth 100 -Compress))
+                [IO.File]::WriteAllText($statePath, '{"replies":[],"summary":null,"verdict":"COMMENTED","events":[],"snapshots":[]}')
 
-    . (Join-Path $script:LibraryRoot 'JsonValue.ps1')
-    . (Join-Path $script:LibraryRoot 'PublicationFailure.ps1')
-    . (Join-Path $script:LibraryRoot 'PullRequestIdentity.ps1')
-    . (Join-Path $script:LibraryRoot 'PullRequestTarget.ps1')
-    . (Join-Path $script:LibraryRoot 'GitHubCliTransport.ps1')
-    . (Join-Path $script:LibraryRoot 'GitHubPullRequestApi.ps1')
-    . (Join-Path $script:LibraryRoot 'PullRequestModel.ps1')
-    . (Join-Path $script:LibraryRoot 'WorkflowData.ps1')
-    . (Join-Path $script:LibraryRoot 'FindingModel.ps1')
-    . (Join-Path $script:LibraryRoot 'GitDiff.ps1')
-    . (Join-Path $script:LibraryRoot 'NativeWorkflowBridge.ps1')
-    . (Join-Path $script:LibraryRoot 'PullRequestAnchor.ps1')
-    . (Join-Path $script:LibraryRoot 'PullRequestPlatform.ps1')
-    . (Join-Path $script:LibraryRoot 'ReviewPublication.ps1')
-    . (Join-Path $script:LibraryRoot 'PullRequestPublication.ps1')
-
-    # Characters are built from their code points so the fixtures never depend on how this file is
-    # encoded on disk, and so the assertions compare code points rather than rendered glyphs.
-    $script:EmDash = [string] [char]0x2014
-    $script:LeftQuote = [string] [char]0x201C
-    $script:RightQuote = [string] [char]0x201D
-    $script:Robot = [char]::ConvertFromUtf32(0x1F916)
-
-    # Every transport built here reads this instant instead of a clock, so nothing in this file
-    # depends on when it runs.
-    $script:FixedNowUtc = [DateTimeOffset]::new(2026, 8, 4, 12, 0, 0, [TimeSpan]::Zero)
-
-    $script:SourceCommit = 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa'
-    $script:MergeBaseCommit = 'bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb'
-
-    $script:Target = [ordered]@{
-        platform      = 'gitHub'
-        collectionUrl = $null
-        organization  = 'octo'
-        project       = $null
-        repository    = 'widget'
-        pullRequestId = 7
-        webUrl        = 'https://github.com/octo/widget/pull/7'
-    }
-
-    function New-GhResponse {
-        param(
-            [string] $Body = '',
-            [int] $ExitCode = 0,
-            [string] $StandardError = ''
-        )
-
-        [ordered]@{
-            exitCode            = $ExitCode
-            standardOutputBytes = [Text.Encoding]::UTF8.GetBytes($Body)
-            standardErrorText   = $StandardError
-        }
-    }
-
-    # Registers a canned reply for every invocation whose command line and standard input contain the
-    # key. Later registrations win, so a test overrides a default fixture by registering again.
-    # Supplying several replies serves them in order and then repeats the last, which is what lets a
-    # sequence of writes and a retried request be expressed without a bespoke fake per test.
-    function Add-GhRoute {
-        param(
-            [Parameter(Mandatory)]
-            [string] $Key,
-
-            [Parameter(Mandatory)]
-            [object[]] $Response
-        )
-
-        $script:GhRoutes.Add([ordered]@{
-                key       = $Key
-                responses = [System.Collections.Generic.List[object]]::new([object[]] $Response)
-            })
-    }
-
-    function New-TestTransport {
-        param(
-            [int] $MaxAttempts = 5,
-            [DateTimeOffset] $NowUtc = $script:FixedNowUtc
-        )
-
-        $routingInvoker = {
-            param(
-                [string[]] $ArgumentList,
-                [string] $StandardInput
-            )
-
-            $script:GhCalls.Add([ordered]@{
-                    arguments     = @($ArgumentList)
-                    standardInput = [string] $StandardInput
-                })
-
-            $composite = ($ArgumentList -join ' ') + ' ' + [string] $StandardInput
-            for ($index = $script:GhRoutes.Count - 1; $index -ge 0; $index--) {
-                $route = $script:GhRoutes[$index]
-                if (-not $composite.Contains([string] $route['key'])) { continue }
-                $responses = $route['responses']
-                if ($responses.Count -eq 0) {
-                    throw "The fake GitHub CLI ran out of replies for '$($route['key'])'."
+                # The launcher never falls through to a real provider command.
+                $provider = @'
+    #Requires -Version 7.6
+    Set-StrictMode -Version Latest
+    $ErrorActionPreference = 'Stop'
+    $PSNativeCommandUseErrorActionPreference = $true
+    $fixture = ConvertFrom-Json -AsHashtable -DateKind String -InputObject ([IO.File]::ReadAllText($env:SS_FIXTURE))
+    $state = ConvertFrom-Json -AsHashtable -DateKind String -InputObject ([IO.File]::ReadAllText($env:SS_STATE))
+    $priorEvents = $state.events.Count
+    $route = $args[1]
+    $responses = $fixture.responses
+    if ($route -eq 'graphql') {
+        $request = ConvertFrom-Json -AsHashtable -InputObject ([Console]::In.ReadToEnd())
+        $query = $request.query
+        $variables = $request.variables
+        if ($query.Contains('states:[PENDING]')) {
+            $pending = if ($env:SS_PENDING -eq 'yes') { @(@{ id = 'existing'; state = 'PENDING' }) } else { @() }
+            $response = @{ data = @{ repository = @{ pullRequest = @{ reviews = @{ nodes = @($pending) } } } } }
+        } elseif ($query.Contains('addPullRequestReviewThreadReply(')) {
+            $id = 'reply-' + ($state.replies.Count + 1)
+            $state.replies += @{
+                thread = $variables.threadId; id = $id; body = $variables.body
+                path = 'src/café.rs'; line = 5; startLine = 4; subject = 'LINE'
+            }
+            $state.events += 'reply:' + $variables.threadId
+            $response = @{ data = @{ addPullRequestReviewThreadReply = @{ comment = @{ id = $id } } } }
+        } elseif ($query.Contains('addPullRequestReviewThread(')) {
+            if ($env:SS_MODE -eq 'singleLine') {
+                if ($variables.Contains('startLine') -or $variables.line -ne 1 -or $variables.side -ne 'RIGHT') {
+                    throw 'Expected a single-line request without a range'
                 }
-                $response = $responses[0]
-                if ($responses.Count -gt 1) { $responses.RemoveAt(0) }
-                return $response
+                $subject = 'LINE'
+                $line = 1
+            } else {
+                if ($variables.Contains('line') -or $variables.Contains('side')) {
+                    throw 'Expected a positionless file request'
+                }
+                $subject = 'FILE'
+                $line = $null
             }
-
-            throw "The fake GitHub CLI has no reply for 'gh $($ArgumentList -join ' ')'."
-        }
-
-        $recordingWait = {
-            param([int] $Milliseconds)
-
-            $script:GhWaits.Add($Milliseconds)
-        }
-
-        # The closure is taken so the fixed instant survives the return of this function; a bare
-        # block would look the name up in whatever scope the transport runs it from.
-        $clock = { $NowUtc }.GetNewClosure()
-
-        New-GitHubCliTransport `
-            -InvokeGh $routingInvoker `
-            -Wait $recordingWait `
-            -GetUtcNow $clock `
-            -MaxAttempts $MaxAttempts
-    }
-
-    function Reset-GhState {
-        $script:GhRoutes = [System.Collections.Generic.List[object]]::new()
-        $script:GhCalls = [System.Collections.Generic.List[object]]::new()
-        $script:GhWaits = [System.Collections.Generic.List[int]]::new()
-    }
-
-    # The GraphQL documents each carry a fragment no other document carries, which is what lets the
-    # routing table stand in for a service without parsing the query.
-    $script:StartReviewKey = 'addPullRequestReview(input:'
-    $script:LineThreadKey = 'subjectType:LINE'
-    $script:RangeThreadKey = 'startLine:$startLine'
-    $script:FileThreadKey = 'subjectType:FILE'
-    $script:ReplyKey = 'addPullRequestReviewThreadReply'
-    $script:SubmitKey = 'submitPullRequestReview'
-    $script:DeleteKey = 'deletePullRequestReview'
-    $script:UnresolveKey = 'unresolveReviewThread'
-    $script:VerifyKey = 'node(id:$reviewId'
-    $script:PendingReviewKey = 'states:[PENDING]'
-
-    function Get-GhOperationSequence {
-        $sequence = [System.Collections.Generic.List[string]]::new()
-        foreach ($call in $script:GhCalls) {
-            $text = [string] $call['standardInput']
-            $name = switch -Regex ($text) {
-                'addPullRequestReviewThreadReply' { 'reply'; break }
-                'subjectType:FILE' { 'fileThread'; break }
-                'subjectType:LINE' { 'lineThread'; break }
-                'addPullRequestReview\(input:' { 'startReview'; break }
-                'submitPullRequestReview' { 'submit'; break }
-                'deletePullRequestReview' { 'delete'; break }
-                'unresolveReviewThread' { 'unresolve'; break }
-                'node\(id:\$reviewId' { 'verify'; break }
-                'states:\[PENDING\]' { 'pendingReview'; break }
-                default { 'other' }
+            $state.replies += @{
+                thread = 'new-thread'; id = 'new-comment'; body = $variables.body
+                path = $variables.path; line = $line; startLine = $null; subject = $subject
             }
-            $sequence.Add($name)
-        }
-        $sequence.ToArray()
-    }
-
-    function Get-GhCallVariable {
-        param(
-            [Parameter(Mandatory)]
-            [string] $Operation
-        )
-
-        $found = [System.Collections.Generic.List[object]]::new()
-        $index = 0
-        foreach ($name in (Get-GhOperationSequence)) {
-            if ($name -eq $Operation) {
-                $payload = ConvertFrom-JsonVerbatim -Text ([string] $script:GhCalls[$index]['standardInput'])
-                $found.Add((Get-JsonProperty -Node $payload -Name 'variables'))
+            $state.events += 'file:' + $variables.path
+            $response = @{ data = @{ addPullRequestReviewThread = @{ thread = @{
+                id = 'new-thread'; comments = @{ nodes = @(@{ id = 'new-comment' }) }
+            } } } }
+        } elseif ($query.Contains('addPullRequestReview(')) {
+            $state.events += 'start'
+            $response = @{ data = @{ addPullRequestReview = @{ pullRequestReview = @{ id = 'review'; state = 'PENDING' } } } }
+        } elseif ($query.Contains('submitPullRequestReview(')) {
+            $state.events += 'submit'
+            if ($env:SS_MODE -eq 'submitFailure') {
+                $response = @{ errors = @(@{ message = 'fixture submission failure' }) }
+            } else {
+                $state.summary = $variables.body
+                $state.verdict = if ($variables.event -eq 'APPROVE') { 'APPROVED' } else { 'COMMENTED' }
+                $response = @{ data = @{ submitPullRequestReview = @{ pullRequestReview = @{
+                    id = 'review'; state = $state.verdict; url = 'https://github.com/octo/widget/pull/7#review'
+                } } } }
             }
-            $index++
-        }
-        , $found.ToArray()
-    }
-
-    function New-ThreadResponseJson {
-        param(
-            [string] $ThreadId = 'PRRT_new',
-            [string] $CommentId = 'PRRC_new'
-        )
-
-        ConvertTo-Json -Depth 12 -Compress -InputObject ([ordered]@{
-                data = [ordered]@{
-                    addPullRequestReviewThread = [ordered]@{
-                        thread = [ordered]@{
-                            id       = $ThreadId
-                            comments = [ordered]@{ nodes = @([ordered]@{ id = $CommentId; databaseId = 11 }) }
-                        }
-                    }
+        } elseif ($query.Contains('deletePullRequestReview(')) {
+            $state.events += 'discard:' + $variables.reviewId
+            $response = if ($env:SS_MODE -eq 'missingDraftDiscardFailure') {
+                @{ errors = @(@{ message = 'fixture discard failure' }) }
+            } else {
+                @{ data = @{ deletePullRequestReview = @{ pullRequestReview = @{ id = $variables.reviewId } } } }
+            }
+        } elseif ($query.Contains('unresolveReviewThread(')) {
+            $state.events += 'reopen:' + $variables.threadId
+            if (($variables.threadId -eq 'PRRT_1' -and $env:SS_MODE -ne 'successReopen') -or $env:SS_FAIL_SECOND -eq 'yes') {
+                $response = @{ errors = @(@{ message = 'fixture refusal' }) }
+            } else {
+                $response = @{ data = @{ unresolveReviewThread = @{ thread = @{ id = $variables.threadId; isResolved = $false } } } }
+            }
+        } elseif ($query.Contains('node(id:$reviewId)')) {
+            $submitted = $null -ne $state.summary
+            $comments = @($state.replies | ForEach-Object {
+                @{
+                    id = $_.id; state = $(if ($submitted) { 'SUBMITTED' } else { 'PENDING' })
+                    path = $_.path; line = $_.line; startLine = $_.startLine; subjectType = $_.subject; body = $_.body
                 }
             })
-    }
-
-    function New-VerificationJson {
-        param(
-            [string] $State = 'COMMENTED',
-            [object[]] $Comment = @(),
-            [string] $Body = 'the summary',
-            [bool] $HasNextPage = $false,
-            [string] $EndCursor = ''
-        )
-
-        ConvertTo-Json -Depth 12 -Compress -InputObject ([ordered]@{
-                data = [ordered]@{
-                    node = [ordered]@{
-                        id       = 'PRR_1'
-                        state    = $State
-                        url      = 'https://github.com/octo/widget/pull/7#pullrequestreview-1'
-                        body     = $Body
-                        comments = [ordered]@{
-                            pageInfo = [ordered]@{ hasNextPage = $HasNextPage; endCursor = $EndCursor }
-                            nodes    = @($Comment)
-                        }
-                    }
+            if (($env:SS_MODE -in 'missingDraft', 'missingDraftDiscardFailure' -and -not $submitted) -or
+                ($env:SS_MODE -eq 'missingCompleted' -and $submitted)) {
+                $comments = @()
+            }
+            $response = @{ data = @{ node = @{
+                id = 'review'; state = $(if ($submitted -and $env:SS_MODE -ne 'pendingCompleted') { $state.verdict } else { 'PENDING' })
+                url = 'https://github.com/octo/widget/pull/7#review'
+                body = $(if ($submitted) { $state.summary } else { '' })
+                comments = @{ pageInfo = @{ hasNextPage = $false; endCursor = $null }; nodes = $comments }
+            } } }
+        } elseif ($query.Contains('reviewThreads(') -and $state.replies.Count -gt 0) {
+            $threads = @($state.replies | ForEach-Object {
+                @{
+                    id = $_.thread; diffSide = 'RIGHT'; subjectType = $_.subject
+                    comments = @{ pageInfo = @{ hasNextPage = $false; endCursor = $null }; nodes = @(@{ id = $_.id }) }
                 }
             })
-    }
-
-    function New-VerificationComment {
-        param(
-            [string] $Id = 'PRRC_new',
-            [string] $State = 'SUBMITTED',
-            [string] $Path = 'src/app.ps1',
-            $Line = 3,
-            $StartLine = $null,
-            [string] $SubjectType = 'LINE',
-            [string] $Body = 'rendered body'
-        )
-
-        [ordered]@{
-            id          = $Id
-            databaseId  = 11
-            state       = $State
-            path        = $Path
-            line        = $Line
-            startLine   = $StartLine
-            subjectType = $SubjectType
-            body        = $Body
+            $response = @{ data = @{ repository = @{ pullRequest = @{ reviewThreads = @{
+                pageInfo = @{ hasNextPage = $false; endCursor = $null }; nodes = $threads
+            } } } } }
+        } elseif ($query.Contains('reviewThreads(')) {
+            $response = $responses.reviewThreads
+        } elseif ($query.Contains('timelineItems(')) {
+            $response = $responses.timeline
+        } elseif ($query.Contains('reviews(')) {
+            $response = $responses.reviewEdits
+        } elseif ($query.Contains('comments(')) {
+            $response = $responses.issueEdits
+        } else {
+            throw "Unexpected GraphQL request: $query"
         }
-    }
-
-    # Registers the replies a run that succeeds end to end needs. A test that is about one failing
-    # write registers that one key again afterwards.
-    function Register-PublicationRoute {
-        param(
-            [string] $SubmitState = 'COMMENTED',
-            [object[]] $VerificationComment = @(),
-            [string] $VerificationBody = 'the summary'
-        )
-
-        $pendingVerificationComment = @(
-            foreach ($comment in $VerificationComment) {
-                $copy = [ordered]@{}
-                foreach ($key in $comment.Keys) { $copy[[string] $key] = $comment[$key] }
-                $copy['state'] = 'PENDING'
-                $copy
+    } else {
+        switch -Wildcard ($route) {
+            'user' { $response = $responses.user }
+            'repos/octo/widget/pulls/7' {
+                $response = $responses.pullRequest
+                $response.html_url = 'https://github.com/octo/widget/pull/7'
             }
-        )
-
-        Add-GhRoute -Key $script:PendingReviewKey -Response @(New-GhResponse -Body '{"data":{"repository":{"pullRequest":{"reviews":{"nodes":[]}}}}}')
-        Add-GhRoute -Key $script:StartReviewKey -Response @(New-GhResponse -Body '{"data":{"addPullRequestReview":{"pullRequestReview":{"id":"PRR_1","state":"PENDING"}}}}')
-        Add-GhRoute -Key 'addPullRequestReviewThread(input:' -Response @(
-            (New-GhResponse -Body (New-ThreadResponseJson -ThreadId 'PRRT_1' -CommentId 'PRRC_1')),
-            (New-GhResponse -Body (New-ThreadResponseJson -ThreadId 'PRRT_2' -CommentId 'PRRC_2')),
-            (New-GhResponse -Body (New-ThreadResponseJson -ThreadId 'PRRT_3' -CommentId 'PRRC_3'))
-        )
-        Add-GhRoute -Key $script:ReplyKey -Response @(New-GhResponse -Body '{"data":{"addPullRequestReviewThreadReply":{"comment":{"id":"PRRC_reply","databaseId":21}}}}')
-        Add-GhRoute -Key $script:SubmitKey -Response @(New-GhResponse -Body (ConvertTo-Json -Depth 12 -Compress -InputObject ([ordered]@{
-                        data = [ordered]@{
-                            submitPullRequestReview = [ordered]@{
-                                pullRequestReview = [ordered]@{
-                                    id    = 'PRR_1'
-                                    state = $SubmitState
-                                    url   = 'https://github.com/octo/widget/pull/7#pullrequestreview-1'
-                                    body  = 'summary'
-                                }
-                            }
-                        }
-                    })))
-        Add-GhRoute -Key $script:VerifyKey -Response @(
-            (New-GhResponse -Body (New-VerificationJson -State 'PENDING' -Comment $pendingVerificationComment -Body ''))
-            (New-GhResponse -Body (New-VerificationJson -State $SubmitState -Comment $VerificationComment -Body $VerificationBody))
-        )
-        Add-GhRoute -Key $script:UnresolveKey -Response @(New-GhResponse -Body '{"data":{"unresolveReviewThread":{"thread":{"id":"PRRT_old","isResolved":false}}}}')
-        Add-GhRoute -Key $script:DeleteKey -Response @(New-GhResponse -Body '{"data":{"deletePullRequestReview":{"pullRequestReview":{"id":"PRR_1"}}}}')
-    }
-
-    function New-TestState {
-        param($PendingReviewId = $null)
-
-        [ordered]@{
-            platform          = 'gitHub'
-            pullRequestNodeId = 'PR_node'
-            url               = 'https://github.com/octo/widget/pull/7'
-            status            = 'open'
-            isActive          = $true
-            isDraft           = $false
-            sourceCommit      = $script:SourceCommit
-            mergeBaseCommit   = $script:MergeBaseCommit
-            identity          = 'runner'
-            pendingReviewId   = $PendingReviewId
+            'repos/octo/widget/pulls/7/reviews?per_page=100' { $response = ,@($responses.reviews) }
+            'repos/octo/widget/issues/7/comments?per_page=100' { $response = ,@($responses.issueComments) }
+            'repos/octo/widget/pulls/7/requested_reviewers?per_page=100' { $response = ,@($responses.requestedReviewers) }
+            'repos/octo/widget/compare/*' { $response = $responses.compare }
+            default { throw "Unexpected provider route: $route" }
         }
     }
-
-    function New-PlanEntry {
-        param(
-            [Parameter(Mandatory)]
-            [ValidateSet('newLineThread', 'newFileThread', 'reply')]
-            [string] $Operation,
-
-            [Parameter(Mandatory)]
-            [string] $FindingId,
-
-            [string] $Body = 'rendered body',
-            [string] $Path = 'src/app.ps1',
-            [int] $StartLine = 3,
-            [int] $EndLine = 3,
-            [string] $Side = 'right',
-            [string] $ThreadId = '',
-            [switch] $RequiresReopen,
-            [switch] $WasDowngraded
-        )
-
-        $anchor = switch ($Operation) {
-            'newLineThread' {
-                [ordered]@{
-                    kind          = 'line'
-                    path          = $Path
-                    startLine     = $StartLine
-                    endLine       = $EndLine
-                    side          = $Side
-                    wasDowngraded = [bool] $WasDowngraded
-                }
-            }
-            'newFileThread' { [ordered]@{ kind = 'file'; path = $Path; wasDowngraded = [bool] $WasDowngraded } }
-            default { $null }
-        }
-
-        [ordered]@{
-            operation        = $Operation
-            findingId        = $FindingId
-            body             = $Body
-            anchor           = $anchor
-            wasDowngraded    = [bool] $WasDowngraded
-            threadId         = if ($ThreadId) { $ThreadId } else { $null }
-            commentId        = $null
-            requiresReopen   = [bool] $RequiresReopen
-            changeTrackingId = $null
+    $journalPath = Join-Path $env:SS_OUTPUT 'publication-result.json'
+    if ($state.events.Count -gt $priorEvents -and [IO.File]::Exists($journalPath)) {
+        $journal = ConvertFrom-Json -AsHashtable -InputObject ([IO.File]::ReadAllText($journalPath))
+        $state.snapshots += @{
+            event = $state.events[-1]; inFlight = $journal.inFlight; operations = $journal.operations
         }
     }
-
-    function New-ScratchDirectory {
-        $path = Join-Path $TestDrive ([guid]::NewGuid().ToString('n'))
-        New-Item -ItemType Directory -Path $path -Force | Out-Null
-        $path
-    }
-
-    # Runs a whole publication against the routing table and hands back everything an assertion needs.
-    function Invoke-TestPublication {
-        param(
-            [Parameter(Mandatory)]
-            [AllowEmptyCollection()]
-            [object[]] $Plan,
-
-            [string] $SummaryBody = 'the summary',
-
-            [System.Collections.IDictionary] $Transport = $null,
-
-            [switch] $ApproveMerge
-        )
-
-        if ($null -eq $Transport) { $Transport = New-TestTransport }
-
-        $outputDirectory = New-ScratchDirectory
-        $resultPath = Get-PullRequestPublicationResultPath -OutputDirectory $outputDirectory
-        $result = New-PullRequestPublicationResult `
-            -Target $script:Target `
-            -State (New-TestState) `
-            -Plan $Plan `
-            -NowUtc $script:FixedNowUtc
-        Write-PullRequestPublicationResult -Result $result -Path $resultPath
-
-        $failure = $null
-        try {
-            Invoke-PullRequestPublication `
-                -Transport $Transport `
-                -Target $script:Target `
-                -State (New-TestState) `
-                -Plan $Plan `
-                -SummaryBody $SummaryBody `
-                -Result $result `
-                -ResultPath $resultPath `
-                -ApproveMerge:$ApproveMerge | Out-Null
-        } catch {
-            $failure = $_
-        }
-
-        [ordered]@{
-            outputDirectory = $outputDirectory
-            resultPath      = $resultPath
-            result          = $result
-            persisted       = ConvertFrom-JsonVerbatim -Text ([System.IO.File]::ReadAllText($resultPath, [System.Text.Encoding]::UTF8))
-            failure         = $failure
-        }
-    }
-
-    function Get-RecordedOperation {
-        param(
-            [Parameter(Mandatory)]
-            $Record,
-
-            [Parameter(Mandatory)]
-            [string] $Operation,
-
-            [string] $FindingId = ''
-        )
-
-        $operations = Get-JsonArrayProperty -Node $Record -Name 'operations'
-        foreach ($entry in $operations) {
-            if ([string] (Get-JsonProperty -Node $entry -Name 'operation') -cne $Operation) { continue }
-            if ($FindingId -and [string] (Get-JsonProperty -Node $entry -Name 'findingId') -cne $FindingId) { continue }
-            return $entry
-        }
-
-        throw "The record holds no '$Operation' operation for finding '$FindingId'."
-    }
-
-    # Renders the code points of a string as text, which is what makes a fidelity failure legible: the
-    # assertion names the exact code point that changed rather than showing two strings that print
-    # identically.
-    function ConvertTo-CodePointText {
-        param([AllowEmptyString()][string] $Text)
-
-        (([System.Globalization.StringInfo]::GetTextElementEnumerator($Text) | ForEach-Object { $_ }) |
-            ForEach-Object { ([int[]] [char[]] $_ | ForEach-Object { 'U+{0:X4}' -f $_ }) -join '+' }) -join ' '
-    }
-
-    $script:DiffText = @'
-diff --git a/src/app.ps1 b/src/app.ps1
-index 1111111..2222222 100644
---- a/src/app.ps1
-+++ b/src/app.ps1
-@@ -1,4 +1,5 @@
- line one
--line two
-+line two changed
-+line two added
- line three
- line four
+    [IO.File]::WriteAllText($env:SS_STATE, (ConvertTo-Json -InputObject $state -Depth 100 -Compress))
+    [Console]::Out.Write((ConvertTo-Json -InputObject $response -Depth 100 -Compress))
 '@
+                $providerPath = Join-Path $root 'provider.ps1'
+                [IO.File]::WriteAllText($providerPath, $provider)
+                $ghPath = Join-Path $root 'gh'
+                [IO.File]::WriteAllText($ghPath, @'
+#!/bin/sh
+    exec "$SS_PWSH" -NoProfile -NonInteractive -File "$SS_PROVIDER" "$@"
+'@
+                )
+                $gitPath = Join-Path $root 'git'
+                [IO.File]::WriteAllText($gitPath, @'
+#!/bin/sh
+    case "$*" in
+      *cat-file*) printf 'commit\n' ;;
+      *diff*) printf 'diff --git a/src/lib.rs b/src/lib.rs\n--- a/src/lib.rs\n+++ b/src/lib.rs\n@@ -1,2 +1,2 @@\n-old\n+new\n context\n' ;;
+      *) printf '.git\n' ;;
+    esac
+'@
+                )
+                [IO.File]::SetUnixFileMode($ghPath, [IO.UnixFileMode] 'UserRead, UserWrite, UserExecute')
+                [IO.File]::SetUnixFileMode($gitPath, [IO.UnixFileMode] 'UserRead, UserWrite, UserExecute')
 
-    # Parses recorded content without depending on a developer checkout.
-    function New-TestDiff {
-        @{
-            mergeBaseCommit = $script:MergeBaseCommit
-            sourceCommit = $script:SourceCommit
-            files = ConvertFrom-GitDiffText -Text $script:DiffText
-        }
-    }
+                function Invoke-FakePublicationCommand {
+                    param([string[]] $Arguments)
+                    $start = [Diagnostics.ProcessStartInfo]::new($ssAi)
+                    $start.UseShellExecute = $false
+                    $start.RedirectStandardOutput = $true
+                    $start.RedirectStandardError = $true
+                    $start.Environment['PATH'] = $root
+                    $start.Environment['SS_PWSH'] = $pwsh
+                    $start.Environment['SS_PROVIDER'] = $providerPath
+                    $start.Environment['SS_FIXTURE'] = $fixturePath
+                    $start.Environment['SS_STATE'] = $statePath
+                    $start.Environment['SS_OUTPUT'] = Join-Path $root 'output'
+                    $start.Environment['SS_MODE'] = $Mode
+                    $start.Environment['SS_FAIL_SECOND'] = if ($FailSecond) { 'yes' } else { 'no' }
+                    $start.Environment['SS_PENDING'] = if ($Mode -like '*Pending' -or $Mode -in 'pending', 'pendingAllowed') { 'yes' } else { 'no' }
+                    foreach ($argument in $Arguments) { $start.ArgumentList.Add($argument) }
+                    $process = [Diagnostics.Process]::Start($start)
+                    try {
+                        $stdout = $process.StandardOutput.ReadToEndAsync()
+                        $stderr = $process.StandardError.ReadToEndAsync()
+                        $process.WaitForExit()
+                        return @{
+                            ExitCode = $process.ExitCode
+                            Output = $stdout.GetAwaiter().GetResult()
+                            Error = $stderr.GetAwaiter().GetResult()
+                        }
+                    } finally {
+                        $process.Dispose()
+                    }
+                }
 
-    function New-TestFinding {
-        param(
-            [string] $Id = 'F-1',
-            [string] $Path = 'src/app.ps1',
-            [int] $StartLine = 3
-        )
+                $captureDir = Join-Path $root 'capture'
+                $created = Invoke-FakePublicationCommand @(
+                    'context', 'create', '--url', 'https://github.com/octo/widget/pull/7',
+                    '--output-directory', $captureDir, '--now-utc', '2026-08-04T12:00:00Z'
+                )
+                $created.ExitCode | Should -Be 0 -Because $created.Error
+                $contextPath = (ConvertFrom-Json -AsHashtable -InputObject $created.Output).contextPath
+                $captured = ConvertFrom-Json -AsHashtable -DateKind String -InputObject ([IO.File]::ReadAllText($contextPath))
+                @($captured.threads.id) | Should -Be @('PRRT_1', 'PRRT_2')
+                $resolution = if ($Mode -eq 'openFollowups') { 'active' } else { 'resolved' }
+                @($captured.threads.resolution) | Should -Be @($resolution, $resolution)
 
-        [ordered]@{
-            schemaVersion     = 1
-            id                = $Id
-            sourceFindingIds  = @()
-            origin            = 'reviewer'
-            title             = "Title of $Id"
-            description       = "Description of $Id"
-            reasoning         = "Reasoning of $Id"
-            consequence       = "Consequence of $Id"
-            recommendedAction = "Recommended action of $Id"
-            references        = @()
-            impactedLocations = @()
-            anchor            = [ordered]@{ kind = 'line'; path = $Path; startLine = $StartLine; endLine = $StartLine; side = 'right' }
-        }
-    }
-
-    function New-TestApproved {
-        param([object[]] $Finding)
-
-        [ordered]@{
-            schemaVersion           = 2
-            target                  = $script:Target
-            reviewedSourceCommit    = $script:SourceCommit
-            reviewedMergeBaseCommit = $script:MergeBaseCommit
-            reviewedContextHash     = Get-PullRequestEvidenceHash -Document (New-TestContext)
-            findings                = @($Finding)
-        }
-    }
-
-    function New-TestContext {
-        [ordered]@{
-            schemaVersion         = 3
-            fetchedUtc            = '2026-08-04T11:00:00.0000000Z'
-            platform              = 'gitHub'
-            repositoryUrl         = 'https://github.com/octo/widget'
-            pullRequestUrl        = 'https://github.com/octo/widget/pull/7'
-            target                = $script:Target
-            authenticatedIdentity = [ordered]@{ uniqueName = 'runner' }
-            pullRequest           = [ordered]@{
-                title                   = 'Review fixture'
-                description             = $null
-                reviewedSourceCommit    = $script:SourceCommit
-                reviewedMergeBaseCommit = $script:MergeBaseCommit
-                isDraft                 = $false
-                mergeState              = 'clean'
+                $findings = foreach ($number in 1, 2) {
+                    [ordered]@{
+                        schemaVersion = 1; id = "F-$number"; sourceFindingIds = @("F-$number")
+                        origin = 'reviewer'; title = "Finding $number"; description = 'Problem'
+                        reasoning = 'Reason'; consequence = 'Impact'; recommendedAction = 'Fix'
+                        anchor = @{ kind = 'file'; path = 'src/lib.rs' }
+                        followUp = @{ threadId = "PRRT_$number"; commentId = "PRRC_$number" }
+                    }
+                }
+                $unicodeText = "Quoted $([char]0x2018)widget$([char]0x2019) $([char]0x2014) $([char]::ConvertFromUtf32(0x1F916))"
+                if ($Mode -eq 'unicode') {
+                    $findings[0].description = $unicodeText
+                }
+                $artifactPath = Join-Path $root 'findings.json'
+                $decisionsPath = Join-Path $root 'decisions.json'
+                $approvedPath = Join-Path $root 'approved.json'
+                $repositoryPath = Join-Path $root 'repository'
+                [void] [IO.Directory]::CreateDirectory($repositoryPath)
+                [IO.File]::WriteAllText($artifactPath, (ConvertTo-Json -Depth 100 -Compress -InputObject @{
+                    schemaVersion = 1; kind = 'consolidated'; findings = @($findings); removed = @()
+                }))
+                [IO.File]::WriteAllText($decisionsPath, (ConvertTo-Json -Depth 100 -Compress -InputObject @{
+                    schemaVersion = 1; decisions = @(
+                        @{ findingId = 'F-1'; decision = 'approved'; recordedUtc = '2026-08-04T12:00:00Z' }
+                        @{ findingId = 'F-2'; decision = 'approved'; recordedUtc = '2026-08-04T12:00:00Z' }
+                    )
+                }))
+                $built = Invoke-FakePublicationCommand @(
+                    'workflow', 'approved', 'build', '--path', $artifactPath, '--decisions-path', $decisionsPath,
+                    '--output-path', $approvedPath, '--context-path', $contextPath, '--repository-path', $repositoryPath
+                )
+                $built.ExitCode | Should -Be 0 -Because $built.Error
+                switch ($Mode) {
+                    { $_ -in 'closed', 'closedAllowed' } { $fixture.responses.pullRequest.state = 'closed' }
+                    'sourceChanged' { $fixture.responses.pullRequest.head.sha = 'b' * 40 }
+                    'sourceChangedPending' { $fixture.responses.pullRequest.head.sha = 'b' * 40 }
+                    'closedSourceChanged' {
+                        $fixture.responses.pullRequest.state = 'closed'
+                        $fixture.responses.pullRequest.head.sha = 'b' * 40
+                    }
+                    'baseChanged' { $fixture.responses.compare.merge_base_commit.sha = 'd' * 40 }
+                    'baseChangedAllowed' { $fixture.responses.compare.merge_base_commit.sha = 'd' * 40 }
+                    'baseChangedPending' { $fixture.responses.compare.merge_base_commit.sha = 'd' * 40 }
+                    'evidenceChanged' { $fixture.responses.pullRequest.title = 'Changed title' }
+                    'evidenceChangedPending' { $fixture.responses.pullRequest.title = 'Changed title' }
+                    'newThreadPending' {
+                        $newThread = ConvertFrom-Json -AsHashtable -DateKind String -InputObject (
+                            ConvertTo-Json -InputObject $second -Depth 100 -Compress
+                        )
+                        $newThread.id = 'PRRT_3'
+                        $newThread.comments.nodes[0].id = 'PRRC_3'
+                        $newThread.comments.nodes[0].databaseId = 900003
+                        $fixture.responses.reviewThreads.data.repository.pullRequest.reviewThreads.nodes += $newThread
+                    }
+                }
+                [IO.File]::WriteAllText($fixturePath, (ConvertTo-Json -InputObject $fixture -Depth 100 -Compress))
+                if ($Mode -in 'badAnchorPending', 'badFindingPending', 'downgrade', 'singleLine', 'emptyApproval') {
+                    $approved = ConvertFrom-Json -AsHashtable -InputObject ([IO.File]::ReadAllText($approvedPath))
+                    if ($Mode -eq 'badAnchorPending') {
+                        [void] $approved.findings[0].Remove('followUp')
+                        $approved.findings[0].anchor.path = 'not-in-diff.rs'
+                    } elseif ($Mode -eq 'badFindingPending') {
+                        $approved.findings[0].title = ''
+                    } elseif ($Mode -eq 'emptyApproval') {
+                        $approved.findings = @()
+                    } else {
+                        [void] $approved.findings[0].Remove('followUp')
+                        $lineNumber = if ($Mode -eq 'singleLine') { 1 } else { 99 }
+                        $approved.findings[0].anchor = @{
+                            kind = 'line'; path = 'src/lib.rs'; startLine = $lineNumber; endLine = $lineNumber; side = 'right'
+                        }
+                    }
+                    [IO.File]::WriteAllText($approvedPath, (ConvertTo-Json -InputObject $approved -Depth 100 -Compress))
+                }
+                $diagnosticsPath = Join-Path $root 'diagnostics.json'
+                [IO.File]::WriteAllText($diagnosticsPath, '{}')
+                $outputPath = Join-Path $root 'output'
+                $publishArguments = @(
+                    'review', 'publish-final-review', '--url', 'https://github.com/octo/widget/pull/7',
+                    '--approved-findings-path', $approvedPath, '--context-path', $contextPath,
+                    '--diagnostics-path', $diagnosticsPath, '--repository-path', $repositoryPath,
+                    '--output-directory', $outputPath, '--now-utc', '2026-08-04T12:00:00Z'
+                )
+                if ($Mode -in 'closedAllowed', 'closedSourceChanged', 'baseChangedAllowed') {
+                    $publishArguments += '--publish-to-closed-pull-request'
+                }
+                if ($Mode -in 'pendingAllowed', 'evidenceChangedPending', 'sourceChangedPending',
+                    'baseChangedPending', 'newThreadPending', 'badAnchorPending', 'badFindingPending') {
+                    $publishArguments += '--discard-pending-review'
+                }
+                if ($Mode -eq 'emptyApproval') {
+                    $mergePath = Join-Path $root 'merge.json'
+                    [IO.File]::WriteAllText($mergePath, (ConvertTo-Json -Compress -InputObject @{
+                        schemaVersion = 1; pullRequestUrl = 'https://github.com/octo/widget/pull/7'
+                        approveMerge = $true; approvedSourceCommit = $captured.pullRequest.reviewedSourceCommit
+                    }))
+                    $publishArguments += @('--merge-approval-path', $mergePath)
+                }
+                $published = Invoke-FakePublicationCommand $publishArguments
+                if ($Mode -eq 'emptyApproval') {
+                    $published.ExitCode | Should -Be 0 -Because $published.Error
+                    $outcome = ConvertFrom-Json -AsHashtable -InputObject $published.Output
+                    $outcome.status | Should -Be 'succeeded'
+                    $outcome.publishedFindingCount | Should -Be 0
+                    $state = ConvertFrom-Json -AsHashtable -InputObject ([IO.File]::ReadAllText($statePath))
+                    @($state.events) | Should -Be @('start', 'submit')
+                    $state.verdict | Should -Be 'APPROVED'
+                    $state.summary | Should -Not -BeNullOrEmpty
+                    return
+                }
+                if ($Mode -in 'successReopen', 'openFollowups') {
+                    $published.ExitCode | Should -Be 0 -Because $published.Error
+                    $outcome = ConvertFrom-Json -AsHashtable -InputObject $published.Output
+                    $outcome.status | Should -Be 'succeeded'
+                    $outcome.publishedFindingCount | Should -Be 2
+                    $state = ConvertFrom-Json -AsHashtable -InputObject ([IO.File]::ReadAllText($statePath))
+                    $expected = @('start', 'reply:PRRT_1', 'reply:PRRT_2', 'submit')
+                    if ($Mode -eq 'successReopen') { $expected += @('reopen:PRRT_1', 'reopen:PRRT_2') }
+                    @($state.events) | Should -Be $expected
+                    return
+                }
+                if ($Mode -in 'downgrade', 'singleLine') {
+                    $published.ExitCode | Should -Be 0 -Because $published.Error
+                    $outcome = ConvertFrom-Json -AsHashtable -InputObject $published.Output
+                    $outcome.status | Should -Be 'succeeded'
+                    $outcome.downgradedAnchorCount | Should -Be $(if ($Mode -eq 'downgrade') { 1 } else { 0 })
+                    $journal = ConvertFrom-Json -AsHashtable -InputObject (
+                        [IO.File]::ReadAllText((Join-Path $outputPath 'publication-result.json'))
+                    )
+                    $entry = @($journal.operations | Where-Object findingId -eq 'F-1')[0]
+                    if ($Mode -eq 'downgrade') {
+                        $entry.operation | Should -Be 'newFileThread'
+                        $entry.wasDowngraded | Should -BeTrue
+                        $entry.anchor.downgradeReason | Should -Match 'line 99'
+                    } else {
+                        $entry.operation | Should -Be 'newLineThread'
+                        $entry.wasDowngraded | Should -BeFalse
+                        $entry.anchor.endLine | Should -Be 1
+                    }
+                    return
+                }
+                $published.ExitCode | Should -Not -Be 0
+                if ($Mode -eq 'submitFailure') {
+                    $published.Output | Should -BeNullOrEmpty
+                    $state = ConvertFrom-Json -AsHashtable -InputObject ([IO.File]::ReadAllText($statePath))
+                    @($state.events) | Should -Be @('start', 'reply:PRRT_1', 'reply:PRRT_2', 'submit')
+                    $journal = ConvertFrom-Json -AsHashtable -InputObject (
+                        [IO.File]::ReadAllText((Join-Path $outputPath 'publication-result.json'))
+                    )
+                    @($journal.operations | Where-Object operation -eq 'completeReview')[0].outcome | Should -Be 'ambiguous'
+                    return
+                }
+                if ($Mode -in 'missingDraft', 'missingDraftDiscardFailure', 'missingCompleted', 'pendingCompleted') {
+                    $published.Output | Should -BeNullOrEmpty
+                    $state = ConvertFrom-Json -AsHashtable -InputObject ([IO.File]::ReadAllText($statePath))
+                    $expected = @('start', 'reply:PRRT_1', 'reply:PRRT_2')
+                    if ($Mode -in 'missingDraft', 'missingDraftDiscardFailure') {
+                        $expected += 'discard:review'
+                    } else {
+                        $expected += 'submit'
+                    }
+                    @($state.events) | Should -Be $expected
+                    $journal = ConvertFrom-Json -AsHashtable -InputObject (
+                        [IO.File]::ReadAllText((Join-Path $outputPath 'publication-result.json'))
+                    )
+                    $journal.status | Should -Be 'failed'
+                    if ($Mode -eq 'missingDraftDiscardFailure') {
+                        $journal.draftDiscarded | Should -BeFalse
+                        $journal.draftDiscardMessage | Should -Match 'ambiguousWrite'
+                        $journal.message | Should -Not -Be $journal.draftDiscardMessage
+                    }
+                    return
+                }
+                if ($Mode -eq 'unicode') {
+                    $state = ConvertFrom-Json -AsHashtable -InputObject ([IO.File]::ReadAllText($statePath))
+                    $journalPath = Join-Path $outputPath 'publication-result.json'
+                    $bytes = [IO.File]::ReadAllBytes($journalPath)
+                    $bytes[0] | Should -Not -Be 0xEF
+                    $journal = ConvertFrom-Json -AsHashtable -InputObject ([Text.Encoding]::UTF8.GetString($bytes))
+                    $state.replies[0].body | Should -BeLike "*$unicodeText*"
+                    $journal.verification.comments[0].body | Should -BeExactly $state.replies[0].body
+                    $journal.verification.body | Should -BeExactly $state.summary
+                    return
+                }
+                if ($Mode -notin 'normal', 'closedAllowed', 'pendingAllowed') {
+                    $published.Output | Should -BeNullOrEmpty
+                    $message = switch ($Mode) {
+                        'closed' { 'closed.*authorization' }
+                        'sourceChanged' { 'revisions changed' }
+                        'sourceChangedPending' { 'revisions changed' }
+                        'closedSourceChanged' { 'revisions changed' }
+                        'baseChanged' { 'revisions changed' }
+                        'baseChangedAllowed' { 'revisions changed' }
+                        'baseChangedPending' { 'revisions changed' }
+                        'evidenceChanged' { 'evidence changed' }
+                        'evidenceChangedPending' { 'evidence changed' }
+                        'newThreadPending' { 'evidence changed' }
+                        'badAnchorPending' { 'anchor|finding' }
+                        'badFindingPending' { 'title' }
+                        'pending' { 'draft.*authorization' }
+                    }
+                    $published.Error | Should -Match $message
+                    $state = ConvertFrom-Json -AsHashtable -InputObject ([IO.File]::ReadAllText($statePath))
+                    @($state.events).Count | Should -Be 0
+                    [IO.File]::Exists((Join-Path $outputPath 'publication-result.json')) | Should -BeFalse
+                    return
+                }
+                $outcome = ConvertFrom-Json -AsHashtable -InputObject $published.Output
+                $outcome.status | Should -Be 'publishedWithFollowUpFailure'
+                $journal = ConvertFrom-Json -AsHashtable -InputObject (
+                    [IO.File]::ReadAllText((Join-Path $outputPath 'publication-result.json'))
+                )
+                $reopen = @($journal.operations | Where-Object operation -eq 'reopenThread')
+                @($reopen.threadId) | Should -Be @('PRRT_1', 'PRRT_2')
+                @($reopen.outcome) | Should -Be @('ambiguous', $(if ($FailSecond) { 'ambiguous' } else { 'succeeded' }))
+                $outcome.message | Should -Match 'PRRT_1'
+                if ($FailSecond) { $outcome.message | Should -Match 'PRRT_2' }
+                $state = ConvertFrom-Json -AsHashtable -InputObject ([IO.File]::ReadAllText($statePath))
+                $expectedEvents = @('start', 'reply:PRRT_1', 'reply:PRRT_2', 'submit', 'reopen:PRRT_1', 'reopen:PRRT_2')
+                if ($Mode -eq 'pendingAllowed') { $expectedEvents = @('discard:existing') + $expectedEvents }
+                @($state.events) | Should -Be $expectedEvents
+                @($state.snapshots).Count | Should -Be 6
+                foreach ($snapshot in $state.snapshots) {
+                    $snapshot.inFlight | Should -Not -BeNullOrEmpty
+                    $snapshot.operations[$snapshot.inFlight.index].outcome | Should -Be 'ambiguous'
+                }
+                $outcome.publishedFindingCount | Should -Be 2
+                $beforeReplay = [IO.File]::ReadAllText($statePath)
+                $journalPath = Join-Path $outputPath 'publication-result.json'
+                $journalBeforeReplay = [IO.File]::ReadAllText($journalPath)
+                $replay = Invoke-FakePublicationCommand $publishArguments
+                $replay.ExitCode | Should -Not -Be 0
+                $replay.Output | Should -BeNullOrEmpty
+                [IO.File]::ReadAllText($statePath) | Should -BeExactly $beforeReplay
+                [IO.File]::ReadAllText($journalPath) | Should -BeExactly $journalBeforeReplay
+            } finally {
+                if ([IO.Directory]::Exists($root)) { [IO.Directory]::Delete($root, $true) }
             }
-            reviewers             = @()
-            revisions             = @()
-            threads               = @()
         }
-    }
-
-    function New-TestBodyMap {
-        param([object[]] $Finding)
-
-        $map = [ordered]@{}
-        foreach ($item in $Finding) { $map[[string] $item['id']] = "body of $($item['id'])" }
-        $map
-    }
-
-    # Registers the reads the live state is assembled from, together with a draft the identity already
-    # holds, which is the state a discard is asked for from.
-    function Register-PendingDraftStateRoute {
-        Add-GhRoute -Key 'api user' -Response @(New-GhResponse -Body '{"login":"runner","id":701,"node_id":"U_runner","type":"User","html_url":"https://github.com/runner"}')
-        Add-GhRoute -Key 'pulls/7 --method GET' -Response @(New-GhResponse -Body (ConvertTo-Json -Depth 12 -Compress -InputObject ([ordered]@{
-                        node_id  = 'PR_node'
-                        html_url = 'https://github.com/octo/widget/pull/7'
-                        state    = 'open'
-                        merged   = $false
-                        draft    = $false
-                        base     = [ordered]@{ sha = $script:MergeBaseCommit; repo = [ordered]@{ full_name = 'octo/widget' } }
-                        head     = [ordered]@{ sha = $script:SourceCommit; repo = [ordered]@{ full_name = 'octo/widget'; owner = [ordered]@{ login = 'octo' } } }
-                    })))
-        Add-GhRoute -Key 'compare/' -Response @(New-GhResponse -Body (ConvertTo-Json -Depth 12 -Compress -InputObject ([ordered]@{
-                        status            = 'ahead'
-                        merge_base_commit = [ordered]@{ sha = $script:MergeBaseCommit }
-                    })))
-        Add-GhRoute -Key $script:PendingReviewKey -Response @(New-GhResponse -Body '{"data":{"repository":{"pullRequest":{"reviews":{"nodes":[{"id":"PRR_existing","state":"PENDING"}]}}}}}')
-        Add-GhRoute -Key $script:DeleteKey -Response @(New-GhResponse -Body '{"data":{"deletePullRequestReview":{"pullRequestReview":{"id":"PRR_existing"}}}}')
-    }
-}
-
-Describe 'GitHub draft assembly' {
-    BeforeEach { Reset-GhState }
-
-    It 'adds a line thread, a file thread and a reply to one unsubmitted review' {
-        Register-PublicationRoute -VerificationComment @(
-            (New-VerificationComment -Id 'PRRC_1'),
-            (New-VerificationComment -Id 'PRRC_2' -Path 'docs/readme.md' -SubjectType 'FILE' -Line $null),
-            (New-VerificationComment -Id 'PRRC_reply')
-        )
-
-        $plan = @(
-            (New-PlanEntry -Operation 'newLineThread' -FindingId 'F-1')
-            (New-PlanEntry -Operation 'newFileThread' -FindingId 'F-2' -Path 'docs/readme.md')
-            (New-PlanEntry -Operation 'reply' -FindingId 'F-3' -ThreadId 'PRRT_old')
-        )
-
-        $run = Invoke-TestPublication -Plan $plan
-
-        $run['failure'] | Should -BeNullOrEmpty
-        Get-GhOperationSequence | Should -Be @('startReview', 'lineThread', 'fileThread', 'reply', 'verify', 'submit', 'verify')
-
-        $reviewIds = @(
-            (Get-GhCallVariable -Operation 'lineThread')[0]['reviewId']
-            (Get-GhCallVariable -Operation 'fileThread')[0]['reviewId']
-            (Get-GhCallVariable -Operation 'reply')[0]['reviewId']
-            (Get-GhCallVariable -Operation 'submit')[0]['reviewId']
-        )
-        @($reviewIds | Sort-Object -Unique) | Should -Be @('PRR_1')
-    }
-
-    It 'publishes a review planned from an identity map with nothing in it' {
-        # GitHub addresses a comment by path, so the file identity read answers with an empty map for
-        # every file and the plan carries no identifier for any of them. That is a complete answer
-        # rather than a missing one, and publication must proceed on it.
-        $identity = Get-PullRequestFileIdentityForTarget `
-            -Transport ([ordered]@{}) `
-            -Target $script:Target `
-            -State (New-TestState) `
-            -Path @('src/app.ps1', 'docs/readme.md')
-
-        $identity.Count | Should -Be 0
-
-        Register-PublicationRoute -VerificationComment @(
-            (New-VerificationComment -Id 'PRRC_1'),
-            (New-VerificationComment -Id 'PRRC_2' -Path 'docs/readme.md' -SubjectType 'FILE' -Line $null)
-        )
-
-        $plan = @(
-            (New-PlanEntry -Operation 'newLineThread' -FindingId 'F-1' -Path 'src/app.ps1')
-            (New-PlanEntry -Operation 'newFileThread' -FindingId 'F-2' -Path 'docs/readme.md')
-        )
-        @($plan | ForEach-Object { $_['changeTrackingId'] }) | Should -Be @($null, $null)
-
-        $run = Invoke-TestPublication -Plan $plan
-
-        $run['failure'] | Should -BeNullOrEmpty
-        $run['persisted']['status'] | Should -Be 'succeeded'
-        Get-GhOperationSequence | Should -Be @('startReview', 'lineThread', 'fileThread', 'verify', 'submit', 'verify')
-    }
-
-    It 'states the commit the review was produced against when it opens the draft' {
-        Register-PublicationRoute -VerificationComment @(New-VerificationComment -Id 'PRRC_1')
-
-        Invoke-TestPublication -Plan @(New-PlanEntry -Operation 'newLineThread' -FindingId 'F-1') | Out-Null
-
-        $variables = (Get-GhCallVariable -Operation 'startReview')[0]
-        $variables['pullRequestId'] | Should -Be 'PR_node'
-        $variables['commitOid'] | Should -Be $script:SourceCommit
-    }
-
-    It 'sends a left-side anchor as the line thread diff side' {
-        Register-PublicationRoute -VerificationComment @(New-VerificationComment -Id 'PRRC_1')
-
-        $run = Invoke-TestPublication -Plan @(New-PlanEntry -Operation 'newLineThread' -FindingId 'F-1' -Side 'left')
-
-        $run['failure'] | Should -BeNullOrEmpty
-        $variables = (Get-GhCallVariable -Operation 'lineThread')[0]
-        $variables['side'] | Should -Be 'LEFT'
-    }
-
-    It 'sends a single-line anchor without a range and a multi-line anchor with one' {
-        Register-PublicationRoute -VerificationComment @(
-            (New-VerificationComment -Id 'PRRC_1'),
-            (New-VerificationComment -Id 'PRRC_2' -Line 6)
-        )
-
-        $plan = @(
-            (New-PlanEntry -Operation 'newLineThread' -FindingId 'F-1' -StartLine 3 -EndLine 3)
-            (New-PlanEntry -Operation 'newLineThread' -FindingId 'F-2' -StartLine 3 -EndLine 6)
-        )
-
-        Invoke-TestPublication -Plan $plan | Out-Null
-
-        $calls = Get-GhCallVariable -Operation 'lineThread'
-        $calls[0].Contains('startLine') | Should -BeFalse
-        $calls[0]['line'] | Should -Be 3
-        $calls[0]['side'] | Should -Be 'RIGHT'
-        $calls[1]['startLine'] | Should -Be 3
-        $calls[1]['line'] | Should -Be 6
-    }
-
-    It 'posts a downgraded anchor as a file thread carrying no position' {
-        Register-PublicationRoute -VerificationComment @(New-VerificationComment -Id 'PRRC_1' -SubjectType 'FILE' -Line $null)
-
-        $plan = @(New-PlanEntry -Operation 'newFileThread' -FindingId 'F-1' -WasDowngraded)
-
-        Invoke-TestPublication -Plan $plan | Out-Null
-
-        Get-GhOperationSequence | Should -Be @('startReview', 'fileThread', 'verify', 'submit', 'verify')
-        $variables = (Get-GhCallVariable -Operation 'fileThread')[0]
-        $variables.Contains('line') | Should -BeFalse
-        $variables.Contains('side') | Should -BeFalse
-        $variables['path'] | Should -Be 'src/app.ps1'
-    }
-}
-
-Describe 'GitHub review completion' {
-    BeforeEach { Reset-GhState }
-
-    It 'submits the review with the summary as its body' {
-        Register-PublicationRoute -VerificationComment @(New-VerificationComment -Id 'PRRC_1') -VerificationBody 'the review summary'
-
-        $run = Invoke-TestPublication `
-            -Plan @(New-PlanEntry -Operation 'newLineThread' -FindingId 'F-1') `
-            -SummaryBody 'the review summary'
-
-        (Get-GhCallVariable -Operation 'submit')[0]['body'] | Should -Be 'the review summary'
-        $run['result']['reviewUrl'] | Should -Be 'https://github.com/octo/widget/pull/7#pullrequestreview-1'
-    }
-
-    It 'submits the review as a comment when the merge is not approved' {
-        Register-PublicationRoute -VerificationComment @(New-VerificationComment -Id 'PRRC_1')
-
-        Invoke-TestPublication -Plan @(New-PlanEntry -Operation 'newLineThread' -FindingId 'F-1') | Out-Null
-
-        (Get-GhCallVariable -Operation 'submit')[0]['event'] | Should -Be 'COMMENT'
-    }
-
-    It 'submits the review as an approval when the merge is approved' {
-        Register-PublicationRoute -VerificationComment @(New-VerificationComment -Id 'PRRC_1') -SubmitState 'APPROVED'
-
-        $run = Invoke-TestPublication -Plan @(New-PlanEntry -Operation 'newLineThread' -FindingId 'F-1') -ApproveMerge
-
-        (Get-GhCallVariable -Operation 'submit')[0]['event'] | Should -Be 'APPROVE'
-        $run['result']['verification']['state'] | Should -Be 'APPROVED'
-        $run['result']['verification']['isPublished'] | Should -BeTrue
-    }
-
-    It 'submits an approval carrying only the summary when the review raises no findings' {
-        Register-PublicationRoute -SubmitState 'APPROVED' -VerificationBody 'the review summary'
-
-        $run = Invoke-TestPublication -Plan @() -SummaryBody 'the review summary' -ApproveMerge
-
-        $run['failure'] | Should -BeNullOrEmpty
-        (Get-GhCallVariable -Operation 'submit')[0]['event'] | Should -Be 'APPROVE'
-        (Get-GhCallVariable -Operation 'submit')[0]['body'] | Should -Be 'the review summary'
-        $run['result']['verification']['isPublished'] | Should -BeTrue
-        @($run['result']['verification']['comments']).Count | Should -Be 0
-    }
-
-    It 'verifies through the review node and reads back what the service published' {
-        Register-PublicationRoute -VerificationComment @(New-VerificationComment -Id 'PRRC_1' -Body 'published body')
-
-        $run = Invoke-TestPublication -Plan @(New-PlanEntry -Operation 'newLineThread' -FindingId 'F-1' -Body 'published body')
-
-        (Get-GhCallVariable -Operation 'verify')[0]['reviewId'] | Should -Be 'PRR_1'
-        $verification = $run['result']['verification']
-        $verification['state'] | Should -Be 'COMMENTED'
-        $verification['isPublished'] | Should -BeTrue
-        @($verification['comments']).Count | Should -Be 1
-        $verification['comments'][0]['isPublished'] | Should -BeTrue
-        $verification['comments'][0]['body'] | Should -Be 'published body'
-    }
-
-    It 'reads every page of the review comments before it accepts the verification' {
-        Register-PublicationRoute
-        Add-GhRoute -Key $script:VerifyKey -Response @(
-            (New-GhResponse -Body (New-VerificationJson `
-                        -State 'PENDING' `
-                        -Comment @(New-VerificationComment -Id 'PRRC_other' -State 'PENDING' -Path 'src/other.ps1') `
-                        -Body '' `
-                        -HasNextPage $true `
-                        -EndCursor 'cursor-1'))
-            (New-GhResponse -Body (New-VerificationJson `
-                        -State 'PENDING' `
-                        -Comment @(New-VerificationComment -Id 'PRRC_1' -State 'PENDING') `
-                        -Body ''))
-            (New-GhResponse -Body (New-VerificationJson `
-                        -State 'COMMENTED' `
-                        -Comment @(New-VerificationComment -Id 'PRRC_other' -Path 'src/other.ps1') `
-                        -HasNextPage $true `
-                        -EndCursor 'cursor-1'))
-            (New-GhResponse -Body (New-VerificationJson `
-                        -State 'COMMENTED' `
-                        -Comment @(New-VerificationComment -Id 'PRRC_1')))
-        )
-
-        $run = Invoke-TestPublication -Plan @(New-PlanEntry -Operation 'newLineThread' -FindingId 'F-1')
-
-        $run['failure'] | Should -BeNullOrEmpty
-        @($run['result']['verification']['comments']).Count | Should -Be 2
-        $verifyCalls = Get-GhCallVariable -Operation 'verify'
-        $cursors = @(foreach ($call in $verifyCalls) { [string] (Get-JsonProperty -Node $call -Name 'cur') })
-        ($cursors -join '|') | Should -BeExactly '|cursor-1||cursor-1'
-        Get-GhOperationSequence | Should -Be @('startReview', 'lineThread', 'verify', 'verify', 'submit', 'verify', 'verify')
-    }
-
-    It 'refuses to submit when draft verification cannot find an accepted comment' {
-        Register-PublicationRoute -VerificationComment @(New-VerificationComment -Id 'PRRC_1')
-        Add-GhRoute -Key $script:VerifyKey -Response @(New-GhResponse -Body (New-VerificationJson -State 'PENDING' -Comment @() -Body ''))
-
-        $run = Invoke-TestPublication -Plan @(New-PlanEntry -Operation 'newLineThread' -FindingId 'F-1')
-
-        $run['failure'] | Should -Not -BeNullOrEmpty
-        $run['failure'].Exception.Message | Should -BeLike "*Finding 'F-1'*"
-        Get-GhOperationSequence | Should -Be @('startReview', 'lineThread', 'verify', 'delete')
-        Get-GhOperationSequence | Should -Not -Contain 'submit'
-        $run['persisted']['preCompletionVerification'] | Should -Not -BeNullOrEmpty
-        (Get-RecordedOperation -Record $run['persisted'] -Operation 'verifyFindings')['outcome'] | Should -Be 'failed'
-        (Get-RecordedOperation -Record $run['persisted'] -Operation 'completeReview')['outcome'] | Should -Be 'pending'
-    }
-
-    It 'refuses a review the service still reports as unsubmitted' {
-        Register-PublicationRoute
-        Add-GhRoute -Key $script:VerifyKey -Response @(New-GhResponse -Body (New-VerificationJson -State 'PENDING' -Comment @(New-VerificationComment -Id 'PRRC_1' -State 'PENDING')))
-
-        $run = Invoke-TestPublication -Plan @(New-PlanEntry -Operation 'newLineThread' -FindingId 'F-1')
-
-        $run['failure'] | Should -Not -BeNullOrEmpty
-        $run['failure'].Exception.Message | Should -BeLike "*reports state 'PENDING'*"
-        $run['persisted']['status'] | Should -Be 'failed'
-    }
-
-    It 'counts only comments the service reports as visible' {
-        Register-PublicationRoute -VerificationComment @(New-VerificationComment -Id 'PRRC_1' -State 'PENDING')
-
-        $run = Invoke-TestPublication -Plan @(New-PlanEntry -Operation 'newLineThread' -FindingId 'F-1')
-
-        $run['failure'].Exception.Message | Should -BeLike '*published fewer comments than it was given*'
-    }
-
-    It 'reports a verification that could not confirm the review as a failure' {
-        Register-PublicationRoute -VerificationComment @(
-            (New-VerificationComment -Id 'PRRC_1' -State 'PENDING')
-            (New-VerificationComment -Id 'PRRC_reply' -State 'PENDING')
-        )
-
-        $plan = @(
-            (New-PlanEntry -Operation 'newLineThread' -FindingId 'F-1')
-            (New-PlanEntry -Operation 'reply' -FindingId 'F-2' -ThreadId 'PRRT_old' -RequiresReopen)
-        )
-
-        $run = Invoke-TestPublication -Plan $plan
-
-        # A count the service will not confirm leaves nobody able to say what the pull request holds,
-        # which is a different situation from a review that is published and merely untidy.
-        $run['persisted']['status'] | Should -Be 'failed'
-        $run['failure'] | Should -Not -BeNullOrEmpty
-        Get-GhOperationSequence | Should -Not -Contain 'unresolve'
-    }
-}
-
-Describe 'GitHub follow-up reopening' {
-    BeforeEach { Reset-GhState }
-
-    It 'sends the planned thread when it replies to an existing thread' {
-        Register-PublicationRoute -VerificationComment @(New-VerificationComment -Id 'PRRC_reply')
-
-        $run = Invoke-TestPublication -Plan @(New-PlanEntry -Operation 'reply' -FindingId 'F-1' -ThreadId 'PRRT_planned')
-
-        $run['failure'] | Should -BeNullOrEmpty
-        $variables = (Get-GhCallVariable -Operation 'reply')[0]
-        $variables['threadId'] | Should -Be 'PRRT_planned'
-    }
-
-    It 'reopens a resolved thread strictly after the review became visible' {
-        Register-PublicationRoute -VerificationComment @(New-VerificationComment -Id 'PRRC_reply')
-
-        $plan = @(New-PlanEntry -Operation 'reply' -FindingId 'F-1' -ThreadId 'PRRT_old' -RequiresReopen)
-
-        $run = Invoke-TestPublication -Plan $plan
-
-        $run['failure'] | Should -BeNullOrEmpty
-        Get-GhOperationSequence | Should -Be @('startReview', 'reply', 'verify', 'submit', 'verify', 'unresolve')
-        (Get-GhCallVariable -Operation 'unresolve')[0]['threadId'] | Should -Be 'PRRT_old'
-    }
-
-    It 'leaves a thread that was already open untouched' {
-        Register-PublicationRoute -VerificationComment @(New-VerificationComment -Id 'PRRC_reply')
-
-        $plan = @(New-PlanEntry -Operation 'reply' -FindingId 'F-1' -ThreadId 'PRRT_open')
-
-        Invoke-TestPublication -Plan $plan | Out-Null
-
-        Get-GhOperationSequence | Should -Not -Contain 'unresolve'
-    }
-
-    It 'reopens nothing when the run never published' {
-        Register-PublicationRoute -VerificationComment @(New-VerificationComment -Id 'PRRC_reply')
-        Add-GhRoute -Key $script:SubmitKey -Response @(New-GhResponse -Body '{"errors":[{"message":"Review is empty."}]}')
-
-        $plan = @(New-PlanEntry -Operation 'reply' -FindingId 'F-1' -ThreadId 'PRRT_old' -RequiresReopen)
-
-        $run = Invoke-TestPublication -Plan $plan
-
-        $run['failure'] | Should -Not -BeNullOrEmpty
-        Get-GhOperationSequence | Should -Not -Contain 'unresolve'
-    }
-
-    It 'reports a published review whose thread stayed resolved as published with a follow-up failure' {
-        Register-PublicationRoute -VerificationComment @(New-VerificationComment -Id 'PRRC_reply')
-        Add-GhRoute -Key $script:UnresolveKey -Response @(New-GhResponse -Body '{"errors":[{"message":"Thread is locked."}]}')
-
-        $plan = @(New-PlanEntry -Operation 'reply' -FindingId 'F-1' -ThreadId 'PRRT_old' -RequiresReopen)
-
-        $run = Invoke-TestPublication -Plan $plan
-
-        $run['failure'] | Should -BeNullOrEmpty
-        $run['persisted']['status'] | Should -Be 'publishedWithFollowUpFailure'
-        $run['persisted']['message'] | Should -BeLike "*PRRT_old*"
-        $run['persisted']['message'] | Should -BeLike '*must not be published again*'
-
-        $recorded = Get-RecordedOperation -Record $run['persisted'] -Operation 'reopenThread' -FindingId 'F-1'
-        $recorded['outcome'] | Should -Be 'failed'
-        $recorded['threadId'] | Should -Be 'PRRT_old'
-        $recorded['message'] | Should -BeLike '*Thread is locked.*'
-    }
-
-    It 'reports the review as published even though a reopening failed' {
-        Register-PublicationRoute -VerificationComment @(New-VerificationComment -Id 'PRRC_reply')
-        Add-GhRoute -Key $script:UnresolveKey -Response @(New-GhResponse -Body '{"errors":[{"message":"Thread is locked."}]}')
-
-        $plan = @(New-PlanEntry -Operation 'reply' -FindingId 'F-1' -ThreadId 'PRRT_old' -RequiresReopen)
-
-        $run = Invoke-TestPublication -Plan $plan
-        $outcome = New-PullRequestPublicationOutcome -Result $run['result'] -ResultPath $run['resultPath']
-
-        $outcome['publishedFindingCount'] | Should -Be 1
-        $outcome['status'] | Should -Be 'publishedWithFollowUpFailure'
-        $outcome['message'] | Should -BeLike '*PRRT_old*'
-        (Get-RecordedOperation -Record $run['persisted'] -Operation 'completeReview')['outcome'] | Should -Be 'succeeded'
-    }
-
-    It 'attempts every reopening even when an earlier one fails' {
-        Register-PublicationRoute -VerificationComment @(
-            (New-VerificationComment -Id 'PRRC_reply')
-            (New-VerificationComment -Id 'PRRC_reply2')
-        )
-        Add-GhRoute -Key $script:UnresolveKey -Response @(New-GhResponse -Body '{"errors":[{"message":"Thread is locked."}]}')
-
-        $plan = @(
-            (New-PlanEntry -Operation 'reply' -FindingId 'F-1' -ThreadId 'PRRT_one' -RequiresReopen)
-            (New-PlanEntry -Operation 'reply' -FindingId 'F-2' -ThreadId 'PRRT_two' -RequiresReopen)
-        )
-
-        $run = Invoke-TestPublication -Plan $plan
-
-        @(Get-GhOperationSequence | Where-Object { $_ -eq 'unresolve' }).Count | Should -Be 2
-        (Get-RecordedOperation -Record $run['persisted'] -Operation 'reopenThread' -FindingId 'F-2')['outcome'] | Should -Be 'failed'
-        $run['persisted']['message'] | Should -BeLike '*PRRT_one*'
-        $run['persisted']['message'] | Should -BeLike '*PRRT_two*'
-    }
-
-    It 'reports a review whose reopening succeeded as nothing but succeeded' {
-        Register-PublicationRoute -VerificationComment @(New-VerificationComment -Id 'PRRC_reply')
-
-        $plan = @(New-PlanEntry -Operation 'reply' -FindingId 'F-1' -ThreadId 'PRRT_old' -RequiresReopen)
-
-        $run = Invoke-TestPublication -Plan $plan
-
-        $run['persisted']['status'] | Should -Be 'succeeded'
-        $run['persisted']['message'] | Should -BeNullOrEmpty
-    }
-}
-
-Describe 'GitHub draft discard' {
-    BeforeEach { Reset-GhState }
-
-    It 'discards the draft when a write fails before the submit' {
-        Register-PublicationRoute
-        Add-GhRoute -Key 'addPullRequestReviewThread(input:' -Response @(New-GhResponse -Body '{"errors":[{"message":"Path is not part of the diff."}]}')
-
-        $run = Invoke-TestPublication -Plan @(New-PlanEntry -Operation 'newLineThread' -FindingId 'F-1')
-
-        Get-GhOperationSequence | Should -Be @('startReview', 'lineThread', 'delete')
-        (Get-GhCallVariable -Operation 'delete')[0]['reviewId'] | Should -Be 'PRR_1'
-        $run['persisted']['draftDiscarded'] | Should -BeTrue
-        { Assert-PullRequestPublicationRecord -OutputDirectory $run['outputDirectory'] -Target $script:Target } |
-            Should -Not -Throw
-    }
-
-    It 'keeps the published review when the failure comes after the submit' {
-        Register-PublicationRoute -VerificationComment @(New-VerificationComment -Id 'PRRC_1')
-        Add-GhRoute -Key $script:VerifyKey -Response @(
-            (New-GhResponse -Body (New-VerificationJson -State 'PENDING' -Comment @(New-VerificationComment -Id 'PRRC_1' -State 'PENDING') -Body ''))
-            (New-GhResponse -Body (New-VerificationJson -State 'PENDING' -Comment @(New-VerificationComment -Id 'PRRC_1' -State 'PENDING')))
-        )
-
-        Invoke-TestPublication -Plan @(New-PlanEntry -Operation 'newLineThread' -FindingId 'F-1') | Out-Null
-
-        Get-GhOperationSequence | Should -Not -Contain 'delete'
-    }
-
-    It 'reports the original failure even when the discard also fails' {
-        Register-PublicationRoute
-        Add-GhRoute -Key 'addPullRequestReviewThread(input:' -Response @(New-GhResponse -Body '{"errors":[{"message":"Path is not part of the diff."}]}')
-        Add-GhRoute -Key $script:DeleteKey -Response @(New-GhResponse -Body '{"errors":[{"message":"Review not found."}]}')
-
-        $run = Invoke-TestPublication -Plan @(New-PlanEntry -Operation 'newLineThread' -FindingId 'F-1')
-
-        $run['failure'].Exception.Message | Should -BeLike '*Path is not part of the diff*'
-        $run['persisted']['draftDiscarded'] | Should -BeFalse
-        $run['persisted']['draftDiscardMessage'] | Should -BeLike '*Review not found*'
-    }
-}
-
-Describe 'GitHub pending review' {
-    BeforeEach { Reset-GhState }
-
-    It 'reports the draft the authenticated identity already holds' {
-        Add-GhRoute -Key $script:PendingReviewKey -Response @(New-GhResponse -Body '{"data":{"repository":{"pullRequest":{"reviews":{"nodes":[{"id":"PRR_existing","state":"PENDING"}]}}}}}')
-
-        Get-GitHubPendingReviewId -Transport (New-TestTransport) -Target $script:Target -Login 'runner' |
-            Should -Be 'PRR_existing'
-    }
-
-    It 'refuses to proceed past that draft unless the caller asked for it to go' {
-        Add-GhRoute -Key $script:DeleteKey -Response @(New-GhResponse -Body '{"data":{"deletePullRequestReview":{"pullRequestReview":{"id":"PRR_existing"}}}}')
-        $transport = New-TestTransport
-
-        { Clear-PullRequestPendingReview `
-                -Transport $transport `
-                -Target $script:Target `
-                -State (New-TestState -PendingReviewId 'PRR_existing') } |
-            Should -Throw -ExpectedMessage '*-DiscardPendingReview*'
-
-        Get-GhOperationSequence | Should -Be @()
-    }
-
-    It 'discards that draft when the caller asked for it to go' {
-        Add-GhRoute -Key $script:DeleteKey -Response @(New-GhResponse -Body '{"data":{"deletePullRequestReview":{"pullRequestReview":{"id":"PRR_existing"}}}}')
-
-        $state = Clear-PullRequestPendingReview `
-            -Transport (New-TestTransport) `
-            -Target $script:Target `
-            -State (New-TestState -PendingReviewId 'PRR_existing') `
-            -DiscardPendingReview
-
-        Get-GhOperationSequence | Should -Be @('delete')
-        (Get-GhCallVariable -Operation 'delete')[0]['reviewId'] | Should -Be 'PRR_existing'
-        $state['pendingReviewId'] | Should -BeNullOrEmpty
-    }
-}
-
-Describe 'GitHub write policy' {
-    BeforeEach { Reset-GhState }
-
-    It 'attempts a failed write exactly once, even when the failure looks transient' {
-        Register-PublicationRoute
-        Add-GhRoute -Key 'addPullRequestReviewThread(input:' -Response @(New-GhResponse -ExitCode 1 -StandardError 'HTTP 502 bad gateway')
-
-        $run = Invoke-TestPublication `
-            -Plan @(New-PlanEntry -Operation 'newLineThread' -FindingId 'F-1') `
-            -Transport (New-TestTransport -MaxAttempts 5)
-
-        $run['failure'] | Should -Not -BeNullOrEmpty
-        @(Get-GhOperationSequence | Where-Object { $_ -eq 'lineThread' }).Count | Should -Be 1
-        $script:GhWaits.Count | Should -Be 0
-    }
-
-    It 'attempts a failed submit exactly once' {
-        Register-PublicationRoute -VerificationComment @(New-VerificationComment -Id 'PRRC_1')
-        Add-GhRoute -Key $script:SubmitKey -Response @(New-GhResponse -ExitCode 1 -StandardError 'HTTP 502 bad gateway')
-
-        Invoke-TestPublication `
-            -Plan @(New-PlanEntry -Operation 'newLineThread' -FindingId 'F-1') `
-            -Transport (New-TestTransport -MaxAttempts 5) | Out-Null
-
-        @(Get-GhOperationSequence | Where-Object { $_ -eq 'submit' }).Count | Should -Be 1
-    }
-
-    It 'attempts a failed draft open exactly once' {
-        Register-PublicationRoute
-        Add-GhRoute -Key $script:StartReviewKey -Response @(New-GhResponse -ExitCode 1 -StandardError 'HTTP 502 bad gateway')
-
-        Invoke-TestPublication `
-            -Plan @(New-PlanEntry -Operation 'newLineThread' -FindingId 'F-1') `
-            -Transport (New-TestTransport -MaxAttempts 5) | Out-Null
-
-        @(Get-GhOperationSequence | Where-Object { $_ -eq 'startReview' }).Count | Should -Be 1
-    }
-}
-
-Describe 'GitHub publication record' {
-    BeforeEach { Reset-GhState }
-
-    It 'rewrites the record after every operation, so a run that dies is accounted for' {
-        Register-PublicationRoute
-        Add-GhRoute -Key 'addPullRequestReviewThread(input:' -Response @(
-            (New-GhResponse -Body (New-ThreadResponseJson -ThreadId 'PRRT_1' -CommentId 'PRRC_1')),
-            (New-GhResponse -Body '{"errors":[{"message":"Path is not part of the diff."}]}')
-        )
-
-        $plan = @(
-            (New-PlanEntry -Operation 'newLineThread' -FindingId 'F-1')
-            (New-PlanEntry -Operation 'newLineThread' -FindingId 'F-2' -StartLine 4 -EndLine 4)
-            (New-PlanEntry -Operation 'reply' -FindingId 'F-3' -ThreadId 'PRRT_old')
-        )
-
-        $run = Invoke-TestPublication -Plan $plan
-        $record = $run['persisted']
-
-        (Get-RecordedOperation -Record $record -Operation 'startReview')['outcome'] | Should -Be 'succeeded'
-        $first = Get-RecordedOperation -Record $record -Operation 'newLineThread' -FindingId 'F-1'
-        $first['outcome'] | Should -Be 'succeeded'
-        $first['threadId'] | Should -Be 'PRRT_1'
-        $first['commentId'] | Should -Be 'PRRC_1'
-        (Get-RecordedOperation -Record $record -Operation 'newLineThread' -FindingId 'F-2')['outcome'] | Should -Be 'failed'
-        (Get-RecordedOperation -Record $record -Operation 'reply' -FindingId 'F-3')['outcome'] | Should -Be 'pending'
-        (Get-RecordedOperation -Record $record -Operation 'completeReview')['outcome'] | Should -Be 'pending'
-        $record['status'] | Should -Be 'failed'
-        $record['reviewId'] | Should -Be 'PRR_1'
-    }
-
-    It 'records a refusal the service reported as a definite failure' {
-        Register-PublicationRoute
-        Add-GhRoute -Key 'addPullRequestReviewThread(input:' -Response @(New-GhResponse -Body '{"errors":[{"message":"Path is not part of the diff."}]}')
-
-        $run = Invoke-TestPublication -Plan @(New-PlanEntry -Operation 'newLineThread' -FindingId 'F-1')
-
-        $entry = Get-RecordedOperation -Record $run['persisted'] -Operation 'newLineThread' -FindingId 'F-1'
-        $entry['outcome'] | Should -Be 'failed'
-        $entry['message'] | Should -BeLike '*Path is not part of the diff*'
-    }
-
-    It 'records a non-zero GraphQL response with service errors as a definite failure' {
-        Register-PublicationRoute
-        $response = New-GhResponse `
-            -ExitCode 1 `
-            -Body '{"errors":[{"message":"Path is not part of the diff."}]}' `
-            -StandardError 'gh: Path is not part of the diff.'
-        Add-GhRoute -Key 'addPullRequestReviewThread(input:' -Response @($response)
-
-        $run = Invoke-TestPublication -Plan @(New-PlanEntry -Operation 'newLineThread' -FindingId 'F-1')
-
-        $entry = Get-RecordedOperation -Record $run['persisted'] -Operation 'newLineThread' -FindingId 'F-1'
-        $entry['outcome'] | Should -Be 'failed'
-        $entry['message'] | Should -BeLike '*Path is not part of the diff*'
-    }
-
-    It 'records a lost response as ambiguous rather than as a failure' {
-        Register-PublicationRoute
-        Add-GhRoute -Key 'addPullRequestReviewThread(input:' -Response @(New-GhResponse -ExitCode 1 -StandardError 'the pipe has been ended')
-
-        $run = Invoke-TestPublication -Plan @(New-PlanEntry -Operation 'newLineThread' -FindingId 'F-1')
-
-        $entry = Get-RecordedOperation -Record $run['persisted'] -Operation 'newLineThread' -FindingId 'F-1'
-        $entry['outcome'] | Should -Be 'ambiguous'
-        $entry['message'] | Should -BeLike '*the pipe has been ended*'
-    }
-
-    It 'records the ambiguity before the run stops, so a killed run still states it' {
-        Register-PublicationRoute
-        Add-GhRoute -Key 'addPullRequestReviewThread(input:' -Response @(New-GhResponse -ExitCode 1 -StandardError 'the pipe has been ended')
-
-        $run = Invoke-TestPublication -Plan @(New-PlanEntry -Operation 'newLineThread' -FindingId 'F-1')
-
-        # The assertion reads the file rather than the in-memory record: the guarantee is about what
-        # survives the process, not about what the run happened to be holding.
-        $onDisk = ConvertFrom-JsonVerbatim -Text ([System.IO.File]::ReadAllText($run['resultPath'], [System.Text.Encoding]::UTF8))
-        (Get-RecordedOperation -Record $onDisk -Operation 'newLineThread' -FindingId 'F-1')['outcome'] |
-            Should -Be 'ambiguous'
-    }
-
-    It 'summarizes what reached the pull request rather than what was intended' {
-        Register-PublicationRoute -VerificationComment @(
-            (New-VerificationComment -Id 'PRRC_1'),
-            (New-VerificationComment -Id 'PRRC_2' -SubjectType 'FILE' -Line $null)
-        )
-
-        $plan = @(
-            (New-PlanEntry -Operation 'newLineThread' -FindingId 'F-1')
-            (New-PlanEntry -Operation 'newFileThread' -FindingId 'F-2' -WasDowngraded)
-        )
-
-        $run = Invoke-TestPublication -Plan $plan
-        $outcome = New-PullRequestPublicationOutcome -Result $run['result'] -ResultPath $run['resultPath']
-
-        $outcome['status'] | Should -Be 'succeeded'
-        $outcome['publishedFindingCount'] | Should -Be 2
-        $outcome['downgradedAnchorCount'] | Should -Be 1
-        $outcome['failedOperationCount'] | Should -Be 0
-        $outcome['ambiguousOperationCount'] | Should -Be 0
-        $outcome['reviewUrl'] | Should -Be 'https://github.com/octo/widget/pull/7#pullrequestreview-1'
-    }
-}
-
-Describe 'GitHub publication text fidelity' {
-    BeforeEach { Reset-GhState }
-
-    It 'carries every code point of a finding body and a summary through unchanged' {
-        $body = "Rename $($script:LeftQuote)widget$($script:RightQuote) $($script:EmDash) it is a $($script:Robot) name."
-        $summary = "Review complete $($script:EmDash) $($script:Robot)"
-
-        Register-PublicationRoute -VerificationComment @(New-VerificationComment -Id 'PRRC_1' -Body $body) -VerificationBody $summary
-
-        $run = Invoke-TestPublication `
-            -Plan @(New-PlanEntry -Operation 'newLineThread' -FindingId 'F-1' -Body $body) `
-            -SummaryBody $summary
-
-        $run['failure'] | Should -BeNullOrEmpty
-
-        $sent = (Get-GhCallVariable -Operation 'lineThread')[0]['body']
-        ConvertTo-CodePointText -Text $sent | Should -Be (ConvertTo-CodePointText -Text $body)
-
-        $sentSummary = (Get-GhCallVariable -Operation 'submit')[0]['body']
-        ConvertTo-CodePointText -Text $sentSummary | Should -Be (ConvertTo-CodePointText -Text $summary)
-
-        $readBack = $run['result']['verification']['comments'][0]['body']
-        ConvertTo-CodePointText -Text $readBack | Should -Be (ConvertTo-CodePointText -Text $body)
-    }
-
-    It 'stores the record as UTF-8 without a byte order mark' {
-        $body = "A $($script:Robot) finding"
-        Register-PublicationRoute -VerificationComment @(New-VerificationComment -Id 'PRRC_1' -Body $body)
-
-        $run = Invoke-TestPublication -Plan @(New-PlanEntry -Operation 'newLineThread' -FindingId 'F-1' -Body $body)
-
-        $bytes = [System.IO.File]::ReadAllBytes($run['resultPath'])
-        $bytes[0] | Should -Not -Be 0xEF
-        $text = [System.Text.Encoding]::UTF8.GetString($bytes)
-        $record = ConvertFrom-JsonVerbatim -Text $text
-        ConvertTo-CodePointText -Text ([string] $record['verification']['comments'][0]['body']) |
-            Should -Be (ConvertTo-CodePointText -Text $body)
-    }
-}
-
-Describe 'GitHub publication state' {
-    BeforeEach { Reset-GhState }
-
-    It 'reads the live pull request, its merge base and the draft the identity holds' {
-        Add-GhRoute -Key 'api user' -Response @(New-GhResponse -Body '{"login":"runner","id":701,"node_id":"U_runner","type":"User","html_url":"https://github.com/runner"}')
-        Add-GhRoute -Key 'pulls/7 --method GET' -Response @(New-GhResponse -Body (ConvertTo-Json -Depth 12 -Compress -InputObject ([ordered]@{
-                        node_id  = 'PR_node'
-                        html_url = 'https://github.com/octo/widget/pull/7'
-                        state    = 'open'
-                        merged   = $false
-                        draft    = $false
-                        base     = [ordered]@{ sha = $script:MergeBaseCommit; repo = [ordered]@{ full_name = 'octo/widget' } }
-                        head     = [ordered]@{ sha = $script:SourceCommit; repo = [ordered]@{ full_name = 'octo/widget'; owner = [ordered]@{ login = 'octo' } } }
-                    })))
-        Add-GhRoute -Key 'compare/' -Response @(New-GhResponse -Body (ConvertTo-Json -Depth 12 -Compress -InputObject ([ordered]@{
-                        status            = 'ahead'
-                        merge_base_commit = [ordered]@{ sha = $script:MergeBaseCommit }
-                    })))
-        Add-GhRoute -Key $script:PendingReviewKey -Response @(New-GhResponse -Body '{"data":{"repository":{"pullRequest":{"reviews":{"nodes":[{"id":"PRR_existing","state":"PENDING"}]}}}}}')
-
-        $state = Get-PullRequestPublicationStateForTarget -Transport (New-TestTransport) -Target $script:Target
-
-        $state['pullRequestNodeId'] | Should -Be 'PR_node'
-        $state['isActive'] | Should -BeTrue
-        $state['sourceCommit'] | Should -Be $script:SourceCommit
-        $state['mergeBaseCommit'] | Should -Be $script:MergeBaseCommit
-        $state['identity'] | Should -Be 'runner'
-        $state['pendingReviewId'] | Should -Be 'PRR_existing'
-    }
-
-    It 'reports a merged pull request as no longer accepting a review' {
-        Add-GhRoute -Key 'api user' -Response @(New-GhResponse -Body '{"login":"runner","id":701,"node_id":"U_runner","type":"User","html_url":"https://github.com/runner"}')
-        Add-GhRoute -Key 'pulls/7 --method GET' -Response @(New-GhResponse -Body (ConvertTo-Json -Depth 12 -Compress -InputObject ([ordered]@{
-                        node_id  = 'PR_node'
-                        html_url = 'https://github.com/octo/widget/pull/7'
-                        state    = 'closed'
-                        merged   = $true
-                        draft    = $false
-                        base     = [ordered]@{ sha = $script:MergeBaseCommit; repo = [ordered]@{ full_name = 'octo/widget' } }
-                        head     = [ordered]@{ sha = $script:SourceCommit; repo = [ordered]@{ full_name = 'octo/widget'; owner = [ordered]@{ login = 'octo' } } }
-                    })))
-        Add-GhRoute -Key 'compare/' -Response @(New-GhResponse -Body '{"status":"identical","merge_base_commit":{"sha":"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"}}')
-        Add-GhRoute -Key $script:PendingReviewKey -Response @(New-GhResponse -Body '{"data":{"repository":{"pullRequest":{"reviews":{"nodes":[]}}}}}')
-
-        $state = Get-PullRequestPublicationStateForTarget -Transport (New-TestTransport) -Target $script:Target
-
-        $state['isActive'] | Should -BeFalse
-        $state['status'] | Should -Be 'closed'
-    }
-}
-
-Describe 'GitHub publication plan ordering' {
-    BeforeEach {
-        Reset-GhState
-        Mock Get-PullRequestContextForTarget { New-TestContext }
-    }
-
-    It 'refuses an anchor the reviewed diff cannot place without discarding the draft' {
-        Register-PendingDraftStateRoute
-        $findings = @(New-TestFinding -Id 'F-1' -Path 'src/absent.ps1')
-
-        { New-PullRequestPublicationPlanForTarget `
-                -Transport (New-TestTransport) `
-                -Target $script:Target `
-                -Approved (New-TestApproved -Finding $findings) `
-                -Finding $findings `
-                -Context (New-TestContext) `
-                -Body (New-TestBodyMap -Finding $findings) `
-                -Diff (New-TestDiff) `
-                -DiscardPendingReview } |
-            Should -Throw -ExpectedMessage "*Finding 'F-1' cannot be anchored*"
-
-        Get-GhOperationSequence | Should -Not -Contain 'delete'
-    }
-
-    It 'refuses a finding that rendered to nothing without discarding the draft' {
-        Register-PendingDraftStateRoute
-        $findings = @(New-TestFinding -Id 'F-1')
-
-        { New-PullRequestPublicationPlanForTarget `
-                -Transport (New-TestTransport) `
-                -Target $script:Target `
-                -Approved (New-TestApproved -Finding $findings) `
-                -Finding $findings `
-                -Context (New-TestContext) `
-                -Body ([ordered]@{ 'F-1' = '   ' }) `
-                -Diff (New-TestDiff) `
-                -DiscardPendingReview } |
-            Should -Throw -ExpectedMessage "*'F-1' rendered to no text*"
-
-        Get-GhOperationSequence | Should -Not -Contain 'delete'
-    }
-
-    It 'refuses a pull request that moved without discarding the draft' {
-        Register-PendingDraftStateRoute
-        $findings = @(New-TestFinding -Id 'F-1')
-        $approved = New-TestApproved -Finding $findings
-        $approved['reviewedSourceCommit'] = 'cccccccccccccccccccccccccccccccccccccccc'
-
-        { New-PullRequestPublicationPlanForTarget `
-                -Transport (New-TestTransport) `
-                -Target $script:Target `
-                -Approved $approved `
-                -Finding $findings `
-                -Context (New-TestContext) `
-                -Body (New-TestBodyMap -Finding $findings) `
-                -Diff (New-TestDiff) `
-                -DiscardPendingReview } |
-            Should -Throw
-
-        Get-GhOperationSequence | Should -Not -Contain 'delete'
-    }
-
-    It 'discards the draft once the whole plan stands' {
-        Register-PendingDraftStateRoute
-        $findings = @(New-TestFinding -Id 'F-1')
-
-        $session = New-PullRequestPublicationPlanForTarget `
-            -Transport (New-TestTransport) `
-            -Target $script:Target `
-            -Approved (New-TestApproved -Finding $findings) `
-            -Finding $findings `
-            -Context (New-TestContext) `
-            -Body (New-TestBodyMap -Finding $findings) `
-            -Diff (New-TestDiff) `
-            -DiscardPendingReview
-
-        @($session['plan']).Count | Should -Be 1
-        $session['plan'][0]['operation'] | Should -Be 'newLineThread'
-        $session['state']['pendingReviewId'] | Should -BeNullOrEmpty
-
-        # The discard is the only write this step performs, and it is the last thing it does.
-        (Get-GhOperationSequence)[-1] | Should -Be 'delete'
-    }
-
-    It 'refuses to proceed past a draft the caller did not ask to discard' {
-        Register-PendingDraftStateRoute
-        $findings = @(New-TestFinding -Id 'F-1')
-
-        { New-PullRequestPublicationPlanForTarget `
-                -Transport (New-TestTransport) `
-                -Target $script:Target `
-                -Approved (New-TestApproved -Finding $findings) `
-                -Finding $findings `
-                -Context (New-TestContext) `
-                -Body (New-TestBodyMap -Finding $findings) `
-                -Diff (New-TestDiff) } |
-            Should -Throw -ExpectedMessage '*-DiscardPendingReview*'
-
-        Get-GhOperationSequence | Should -Not -Contain 'delete'
-    }
-
-    It 'refuses <Change> immediately before publication without discarding the draft' -ForEach @(
-        @{ Change = 'a force-pushed source'; Mutate = { param($context) $context.pullRequest.reviewedSourceCommit = 'unrelated-history' } }
-        @{ Change = 'a changed merge base'; Mutate = { param($context) $context.pullRequest.reviewedMergeBaseCommit = 'new-base' } }
-        @{ Change = 'discussion arriving during the human wait'; Mutate = { param($context) $context.threads = @([ordered]@{ id = 'new-thread'; comments = @() }) } }
-        @{ Change = 'changed PR intent'; Mutate = { param($context) $context.pullRequest['description'] = 'Changed requirements' } }
-    ) {
-        Register-PendingDraftStateRoute
-        $script:LiveEvidence = New-TestContext
-        & $Mutate $script:LiveEvidence
-        Mock Get-PullRequestContextForTarget { $script:LiveEvidence }
-        $findings = @(New-TestFinding -Id 'F-1')
-        { New-PullRequestPublicationPlanForTarget -Transport (New-TestTransport) -Target $script:Target `
-            -Approved (New-TestApproved -Finding $findings) -Finding $findings -Context (New-TestContext) `
-            -Body (New-TestBodyMap -Finding $findings) -Diff (New-TestDiff) -DiscardPendingReview } |
-            Should -Throw '*evidence changed immediately before publication*'
-        Get-GhOperationSequence | Should -Not -Contain 'delete'
-        Should -Invoke Get-PullRequestContextForTarget -Times 1 -Exactly
-    }
-
-    It 'refuses substituting a different unchecked capture even if commits match' {
-        Register-PendingDraftStateRoute
-        $context = New-TestContext
-        $context.pullRequest['description'] = 'Unchecked discussion context'
-        $findings = @(New-TestFinding -Id 'F-1')
-        { New-PullRequestPublicationPlanForTarget -Transport (New-TestTransport) -Target $script:Target `
-            -Approved (New-TestApproved -Finding $findings) -Finding $findings -Context $context `
-            -Body (New-TestBodyMap -Finding $findings) -Diff (New-TestDiff) -DiscardPendingReview } |
-            Should -Throw '*not bound to this checked capture*'
-        Get-GhOperationSequence | Should -Not -Contain 'delete'
     }
 }

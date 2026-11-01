@@ -97,6 +97,19 @@ fn selected_input_bytes_change_the_fingerprint() {
     assert_ne!(first, fingerprint(&fixture.run()));
 }
 
+#[test]
+#[cfg_attr(miri, ignore = "requires an isolated native subprocess")]
+fn schema_additions_and_changes_participate_in_build_identity() {
+    let fixture = Fixture::new();
+    let first = fingerprint(&fixture.run());
+    let schema = fixture.0.join("skills/ss-review/schemas/contract.json");
+    fs::write(&schema, "{}").unwrap();
+    let added = fingerprint(&fixture.run());
+    assert_ne!(first, added);
+    fs::write(&schema, r#"{"type":"object"}"#).unwrap();
+    assert_ne!(added, fingerprint(&fixture.run()));
+}
+
 #[cfg(unix)]
 #[test]
 #[cfg_attr(miri, ignore = "requires an isolated native subprocess")]

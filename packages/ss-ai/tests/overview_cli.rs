@@ -242,7 +242,17 @@ fn github_unproven_rate_limit_does_not_authorize_replay() {
 }
 
 #[test]
-fn github_explicit_rate_refusal_allows_retry() {
+fn github_interrupted_rate_refusal_allows_retry() {
+    struct Interrupted;
+    impl Clock for Interrupted {
+        fn now(&self) -> Timestamp {
+            Timestamp::UNIX_EPOCH
+        }
+        fn wait(&self, _: Duration) -> Result<(), AppError> {
+            Err(ss_ai_runtime::fail("interrupted", "wait interrupted"))
+        }
+    }
+
     let fixture = fixture();
     prepare(fixture.path());
     let refused = Provider {
@@ -250,12 +260,10 @@ fn github_explicit_rate_refusal_allows_retry() {
         ..Provider::default()
     };
     let args = arguments(fixture.path());
-    let result: Value =
-        from_str(&run(&args, &refused, &refused, &SystemClock::default()).unwrap()).unwrap();
+    let result: Value = from_str(&run(&args, &refused, &refused, &Interrupted).unwrap()).unwrap();
     assert_eq!(result["operations"][0]["status"], "failed", "{result}");
     let accepted = Provider::default();
-    let result: Value =
-        from_str(&run(&args, &accepted, &accepted, &SystemClock::default()).unwrap()).unwrap();
+    let result: Value = from_str(&run(&args, &accepted, &accepted, &Interrupted).unwrap()).unwrap();
     assert_eq!(result["status"], "succeeded", "{result}");
 }
 

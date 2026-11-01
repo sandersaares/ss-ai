@@ -16,14 +16,6 @@ Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 $PSNativeCommandUseErrorActionPreference = $true
 
-$repoRoot = Split-Path -Parent (Split-Path -Parent $PSScriptRoot)
-$skillScripts = Join-Path $repoRoot 'skills\ss-review\scripts'
-. "$skillScripts\lib\JsonValue.ps1"
-. "$skillScripts\lib\PullRequestModel.ps1"
-. "$skillScripts\lib\WorkflowData.ps1"
-. "$skillScripts\lib\FindingModel.ps1"
-. "$skillScripts\lib\ReviewWork.ps1"
-
 $program = (Get-Command ss-ai -CommandType Application -ErrorAction Stop | Select-Object -First 1).Source
 $script:ProcessLaunches = 0
 $script:PersistenceProcessLaunches = 0
@@ -55,11 +47,11 @@ function Invoke-CoverageOperation {
         $output = $stdout.GetAwaiter().GetResult()
         $errors = $stderr.GetAwaiter().GetResult()
         if ($process.ExitCode -ne 0) { throw "ss-ai workflow operation failed: $errors" }
-        ConvertFrom-JsonVerbatim -Text $output
+        ConvertFrom-Json -InputObject $output -AsHashtable -DateKind String -NoEnumerate
     } finally { $process.Dispose() }
 }
 
-$StateDirectory = Resolve-PullRequestPath -Path $StateDirectory
+$StateDirectory = [IO.Path]::GetFullPath($StateDirectory, (Get-Location).ProviderPath)
 New-Item -ItemType Directory -Path $StateDirectory -ErrorAction Stop | Out-Null
 $measurements = @(foreach ($mode in @('PerFile', 'Batch')) {
     $root = Join-Path $StateDirectory $mode
@@ -76,8 +68,8 @@ $measurements = @(foreach ($mode in @('PerFile', 'Batch')) {
     $groupPath = Join-Path $root 'groups.json'
     $queue = Join-Path $root 'queue.json'
     $artifactDirectory = Join-Path $root 'findings'
-    Write-PullRequestOutputFileAtomically -Path $inventory -Content (ConvertTo-JsonText -Value $files)
-    Write-PullRequestOutputFileAtomically -Path $groupPath -Content (ConvertTo-JsonText -Value $groups)
+    [IO.File]::WriteAllText($inventory, (ConvertTo-Json -InputObject $files -Depth 100))
+    [IO.File]::WriteAllText($groupPath, (ConvertTo-Json -InputObject $groups -Depth 100))
     $null = Invoke-CoverageOperation -Arguments @(
         'initialize-review-queue', "--queue-path=$queue", "--inventory-path=$inventory", "--file-groups-path=$groupPath"
     )
@@ -99,7 +91,7 @@ $measurements = @(foreach ($mode in @('PerFile', 'Batch')) {
         $draft = Join-Path $root 'draft.json'
         if ($mode -ceq 'PerFile') {
             foreach ($assessment in $assessments) {
-                [IO.File]::WriteAllText($draft, (ConvertTo-JsonText -Value $assessment))
+                [IO.File]::WriteAllText($draft, (ConvertTo-Json -InputObject $assessment -Depth 100))
                 $null = Invoke-CoverageOperation -Arguments @(
                     'set-review-assessment', "--queue-path=$queue", "--inventory-path=$inventory",
                     "--file-groups-path=$groupPath", "--assessment-path=$draft"
@@ -110,7 +102,7 @@ $measurements = @(foreach ($mode in @('PerFile', 'Batch')) {
             ) -Measure -Persistence
         } else {
             $batch = @{ schemaVersion = 1; snapshot = $claim.snapshot; groupId = $claim.item.groupId; assessments = $assessments; findingIds = @() }
-            [IO.File]::WriteAllText($draft, (ConvertTo-JsonText -Value $batch))
+            [IO.File]::WriteAllText($draft, (ConvertTo-Json -InputObject $batch -Depth 100))
             $null = Invoke-CoverageOperation -Arguments @(
                 'complete-review-batch', "--queue-path=$queue", "--inventory-path=$inventory",
                 "--file-groups-path=$groupPath", "--artifact-path=$($artifact.artifactPath)", "--batch-path=$draft"
@@ -123,9 +115,15 @@ $measurements = @(foreach ($mode in @('PerFile', 'Batch')) {
         persistenceProcessLaunches = $script:PersistenceProcessLaunches
         elapsedMilliseconds = $timer.Elapsed.TotalMilliseconds
     }
-    Assert-ReviewFileGroupQueueComplete -Path $queue -Group $groups
-    if ((Read-ReviewQueueDocument -Path $queue).assessments.Count -ne $files.Count) { throw 'Benchmark lost file coverage.' }
-    Assert-WorkflowData -Kind coverageMeasurement -Value $measurement
+    # Resume validates journal coverage against the original inputs; completion checks receipts.
+    $null = Invoke-CoverageOperation -Arguments @(
+        'initialize-review-queue', "--queue-path=$queue", "--inventory-path=$inventory", "--file-groups-path=$groupPath", '--resume'
+    )
+    $null = Invoke-CoverageOperation -Arguments @(
+        'complete-finding', "--artifact-path=$($artifact.artifactPath)", "--queue-path=$queue"
+    )
+    $journal = ConvertFrom-Json -InputObject ([IO.File]::ReadAllText($queue)) -AsHashtable -DateKind String
+    if ($journal.assessments.Count -ne $files.Count) { throw 'Benchmark lost file coverage.' }
     $measurement
 })
-ConvertTo-JsonText -Value $measurements
+ConvertTo-Json -InputObject $measurements -Depth 100

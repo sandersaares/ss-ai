@@ -329,6 +329,7 @@ fn invalid_local_inputs_never_authenticate_or_contact_a_provider() {
 
 #[test]
 #[cfg_attr(miri, ignore = "requires a native subprocess")]
+#[cfg_attr(mutants, ignore = "mutated native subprocesses may block")]
 fn executable_rejects_bad_named_input_on_a_bounded_stack() {
     let fixture = Fixture::new(1);
     fs::write(fixture.path("approved 雪.json"), b"{").unwrap();

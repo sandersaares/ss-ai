@@ -371,7 +371,6 @@ fn from_url(
             // Azure service areas start with an underscore; the project precedes
             // that area or ends the URL. Modern hosts also put the organization
             // in the path, while per-organization hosts put it in the hostname.
-            // Ref: skills/ss-review/scripts/lib/TrackerTarget.ps1.
             let boundary = segments
                 .iter()
                 .position(|segment| segment.starts_with('_'))

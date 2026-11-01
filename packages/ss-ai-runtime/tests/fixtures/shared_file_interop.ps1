@@ -11,7 +11,51 @@ Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 $PSNativeCommandUseErrorActionPreference = $true
 
-. "$PSScriptRoot/../../../../skills/ss-review/scripts/lib/PullRequestModel.ps1"
+# The independent .NET participant exercises the shared sibling-lock protocol
+# without depending on any particular skill's file helpers.
+function Open-PullRequestFileLock {
+    param([string] $Path, [switch] $Shared)
+    while ($true) {
+        try {
+            if ($Shared) {
+                return [IO.File]::Open("$Path.lock", [IO.FileMode]::OpenOrCreate, [IO.FileAccess]::Read, [IO.FileShare]::Read)
+            }
+            return [IO.File]::Open("$Path.lock", [IO.FileMode]::OpenOrCreate, [IO.FileAccess]::ReadWrite, [IO.FileShare]::None)
+        } catch [IO.IOException] {
+            $cause = $_.Exception.GetBaseException()
+            $contended = ($IsWindows -and $cause.HResult -eq [int]0x80070020) -or
+                ($IsLinux -and $cause.HResult -eq 11) -or ($IsMacOS -and $cause.HResult -eq 35)
+            if (-not $contended) { throw }
+            Start-Sleep -Milliseconds 1
+        }
+    }
+}
+
+function Open-PullRequestFileRead {
+    param([string] $Path)
+    [IO.File]::Open($Path, [IO.FileMode]::Open, [IO.FileAccess]::Read,
+        ([IO.FileShare]::Read -bor [IO.FileShare]::Delete))
+}
+
+function Read-PullRequestFileText {
+    param([string] $Path)
+    $stream = Open-PullRequestFileRead -Path $Path
+    try {
+        $reader = [IO.StreamReader]::new($stream)
+        try { $reader.ReadToEnd() } finally { $reader.Dispose() }
+    } finally { $stream.Dispose() }
+}
+
+function Write-PullRequestOutputFileAtomically {
+    param([string] $Path, [string] $Content)
+    $staging = "$Path.$([guid]::NewGuid().ToString('N')).staging"
+    try {
+        [IO.File]::WriteAllText($staging, $Content, [Text.UTF8Encoding]::new($false))
+        [IO.File]::Replace($staging, $Path, [NullString]::Value)
+    } finally {
+        if ([IO.File]::Exists($staging)) { [IO.File]::Delete($staging) }
+    }
+}
 
 # Yield the retry to the parent so it can release the real native lock.
 $script:waitCount = 0

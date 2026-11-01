@@ -119,6 +119,29 @@ function Get-RustTestIdentity {
             }
         }
 
+        # Native tests embed query fixtures and consume provider fixtures outside the package tree.
+        foreach ($fixture in @(
+            'tests/fixtures/ss-review-query-capture.json',
+            'tests/fixtures/ss-review-query-expected.json'
+        )) {
+            $path = Join-Path $RepositoryRoot $fixture
+            if (Test-Path -LiteralPath $path -PathType Leaf) {
+                Get-Item -LiteralPath $path
+            }
+        }
+        $providerFixtures = Join-Path $RepositoryRoot 'tests/fixtures/ss-review-native-capture'
+        if (Test-Path -LiteralPath $providerFixtures -PathType Container) {
+            Get-ChildItem -LiteralPath $providerFixtures -Recurse -File -Force |
+                Where-Object Extension -CEQ '.json'
+        }
+
+        # The focus-generation build fingerprint includes these external schemas.
+        $schemas = Join-Path $RepositoryRoot 'skills/ss-review/schemas'
+        if (Test-Path -LiteralPath $schemas -PathType Container) {
+            Get-ChildItem -LiteralPath $schemas -Recurse -File -Force |
+                Where-Object Extension -CEQ '.json'
+        }
+
         # Reapproval tests embed the shared policy outside the Cargo package tree.
         $policy = Join-Path $RepositoryRoot 'skills/ss-autoreapprove/significance.md'
         if (Test-Path -LiteralPath $policy -PathType Leaf) {

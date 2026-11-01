@@ -196,7 +196,7 @@ pub fn create_assignment(
         ),
         (
             "RESUME_FLAG",
-            if resume { "-Resume" } else { "" }.to_owned(),
+            if resume { "--resume" } else { "" }.to_owned(),
         ),
         (
             "content-overview.md",
@@ -284,29 +284,37 @@ pub fn create_assignment(
     };
     validate(&assignment)?;
     transaction.write_bytes(&serde_json::to_vec(&assignment)?)?;
-    let literal = path_text(&assignment_path)?.replace('\'', "''");
+    let path = path_text(&assignment_path)?;
+    let powershell_path = path.replace('\'', "''");
+    let bash_path = path.replace('\'', "'\\''");
     let mut dispatch = vec![
-        format!("Execute authorized bounded '{}' work, not the ss-review skill. Orchestration and human decisions remain with the primary session.", options.phase),
+        format!(
+            "Execute authorized bounded '{}' work, not the ss-review skill. Orchestration and human decisions remain with the primary session.",
+            options.phase
+        ),
         "Apply this recovery policy before initial shared reads and compaction reloads:".to_owned(),
         recovery,
         "Keep this policy and the reader command in compaction notes.".to_owned(),
-        "Read each document below using the prepared command in PowerShell. Do not use the default file viewer.".to_owned(),
+        "Read each document below using the native command. Do not use the default file viewer."
+            .to_owned(),
     ];
     if context.is_some() {
         dispatch.push("Follow the Calling shell contract in the assigned queryRecipe, including for any permitted nested worker.".to_owned());
     }
     dispatch.extend([
+        "Use the block for your calling shell, replacing DOCUMENT_ID with one ID from the list below. Check the command's exit status before using its output.".to_owned(),
         "```powershell".to_owned(),
         "#Requires -Version 7.6".to_owned(),
         "if ($PSVersionTable.PSVersion -lt [version]'7.6') { throw 'PowerShell 7.6 or later is required.' }".to_owned(),
         "Set-StrictMode -Version Latest".to_owned(),
         "$ErrorActionPreference = 'Stop'".to_owned(),
         "$PSNativeCommandUseErrorActionPreference = $true".to_owned(),
-        format!("ss-ai workflow worker-document --assignment-path '{literal}' --document-id '{{{{DOCUMENT_ID}}}}' --offset 0"),
+        format!("ss-ai workflow worker-document --assignment-path '{powershell_path}' --document-id '{{{{DOCUMENT_ID}}}}' --offset 0"),
         "```".to_owned(),
-        "| Placeholder | Replacement |".to_owned(),
-        "| --- | --- |".to_owned(),
-        "| DOCUMENT_ID | One ID from the list below. |".to_owned(),
+        "```bash".to_owned(),
+        "set -e".to_owned(),
+        format!("ss-ai workflow worker-document --assignment-path '{bash_path}' --document-id '{{{{DOCUMENT_ID}}}}' --offset 0"),
+        "```".to_owned(),
         "Process each page, then repeat with its exact nextOffset until complete is true. Never truncate, summarize unread pages, or apply this reader to a PR capture.".to_owned(),
         "On errors apply the recovery policy above before reporting an unresolved blocker to the primary session.".to_owned(),
     ]);
@@ -589,6 +597,7 @@ fn render(template: &str, bindings: &BTreeMap<&str, String>) -> Result<String, A
     let mut output = String::new();
     let mut rest = template;
     while let Some(start) = rest.find("{{") {
+        let previous_length = rest.len();
         output.push_str(&rest[..start]);
         let tail = &rest[start + 2..];
         let end = tail
@@ -601,6 +610,10 @@ fn render(template: &str, bindings: &BTreeMap<&str, String>) -> Result<String, A
                 .ok_or_else(|| invalid(format!("Unknown assignment placeholder '{key}'")))?,
         );
         rest = &tail[end + 2..];
+        debug_assert!(
+            rest.len() < previous_length,
+            "Placeholder parsing must advance"
+        );
     }
     output.push_str(rest);
     Ok(output)
@@ -653,7 +666,23 @@ fn invalid(message: impl Into<String>) -> AppError {
 #[cfg(test)]
 #[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
-    use super::{OUTPUT_LIMIT, select_page};
+    use std::collections::BTreeMap;
+
+    use super::{OUTPUT_LIMIT, render, select_page};
+
+    #[test]
+    fn renders_adjacent_placeholders_without_reinterpreting_bindings() {
+        let bindings = BTreeMap::from([
+            ("first", "α{{second}}".to_owned()),
+            ("second", "β".to_owned()),
+        ]);
+        assert_eq!(
+            render("{{first}}{{second}}!", &bindings).unwrap(),
+            "α{{second}}β!"
+        );
+        assert!(render("{{first", &bindings).is_err());
+        assert!(render("{{missing}}", &bindings).is_err());
+    }
 
     #[test]
     fn pages_fit_and_fill_both_console_newline_budgets() {

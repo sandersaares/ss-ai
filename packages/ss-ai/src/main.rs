@@ -79,6 +79,23 @@ fn execute() -> Result<ExitCode, AppError> {
         run(&arguments, &process, &http, &SystemClock::default())?
     };
     write_output(&output)?;
+    // Validation diagnostics must remain readable even when the gate fails.
+    if arguments.get(1).is_some_and(|arg| arg == "workflow")
+        && arguments
+            .get(2)
+            .is_some_and(|arg| arg == "validate-findings")
+        && arguments.iter().any(|arg| arg == "--fail-on-invalid")
+        && !arguments.iter().any(|arg| arg == "--help" || arg == "-h")
+    {
+        let value: serde_json::Value = serde_json::from_str(&output)?;
+        let is_valid = value
+            .get("isValid")
+            .and_then(serde_json::Value::as_bool)
+            .ok_or_else(|| fail("invalidState", "Finding validation outcome has no status"))?;
+        if !is_valid {
+            return Ok(ExitCode::FAILURE);
+        }
+    }
     // Publication outcomes must remain available on stdout even when the
     // durable result requires intervention.
     if arguments.get(1).is_some_and(|arg| arg == "review")

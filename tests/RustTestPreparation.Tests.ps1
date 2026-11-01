@@ -1,3 +1,9 @@
+#Requires -Version 7.6
+
+Set-StrictMode -Version Latest
+$ErrorActionPreference = 'Stop'
+$PSNativeCommandUseErrorActionPreference = $true
+
 BeforeAll {
     Set-StrictMode -Version Latest
     $ErrorActionPreference = 'Stop'
@@ -44,6 +50,12 @@ BeforeAll {
             $stamp = [IO.File]::GetLastWriteTimeUtc($script:TouchDuringBuild)
             [IO.File]::SetLastWriteTimeUtc($script:TouchDuringBuild, $stamp.AddDays(1))
         }
+        if ($script:ChangeDuringBuild) {
+            # Keep the timestamp fixed so the content identity detects this change.
+            $stamp = [IO.File]::GetLastWriteTimeUtc($script:ChangeDuringBuild)
+            [IO.File]::WriteAllText($script:ChangeDuringBuild, 'changed schema')
+            [IO.File]::SetLastWriteTimeUtc($script:ChangeDuringBuild, $stamp)
+        }
         @{
             reason = 'compiler-artifact'
             target = @{ name = 'fixture' }
@@ -77,6 +89,7 @@ Describe 'Rust preparation boundary' {
         $script:FailProvider = $false
         $script:FailCargo = $false
         $script:TouchDuringBuild = $null
+        $script:ChangeDuringBuild = $null
         $fixture = New-PreparationFixture
     }
 
@@ -235,6 +248,19 @@ Describe 'Rust preparation boundary' {
         @(Get-ChildItem -LiteralPath $fixture.root -Directory -Filter 'rust-tests-*') | Should -BeNullOrEmpty
     }
 
+    It 'never publishes a record after a schema changes during compilation' {
+        $schema = Join-Path $fixture.root 'skills/ss-review/schemas/focus-area-map.schema.json'
+        New-Item -ItemType Directory -Path (Split-Path -Parent $schema) -Force | Out-Null
+        [IO.File]::WriteAllText($schema, 'original schema')
+        $script:ChangeDuringBuild = $schema
+
+        { New-RustTestPreparation -RepositoryRoot $fixture.root -PrerequisitePath $fixture.record } |
+            Should -Throw '*sources changed during preparation*'
+
+        Test-Path -LiteralPath $fixture.record | Should -BeFalse
+        @(Get-ChildItem -LiteralPath $fixture.root -Directory -Filter 'rust-tests-*') | Should -BeNullOrEmpty
+    }
+
     It 'reports provider failure explicitly, blocks native only, and still runs other tests and doctests' {
         $script:FailProvider = $true
         $prepared = New-RustTestPreparation -RepositoryRoot $fixture.root -PrerequisitePath $fixture.record
@@ -351,6 +377,18 @@ Describe 'Rust preparation boundary' {
             'packages/ss-ai-cargo-fuzz/seeds/dependencies.toml',
             'packages/ss-ai-cargo-fuzz/seeds/malformed.toml',
             'skills/ss-autoreapprove/significance.md',
+            'skills/ss-review/schemas/focus-area-map.schema.json',
+            'tests/fixtures/ss-review-query-capture.json',
+            'tests/fixtures/ss-review-query-expected.json',
+            'tests/fixtures/ss-review-native-capture/github.json',
+            'tests/fixtures/ss-review-native-capture/github-context.json',
+            'tests/fixtures/ss-review-native-capture/github-expected.json',
+            'tests/fixtures/ss-review-native-capture/azure-devops.json',
+            'tests/fixtures/ss-review-native-capture/azure-devops-context.json',
+            'tests/fixtures/ss-review-native-capture/azure-devops-expected.json',
+            'tests/fixtures/ss-review-native-capture/github-refresh-parity.json',
+            'tests/fixtures/ss-review-native-capture/azure-devops-refresh-expected.json',
+            'tests/fixtures/ss-review-native-capture/nested/fixture.json',
             'Cargo.toml', 'Cargo.lock', 'rust-toolchain.toml', '.cargo/config.toml'
         )) {
             foreach ($rewrite in @($false, $true)) {
@@ -387,6 +425,18 @@ Describe 'Rust preparation boundary' {
         @{ Asset = 'packages/ss-ai-cargo-fuzz/seeds/dependencies.toml' }
         @{ Asset = 'packages/ss-ai-cargo-fuzz/seeds/malformed.toml' }
         @{ Asset = 'skills/ss-autoreapprove/significance.md' }
+        @{ Asset = 'skills/ss-review/schemas/focus-area-map.schema.json' }
+        @{ Asset = 'tests/fixtures/ss-review-query-capture.json' }
+        @{ Asset = 'tests/fixtures/ss-review-query-expected.json' }
+        @{ Asset = 'tests/fixtures/ss-review-native-capture/github.json' }
+        @{ Asset = 'tests/fixtures/ss-review-native-capture/github-context.json' }
+        @{ Asset = 'tests/fixtures/ss-review-native-capture/github-expected.json' }
+        @{ Asset = 'tests/fixtures/ss-review-native-capture/azure-devops.json' }
+        @{ Asset = 'tests/fixtures/ss-review-native-capture/azure-devops-context.json' }
+        @{ Asset = 'tests/fixtures/ss-review-native-capture/azure-devops-expected.json' }
+        @{ Asset = 'tests/fixtures/ss-review-native-capture/github-refresh-parity.json' }
+        @{ Asset = 'tests/fixtures/ss-review-native-capture/azure-devops-refresh-expected.json' }
+        @{ Asset = 'tests/fixtures/ss-review-native-capture/nested/fixture.json' }
     ) {
         $assetPath = Join-Path $fixture.root $Asset
         New-Item -ItemType Directory -Path (Split-Path -Parent $assetPath) -Force | Out-Null
@@ -410,11 +460,43 @@ Describe 'Rust preparation boundary' {
         }
     }
 
-    It 'ignores unrelated TOML files and generated fuzz corpus inputs' {
+    It 'rejects a schema <Change> after preparation for <Asset>' -ForEach @(
+        @{ Change = 'addition'; Asset = 'focus-area-map.schema.json'; Hidden = $false }
+        @{ Change = 'removal'; Asset = 'focus-area-map.schema.json'; Hidden = $false }
+        @{ Change = 'addition'; Asset = '.hidden.schema.json'; Hidden = $true }
+    ) {
+        $schema = Join-Path $fixture.root "skills/ss-review/schemas/$Asset"
+        New-Item -ItemType Directory -Path (Split-Path -Parent $schema) -Force | Out-Null
+        if ($Change -eq 'removal') { [IO.File]::WriteAllText($schema, 'schema') }
+        $null = New-RustTestPreparation -RepositoryRoot $fixture.root -PrerequisitePath $fixture.record
+        if ($Change -eq 'addition') {
+            [IO.File]::WriteAllText($schema, 'schema')
+            if ($Hidden -and $IsWindows) {
+                [IO.File]::SetAttributes($schema, [IO.File]::GetAttributes($schema) -bor [IO.FileAttributes]::Hidden)
+                if (-not ([IO.File]::GetAttributes($schema) -band [IO.FileAttributes]::Hidden)) {
+                    Set-ItResult -Skipped -Because 'The fixture filesystem does not support hidden attributes.'
+                    return
+                }
+            }
+        } else {
+            Remove-Item -LiteralPath $schema
+        }
+
+        { Read-RustTestPreparation -RepositoryRoot $fixture.root -PrerequisitePath $fixture.record } |
+            Should -Throw '*sourceSha256*'
+        $script:CargoCalls.Count | Should -Be 1
+    }
+
+    It 'ignores unrelated TOML files, generated fuzz corpus and non-schema skill assets' {
         $paths = @(
             'packages/ss-ai-cargo-fuzz/corpus/manifest/dependencies.toml',
             'packages/ss-ai-cargo-fuzz/seeds/unrelated.toml',
-            'packages/another/fuzz/seeds/malformed.toml'
+            'packages/another/fuzz/seeds/malformed.toml',
+            # The build fingerprint selects only the exact lowercase JSON extension.
+            'skills/ss-review/schemas/other.schema.JSON',
+            'skills/ss-review/schemas/other.txt',
+            'tests/fixtures/ss-review-native-capture/other.JSON',
+            'tests/fixtures/ss-review-native-capture/other.txt'
         )
         foreach ($path in $paths) {
             $assetPath = Join-Path $fixture.root $path

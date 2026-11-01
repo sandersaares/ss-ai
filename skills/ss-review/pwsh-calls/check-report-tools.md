@@ -1,19 +1,11 @@
-```powershell
-#Requires -Version 7.6
-
-Set-StrictMode -Version Latest
-$ErrorActionPreference = 'Stop'
-$PSNativeCommandUseErrorActionPreference = $true
-
-& (Join-Path "{{SKILL_ROOT}}" 'scripts/Test-ReviewReportTools.ps1')
+```text
+ss-ai workflow test-review-report-tools --skill-root "{{SKILL_ROOT}}" --tools-directory "{{TOOLS_DIRECTORY}}"
 ```
 
 | Placeholder | Description |
 | --- | --- |
 | `SKILL_ROOT` | Absolute directory containing the active `SKILL.md`. |
-
-The adapter selects the shared user-local tools directory and passes it and the active skill
-directory to `ss-ai workflow test-review-report-tools`.
+| `TOOLS_DIRECTORY` | Shared user-local tools directory: `%LOCALAPPDATA%/ss-review/tools` when `LOCALAPPDATA` is set, otherwise `~/.local/share/ss-review/tools`, expanded to an absolute path. |
 
 Run in the review's actual host/container/WSL distribution, as the same user and with the same
 environment and working directory that will render reports. The command emits JSON with

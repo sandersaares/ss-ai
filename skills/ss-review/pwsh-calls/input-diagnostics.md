@@ -2,9 +2,8 @@
 
 Prepared assignment, shared-read, and query commands update each worker attempt's private `input-diagnostics.json` atomically. Its record contract is in `data-guides/worker-inputs.md`. Do not share one counter file across concurrent workers. Record a viewer or shell-parser failure that occurred outside those commands explicitly; do not double-count a failure already recorded by a command.
 
-```powershell
-pwsh -NoProfile -NonInteractive -File '{{SKILL_ROOT}}\scripts\Get-ReviewInputDiagnostics.ps1' `
-  -Path '{{DIAGNOSTICS_PATH}}'
+```text
+ss-ai context diagnostics --path "{{DIAGNOSTICS_PATH}}"
 ```
 
 | Placeholder | Description |
@@ -12,7 +11,7 @@ pwsh -NoProfile -NonInteractive -File '{{SKILL_ROOT}}\scripts\Get-ReviewInputDia
 | `SKILL_ROOT` | Absolute skill directory. |
 | `DIAGNOSTICS_PATH` | Absolute diagnostics file path, or the current run's session-state directory to aggregate its `input-diagnostics.json` records. Keep measured baseline files outside that directory or under a different filename. |
 
-To record an observed event, add `-Record '{{METRIC}}' -Count {{COUNT}}`.
+To record an observed event, add `--record "{{METRIC}}" --count {{COUNT}}`.
 
 | Placeholder | Description |
 | --- | --- |

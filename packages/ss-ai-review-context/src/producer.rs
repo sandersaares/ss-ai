@@ -616,7 +616,7 @@ fn sort_key(value: &Value, timestamp: &str) -> Vec<u16> {
     let id = string_id(property(value, "id"));
     let id = if !id.is_empty() && id.bytes().all(|byte| byte.is_ascii_digit()) {
         // Padding preserves numeric order in text comparisons. The width exceeds
-        // realistic provider identifiers, matching PullRequestModel.ps1.
+        // realistic provider identifiers for the capture contract.
         format!("{id:0>20}")
     } else {
         id

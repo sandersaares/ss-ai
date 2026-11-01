@@ -31,9 +31,6 @@ Improvement ideas to revisit when the repo matures.
 
 ## Skill design
 
-- **Retire ss-review PowerShell adapters.** Migrate remaining callers to native
-  commands and remove adapters only when no consumers remain, preserving the
-  workflow's records, transaction boundaries and authority gates.
 - **Detect hard-linked capture lock files.** Reject aliased retained sibling
   locks before waiting when portable file identity can be checked without
   interfering with other lock holders. Until then, self-contention fails

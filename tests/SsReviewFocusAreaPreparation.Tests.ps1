@@ -6,10 +6,6 @@ $PSNativeCommandUseErrorActionPreference = $true
 
 BeforeAll {
     $script:Skill = Join-Path (Split-Path -Parent $PSScriptRoot) 'skills\ss-review'
-    . "$script:Skill\scripts\lib\JsonValue.ps1"
-    . "$script:Skill\scripts\lib\PullRequestModel.ps1"
-    . "$script:Skill\scripts\lib\ReviewWork.ps1"
-
     # Fixture spans use real line positions so validation and copying exercise the same contract.
     function New-TestSpan {
         param([string] $Path, [int] $Start, [int] $End, [string] $Root = 'instruction-set-raw')
@@ -38,23 +34,9 @@ BeforeAll {
         }
     }
 
-    # Serializes the mutable fixture through the same verbatim JSON helpers used by the CLI.
+    # Serializes the mutable fixture as the input file consumed by the CLI.
     function Save-TestFocusMap {
-        [IO.File]::WriteAllText($script:MapPath, (ConvertTo-JsonText -Value $script:Map))
-    }
-
-    # Runs public entry points with a real native argument boundary and captures failures without
-    # depending on console formatting, interactive prompts, or wall-clock timeouts.
-    function Start-FocusPreparationCommand {
-        param([string] $Name, [string[]] $Arguments)
-        $start = [Diagnostics.ProcessStartInfo]::new((Get-Process -Id $PID).Path)
-        $start.UseShellExecute = $false
-        $start.RedirectStandardOutput = $true
-        $start.RedirectStandardError = $true
-        foreach ($argument in @('-NoProfile', '-NonInteractive', '-File', "$script:Skill\scripts\$Name") + $Arguments) {
-            $start.ArgumentList.Add($argument)
-        }
-        [Diagnostics.Process]::Start($start)
+        [IO.File]::WriteAllText($script:MapPath, (ConvertTo-Json -InputObject $script:Map -Depth 100 -Compress), [Text.UTF8Encoding]::new($false))
     }
 
     function Receive-FocusPreparationCommand {
@@ -71,12 +53,7 @@ BeforeAll {
         } finally { $Process.Dispose() }
     }
 
-    function Invoke-FocusPreparationCommand {
-        param([string] $Name, [string[]] $Arguments)
-        Receive-FocusPreparationCommand (Start-FocusPreparationCommand $Name $Arguments)
-    }
-
-    # Generation has native entrypoints rather than PowerShell wrappers.
+    # Runs focus-area commands through the native process and JSON boundary.
     function Invoke-TestFocusNative {
         param([string[]] $Arguments)
         $native = (Get-Command ss-ai -CommandType Application -ErrorAction Stop | Select-Object -First 1).Source
@@ -84,6 +61,8 @@ BeforeAll {
         $start.UseShellExecute = $false
         $start.RedirectStandardOutput = $true
         $start.RedirectStandardError = $true
+        $start.StandardOutputEncoding = [Text.UTF8Encoding]::new($false, $true)
+        $start.StandardErrorEncoding = [Text.UTF8Encoding]::new($false, $true)
         foreach ($argument in @('workflow') + $Arguments) { $start.ArgumentList.Add($argument) }
         Receive-FocusPreparationCommand ([Diagnostics.Process]::Start($start))
     }
@@ -91,8 +70,8 @@ BeforeAll {
     # The executable owns validation and rendering; inspect its published files rather than internals.
     function Invoke-TestFocusMap {
         param([string] $Path = $script:MapPath, [switch] $Complete)
-        $name = if ($Complete) { 'New-FocusAreaArtifacts.ps1' } else { 'Test-FocusAreaMap.ps1' }
-        $result = Invoke-FocusPreparationCommand $name @('-SessionStateDirectory', $script:Session, '-MapPath', $Path)
+        $name = if ($Complete) { 'assemble-focus-areas' } else { 'validate-focus-area-map' }
+        $result = Invoke-TestFocusNative @($name, '--session-state', $script:Session, '--map-path', $Path)
         if ($result.ExitCode -ne 0) { throw $result.Error }
         $result.Output | ConvertFrom-Json
     }
@@ -110,14 +89,14 @@ BeforeAll {
 
     function Invoke-TestExpansion {
         param([string] $Operation, $InputRecord, [string] $ReferenceId)
-        $arguments = @('-SessionStateDirectory', $script:Session, '-Operation', $Operation)
+        $arguments = @('update-focus-area-expansion', '--session-state', $script:Session, '--operation', $Operation.ToLowerInvariant())
         if ($null -ne $InputRecord) {
             $inputPath = Join-Path $script:Session 'expansion-input.json'
-            [IO.File]::WriteAllText($inputPath, (ConvertTo-JsonText -Value $InputRecord))
-            $arguments += @('-InputPath', $inputPath)
+            [IO.File]::WriteAllText($inputPath, (ConvertTo-Json -InputObject $InputRecord -Depth 100 -Compress), [Text.UTF8Encoding]::new($false))
+            $arguments += @('--input-path', $inputPath)
         }
-        if ($ReferenceId) { $arguments += @('-ReferenceId', $ReferenceId) }
-        $result = Invoke-FocusPreparationCommand 'Update-FocusAreaExpansion.ps1' $arguments
+        if ($ReferenceId) { $arguments += @('--reference-id', $ReferenceId) }
+        $result = Invoke-TestFocusNative $arguments
         if ($result.ExitCode -ne 0) { throw $result.Error }
         $result.Output | ConvertFrom-Json
     }
@@ -174,22 +153,22 @@ Describe 'ss-review focus-area preparation' {
         [IO.File]::WriteAllText((Join-Path $script:Session 'focus-area-expansion-status.json'), '{"schemaVersion":1,"state":"Complete","references":[]}')
     }
 
-    It 'allows a shared PowerShell owner while <CommandName> reads' -ForEach @(
-        @{ CommandName = 'Test-FocusAreaMap.ps1' }
-        @{ CommandName = 'Update-FocusAreaMap.ps1' }
-        @{ CommandName = 'New-FocusAreaArtifacts.ps1' }
-        @{ CommandName = 'Update-FocusAreaExpansion.ps1' }
+    It 'allows a shared file owner while <CommandName> reads' -ForEach @(
+        @{ CommandName = 'validate-focus-area-map' }
+        @{ CommandName = 'update-focus-area-map' }
+        @{ CommandName = 'assemble-focus-areas' }
+        @{ CommandName = 'update-focus-area-expansion' }
     ) {
         # A separate process owns the shared descriptor so readers cannot inherit it.
         $holderPath = Join-Path $script:Session 'publisher.ps1'
         [IO.File]::WriteAllText($holderPath, @'
 #Requires -Version 7.6
-param([string] $Library, [string] $Session)
+param([string] $Session)
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 $PSNativeCommandUseErrorActionPreference = $true
-. $Library
-$lock = Open-PullRequestFileLock -Path (Join-Path $Session 'focus-area-cache-operation') -Shared
+$lock = [IO.File]::Open((Join-Path $Session 'focus-area-cache-operation.lock'),
+    [IO.FileMode]::OpenOrCreate, [IO.FileAccess]::Read, [IO.FileShare]::Read)
 try {
     [Console]::Out.WriteLine('ready')
     [Console]::Out.Flush()
@@ -203,17 +182,17 @@ try {
         $start.RedirectStandardInput = $true
         $start.RedirectStandardOutput = $true
         $start.RedirectStandardError = $true
-        foreach ($arg in @('-NoProfile', '-NonInteractive', '-File', $holderPath, '-Library', "$script:Skill\scripts\lib\PullRequestModel.ps1", '-Session', $script:Session)) {
+        foreach ($arg in @('-NoProfile', '-NonInteractive', '-File', $holderPath, '-Session', $script:Session)) {
             $start.ArgumentList.Add($arg)
         }
         $holder = [Diagnostics.Process]::Start($start)
-        $arguments = @('-SessionStateDirectory', $script:Session)
+        $arguments = @($CommandName, '--session-state', $script:Session)
         switch ($CommandName) {
-            'Update-FocusAreaExpansion.ps1' { $arguments += @('-Operation', 'Read') }
-            'Update-FocusAreaMap.ps1' {
-                $arguments += @('-Path', (Join-Path $script:Session 'merged-map.json'), '-Operation', 'Append', '-InputPath', $script:MapPath)
+            'update-focus-area-expansion' { $arguments += @('--operation', 'read') }
+            'update-focus-area-map' {
+                $arguments += @('--path', (Join-Path $script:Session 'merged-map.json'), '--operation', 'append', '--input-path', $script:MapPath)
             }
-            default { $arguments += @('-MapPath', $script:MapPath) }
+            default { $arguments += @('--map-path', $script:MapPath) }
         }
         try {
             $holder.StandardOutput.ReadLine() | Should -BeExactly 'ready'
@@ -221,7 +200,7 @@ try {
                 $probe = [IO.File]::Open((Join-Path $script:Session 'focus-area-cache-operation.lock'), 'Open', 'ReadWrite', 'None')
                 $probe.Dispose()
             } | Should -Throw
-            $result = Invoke-FocusPreparationCommand $CommandName $arguments
+            $result = Invoke-TestFocusNative $arguments
             $result.ExitCode | Should -Be 0 -Because $result.Error
             $holder.StandardInput.WriteLine('release')
             $holder.StandardInput.Flush()
@@ -325,9 +304,8 @@ try {
     ) {
         & $Change
         Save-TestFocusMap
-        $result = Invoke-FocusPreparationCommand 'Test-FocusAreaMap.ps1' @('-SessionStateDirectory', $script:Session, '-MapPath', $script:MapPath)
+        $result = Invoke-TestFocusNative @('validate-focus-area-map', '--session-state', $script:Session, '--map-path', $script:MapPath)
         $result.ExitCode | Should -Not -Be 0
-        # PowerShell can wrap native diagnostics and insert a gutter between words.
         $pattern = [regex]::Escape($Error).Replace('\*', '(?s:.*?)').Replace('\ ', '(?s:.*?)')
         $result.Error | Should -Match $pattern
     }
@@ -340,7 +318,7 @@ try {
         Save-TestFocusMap
         $partial = Invoke-TestFocusMap
         $partial.chapterCount | Should -Be 1
-        $result = Invoke-FocusPreparationCommand 'New-FocusAreaArtifacts.ps1' @('-SessionStateDirectory', $script:Session, '-MapPath', $script:MapPath)
+        $result = Invoke-TestFocusNative @('assemble-focus-areas', '--session-state', $script:Session, '--map-path', $script:MapPath)
         $result.ExitCode | Should -Not -Be 0
         $result.Error | Should -Match '(?s)Uncovered.*?raw.*?input.*?line'
     }
@@ -397,11 +375,11 @@ try {
     }
 
     It 'assembles through the CLI, preserves outputs on invalid input, and removes obsolete categories on retry' {
-        $arguments = @('-SessionStateDirectory', $script:Session, '-MapPath', $script:MapPath)
-        $validated = Invoke-FocusPreparationCommand 'Test-FocusAreaMap.ps1' $arguments
+        $arguments = @('--session-state', $script:Session, '--map-path', $script:MapPath)
+        $validated = Invoke-TestFocusNative (@('validate-focus-area-map') + $arguments)
         $validated.ExitCode | Should -Be 0 -Because $validated.Error
         ($validated.Output | ConvertFrom-Json).status | Should -Be 'Valid'
-        $assembled = Invoke-FocusPreparationCommand 'New-FocusAreaArtifacts.ps1' $arguments
+        $assembled = Invoke-TestFocusNative (@('assemble-focus-areas') + $arguments)
         $assembled.ExitCode | Should -Be 0 -Because $assembled.Error
         ($assembled.Output | ConvertFrom-Json).status | Should -Be 'Assembled'
         ($assembled.Output | ConvertFrom-Json).chapterCount | Should -Be 4
@@ -409,14 +387,14 @@ try {
         $before = [IO.File]::ReadAllText($catalog)
         $script:Map.chapters[0].content.endLine = 99
         Save-TestFocusMap
-        (Invoke-FocusPreparationCommand 'New-FocusAreaArtifacts.ps1' $arguments).ExitCode | Should -Not -Be 0
+        (Invoke-TestFocusNative (@('assemble-focus-areas') + $arguments)).ExitCode | Should -Not -Be 0
         [IO.File]::ReadAllText($catalog) | Should -BeExactly $before
 
         $script:Map.chapters[0].content.endLine = 8
         $script:Map.chapters[3].categoryId = 'scripts'
         $script:Map.categories = @($script:Map.categories[0])
         Save-TestFocusMap
-        (Invoke-FocusPreparationCommand 'New-FocusAreaArtifacts.ps1' $arguments).ExitCode | Should -Be 0
+        (Invoke-TestFocusNative (@('assemble-focus-areas') + $arguments)).ExitCode | Should -Be 0
         Test-Path -LiteralPath (Join-Path $script:Session 'focus-areas\focus-general.md') | Should -BeFalse
         @(Get-ChildItem -LiteralPath $script:Session -Directory -Filter '.focus-area-assembly-*').Count | Should -Be 0
     }
@@ -446,21 +424,21 @@ try {
     }
 
     It 'rejects positional arguments and missing mandatory parameters without waiting for input' {
-        (Invoke-FocusPreparationCommand 'Test-FocusAreaMap.ps1' @($script:Session, $script:MapPath)).ExitCode | Should -Not -Be 0
-        (Invoke-FocusPreparationCommand 'New-FocusAreaArtifacts.ps1' @('-MapPath', $script:MapPath)).ExitCode | Should -Not -Be 0
+        (Invoke-TestFocusNative @('validate-focus-area-map', $script:Session, $script:MapPath)).ExitCode | Should -Not -Be 0
+        (Invoke-TestFocusNative @('assemble-focus-areas', '--map-path', $script:MapPath)).ExitCode | Should -Not -Be 0
     }
 
     It 'assembles worker maps through prepared append, regroup and correction commands' {
         $merged = Join-Path $script:Session 'merged-map.json'
-        $arguments = @('-SessionStateDirectory', $script:Session, '-Path', $merged, '-Operation', 'Append', '-InputPath', $script:MapPath)
+        $arguments = @('update-focus-area-map', '--session-state', $script:Session, '--path', $merged, '--operation', 'append', '--input-path', $script:MapPath)
         foreach ($attempt in 1..2) {
-            $run = Invoke-FocusPreparationCommand 'Update-FocusAreaMap.ps1' $arguments
+            $run = Invoke-TestFocusNative $arguments
             $run.ExitCode | Should -Be 0 -Because $run.Error
             ($run.Output | ConvertFrom-Json).chapterCount | Should -Be 4
         }
-        $run = Invoke-FocusPreparationCommand 'Update-FocusAreaMap.ps1' @(
-            '-SessionStateDirectory', $script:Session, '-Path', $merged, '-Operation', 'Regroup',
-            '-CategoryId', 'general', '-NewCategoryId', 'scripts', '-Title', 'Script contracts'
+        $run = Invoke-TestFocusNative @(
+            'update-focus-area-map', '--session-state', $script:Session, '--path', $merged, '--operation', 'regroup',
+            '--category-id', 'general', '--new-category-id', 'scripts', '--title', 'Script contracts'
         )
         $run.ExitCode | Should -Be 0 -Because $run.Error
         (Invoke-TestFocusMap -Path $merged -Complete).categoryCount | Should -Be 1
@@ -471,8 +449,8 @@ try {
         $script:Map.chapters = @($script:Map.chapters[0])
         $script:Map.chapters[0].applicability[0].effectiveScope = 'Corrected scope judgment.'
         Save-TestFocusMap
-        $run = Invoke-FocusPreparationCommand 'Update-FocusAreaMap.ps1' @(
-            '-SessionStateDirectory', $script:Session, '-Path', $merged, '-Operation', 'Replace', '-InputPath', $script:MapPath
+        $run = Invoke-TestFocusNative @(
+            'update-focus-area-map', '--session-state', $script:Session, '--path', $merged, '--operation', 'replace', '--input-path', $script:MapPath
         )
         $run.ExitCode | Should -Be 0 -Because $run.Error
         (Invoke-TestFocusMap -Path $merged -Complete).chapterCount | Should -Be 4
@@ -530,19 +508,41 @@ try {
             Should -BeExactly $documents['focus-areas\focus-scripts.md']
     }
 
-    It 'produces applicability records readable and invalidated by the PowerShell review consumer' {
+    It 'applies assembled path scopes and rejects stale applicability in native review work' {
         foreach ($chapter in $script:Map.chapters[0..2]) {
             $chapter.applicability[0]['pathScope'] = @{ base = '.'; include = @('**/*.ps1') }
         }
         Save-TestFocusMap
         $null = Get-TestFocusDocuments
         $path = Join-Path $script:Session 'focus-areas\focus-scripts.md'
-        $map = Read-ReviewApplicability -Path $path
-        $map.chapters.Count | Should -Be 3
-        (Test-ReviewPathScope -Scope $map.chapters[0].applicability[0].pathScope -RelativePath 'src/example.ps1') | Should -BeTrue
-        (Test-ReviewPathScope -Scope $map.chapters[0].applicability[0].pathScope -RelativePath 'src/example.rs') | Should -BeFalse
+        $inventory = Join-Path $script:Session 'inventory.json'
+        $groups = Join-Path $script:Session 'groups.json'
+        foreach ($case in @(
+            @{ extension = 'ps1'; excluded = 0 }
+            @{ extension = 'rs'; excluded = 1 }
+        )) {
+            $file = @{ path = (Join-Path $script:Session "src/example.$($case.extension)"); sizeBytes = 1; change = 'modified' }
+            [IO.File]::WriteAllText($inventory, (ConvertTo-Json -InputObject @($file) -Depth 20 -Compress), [Text.UTF8Encoding]::new($false))
+            [IO.File]::WriteAllText($groups, (ConvertTo-Json -InputObject @(@{ groupId = 'group-1'; files = @($file) }) -Depth 20 -Compress), [Text.UTF8Encoding]::new($false))
+            $result = Invoke-TestFocusNative @(
+                'create-review-work', '--inventory-path', $inventory, '--file-groups-path', $groups,
+                '--focus-area-directory', (Join-Path $script:Session 'focus-areas'),
+                '--output-directory', (Join-Path $script:Session "work-$($case.extension)"),
+                '--artifact-directory', (Join-Path $script:Session "findings-$($case.extension)"),
+                '--repository-root', $script:Session
+            )
+            $result.ExitCode | Should -Be 0 -Because $result.Error
+            ($result.Output | ConvertFrom-Json).excludedReviewerCount | Should -Be $case.excluded
+        }
         [IO.File]::AppendAllText($path, 'Modified guidance.')
-        { Read-ReviewApplicability -Path $path } | Should -Throw '*Stale applicability metadata*'
+        $stale = Invoke-TestFocusNative @(
+            'create-review-work', '--inventory-path', $inventory, '--file-groups-path', $groups,
+            '--focus-area-directory', (Join-Path $script:Session 'focus-areas'),
+            '--output-directory', (Join-Path $script:Session 'work-stale'),
+            '--artifact-directory', (Join-Path $script:Session 'findings-stale'), '--repository-root', $script:Session
+        )
+        $stale.ExitCode | Should -Not -Be 0
+        $stale.Error | Should -Match 'Stale applicability metadata'
     }
 
     It 'round trips assembled artifacts through the cache without requiring categorization intermediates' {
@@ -551,19 +551,20 @@ try {
         # Snapshot only the skill's built-in inputs; the fixture must not depend on user settings.
         $env:COPILOT_CUSTOM_INSTRUCTIONS_DIRS = ''
         try {
-            $snapshot = Invoke-FocusPreparationCommand 'Copy-ReviewInstructionSources.ps1' @('-SessionStateDirectory', $realSession)
+            $snapshot = Invoke-TestFocusNative @('snapshot-instructions', '--session-state', $realSession, '--skill-root', $script:Skill)
             $snapshot.ExitCode | Should -Be 0 -Because $snapshot.Error
             $source = $snapshot.Output | ConvertFrom-Json
             $cacheArguments = @(
-                '-RecipePath', (Join-Path $script:Skill 'prepare-focus-areas.md'),
-                '-CacheDirectory', (Join-Path $TestDrive 'cache'),
-                '-GeneratorProfile', 'test',
-                '-FreshnessDays', '7',
-                '-NowUtc', '2026-10-06T12:00:00Z'
+                '--skill-root', $script:Skill,
+                '--recipe-path', (Join-Path $script:Skill 'prepare-focus-areas.md'),
+                '--cache-directory', (Join-Path $TestDrive 'cache'),
+                '--generator-profile', 'test',
+                '--freshness-days', '7',
+                '--now-utc', '2026-10-06T12:00:00Z'
             )
-            $initial = Invoke-FocusPreparationCommand 'Restore-FocusAreaCache.ps1' (@(
-                '-SessionStateDirectory', $realSession, '-InputDirectory', $source.sourceDirectory,
-                '-SnapshotIdentity', $source.snapshotIdentity
+            $initial = Invoke-TestFocusNative (@(
+                'restore-focus-area-cache', '--session-state', $realSession, '--input-directory', $source.sourceDirectory,
+                '--snapshot-identity', $source.snapshotIdentity
             ) + $cacheArguments)
             $initial.ExitCode | Should -Be 0 -Because $initial.Error
             $restoration = $initial.Output | ConvertFrom-Json
@@ -597,31 +598,31 @@ try {
             $publish = Invoke-TestFocusNative @('publish-focus-area-generation', "--session-state=$realSession", "--generation-id=$($generation.generationId)")
             $publish.ExitCode | Should -Be 0 -Because $publish.Error
             ($publish.Output | ConvertFrom-Json).status | Should -Be 'Published'
-            $validation = Invoke-FocusPreparationCommand 'Test-FocusAreaArtifacts.ps1' @(
-                '-SessionStateDirectory', $realSession, '-PreparationIdentity', $identity
+            $validation = Invoke-TestFocusNative @(
+                'validate-focus-area-artifacts', '--session-state', $realSession, '--preparation-identity', $identity
             )
             $validation.ExitCode | Should -Be 0 -Because $validation.Error
             ($validation.Output | ConvertFrom-Json).status | Should -Be 'Valid'
-            $save = Invoke-FocusPreparationCommand 'Save-FocusAreaCache.ps1' (@(
-                '-SessionStateDirectory', $realSession, '-InputDirectory', $source.sourceDirectory,
-                '-PreparationIdentity', $identity
+            $save = Invoke-TestFocusNative (@(
+                'save-focus-area-cache', '--session-state', $realSession, '--input-directory', $source.sourceDirectory,
+                '--preparation-identity', $identity
             ) + $cacheArguments)
             $save.ExitCode | Should -Be 0 -Because $save.Error
             ($save.Output | ConvertFrom-Json).status | Should -Be 'Stored' -Because $save.Output
             $restored = Join-Path $TestDrive 'restored'
             [void] [IO.Directory]::CreateDirectory($restored)
-            $nextSnapshot = Invoke-FocusPreparationCommand 'Copy-ReviewInstructionSources.ps1' @('-SessionStateDirectory', $restored)
+            $nextSnapshot = Invoke-TestFocusNative @('snapshot-instructions', '--session-state', $restored, '--skill-root', $script:Skill)
             $nextSnapshot.ExitCode | Should -Be 0 -Because $nextSnapshot.Error
             $nextSource = $nextSnapshot.Output | ConvertFrom-Json
-            $restore = Invoke-FocusPreparationCommand 'Restore-FocusAreaCache.ps1' (@(
-                '-SessionStateDirectory', $restored, '-InputDirectory', $nextSource.sourceDirectory,
-                '-SnapshotIdentity', $nextSource.snapshotIdentity
+            $restore = Invoke-TestFocusNative (@(
+                'restore-focus-area-cache', '--session-state', $restored, '--input-directory', $nextSource.sourceDirectory,
+                '--snapshot-identity', $nextSource.snapshotIdentity
             ) + $cacheArguments)
             $restore.ExitCode | Should -Be 0 -Because $restore.Error
             $hit = $restore.Output | ConvertFrom-Json
             $hit.status | Should -Be 'Hit'
-            $validation = Invoke-FocusPreparationCommand 'Test-FocusAreaArtifacts.ps1' @(
-                '-SessionStateDirectory', $restored, '-PreparationIdentity', $hit.preparationIdentity
+            $validation = Invoke-TestFocusNative @(
+                'validate-focus-area-artifacts', '--session-state', $restored, '--preparation-identity', $hit.preparationIdentity
             )
             $validation.ExitCode | Should -Be 0 -Because $validation.Error
             ($validation.Output | ConvertFrom-Json).status | Should -Be 'Valid'

@@ -8,7 +8,6 @@
 use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
-use std::process::Command;
 
 use serde_json::{Value, json};
 use ss_ai_review_workflow::{anchors, approved};
@@ -405,7 +404,6 @@ fn follow_up_must_name_reply_capable_opening_comment() {
 }
 
 #[test]
-#[cfg_attr(miri, ignore = "requires PowerShell subprocesses")]
 fn freshness_does_not_replace_destination_follow_up_rules() {
     let workspace = Workspace::new("destination-followup");
     let clock = SystemClock::default();
@@ -425,7 +423,6 @@ fn freshness_does_not_replace_destination_follow_up_rules() {
         "reviewedMergeBaseCommit":context["pullRequest"]["reviewedMergeBaseCommit"],
         "reviewedContextHash":ss_ai_review_context::evidence_hash(&context).unwrap(),"findings":[finding]});
     let context_path = workspace.put("context.json", &context);
-    let finding_path = workspace.put("finding.json", &finding);
     let approved_path = workspace.put("approved.json", &approved);
     let request = workspace.put(
         "request.json",
@@ -434,25 +431,37 @@ fn freshness_does_not_replace_destination_follow_up_rules() {
     approved::check_approved(&approved_path, Some(&context_path), &clock).unwrap();
     approved::check_approved_request_path(&request, &clock).unwrap();
 
-    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
-    let script =
-        Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/approved_followup_predecessor.ps1");
-    let output = Command::new("pwsh")
-        .args(["-NoLogo", "-NoProfile", "-NonInteractive", "-File"])
-        .arg(script)
-        .arg("-Root")
-        .arg(root)
-        .arg("-ContextPath")
-        .arg(context_path)
-        .arg("-FindingPath")
-        .arg(finding_path)
-        .output()
-        .expect("PowerShell is required for destination parity coverage");
-    assert!(
-        output.status.success(),
-        "Destination validation failed: {}",
-        String::from_utf8_lossy(&output.stderr)
+    let diagnostics = workspace.put("diagnostics.json", &json!({}));
+    let plan = ss_ai_review_workflow::tracker_publication_plan::prepare(
+        &approved_path,
+        &diagnostics,
+        Some(&context_path),
+        "gitHub",
+        &clock,
+    )
+    .unwrap();
+    assert_eq!(plan["items"].as_array().unwrap().len(), 1);
+    let artifact = workspace.put(
+        "findings.json",
+        &json!({
+            "schemaVersion":1,"kind":"consolidated","findings":[finding]
+        }),
     );
+    let decisions = workspace.put("decisions.json", &decisions(&[("F", "approved")]));
+    let output = workspace.0.join("publication-approved.json");
+    assert!(
+        approved::build_approved(
+            &artifact,
+            &decisions,
+            &output,
+            Some(&context_path),
+            Some(&workspace.0),
+            &clock,
+            &Git
+        )
+        .is_err()
+    );
+    assert!(!output.exists());
 }
 
 #[test]
@@ -529,8 +538,7 @@ fn batched_anchor_requests_preserve_results_and_validate_the_whole_diff() {
 }
 
 #[test]
-#[cfg_attr(miri, ignore = "requires PowerShell subprocesses")]
-fn reviewed_context_hash_matches_powershell_for_discussion() {
+fn reviewed_context_hash_binds_discussion_prose() {
     let workspace = Workspace::new("evidence-parity");
     let clock = SystemClock::default();
     let artifact = workspace.put(
@@ -560,24 +568,12 @@ fn reviewed_context_hash_matches_powershell_for_discussion() {
     )
     .unwrap();
     let document: Value = serde_json::from_slice(&fs::read(output).unwrap()).unwrap();
-    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
-    let script = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/approved_hash_predecessor.ps1");
-    let predecessor = Command::new("pwsh")
-        .args(["-NoLogo", "-NoProfile", "-NonInteractive", "-File"])
-        .arg(script)
-        .arg("-Root")
-        .arg(root)
-        .arg("-ContextPath")
-        .arg(context_path)
-        .output()
-        .expect("PowerShell is required for evidence parity coverage");
-    assert!(
-        predecessor.status.success(),
-        "PowerShell hashing failed: {}",
-        String::from_utf8_lossy(&predecessor.stderr)
-    );
+    let hash = ss_ai_review_context::evidence_hash(&context).unwrap();
     assert_eq!(
-        document["reviewedContextHash"].as_str().unwrap(),
-        String::from_utf8(predecessor.stdout).unwrap().trim()
+        hash,
+        "17149D7E6A7D3CBD9E74C3A446F9F57402D213D1DDAD01E47409656046C91C34"
     );
+    assert_eq!(document["reviewedContextHash"], hash);
+    context["threads"][0]["comments"][0]["content"] = json!("Changed discussion");
+    assert_ne!(ss_ai_review_context::evidence_hash(&context).unwrap(), hash);
 }

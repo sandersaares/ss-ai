@@ -41,6 +41,17 @@ HTTP replies retain status, normalized headers, and raw bytes until transport
 classifies them. GitHub failures use captured CLI diagnostics and explicit
 rate-limit evidence. Neither path treats an uncertain write as permission to
 try again; journal reconciliation belongs to the calling workflow.
+GraphQL mutation responses with execution data, conflicting errors, or an
+unreadable nonempty body remain ambiguous even when an HTTP status or diagnostic
+reports a rate-limit refusal.
+When an Azure retry-authorized write receives HTTP 429 and the wait is
+interrupted, its journal retains the refusal because no next attempt began.
+
+GitHub initial overview writes retry a rate-limit refusal only when a failed
+response includes an HTTP refusal status and no partial-write evidence. An
+unreadable nonempty body is uncertain. An interrupted wait retains the refusal
+in the journal; a later uncertain response requires reconciliation instead of
+replay.
 
 Approval publication uses explicit single-attempt methods for both providers,
 including ADO's reviewer PUT and audit-thread POST. These methods do not wait

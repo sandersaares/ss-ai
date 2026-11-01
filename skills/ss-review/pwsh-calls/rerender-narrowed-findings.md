@@ -1,8 +1,5 @@
-```powershell
-pwsh -NoProfile -NonInteractive -File "{{SKILL_ROOT}}/scripts/ConvertTo-FindingMarkdown.ps1" `
-  -Path "{{SESSION_STATE}}/findings.json" `
-  -OutputDirectory "{{SESSION_STATE}}/rendered" `
-  -FindingId "{{FINDING_IDS}}"
+```text
+ss-ai workflow prepare-markdown --path "{{SESSION_STATE}}/findings.json" --output-directory "{{SESSION_STATE}}/rendered" --finding-id "{{FINDING_ID}}"
 ```
 
 Placeholders to replace:
@@ -11,4 +8,6 @@ Placeholders to replace:
 |-------------|-------------|
 | `SKILL_ROOT` | Directory containing the active `SKILL.md`. |
 | `SESSION_STATE` | Session state directory for this review. |
-| `FINDING_IDS` | Comma-separated identifiers of the findings to re-render, as one argument. Naming them as separate arguments binds the second one to another parameter instead, which re-renders only the first finding and reports no error. |
+| `FINDING_ID` | Identifier of a finding to re-render. Repeat `--finding-id` for each selected finding. |
+
+Inspect the emitted JSON and apply [error recovery](../error-recovery.md) before using the rendered files.

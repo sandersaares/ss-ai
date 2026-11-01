@@ -370,7 +370,7 @@ unrelated revisions and intentional Puppeteer configuration. A failed approved
 installation produces recovery guidance rather than another generic installation prompt.
 
 Report tools recognize Node.js installations managed by nvm even when the
-noninteractive PowerShell session cannot find Node.js on `PATH`. They preserve
+invoking environment cannot find Node.js on `PATH`. They preserve
 an active runtime choice and otherwise use the configured nvm default on
 POSIX systems, without installing or switching Node.js versions.
 

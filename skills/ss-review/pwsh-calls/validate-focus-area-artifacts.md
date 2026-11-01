@@ -1,12 +1,5 @@
-```powershell
-#Requires -Version 7.6
-
-Set-StrictMode -Version Latest
-$ErrorActionPreference = 'Stop'
-$PSNativeCommandUseErrorActionPreference = $true
-
-ss-ai workflow validate-focus-area-artifacts --session-state "{{SESSION_STATE}}" `
-  --preparation-identity "{{PREPARATION_IDENTITY}}"
+```text
+ss-ai workflow validate-focus-area-artifacts --session-state "{{SESSION_STATE}}" --preparation-identity "{{PREPARATION_IDENTITY}}"
 ```
 
 | Placeholder | Value |

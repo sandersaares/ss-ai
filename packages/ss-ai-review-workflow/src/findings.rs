@@ -63,7 +63,7 @@ struct ValidatedContent(Value);
 pub fn read_artifact(path: &Path, clock: &dyn Clock) -> Result<Value, AppError> {
     let bytes = read_bytes(path, clock)?
         .ok_or_else(|| fail("invalidInput", "Finding artifact is missing"))?;
-    parse_artifact(&bytes)
+    parse_artifact(&bytes, path)
 }
 
 /// Reports completeness and shape problems for a file or reviewer directory.
@@ -194,7 +194,7 @@ pub fn validate_artifacts(
             }
         }
         for finding in findings {
-            if let Err(error) = validate_record(finding) {
+            if let Err(error) = validate_stored_record(finding) {
                 errors.push(format!("{}: {error}", file.display()));
             }
         }
@@ -202,7 +202,7 @@ pub fn validate_artifacts(
             for entry in removed {
                 let result =
                     object(entry, &["finding", "reason", "removedUtc"]).and_then(|entry| {
-                        validate_record(
+                        validate_stored_record(
                             entry
                                 .get("finding")
                                 .ok_or_else(|| invalid("Missing removed finding"))?,
@@ -281,10 +281,13 @@ pub fn validate_artifact(value: &Value) -> Result<(), AppError> {
     let findings = array(fields.get("findings"), "findings")?;
     let mut ids = HashSet::new();
     for finding in findings {
-        validate_record(finding)?;
+        validate_stored_record(finding)?;
         let id = text(finding.get("id"), "id")?;
         if !ids.insert(id.to_owned()) {
-            return Err(invalid("Duplicate finding identifier"));
+            return Err(fail(
+                "invalidInput",
+                format!("Duplicate finding identifier '{id}'"),
+            ));
         }
     }
     if let Some(removed) = fields.get("removed") {
@@ -293,14 +296,18 @@ pub fn validate_artifact(value: &Value) -> Result<(), AppError> {
             let finding = entry
                 .get("finding")
                 .ok_or_else(|| invalid("Missing removed finding"))?;
-            validate_record(finding).map_err(|error| {
+            validate_stored_record(finding).map_err(|error| {
                 fail(
                     "invalidInput",
                     format!("Finding in removal record at position {index} has missing or invalid fields: {error}"),
                 )
             })?;
-            if !ids.insert(text(finding.get("id"), "id")?.to_owned()) {
-                return Err(invalid("Duplicate finding identifier in history"));
+            let id = text(finding.get("id"), "id")?;
+            if !ids.insert(id.to_owned()) {
+                return Err(fail(
+                    "invalidInput",
+                    format!("Duplicate finding identifier '{id}' in history"),
+                ));
             }
             text(entry.get("reason"), "reason")?;
             text(entry.get("removedUtc"), "removedUtc")?;
@@ -310,9 +317,15 @@ pub fn validate_artifact(value: &Value) -> Result<(), AppError> {
 }
 
 /// Parses and validates a complete persisted artifact.
-fn parse_artifact(bytes: &[u8]) -> Result<Value, AppError> {
-    let value = parse_json(bytes)?;
-    validate_artifact(&value)?;
+fn parse_artifact(bytes: &[u8], path: &Path) -> Result<Value, AppError> {
+    let context = |error| {
+        fail(
+            "invalidInput",
+            format!("Finding artifact '{}': {error}", path.display()),
+        )
+    };
+    let value = parse_json(bytes).map_err(context)?;
+    validate_artifact(&value).map_err(context)?;
     Ok(value)
 }
 
@@ -338,7 +351,7 @@ pub fn initialize(
     let existing = transaction.read_bytes()?;
     if existing.is_some() && !force {
         return Err(invalid(
-            "Finding artifact already exists; use -Resume to preserve it or -Force for a new review",
+            "Finding artifact already exists; use --resume to preserve it or --force for a new review",
         ));
     }
     let value = json!({"schemaVersion":1,"kind":"reviewer","reviewerId":reviewer,"focusArea":focus_area,"status":"open","findings":[]});
@@ -401,14 +414,14 @@ pub fn initialize_with_queue_result(
             return Err(invalid("Artifact is missing despite journaled work"));
         }
     } else if let Some(bytes) = &existing {
-        let artifact = parse_artifact(bytes)?;
+        let artifact = parse_artifact(bytes, path)?;
         if !array(artifact.get("findings"), "findings")?.is_empty() {
             return Err(invalid("Journal is missing despite recorded findings"));
         }
     }
     let value = if resume {
         if let Some(bytes) = existing {
-            let mut artifact = parse_artifact(&bytes)?;
+            let mut artifact = parse_artifact(&bytes, path)?;
             if artifact.get("kind") != Some(&json!("reviewer"))
                 || artifact.get("reviewerId") != Some(&json!(reviewer))
                 || artifact.get("focusArea") != Some(&json!(focus_area))
@@ -426,7 +439,7 @@ pub fn initialize_with_queue_result(
     } else {
         if existing.is_some() && !force {
             return Err(invalid(
-                "Finding artifact already exists; use -Resume to preserve it or -Force for a new review",
+                "Finding artifact already exists; use --resume to preserve it or --force for a new review",
             ));
         }
         json!({"schemaVersion":1,"kind":"reviewer","reviewerId":reviewer,"focusArea":focus_area,"status":"open","findings":[]})
@@ -479,7 +492,7 @@ pub fn add_with_context(
     let bytes = transaction
         .read_bytes()?
         .ok_or_else(|| invalid("Finding artifact is missing"))?;
-    let mut artifact = parse_artifact(&bytes)?;
+    let mut artifact = parse_artifact(&bytes, path)?;
     if artifact.get("status") == Some(&json!("complete")) {
         return Err(invalid(
             "Completed reviewer artifact cannot accept findings",
@@ -770,8 +783,12 @@ fn reviewer_sources(
             "focusArea": artifact.get("focusArea"),
         });
         for finding in array(artifact.get("findings"), "findings")? {
-            if !ids.insert(text(finding.get("id"), "id")?.to_owned()) {
-                return Err(invalid("Duplicate finding identifier across artifacts"));
+            let id = text(finding.get("id"), "id")?;
+            if !ids.insert(id.to_owned()) {
+                return Err(fail(
+                    "invalidInput",
+                    format!("Duplicate finding identifier '{id}' across artifacts"),
+                ));
             }
             result.push((metadata.clone(), finding.clone()));
         }
@@ -824,9 +841,12 @@ pub fn consolidate_result(
             let mut first = usize::MAX;
             let mut replacements = Vec::new();
             for id in &group.source_finding_ids {
-                let position = *positions
-                    .get(id)
-                    .ok_or_else(|| invalid("Merge references unknown finding"))?;
+                let position = *positions.get(id).ok_or_else(|| {
+                    fail(
+                        "invalidInput",
+                        format!("Merge references unknown finding '{id}'"),
+                    )
+                })?;
                 if !claimed.insert(id.clone()) {
                     return Err(fail(
                         "invalidInput",
@@ -930,8 +950,28 @@ fn validate_merge(content: &mut ValidatedContent, sources: &[&Value]) -> Result<
                 .iter()
                 .any(|candidate| location_covers(candidate, &required))
             {
-                return Err(invalid(
-                    "Merged finding does not cover every source location",
+                let path = text(required.get("path"), "path")?;
+                let location = match required.get("startLine").and_then(Value::as_i64) {
+                    Some(start) => {
+                        let end = required.get("endLine").and_then(Value::as_i64);
+                        match end.filter(|end| *end != start) {
+                            Some(end) => format!("{path}:{start}-{end}"),
+                            None => format!("{path}:{start}"),
+                        }
+                    }
+                    None => path.to_owned(),
+                };
+                let id = text(source.get("id"), "id")?;
+                let side = required
+                    .get("side")
+                    .and_then(Value::as_str)
+                    .map(|side| format!(" (side '{side}')"))
+                    .unwrap_or_default();
+                return Err(fail(
+                    "invalidInput",
+                    format!(
+                        "Merged finding does not cover location '{location}'{side} from finding '{id}'"
+                    ),
                 ));
             }
         }
@@ -1021,7 +1061,7 @@ pub fn update(
     let bytes = transaction
         .read_bytes()?
         .ok_or_else(|| invalid("Finding artifact is missing"))?;
-    let mut artifact = parse_artifact(&bytes)?;
+    let mut artifact = parse_artifact(&bytes, path)?;
     let findings = artifact
         .get_mut("findings")
         .and_then(Value::as_array_mut)
@@ -1070,7 +1110,7 @@ pub fn remove(
     let bytes = transaction
         .read_bytes()?
         .ok_or_else(|| invalid("Finding artifact is missing"))?;
-    let mut artifact = parse_artifact(&bytes)?;
+    let mut artifact = parse_artifact(&bytes, path)?;
     for (id, reason) in removals {
         let findings = artifact
             .get_mut("findings")
@@ -1109,7 +1149,7 @@ pub fn complete(path: &Path, queue_path: &Path, clock: &dyn Clock) -> Result<Val
     let bytes = artifact_transaction
         .read_bytes()?
         .ok_or_else(|| invalid("Finding artifact is missing"))?;
-    let mut artifact = parse_artifact(&bytes)?;
+    let mut artifact = parse_artifact(&bytes, path)?;
     if artifact.get("kind") != Some(&json!("reviewer")) {
         return Err(invalid("Only reviewer artifacts can be completed"));
     }
@@ -1404,6 +1444,21 @@ fn next_id(artifact: &Value) -> Result<String, AppError> {
     Ok(format!("{prefix}{next}"))
 }
 
+/// Adds a finding identifier to validation errors from persisted evidence.
+fn validate_stored_record(value: &Value) -> Result<(), AppError> {
+    validate_record(value).map_err(|error| {
+        let subject = value
+            .get("id")
+            .and_then(Value::as_str)
+            .filter(|id| !id.trim().is_empty())
+            .map_or_else(
+                || "Finding with missing or invalid identifier".to_owned(),
+                |id| format!("Finding '{id}'"),
+            );
+        fail("invalidInput", format!("{subject}: {error}"))
+    })
+}
+
 /// Validates the tool-owned fields and authored content of a stored finding.
 fn validate_record(value: &Value) -> Result<(), AppError> {
     validate_content(value, true)?;
@@ -1425,6 +1480,9 @@ fn validate_record(value: &Value) -> Result<(), AppError> {
 
 /// Checks known fields, prose, locations and follow-up identifiers.
 fn validate_content(value: &Value, record: bool) -> Result<(), AppError> {
+    // Tracker title limits motivate the bound; UTF-16 units match the
+    // provider's string-length convention.
+    const TITLE_LIMIT: usize = 255;
     let allowed = [
         "schemaVersion",
         "id",
@@ -1441,12 +1499,16 @@ fn validate_content(value: &Value, record: bool) -> Result<(), AppError> {
         "followUp",
     ];
     let fields = object(value, &allowed)?;
-    if !record
-        && ["schemaVersion", "id", "sourceFindingIds", "origin"]
+    if !record {
+        // Provenance is assigned by the operation, not by authored finding data.
+        if let Some(name) = ["schemaVersion", "id", "sourceFindingIds", "origin"]
             .iter()
-            .any(|name| fields.contains_key(*name))
-    {
-        return Err(invalid("Authored content cannot assign provenance"));
+            .find(|name| fields.contains_key(**name))
+        {
+            return Err(invalid(&format!(
+                "Finding sets '{name}', which the tooling assigns"
+            )));
+        }
     }
     for name in [
         "title",
@@ -1456,14 +1518,20 @@ fn validate_content(value: &Value, record: bool) -> Result<(), AppError> {
         "recommendedAction",
     ] {
         let prose = text(fields.get(name), name)?;
-        // Tracker title limits motivate the bound; UTF-16 units match the
-        // retained .NET string-length check in FindingModel.ps1.
-        if (name == "title" && prose.encode_utf16().count() > 255)
-            || prose
-                .chars()
-                .any(|c| (c as u32) < 32 && (name == "title" || !matches!(c, '\t' | '\n')))
+        if let Some(control) = prose
+            .chars()
+            .find(|c| (*c as u32) < 32 && (name == "title" || !matches!(c, '\t' | '\n')))
         {
-            return Err(invalid("Invalid finding prose"));
+            return Err(invalid(&format!(
+                "Finding '{name}' contains C0 control character U+{:04X}",
+                control as u32
+            )));
+        }
+        let length = prose.encode_utf16().count();
+        if name == "title" && length > TITLE_LIMIT {
+            return Err(invalid(&format!(
+                "The finding reports a title of {length} characters; a title holds at most {TITLE_LIMIT}"
+            )));
         }
     }
     location(

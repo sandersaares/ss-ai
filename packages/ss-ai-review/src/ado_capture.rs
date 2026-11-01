@@ -127,9 +127,17 @@ pub(crate) fn collect(transport: &mut Transport<'_>, target: &Target) -> Result<
         }
         revisions.push(revision);
     }
-    let (latest_id, latest) = latest.ok_or_else(|| fail("service", "No Azure DevOps iteration"))?;
-    let source = required_text(&latest, "sourceCommit")?;
-    let base = required_text(&latest, "mergeBaseCommit")?;
+    // An empty iteration list is complete evidence of an unavailable reviewed pair;
+    // malformed iterations and provider failures have already been rejected.
+    let latest_id = latest.as_ref().map(|(id, _)| *id);
+    let source = latest
+        .as_ref()
+        .map(|(_, revision)| required_text(revision, "sourceCommit"))
+        .transpose()?;
+    let base = latest
+        .as_ref()
+        .map(|(_, revision)| required_text(revision, "mergeBaseCommit"))
+        .transpose()?;
 
     let mut converted_reviewers = Vec::new();
     let mut reviewer_ids = HashSet::new();
@@ -433,7 +441,7 @@ fn convert_thread(
     node: &Value,
     target: &Target,
     properties: &Map<String, Value>,
-    latest: NonZeroU64,
+    latest: Option<NonZeroU64>,
 ) -> Result<Value, AppError> {
     let id = field(node, "id")?;
     let url = format!(
@@ -515,7 +523,7 @@ fn convert_thread(
         "id": id, "url": url, "publishedUtc": published,
         "lastUpdatedUtc": canonical_time(node.get("lastUpdatedDate"))?,
         "eventUtc": published, "rawStatus": node.get("status"), "resolution": resolution,
-        "kind": kind, "isOutdated": anchor_revision.is_some_and(|id| id < latest.get()),
+        "kind": kind, "isOutdated": anchor_revision.zip(latest).is_some_and(|(id, latest)| id < latest.get()),
         "context": context(node.get("threadContext"))?,
         "anchorKey": node.pointer("/pullRequestThreadContext/changeTrackingId"),
         "properties": properties, "openingCommentId": opening_id,

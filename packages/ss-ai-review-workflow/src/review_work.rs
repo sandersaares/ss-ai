@@ -1053,7 +1053,15 @@ fn validate_groups(groups: &Value, files: &Value) -> Result<(), AppError> {
         }
     }
     if paths.len() != inventory.len() {
-        return Err(invalid("Groups omit inventory files"));
+        let omitted: Vec<_> = files
+            .iter()
+            .filter_map(|file| file["path"].as_str())
+            .filter(|path| !paths.contains(path))
+            .collect();
+        return Err(invalid(&format!(
+            "Groups omit inventory files: {}",
+            omitted.join(", ")
+        )));
     }
     Ok(())
 }

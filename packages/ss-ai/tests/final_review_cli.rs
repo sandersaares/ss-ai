@@ -11,8 +11,16 @@ use std::env;
 use std::ffi::OsString;
 use std::fs;
 use std::io;
+#[cfg(unix)]
+use std::io::{BufRead, BufReader, Read, Write};
+#[cfg(unix)]
+use std::net::{TcpListener, TcpStream};
+#[cfg(unix)]
+use std::os::unix::fs::PermissionsExt;
 use std::path::PathBuf;
 use std::process::Command;
+#[cfg(unix)]
+use std::thread;
 use std::time::Duration;
 
 use jiff::Timestamp;
@@ -259,6 +267,7 @@ fn executable_dispatches_on_a_bounded_stack() {
 
 #[test]
 #[cfg_attr(miri, ignore = "requires a native subprocess")]
+#[cfg_attr(mutants, ignore = "mutated native subprocesses may block")]
 fn tracker_publication_dispatches_on_a_bounded_stack() {
     let fixture = Fixture::new();
     let output = command()
@@ -438,6 +447,11 @@ struct PublicationProvider {
     approval_expected: Cell<bool>,
     approval_written: Cell<bool>,
     reverse_replies: Cell<bool>,
+    bad_ado_readback: Cell<Option<&'static str>>,
+    fail_reopen: Cell<bool>,
+    fail_summary: Cell<bool>,
+    journal_path: RefCell<Option<PathBuf>>,
+    journal_snapshots: RefCell<Vec<Value>>,
     fail_final_readback: bool,
 }
 
@@ -456,6 +470,11 @@ impl PublicationProvider {
             approval_expected: Cell::new(false),
             approval_written: Cell::new(false),
             reverse_replies: Cell::new(false),
+            bad_ado_readback: Cell::new(None),
+            fail_reopen: Cell::new(false),
+            fail_summary: Cell::new(false),
+            journal_path: RefCell::new(None),
+            journal_snapshots: RefCell::new(Vec::new()),
             fail_final_readback,
         }
     }
@@ -558,6 +577,21 @@ impl PublicationProvider {
         }
     }
 
+    /// Simulates reopening after the review's readback has completed.
+    fn ado_reopen(&self, body: Option<&[u8]>) -> HttpResponse {
+        let request: Value = from_slice(body.unwrap()).unwrap();
+        assert_eq!(request["status"], "active");
+        self.writes.borrow_mut().push("reopen".into());
+        if self.fail_reopen.get() {
+            return HttpResponse::new(400, BTreeMap::new(), b"refused".to_vec());
+        }
+        HttpResponse::new(
+            200,
+            BTreeMap::new(),
+            to_vec(&json!({"id":101,"status":"active"})).unwrap(),
+        )
+    }
+
     /// Builds a thread-grouped response without imposing cross-thread ordering.
     fn ado_threads(&self) -> Value {
         let mut threads = self.responses["threads"]["value"]
@@ -589,14 +623,23 @@ impl PublicationProvider {
             );
             // Existing threads precede new threads in this listing, even
             // though the CLI publishes new threads before follow-ups.
-            for (index, finding) in findings.iter().enumerate().rev() {
-                threads.push(json!({"id":index.checked_add(201).unwrap(),
-                    "threadContext":{"filePath":"/src/lib.rs",
-                    "rightFileStart":{"line":1,"offset":1},"rightFileEnd":{"line":2,"offset":2}},
-                    "status":"active","comments":[{"id":1,"content":finding}]}));
+            let stage = if self.summary.borrow().is_some() {
+                "completed"
+            } else {
+                "finding"
+            };
+            if self.bad_ado_readback.get() != Some(stage) {
+                for (index, finding) in findings.iter().enumerate().rev() {
+                    threads.push(json!({"id":index.checked_add(201).unwrap(),
+                        "threadContext":{"filePath":"/src/lib.rs",
+                        "rightFileStart":{"line":1,"offset":1},"rightFileEnd":{"line":2,"offset":2}},
+                        "status":"active","comments":[{"id":1,"content":finding}]}));
+                }
             }
         }
-        if let Some(summary) = self.summary.borrow().as_ref() {
+        if self.bad_ado_readback.get() != Some("summary")
+            && let Some(summary) = self.summary.borrow().as_ref()
+        {
             threads.push(json!({"id":300,"status":"closed",
                 "comments":[{"id":1,"content":summary}]}));
         }
@@ -637,6 +680,15 @@ impl Http for PublicationProvider {
     ) -> Result<HttpResponse, AppError> {
         assert!(!self.github, "GitHub must not use ADO HTTP");
         assert_eq!(token, "fixture-token");
+        if method != "GET"
+            && let Some(path) = self.journal_path.borrow().as_ref()
+        {
+            let record = from_slice(&fs::read(path).unwrap()).unwrap();
+            self.journal_snapshots.borrow_mut().push(record);
+        }
+        if method == "PATCH" && url.contains("/threads/101?") {
+            return Ok(self.ado_reopen(body));
+        }
         let responses = &self.responses;
         let response = if method == "PUT" && url.contains("/reviewers/runner?") {
             assert!(self.approval_expected.get());
@@ -673,6 +725,9 @@ impl Http for PublicationProvider {
                 json!({"id":id,"comments":[{"id":1}]})
             } else {
                 self.writes.borrow_mut().push("summary".into());
+                if self.fail_summary.get() {
+                    return Ok(HttpResponse::new(500, BTreeMap::new(), b"refused".to_vec()));
+                }
                 *self.summary.borrow_mut() = Some(content);
                 json!({"id":300,"comments":[{"id":1}]})
             }
@@ -841,6 +896,24 @@ fn ado_multiple_findings_verify_in_per_thread_order() {
     let replies = provider.ado_replies.borrow();
     assert!(replies[0].contains("Follow-up R1"));
     assert!(replies[1].contains("Follow-up R2"));
+    let bytes = fs::read(fixture.path("output 雪/publication-result.json")).unwrap();
+    assert!(!bytes.starts_with(&[0xEF, 0xBB, 0xBF]));
+    let journal: Value = from_slice(&bytes).unwrap();
+    let operations = journal["operations"].as_array().unwrap();
+    for (finding, thread, comment) in [
+        ("F", "201", "1"),
+        ("F2", "202", "1"),
+        ("R1", "101", "3"),
+        ("R2", "101", "4"),
+    ] {
+        let operation = operations
+            .iter()
+            .find(|operation| operation["findingId"] == finding)
+            .unwrap();
+        assert_eq!(operation["outcome"], "succeeded");
+        assert_eq!(operation["threadId"], thread);
+        assert_eq!(operation["commentId"], comment);
+    }
 }
 
 #[test]
@@ -861,6 +934,168 @@ fn ado_reordered_replies_fail_readback_and_cannot_be_replayed() {
     let offline = Offline::default();
     run(&args, &offline, &offline, &FixedClock).unwrap_err();
     assert!(!offline.provider_called.get());
+}
+
+#[test]
+fn ado_missing_findings_or_summary_refuse_completion_and_replay() {
+    for stage in ["finding", "completed", "summary"] {
+        let fixture = Fixture::new();
+        let provider = PublicationProvider::new("azure-devops", false);
+        provider.bad_ado_readback.set(Some(stage));
+        let args = publication_args(&fixture, "azure-devops");
+        _ = run(&args, &provider, &provider, &FixedClock).unwrap_err();
+        assert_eq!(
+            *provider.writes.borrow(),
+            if stage == "finding" {
+                vec!["finding"]
+            } else {
+                vec!["finding", "summary"]
+            },
+            "{stage}"
+        );
+        let offline = Offline::default();
+        _ = run(&args, &offline, &offline, &FixedClock).unwrap_err();
+        assert!(!offline.provider_called.get(), "{stage}");
+    }
+}
+
+#[test]
+fn ado_journals_intent_before_each_write_and_preserves_partial_receipts() {
+    for fail_summary in [false, true] {
+        let fixture = Fixture::new();
+        let provider = PublicationProvider::new("azure-devops", false);
+        *provider.journal_path.borrow_mut() =
+            Some(fixture.path("output 雪/publication-result.json"));
+        provider.fail_summary.set(fail_summary);
+        let args = multi_ado_args(&fixture);
+        let result = run(&args, &provider, &provider, &FixedClock);
+        assert_eq!(result.is_err(), fail_summary);
+        assert_eq!(
+            *provider.writes.borrow(),
+            ["finding", "finding", "reply", "reply", "summary"]
+        );
+        let snapshots = provider.journal_snapshots.borrow();
+        assert_eq!(snapshots.len(), 5);
+        for snapshot in snapshots.iter() {
+            let index = usize::try_from(snapshot["inFlight"]["index"].as_u64().unwrap()).unwrap();
+            assert_eq!(snapshot["operations"][index]["outcome"], "ambiguous");
+        }
+        let journal: Value =
+            from_slice(&fs::read(fixture.path("output 雪/publication-result.json")).unwrap())
+                .unwrap();
+        let operations = journal["operations"].as_array().unwrap();
+        for finding in ["F", "F2", "R1", "R2"] {
+            let operation = operations
+                .iter()
+                .find(|operation| operation["findingId"] == finding)
+                .unwrap();
+            assert_eq!(operation["outcome"], "succeeded");
+            assert!(
+                operation["threadId"]
+                    .as_str()
+                    .is_some_and(|id| !id.is_empty())
+            );
+            assert!(
+                operation["commentId"]
+                    .as_str()
+                    .is_some_and(|id| !id.is_empty())
+            );
+        }
+        let complete = operations
+            .iter()
+            .find(|operation| operation["operation"] == "completeReview")
+            .unwrap();
+        assert_eq!(
+            complete["outcome"],
+            if fail_summary {
+                "ambiguous"
+            } else {
+                "succeeded"
+            }
+        );
+        let offline = Offline::default();
+        _ = run(&args, &offline, &offline, &FixedClock).unwrap_err();
+        assert!(!offline.provider_called.get());
+    }
+}
+
+#[test]
+fn ado_approval_without_findings_writes_only_vote_and_summary() {
+    let fixture = Fixture::new();
+    let provider = PublicationProvider::new("azure-devops", false);
+    provider.approval_expected.set(true);
+    let mut args = publication_args(&fixture, "azure-devops");
+    let mut document: Value =
+        from_slice(&fs::read(fixture.path("approved 雪.json")).unwrap()).unwrap();
+    document["findings"] = json!([]);
+    fixture.write("approved 雪.json", &document);
+    authorize(&fixture, &mut args, "azure-devops");
+    let result: Value = from_str(&run(&args, &provider, &provider, &FixedClock).unwrap()).unwrap();
+    assert_eq!(result["status"], "succeeded");
+    assert_eq!(result["publishedFindingCount"], 0);
+    assert_eq!(*provider.writes.borrow(), ["approval", "summary"]);
+    assert!(
+        provider
+            .readbacks
+            .borrow()
+            .iter()
+            .any(|entry| entry == "approval")
+    );
+    assert!(!provider.summary.borrow().as_ref().unwrap().is_empty());
+}
+
+#[test]
+fn ado_reopens_resolved_follow_up_only_after_verified_publication() {
+    for fail in [false, true] {
+        let fixture = Fixture::new();
+        let mut provider = PublicationProvider::new("azure-devops", false);
+        provider.responses["threads"]["value"][0]["status"] = json!("fixed");
+        provider.fail_reopen.set(fail);
+        let args = multi_ado_args(&fixture);
+        let mut context: Value =
+            from_slice(&fs::read(fixture.path("context 雪.json")).unwrap()).unwrap();
+        context["threads"][0]["resolution"] = json!("resolved");
+        context["threads"][0]["rawStatus"] = json!("fixed");
+        fixture.write("context 雪.json", &context);
+        let mut document: Value =
+            from_slice(&fs::read(fixture.path("approved 雪.json")).unwrap()).unwrap();
+        document["reviewedContextHash"] = json!(evidence_hash(&context).unwrap());
+        fixture.write("approved 雪.json", &document);
+        let result: Value =
+            from_str(&run(&args, &provider, &provider, &FixedClock).unwrap()).unwrap();
+        assert_eq!(
+            result["status"],
+            if fail {
+                "publishedWithFollowUpFailure"
+            } else {
+                "succeeded"
+            }
+        );
+        assert_eq!(
+            *provider.writes.borrow(),
+            [
+                "finding", "finding", "reply", "reply", "summary", "reopen", "reopen"
+            ]
+        );
+        let journal: Value =
+            from_slice(&fs::read(fixture.path("output 雪/publication-result.json")).unwrap())
+                .unwrap();
+        assert_eq!(journal["verification"]["isPublished"], true);
+        let reopens: Vec<_> = journal["operations"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|operation| operation["operation"] == "reopenThread")
+            .collect();
+        assert_eq!(reopens.len(), 2);
+        for reopen in reopens {
+            assert_eq!(reopen["threadId"], "101");
+            assert_eq!(reopen["outcome"], if fail { "failed" } else { "succeeded" });
+        }
+        let offline = Offline::default();
+        _ = run(&args, &offline, &offline, &FixedClock).unwrap_err();
+        assert!(!offline.provider_called.get());
+    }
 }
 
 #[test]
@@ -917,4 +1152,258 @@ fn accepted_github_submission_with_failed_readback_is_not_replayed() {
     assert!(run(&args, &offline, &offline, &FixedClock).is_err());
     assert!(!offline.provider_called.get());
     assert_eq!(*provider.writes.borrow(), ["start", "finding", "complete"]);
+}
+
+/// Serves the executable's provider processes from deterministic local evidence.
+#[cfg(unix)]
+struct PartialProvider {
+    provider: PublicationProvider,
+    reply: Option<String>,
+}
+
+#[cfg(unix)]
+impl PartialProvider {
+    fn new() -> Self {
+        let mut provider = PublicationProvider::new("github", false);
+        provider.responses["reviewThreads"]["data"]["repository"]["pullRequest"]["reviewThreads"]
+            ["nodes"][0]["isResolved"] = json!(true);
+        Self {
+            provider,
+            reply: None,
+        }
+    }
+
+    fn respond(&mut self, route: &str, input: &[u8]) -> Value {
+        if route == "graphql" {
+            let request: Value = from_slice(input).unwrap();
+            let query = request["query"].as_str().unwrap();
+            let variables = &request["variables"];
+            if query.contains("addPullRequestReviewThreadReply(") {
+                assert_eq!(variables["threadId"], "PRRT_1");
+                self.provider.writes.borrow_mut().push("reply".into());
+                self.reply = Some(variables["body"].as_str().unwrap().to_owned());
+                return json!({"data":{"addPullRequestReviewThreadReply":{"comment":{"id":"reply-comment"}}}});
+            }
+            if query.contains("unresolveReviewThread(") {
+                assert_eq!(variables["threadId"], "PRRT_1");
+                self.provider.writes.borrow_mut().push("reopen".into());
+                return json!({"errors":[{"message":"fixture reopen failure"}]});
+            }
+            if query.contains("node(id:$reviewId)") {
+                let summary = self.provider.summary.borrow();
+                let submitted = summary.is_some();
+                return json!({"data":{"node":{"id":"review",
+                    "state":if submitted {"COMMENTED"} else {"PENDING"},
+                    "url":"https://github.com/octo/widget/pull/7#review",
+                    "body":summary.as_deref().unwrap_or(""),
+                    "comments":{"pageInfo":{"hasNextPage":false,"endCursor":null},
+                    "nodes":[{"id":"reply-comment","state":if submitted {"SUBMITTED"} else {"PENDING"},
+                        "path":"src/café.rs","line":5,"startLine":4,"subjectType":"LINE",
+                        "body":self.reply.as_ref().unwrap()}]}}}});
+            }
+            if query.contains("reviewThreads(") && self.reply.is_some() {
+                return json!({"data":{"repository":{"pullRequest":{"reviewThreads":{
+                    "pageInfo":{"hasNextPage":false,"endCursor":null},
+                    "nodes":[{"id":"PRRT_1","diffSide":"RIGHT","subjectType":"LINE",
+                        "comments":{"pageInfo":{"hasNextPage":false,"endCursor":null},
+                        "nodes":[{"id":"reply-comment"}]}}]}}}}});
+            }
+        }
+        self.provider.github_response(route, input)
+    }
+}
+
+/// Lets the test binary act as a provider launcher without installing a CLI.
+#[test]
+#[cfg(unix)]
+#[cfg_attr(miri, ignore = "requires a native subprocess")]
+fn partial_provider_process() {
+    let Some(address) = env::var_os("SS_PARTIAL_PROVIDER") else {
+        return;
+    };
+    let mut body = Vec::new();
+    io::stdin().read_to_end(&mut body).unwrap();
+    let request = json!({
+        "route":env::var("SS_PARTIAL_ROUTE").unwrap(),
+        "body":String::from_utf8(body).unwrap()
+    });
+    let mut stream = TcpStream::connect(address.to_str().unwrap()).unwrap();
+    stream.write_all(&to_vec(&request).unwrap()).unwrap();
+    stream.write_all(b"\n").unwrap();
+    let mut response = Vec::new();
+    stream.read_to_end(&mut response).unwrap();
+    fs::write(env::var_os("SS_PARTIAL_RESPONSE").unwrap(), response).unwrap();
+}
+
+/// Keeps the subprocess fixture and its durable journal in the checkout.
+#[cfg(unix)]
+struct PartialWorkspace(PathBuf);
+
+#[cfg(unix)]
+impl PartialWorkspace {
+    fn new() -> Self {
+        let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join(format!(".final-review-partial-{}", std::process::id()));
+        #[expect(clippy::create_dir, reason = "The fixture must not reuse prior state")]
+        fs::create_dir(&path).unwrap();
+        Self(path)
+    }
+
+    fn path(&self, name: &str) -> PathBuf {
+        self.0.join(name)
+    }
+
+    fn executable(&self, name: &str, contents: &str) {
+        let path = self.path(name);
+        fs::write(&path, contents).unwrap();
+        fs::set_permissions(path, fs::Permissions::from_mode(0o700)).unwrap();
+    }
+}
+
+#[cfg(unix)]
+impl Drop for PartialWorkspace {
+    fn drop(&mut self) {
+        fs::remove_dir_all(&self.0).unwrap();
+    }
+}
+
+/// Acknowledge and verify a review before the independent reopen fails.
+#[test]
+#[cfg(unix)]
+#[cfg_attr(miri, ignore = "requires native subprocesses and loopback sockets")]
+#[cfg_attr(
+    mutants,
+    ignore = "mutations can remove a subprocess or socket interaction and block the fixture"
+)]
+fn executable_partial_outcome_preserves_receipts_and_refuses_replay() {
+    let workspace = PartialWorkspace::new();
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let address = listener.local_addr().unwrap();
+    let requests = workspace.path("requests.log");
+    let server = thread::spawn({
+        let requests = requests.clone();
+        move || {
+            let mut provider = PartialProvider::new();
+            for connection in listener.incoming() {
+                let mut stream = connection.unwrap();
+                let mut request = String::new();
+                BufReader::new(&stream).read_line(&mut request).unwrap();
+                let request: Value = from_str(&request).unwrap();
+                if request["shutdown"] == true {
+                    break;
+                }
+                let route = request["route"].as_str().unwrap();
+                let input = request["body"].as_str().unwrap().as_bytes();
+                let mut log = fs::OpenOptions::new()
+                    .create(true)
+                    .append(true)
+                    .open(&requests)
+                    .unwrap();
+                writeln!(log, "{route}").unwrap();
+                let response = provider.respond(route, input);
+                stream.write_all(&to_vec(&response).unwrap()).unwrap();
+            }
+            provider.provider.writes.into_inner()
+        }
+    });
+    workspace.executable(
+        "gh",
+        "#!/bin/sh\nSS_PARTIAL_ROUTE=\"$2\"; export SS_PARTIAL_ROUTE\n\"$SS_PARTIAL_TEST\" --exact partial_provider_process --nocapture > /dev/null || exit $?\nexec /bin/cat \"$SS_PARTIAL_RESPONSE\"\n",
+    );
+    workspace.executable(
+        "git",
+        "#!/bin/sh\ncase \"$*\" in\n*cat-file*) printf 'commit\\n';;\n*diff*) printf 'diff --git a/src/lib.rs b/src/lib.rs\\n--- a/src/lib.rs\\n+++ b/src/lib.rs\\n@@ -1,2 +1,2 @@\\n-old\\n+new\\n context\\n';;\n*) printf '.git\\n';;\nesac\n",
+    );
+    fs::create_dir_all(workspace.path("repository")).unwrap();
+    let mut capture = recorded("github-expected");
+    capture["threads"][0]["resolution"] = json!("resolved");
+    capture["threads"][0]["rawStatus"] = json!("resolved");
+    let mut document = approved(&capture, true);
+    document["findings"][0]["followUp"] = json!({"threadId":"PRRT_1","commentId":"PRRC_1"});
+    for (name, value) in [
+        ("capture.json", capture),
+        ("approved.json", document),
+        ("diagnostics.json", json!({})),
+    ] {
+        fs::write(workspace.path(name), to_vec(&value).unwrap()).unwrap();
+    }
+    let launch = || {
+        let mut command = command();
+        command
+            .current_dir(&workspace.0)
+            .env("PATH", &workspace.0)
+            .env("SS_PARTIAL_PROVIDER", address.to_string())
+            .env("SS_PARTIAL_TEST", env::current_exe().unwrap())
+            .env("SS_PARTIAL_RESPONSE", workspace.path("response.json"))
+            .args([
+                "review",
+                "publish-final-review",
+                "--url",
+                "https://github.com/octo/widget/pull/7",
+                "--approved-findings-path",
+                "approved.json",
+                "--context-path",
+                "capture.json",
+                "--diagnostics-path",
+                "diagnostics.json",
+                "--repository-path",
+                "repository",
+                "--output-directory",
+                "output",
+                "--now-utc",
+                "2026-08-04T12:00:00Z",
+            ])
+            .output()
+            .unwrap()
+    };
+    let output = launch();
+    assert!(!output.status.success());
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    let outcome: Value = from_str(&stdout).unwrap_or_else(|error| {
+        panic!(
+            "No structured outcome: {error}; stderr={}",
+            String::from_utf8_lossy(&output.stderr)
+        )
+    });
+    let journal_path = workspace.path("output/publication-result.json");
+    let journal_bytes = fs::read(&journal_path).unwrap();
+    let journal: Value = from_slice(&journal_bytes).unwrap();
+    assert_eq!(
+        outcome,
+        json!({
+            "schemaVersion":1, "status":"publishedWithFollowUpFailure",
+            "message":"The review is published and verified; reconcile these threads without publishing again: thread 'PRRT_1': ambiguousWrite: GraphQL mutation returned incomplete evidence",
+            "platform":"gitHub", "pullRequestUrl":"https://github.com/octo/widget/pull/7",
+            "reviewId":"review", "reviewUrl":"https://github.com/octo/widget/pull/7#review",
+            "resultPath":journal_path, "publishedFindingCount":1, "failedOperationCount":0,
+            "ambiguousOperationCount":1, "downgradedAnchorCount":0
+        })
+    );
+    assert_eq!(journal["message"], outcome["message"]);
+    let operations = journal["operations"].as_array().unwrap();
+    assert_eq!(operations[0]["receipt"]["reviewId"], "review");
+    assert_eq!(
+        operations[1]["receipt"],
+        json!({"threadId":"PRRT_1","commentId":"reply-comment"})
+    );
+    assert_eq!(operations[2]["outcome"], "succeeded");
+    assert_eq!(operations[3]["receipt"]["reviewId"], "review");
+    assert_eq!(operations[3]["outcome"], "succeeded");
+    assert_eq!(operations[4]["operation"], "reopenThread");
+    assert_eq!(operations[4]["outcome"], "ambiguous");
+    assert_eq!(journal["verification"]["isPublished"], true);
+    assert!(journal["inFlight"].is_null());
+
+    let requests_before = fs::read(&requests).unwrap();
+    let replay = launch();
+    assert!(!replay.status.success());
+    assert!(replay.stdout.is_empty());
+    assert_eq!(fs::read(&requests).unwrap(), requests_before);
+    assert_eq!(fs::read(&journal_path).unwrap(), journal_bytes);
+    let mut shutdown = TcpStream::connect(address).unwrap();
+    shutdown.write_all(b"{\"shutdown\":true}\n").unwrap();
+    assert_eq!(
+        server.join().unwrap(),
+        ["start", "reply", "complete", "reopen"]
+    );
 }

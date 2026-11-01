@@ -1,6 +1,5 @@
-```powershell
-pwsh -NoProfile -NonInteractive -File "{{SKILL_ROOT}}\scripts\Set-ReviewWorkerFailure.ps1" `
-  -QueuePath "{{FILE_GROUP_QUEUE}}" -Reason "{{FAILURE_REASON}}"
+```text
+ss-ai workflow fail-review-worker --queue-path "{{FILE_GROUP_QUEUE}}" --reason "{{FAILURE_REASON}}"
 ```
 
 | Placeholder | Value |

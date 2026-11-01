@@ -11,8 +11,8 @@ use ohno::AppError;
 use serde_json::json;
 use ss_ai_review_workflow::{
     anchors, approved, audit, findings, focus_area_expansion, focus_area_generation,
-    focus_area_map, focus_cache, instruction_sources, markdown, report_html, report_tools,
-    review_work, worker_input, workflow_plan,
+    focus_area_map, focus_cache, instruction_sources, markdown, markdown_preparation,
+    overview_validation, report_html, report_tools, review_work, worker_input, workflow_plan,
 };
 use ss_ai_runtime::{Clock, LockMode, Process, caused_by, fail, read_bytes};
 
@@ -324,6 +324,32 @@ enum WorkerCommand {
         #[arg(long)]
         request_path: PathBuf,
     },
+    /// Validate the prepared overview and its captured pull request link.
+    ValidateOverview {
+        #[arg(long)]
+        path: PathBuf,
+        #[arg(long)]
+        context_path: Option<PathBuf>,
+    },
+    /// Render a validated finding artifact or approved set for audit and delivery.
+    PrepareMarkdown {
+        #[arg(long)]
+        path: PathBuf,
+        #[arg(long)]
+        output_directory: PathBuf,
+        #[arg(long)]
+        combined_path: Option<PathBuf>,
+        #[arg(long)]
+        audit_document_path: Option<PathBuf>,
+        #[arg(long)]
+        finding_id: Vec<String>,
+        #[arg(long, default_value = "pullRequest")]
+        destination: String,
+        #[arg(long)]
+        context_path: Option<PathBuf>,
+        #[arg(long)]
+        overview_path: Option<PathBuf>,
+    },
     /// Resolve an anchor against captured diff evidence.
     ResolveAnchor {
         #[arg(long)]
@@ -334,12 +360,22 @@ enum WorkerCommand {
 /// Selects audit and approved-set operations.
 #[derive(Debug, Subcommand)]
 enum AuditCommand {
-    /// Append an audit decision batch.
+    /// Append an audit decision or decision batch.
     AuditAddDecisions {
         #[arg(long)]
         path: PathBuf,
-        #[arg(long)]
-        plan_path: PathBuf,
+        #[arg(
+            long,
+            required_unless_present = "item_path",
+            conflicts_with = "item_path"
+        )]
+        plan_path: Option<PathBuf>,
+        #[arg(
+            long,
+            required_unless_present = "plan_path",
+            conflicts_with = "plan_path"
+        )]
+        item_path: Option<PathBuf>,
         #[arg(long)]
         audit_feedback_path: Option<PathBuf>,
         #[arg(long)]
@@ -485,6 +521,8 @@ enum FindingCommand {
         path: PathBuf,
         #[arg(long)]
         reviewer_id: Vec<String>,
+        #[arg(long)]
+        fail_on_invalid: bool,
     },
     /// Build an index of all reviewer findings.
     FindingIndex {
@@ -1255,6 +1293,36 @@ where
                 &bytes, clock,
             )?)?)
         }
+        WorkflowCommand::Worker(WorkerCommand::ValidateOverview { path, context_path }) => {
+            Ok(serde_json::to_string(&overview_validation::validate(
+                &path,
+                context_path.as_deref(),
+                &ss_ai_review::validate_overview_structure,
+                clock,
+            )?)?)
+        }
+        WorkflowCommand::Worker(WorkerCommand::PrepareMarkdown {
+            path,
+            output_directory,
+            combined_path,
+            audit_document_path,
+            finding_id,
+            destination,
+            context_path,
+            overview_path,
+        }) => Ok(serde_json::to_string(&markdown_preparation::prepare(
+            &markdown_preparation::Options {
+                path: &path,
+                output_directory: &output_directory,
+                combined_path: combined_path.as_deref(),
+                audit_document_path: audit_document_path.as_deref(),
+                finding_ids: &finding_id,
+                destination: &destination,
+                context_path: context_path.as_deref(),
+                overview_path: overview_path.as_deref(),
+            },
+            clock,
+        )?)?),
         WorkflowCommand::Worker(WorkerCommand::ResolveAnchor { request_path }) => {
             Ok(serde_json::to_string(&anchors::resolve_request_path(
                 &absolute(request_path)?,
@@ -1264,19 +1332,33 @@ where
         WorkflowCommand::Audit(AuditCommand::AuditAddDecisions {
             path,
             plan_path,
+            item_path,
             audit_feedback_path,
             policy_classification,
             recorded_utc,
         }) => {
             let audit_feedback_path = audit_feedback_path.map(absolute).transpose()?;
-            Ok(serde_json::to_string(&audit::add_decisions(
-                &absolute(path)?,
-                &absolute(plan_path)?,
-                audit_feedback_path.as_deref(),
-                policy_classification,
-                &recorded_utc,
-                clock,
-            )?)?)
+            let path = absolute(path)?;
+            let result = match (plan_path, item_path) {
+                (Some(plan), None) => audit::add_decisions(
+                    &path,
+                    &absolute(plan)?,
+                    audit_feedback_path.as_deref(),
+                    policy_classification,
+                    &recorded_utc,
+                    clock,
+                )?,
+                (None, Some(item)) => audit::add_decision(
+                    &path,
+                    &absolute(item)?,
+                    audit_feedback_path.as_deref(),
+                    policy_classification,
+                    &recorded_utc,
+                    clock,
+                )?,
+                _ => return Err(fail("invalidInput", "Specify one decision input")),
+            };
+            Ok(serde_json::to_string(&result)?)
         }
         WorkflowCommand::Audit(AuditCommand::AuditPollClassification {
             artifact_path,
@@ -1490,12 +1572,11 @@ where
                 &json!({"status": "Valid", "clusterCount": count}),
             )?)
         }
-        WorkflowCommand::Finding(FindingCommand::ValidateFindings { path, reviewer_id }) => {
-            Ok(serde_json::to_string(&findings::validate_artifacts(
-                &absolute(path)?,
-                &reviewer_id,
-                clock,
-            )?)?)
+        WorkflowCommand::Finding(FindingCommand::ValidateFindings {
+            path, reviewer_id, ..
+        }) => {
+            let result = findings::validate_artifacts(&absolute(path)?, &reviewer_id, clock)?;
+            Ok(serde_json::to_string(&result)?)
         }
         WorkflowCommand::Finding(FindingCommand::FindingIndex {
             reviewer_directory,

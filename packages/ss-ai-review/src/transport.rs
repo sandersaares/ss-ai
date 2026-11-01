@@ -340,11 +340,8 @@ impl<'a> Transport<'a> {
         self.github(path, "POST", Some(body), false, false)
     }
 
-    /// Distinguishes an explicit HTTP 429 from other single-attempt failures.
-    ///
-    /// Only a failed command with an included HTTP status line establishes the
-    /// `explicitRateLimited` classification; diagnostic prose is not proof.
-    pub(crate) fn github_write_once_with_refusal_evidence(
+    /// Retries a write only when an HTTP response establishes rate refusal.
+    pub(crate) fn github_write_retrying_refusals(
         &self,
         path: &str,
         body: &Value,
@@ -354,8 +351,8 @@ impl<'a> Transport<'a> {
             "POST",
             Some(body),
             false,
-            false,
-            GithubResponseMode::ExplicitRefusal,
+            true,
+            GithubResponseMode::RefusalRetryWrite,
         )?
         .ok_or_else(|| fail("service", "Unexpected absent GitHub response"))
     }
@@ -551,27 +548,53 @@ impl<'a> Transport<'a> {
             {
                 return Ok(None);
             }
-            if matches!(response_mode, GithubResponseMode::ExplicitRefusal)
-                && !output.success
-                && response_status(headers) == Some(429)
-            {
-                return Err(fail(
-                    "explicitRateLimited",
-                    "GitHub refused the write for rate limiting; no write was retried",
-                ));
-            }
             let stderr = String::from_utf8_lossy(&output.stderr);
             let error_text = format!("{stderr}\n{payload}");
             let status_text = format!("{headers}\n{stderr}");
             let json = serde_json::from_str::<Value>(payload);
+            // A truncated body may conceal an accepted receipt despite its status.
+            let unreadable_write_body = matches!(
+                response_mode,
+                GithubResponseMode::Mutation | GithubResponseMode::RefusalRetryWrite
+            ) && !payload.trim().is_empty()
+                && json.is_err();
+            let rate_evidence = rate_message(&error_text)
+                || (matches!(response_mode, GithubResponseMode::Mutation)
+                    && json
+                        .as_ref()
+                        .is_ok_and(|value| github_rate_limit("", "", Some(value))));
+            let graphql_conflicting = matches!(response_mode, GithubResponseMode::Mutation)
+                && match json.as_ref() {
+                    Ok(value) => {
+                        !value.is_object()
+                            || github_partial_write(value)
+                            || (rate_evidence
+                                && value.get("message").is_some_and(|message| {
+                                    message
+                                        .as_str()
+                                        .is_none_or(|message| !rate_message(message))
+                                }))
+                    }
+                    Err(_) => {
+                        // An empty 429 is an HTTP refusal without conflicting
+                        // body evidence; an unreadable body may conceal data.
+                        unreadable_write_body
+                            || (response_status(headers) == Some(403) && rate_evidence)
+                    }
+                };
             // A mutation can only be replayed when the HTTP response itself
             // establishes refusal; GraphQL error prose may accompany a write.
-            let rate_limited = if matches!(response_mode, GithubResponseMode::Mutation) {
-                !output.success
-                    && (response_status(headers) == Some(429)
-                        || (response_status(headers) == Some(403) && rate_message(&error_text)))
-            } else {
-                github_rate_limit(&status_text, &error_text, json.as_ref().ok())
+            let rate_limited = match response_mode {
+                GithubResponseMode::Mutation | GithubResponseMode::RefusalRetryWrite => {
+                    let partial = graphql_conflicting
+                        || unreadable_write_body
+                        || json.as_ref().is_ok_and(github_partial_write);
+                    !partial
+                        && !output.success
+                        && (response_status(headers) == Some(429)
+                            || (response_status(headers) == Some(403) && rate_evidence))
+                }
+                _ => github_rate_limit(&status_text, &error_text, json.as_ref().ok()),
             };
             if rate_limited {
                 if !retry_refusals {
@@ -591,7 +614,22 @@ impl<'a> Transport<'a> {
                     "GitHub rate-limit refusal; waiting {} ms before retrying",
                     delay.as_millis()
                 );
-                self.clock.wait(delay)?;
+                if let Err(error) = self.clock.wait(delay) {
+                    // The last attempt was refused and no next attempt began.
+                    // Preserve that evidence for the publication journal.
+                    if matches!(
+                        response_mode,
+                        GithubResponseMode::Mutation | GithubResponseMode::RefusalRetryWrite
+                    ) {
+                        return Err(crate::error::caused_by(
+                            "explicitRateLimited",
+                            "GitHub rate-limit wait was interrupted",
+                            error.into_std_error(),
+                        )
+                        .into());
+                    }
+                    return Err(error);
+                }
                 continue;
             }
             if output.success {
@@ -621,7 +659,12 @@ impl<'a> Transport<'a> {
                 transient_attempt = transient_attempt.saturating_add(1);
                 continue;
             }
-            let kind = if matches!(response_mode, GithubResponseMode::Mutation) {
+            let kind = if graphql_conflicting || unreadable_write_body {
+                "ambiguousWrite"
+            } else if matches!(
+                response_mode,
+                GithubResponseMode::Mutation | GithubResponseMode::RefusalRetryWrite
+            ) {
                 match response_status(headers) {
                     Some(401) => "authentication",
                     Some(403 | 422) => "permissionDenied",
@@ -830,6 +873,14 @@ impl<'a> Transport<'a> {
         // Publication records intent before upload and never replays a write.
         let response =
             self.ado_response(path, method, body, query, version, AdoRequestKind::Binary)?;
+        // ADO uses this status for intercepted sign-in pages. Ordinary HTML
+        // attachments remain permissible when delivered with a successful read.
+        if method == "GET" && response.status == 203 {
+            return Err(fail(
+                "authentication",
+                "Azure DevOps returned HTTP 203 for an attachment; authenticate with the collection's tenant",
+            ));
+        }
         // Attachment reads are verified by the caller's frozen content hash.
         if method == "POST"
             && response
@@ -921,7 +972,18 @@ impl<'a> Transport<'a> {
                     "Azure DevOps rate-limit refusal; waiting {} ms before retrying",
                     delay.as_millis()
                 );
-                self.clock.wait(delay)?;
+                if let Err(error) = self.clock.wait(delay) {
+                    if read {
+                        return Err(error);
+                    }
+                    // The service refused the last write and no retry started.
+                    return Err(crate::error::caused_by(
+                        "rateLimited",
+                        "Azure DevOps rate-limit wait was interrupted",
+                        error.into_std_error(),
+                    )
+                    .into());
+                }
                 continue;
             }
             if response.status == 401 && read && !refreshed {
@@ -979,8 +1041,8 @@ enum GithubResponseMode {
     Mutation,
     /// Recognize an explicit not-found response for optional reads.
     OptionalNotFound,
-    /// Recognize an explicit rate refusal for a single-attempt write.
-    ExplicitRefusal,
+    /// Retry an ordinary write only after an established HTTP refusal.
+    RefusalRetryWrite,
 }
 
 /// Selects decoding and refusal replay without changing the existing JSON policy.
@@ -1122,6 +1184,28 @@ fn rate_message(value: &str) -> bool {
     ]
     .iter()
     .any(|pattern| value.contains(pattern))
+}
+
+/// Partial write evidence cannot establish that the effect was refused.
+fn github_partial_write(response: &Value) -> bool {
+    ["data", "id"]
+        .iter()
+        .any(|key| response.get(*key).is_some_and(|value| !value.is_null()))
+        || response.get("errors").is_some_and(|errors| {
+            errors.as_array().is_none_or(|errors| {
+                errors.iter().any(|error| {
+                    let kind = error.get("type");
+                    let message = error.get("message");
+                    (kind.is_none() && message.is_none())
+                        || kind.is_some_and(|kind| kind.as_str() != Some("RATE_LIMITED"))
+                        || message.is_some_and(|message| {
+                            message
+                                .as_str()
+                                .is_none_or(|message| !rate_message(message))
+                        })
+                })
+            })
+        })
 }
 
 /// Requires refusal evidence before allowing a request to use rate-limit recovery.
@@ -1634,6 +1718,69 @@ mod tests {
     }
 
     #[test]
+    fn binary_read_rejects_signin_status_without_rejecting_html_attachments() {
+        let mut headers = BTreeMap::new();
+        headers.insert("content-type".to_owned(), "text/html".to_owned());
+        let fixture = Fixture::new(vec![
+            Ok(HttpResponse::new(
+                203,
+                headers.clone(),
+                b"<sign-in>".to_vec(),
+            )),
+            Ok(HttpResponse::new(
+                200,
+                headers,
+                b"<html>report</html>".to_vec(),
+            )),
+            response(201, br#"{"id":"abc"}"#),
+            response(203, br#"{"id":7}"#),
+        ]);
+        let target = target();
+        let mut transport = Transport::new(&target, None, &fixture, &fixture, &fixture);
+        let error = transport
+            .ado_binary("attachment", "GET", None, &[], "7.1")
+            .unwrap_err();
+        assert_eq!(classification(&error), "authentication");
+        assert!(error.to_string().contains("HTTP 203"));
+        assert_eq!(fixture.calls.borrow().len(), 1);
+        assert_eq!(fixture.waits.get(), 0);
+        assert_eq!(
+            transport
+                .ado_binary("attachment", "GET", None, &[], "7.1")
+                .unwrap()
+                .body,
+            b"<html>report</html>"
+        );
+        assert_eq!(
+            transport
+                .ado_binary("attachment", "POST", Some(b"zip"), &[], "7.1")
+                .unwrap()
+                .status,
+            201
+        );
+        assert_eq!(
+            transport.request("resource", "GET", None).unwrap(),
+            json!({"id": 7})
+        );
+    }
+
+    #[test]
+    fn json_read_rejects_signin_document_with_misleading_media_type() {
+        let fixture = Fixture::new(vec![Ok(HttpResponse::new(
+            203,
+            BTreeMap::from([("content-type".into(), "application/octet-stream".into())]),
+            b"  <!DOCTYPE html><html><body>Sign in</body></html>".to_vec(),
+        ))]);
+        let target = target();
+        let mut transport = Transport::new(&target, None, &fixture, &fixture, &fixture);
+        let error = transport.request("resource", "GET", None).unwrap_err();
+        assert_eq!(classification(&error), "authentication");
+        assert!(error.to_string().contains("tenant"));
+        assert_eq!(fixture.calls.borrow().len(), 1);
+        assert_eq!(fixture.waits.get(), 0);
+    }
+
+    #[test]
     fn binary_reads_refresh_and_retry_but_writes_are_not_replayed_when_ambiguous() {
         let fixture = Fixture::new(vec![
             response(401, b"expired"),
@@ -1752,7 +1899,7 @@ mod tests {
     }
 
     #[test]
-    fn github_explicit_refusal_requires_failed_command_and_http_status_line() {
+    fn github_write_retry_requires_failed_response_and_actual_refusal_status() {
         struct GithubProcess {
             replies: RefCell<VecDeque<ProcessOutput>>,
             calls: Cell<usize>,
@@ -1778,15 +1925,62 @@ mod tests {
 
         let process = GithubProcess {
             replies: RefCell::new(VecDeque::from([
-                ProcessOutput::new(false, b"HTTP/2 429\n\n{}".to_vec(), vec![]),
                 ProcessOutput::new(false, b"{}".to_vec(), b"HTTP 429".to_vec()),
                 ProcessOutput::new(
                     false,
                     br#"{"errors":[{"message":"rate limit"}]}"#.to_vec(),
                     vec![],
                 ),
+                ProcessOutput::new(
+                    false,
+                    br#"HTTP/2 403
+
+{"id":"accepted""#
+                        .to_vec(),
+                    b"rate limit".to_vec(),
+                ),
+                ProcessOutput::new(
+                    false,
+                    br#"HTTP/2 429
+
+{"id":"accepted""#
+                        .to_vec(),
+                    vec![],
+                ),
+                ProcessOutput::new(
+                    false,
+                    br#"HTTP/2 429
+
+{"data":{"created":true}}"#
+                        .to_vec(),
+                    vec![],
+                ),
+                ProcessOutput::new(
+                    false,
+                    br#"HTTP/2 403
+
+{"message":"rate limit","id":123}"#
+                        .to_vec(),
+                    vec![],
+                ),
+                ProcessOutput::new(
+                    false,
+                    br#"HTTP/2 429
+
+{"errors":[{"type":"RATE_LIMITED"},{"message":"other failure"}]}"#
+                        .to_vec(),
+                    vec![],
+                ),
                 ProcessOutput::new(true, b"HTTP/2 429\n\n{}".to_vec(), vec![]),
+                ProcessOutput::new(
+                    false,
+                    b"HTTP/2 403\n\n{\"message\":\"forbidden\"}".to_vec(),
+                    vec![],
+                ),
                 ProcessOutput::new(false, b"HTTP/2 429\n\n{}".to_vec(), vec![]),
+                ProcessOutput::new(false, vec![], b"connection reset".to_vec()),
+                ProcessOutput::new(false, b"HTTP/2 429\n\n".to_vec(), vec![]),
+                ProcessOutput::new(true, b"HTTP/2 200\n\n{}".to_vec(), vec![]),
             ])),
             calls: Cell::new(0),
         };
@@ -1794,21 +1988,108 @@ mod tests {
         let target = Target::repository("https://github.com/org/repo").unwrap();
         let transport = Transport::new(&target, None, &process, &fixture, &fixture);
         for expected in [
-            "explicitRateLimited",
-            "rateLimited",
-            "rateLimited",
-            "rateLimited",
+            "ambiguousWrite",
+            "ambiguousWrite",
+            "ambiguousWrite",
+            "ambiguousWrite",
+            "ambiguousWrite",
+            "permissionDenied",
+            "ambiguousWrite",
         ] {
             let error = transport
-                .github_write_once_with_refusal_evidence("gists", &json!({}))
+                .github_write_retrying_refusals("gists", &json!({}))
                 .unwrap_err();
             assert_eq!(classification(&error), expected);
         }
+        assert_eq!(
+            transport
+                .github_write_retrying_refusals("gists", &json!({}))
+                .unwrap(),
+            json!({})
+        );
+        assert_eq!(
+            classification(
+                &transport
+                    .github_write_retrying_refusals("gists", &json!({}))
+                    .unwrap_err()
+            ),
+            "permissionDenied"
+        );
         let error = transport
-            .github_write_once("gists", &json!({}))
+            .github_write_retrying_refusals("gists", &json!({}))
             .unwrap_err();
-        assert_eq!(classification(&error), "rateLimited");
-        assert_eq!(process.calls.get(), 5);
+        assert_eq!(classification(&error), "ambiguousWrite");
+        assert_eq!(
+            transport
+                .github_write_retrying_refusals("gists", &json!({}))
+                .unwrap(),
+            json!({})
+        );
+        assert_eq!(process.calls.get(), 13);
+        assert_eq!(fixture.waits.get(), 2);
+        assert!(process.replies.borrow().is_empty());
+    }
+
+    #[test]
+    fn ado_interrupted_refusal_preserves_write_evidence_and_read_error() {
+        struct Interrupted(Cell<usize>);
+
+        impl Clock for Interrupted {
+            fn now(&self) -> Timestamp {
+                Timestamp::UNIX_EPOCH
+            }
+
+            fn wait(&self, _: Duration) -> Result<(), AppError> {
+                assert_eq!(self.0.get(), 0, "unexpected wait");
+                self.0.set(1);
+                Err(io::Error::other("scripted wait interruption").into())
+            }
+        }
+
+        let target = Target::repository("https://dev.azure.com/org/project/_git/repo").unwrap();
+        for mode in ["json-write", "patch-write", "read", "write-once"] {
+            let fixture = Fixture::new(vec![Ok(HttpResponse::new(
+                429,
+                BTreeMap::new(),
+                Vec::new(),
+            ))]);
+            let clock = Interrupted(Cell::new(0));
+            let mut transport = Transport::new(&target, None, &fixture, &fixture, &clock);
+            let error = match mode {
+                "json-write" => transport
+                    .request("resource", "POST", Some(&json!({})))
+                    .map(|_| ()),
+                "patch-write" => transport
+                    .ado_json_patch("resource", "PATCH", &json!([]), &[], "7.1")
+                    .map(|_| ()),
+                "read" => transport.request("resource", "GET", None).map(|_| ()),
+                "write-once" => transport
+                    .ado_write_once("resource", "POST", &json!({}))
+                    .map(|_| ()),
+                _ => panic!("unknown mode"),
+            }
+            .unwrap_err();
+            assert_eq!(fixture.calls.borrow().len(), 1, "{mode}");
+            if mode == "write-once" {
+                assert_eq!(classification(&error), "rateLimited");
+                assert_eq!(clock.0.get(), 0);
+            } else {
+                assert_eq!(clock.0.get(), 1);
+                assert_eq!(
+                    error.find_source::<io::Error>().unwrap().to_string(),
+                    "scripted wait interruption"
+                );
+                assert_eq!(
+                    classification(&error),
+                    if mode == "read" {
+                        "service"
+                    } else {
+                        "rateLimited"
+                    },
+                    "{mode}"
+                );
+            }
+        }
     }
 
     #[test]
@@ -1839,12 +2120,34 @@ mod tests {
                     vec![],
                 ),
                 ProcessOutput::new(false, vec![], b"HTTP 403 gh auth login".to_vec()),
-                ProcessOutput::new(false, b"HTTP/2 429\n\n{}".to_vec(), vec![]),
+                ProcessOutput::new(false, b"HTTP/2 429\n\n".to_vec(), vec![]),
                 ProcessOutput::new(
                     true,
                     br#"HTTP/2 200
 
 {"data":{"ok":true}}"#
+                        .to_vec(),
+                    vec![],
+                ),
+                ProcessOutput::new(
+                    false,
+                    br#"HTTP/2 403
+
+{"data":null,"errors":[{"type":"RATE_LIMITED"}]}"#
+                        .to_vec(),
+                    vec![],
+                ),
+                ProcessOutput::new(
+                    true,
+                    b"HTTP/2 200\n\n{\"data\":{\"ok\":true}}".to_vec(),
+                    vec![],
+                ),
+                ProcessOutput::new(false, b"HTTP/2 429\n\n{}".to_vec(), vec![]),
+                ProcessOutput::new(
+                    false,
+                    br#"HTTP/2 403
+
+{"data":{"created":{"id":"accepted"}},"errors":[{"type":"RATE_LIMITED"}]}"#
                         .to_vec(),
                     vec![],
                 ),
@@ -1866,6 +2169,158 @@ mod tests {
             .unwrap();
         assert_eq!(response["data"]["ok"], true);
         assert_eq!(process.calls.get(), 6);
-        assert_eq!(fixture.waits.get(), 1);
+        assert_eq!(
+            transport
+                .graphql_mutation("mutation { test }", &json!({}))
+                .unwrap()["data"]["ok"],
+            true
+        );
+        assert_eq!(process.calls.get(), 8);
+        let error = transport
+            .graphql_mutation("mutation { test }", &json!({}))
+            .unwrap_err();
+        assert_eq!(classification(&error), "ambiguousWrite");
+        assert_eq!(process.calls.get(), 10);
+        assert_eq!(fixture.waits.get(), 3);
+        assert!(process.replies.borrow().is_empty());
+    }
+
+    #[test]
+    fn graphql_partial_or_conflicting_responses_never_authorize_replay() {
+        struct SingleResponse {
+            output: RefCell<Option<ProcessOutput>>,
+            calls: Cell<usize>,
+        }
+
+        impl Process for SingleResponse {
+            fn execute(&self, _: &str, _: &[String], _: &[u8]) -> io::Result<ProcessOutput> {
+                self.calls.set(self.calls.get() + 1);
+                Ok(self.output.borrow_mut().take().expect("unexpected replay"))
+            }
+        }
+
+        let cases = [
+            (
+                403,
+                json!({"data":{"created":{"id":"accepted"}},"errors":[{"type":"RATE_LIMITED","message":"rate limit"}]}),
+                "",
+            ),
+            (
+                403,
+                json!({"data":{"created":{"id":"accepted"}},"errors":[{"message":"forbidden"}]}),
+                "",
+            ),
+            (
+                429,
+                json!({"data":{"created":{"id":"accepted"}},"errors":[{"type":"RATE_LIMITED"}]}),
+                "",
+            ),
+            (
+                403,
+                json!({"data":null,"errors":[{"type":"RATE_LIMITED"},{"message":"other failure"}]}),
+                "",
+            ),
+            (
+                429,
+                json!({"data":null,"errors":[{"type":"RATE_LIMITED"},{"message":"other failure"}]}),
+                "",
+            ),
+            (
+                403,
+                json!({"data":null,"errors":[{"type":"RATE_LIMITED","message":"permission denied"}]}),
+                "",
+            ),
+            (429, json!({"errors":"malformed"}), ""),
+            (403, json!({"message":"forbidden"}), "rate limit"),
+            (401, json!({"data":{"created":{"id":"accepted"}}}), ""),
+        ];
+        let target = Target::repository("https://github.com/org/repo").unwrap();
+        for (status, body, stderr) in cases {
+            let process = SingleResponse {
+                output: RefCell::new(Some(ProcessOutput::new(
+                    false,
+                    format!("HTTP/2 {status}\n\n{body}").into_bytes(),
+                    stderr.as_bytes().to_vec(),
+                ))),
+                calls: Cell::new(0),
+            };
+            let clock = Fixture::new(vec![]);
+            let transport = Transport::new(&target, None, &process, &clock, &clock);
+            let error = transport
+                .graphql_mutation("mutation { test }", &json!({}))
+                .unwrap_err();
+            assert_eq!(classification(&error), "ambiguousWrite", "{status} {body}");
+            assert_eq!(process.calls.get(), 1);
+            assert_eq!(clock.waits.get(), 0);
+        }
+        for (status, body, stderr) in [
+            (403, r#"{"data":{"created":{"id":"accepted"}"#, "rate limit"),
+            (403, r#"{"data":{"created":{"id":"accepted"}"#, "forbidden"),
+            (429, r#"{"data":{"created":{"id":"accepted"}"#, ""),
+            (403, "", "rate limit"),
+        ] {
+            let process = SingleResponse {
+                output: RefCell::new(Some(ProcessOutput::new(
+                    false,
+                    format!("HTTP/2 {status}\n\n{body}").into_bytes(),
+                    stderr.as_bytes().to_vec(),
+                ))),
+                calls: Cell::new(0),
+            };
+            let clock = Fixture::new(vec![]);
+            let transport = Transport::new(&target, None, &process, &clock, &clock);
+            let error = transport
+                .graphql_mutation("mutation { test }", &json!({}))
+                .unwrap_err();
+            assert_eq!(classification(&error), "ambiguousWrite", "{status} {body}");
+            assert_eq!(process.calls.get(), 1);
+            assert_eq!(clock.waits.get(), 0);
+        }
+    }
+
+    #[test]
+    fn graphql_interrupted_refusal_wait_retains_definite_failure() {
+        struct Interrupted {
+            calls: Cell<usize>,
+            waits: Cell<usize>,
+        }
+
+        impl Process for Interrupted {
+            fn execute(&self, _: &str, _: &[String], _: &[u8]) -> io::Result<ProcessOutput> {
+                assert_eq!(self.calls.get(), 0, "unexpected replay");
+                self.calls.set(1);
+                Ok(ProcessOutput::new(
+                    false,
+                    b"HTTP/2 429\n\n{}".to_vec(),
+                    vec![],
+                ))
+            }
+        }
+
+        impl Clock for Interrupted {
+            fn now(&self) -> Timestamp {
+                Timestamp::UNIX_EPOCH
+            }
+
+            fn wait(&self, _: Duration) -> Result<(), AppError> {
+                assert_eq!(self.waits.get(), 0, "unexpected wait");
+                self.waits.set(1);
+                Err(fail("interrupted", "scripted interruption"))
+            }
+        }
+
+        let process = Interrupted {
+            calls: Cell::new(0),
+            waits: Cell::new(0),
+        };
+        let http = Fixture::new(vec![]);
+        let target = Target::repository("https://github.com/org/repo").unwrap();
+        let transport = Transport::new(&target, None, &process, &http, &process);
+        let error = transport
+            .graphql_mutation("mutation { test }", &json!({}))
+            .unwrap_err();
+        assert_eq!(classification(&error), "explicitRateLimited");
+        assert_eq!(process.calls.get(), 1);
+        assert_eq!(process.waits.get(), 1);
     }
 }

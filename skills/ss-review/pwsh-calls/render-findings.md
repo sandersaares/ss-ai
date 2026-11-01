@@ -1,18 +1,13 @@
-```powershell
-pwsh -NoProfile -NonInteractive -File "{{SKILL_ROOT}}/scripts/ConvertTo-FindingMarkdown.ps1" `
-  -Path "{{SESSION_STATE}}/findings.json" `
-  -OutputDirectory "{{SESSION_STATE}}/rendered" `
-  -FindingId "{{IMPORTANT_FINDING_IDS}}" `
-  -AuditDocumentPath "{{SESSION_STATE}}/audit-findings.md" `
-  -OverviewPath "{{SESSION_STATE}}/content-overview.md"
+```text
+ss-ai workflow prepare-markdown --path "{{SESSION_STATE}}/findings.json" --output-directory "{{SESSION_STATE}}/rendered" --finding-id "{{IMPORTANT_FINDING_ID}}" --audit-document-path "{{SESSION_STATE}}/audit-findings.md" --overview-path "{{SESSION_STATE}}/content-overview.md"
 ```
 
 Renders the findings the audit must decide: one file per finding under `rendered/`, and one
 `audit-findings.md` collecting them for document review. In-session review displays each
 per-finding file verbatim, using the emitted `findings` entries' `findingId` and absolute `path`
-rather than reconstructing prose or enumerating old files in the output directory. `-AuditDocumentPath`
-honours `-FindingId`, so both cover only the named findings - policy-approved findings
-are not rendered and not presented. `-OverviewPath` prepends the content overview
+rather than reconstructing prose or enumerating old files in the output directory. `--audit-document-path`
+honours `--finding-id`, so both cover only the named findings - policy-approved findings
+are not rendered and not presented. `--overview-path` prepends the content overview
 to that document so the auditor has it before the findings. The emitted JSON reports
 `auditDocumentPath` and `auditDocumentUri`. Present `auditDocumentUri` as a named Markdown link
 whose destination is enclosed in angle brackets:
@@ -34,4 +29,4 @@ Placeholders to replace:
 |-------------|-------------|
 | `SKILL_ROOT` | Directory containing the active `SKILL.md`. |
 | `SESSION_STATE` | Session state directory for this review. |
-| `IMPORTANT_FINDING_IDS` | `auditFindingIds` from `get-next-auto-approval-finding.md`, joined as one comma separated value. |
+| `IMPORTANT_FINDING_ID` | One of the `auditFindingIds` from `get-next-auto-approval-finding.md`; repeat `--finding-id` for every identifier. |
