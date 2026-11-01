@@ -1,6 +1,6 @@
 [package]
 name = "ss-ai-review-fuzz"
-description = "Bounded provider capture fuzz target for ss-ai-review"
+description = "Bounded provider capture and overview fuzz targets for ss-ai-review"
 version = "0.1.0"
 publish = false
 authors.workspace = true
@@ -26,6 +26,13 @@ ss-ai-review = { workspace = true }
 [[bin]]
 name = "provider_capture"
 path = "fuzz_targets/provider_capture.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "overview_validator"
+path = "fuzz_targets/overview_validator.rs"
 test = false
 doc = false
 bench = false

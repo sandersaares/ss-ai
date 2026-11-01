@@ -42,6 +42,7 @@ url = { version = "2.5.7", default-features = false, features = ["std"] }
 uuid = { version = "1.18.1", default-features = false, features = ["std"] }
 winapi-util = { version = "0.1.11", default-features = false }
 windows-sys = { version = "0.61.2", default-features = false }
+zip = { version = "2.4.2", default-features = false }
 
 # Folo is the canonical lint configuration; do not customize this copy.
 # When upgrading tooling versions, copy-paste the full lint section and

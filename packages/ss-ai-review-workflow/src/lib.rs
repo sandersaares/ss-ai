@@ -1,5 +1,6 @@
 //! Local finding and workflow plan operations for review workflows.
 #![cfg_attr(docsrs, feature(doc_cfg))]
+#![cfg_attr(coverage_nightly, feature(coverage_attribute))]
 
 pub mod anchors;
 pub mod approved;
@@ -12,6 +13,7 @@ pub mod focus_area_source;
 pub mod focus_cache;
 pub mod instruction_sources;
 pub mod markdown;
+pub mod overview_artifact;
 pub mod report_html;
 pub mod report_tools;
 pub mod review_work;

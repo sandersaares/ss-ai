@@ -5,7 +5,7 @@ use std::path::Path;
 
 use ohno::AppError;
 
-use crate::{Clock, Http, Process, cargo, context, git, workflow};
+use crate::{Clock, Http, Process, cargo, context, git, overview, workflow};
 
 /// Runs a complete command with injected external boundaries.
 pub fn run(
@@ -59,6 +59,15 @@ fn dispatch(
         .is_some_and(|argument| argument == "workflow")
     {
         return workflow::run(local_arguments(arguments), process, clock);
+    }
+    if arguments
+        .get(1)
+        .is_some_and(|argument| argument == "review")
+        && arguments
+            .get(2)
+            .is_some_and(|argument| argument == "publish-overview")
+    {
+        return overview::run(arguments, process, http, clock);
     }
     match directory {
         Some(directory) => ss_ai_review::run_in(arguments, process, http, clock, directory),

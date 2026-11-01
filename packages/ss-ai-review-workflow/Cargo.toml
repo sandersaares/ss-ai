@@ -27,6 +27,7 @@ ss-ai-review-context = { workspace = true }
 ss-ai-runtime = { workspace = true }
 tempfile = { workspace = true }
 url = { workspace = true }
+zip = { workspace = true }
 
 [build-dependencies]
 sha2 = { workspace = true }

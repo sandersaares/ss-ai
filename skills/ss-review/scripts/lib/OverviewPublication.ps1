@@ -4,6 +4,7 @@
 # Ref: docs/implementation.md, "Initial overview publication".
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
+$PSNativeCommandUseErrorActionPreference = $true
 
 # Shared preparation/publication gate; fenced examples are not document headings.
 function Assert-ReviewOverviewStructure {
@@ -151,6 +152,75 @@ function Write-OverviewArchive {
     }
 }
 
+# Keeps persisted artifact paths inside the publication directory, including
+# retry directories, without following a link outside the publication tree.
+function Resolve-OverviewArtifactPath {
+    param(
+        [Parameter(Mandatory)][string] $Path,
+        [Parameter(Mandatory)][string] $PublicationDirectory
+    )
+
+    $root = [IO.Path]::TrimEndingDirectorySeparator([IO.Path]::GetFullPath((Resolve-PullRequestPath -Path $PublicationDirectory)))
+    $fullPath = [IO.Path]::GetFullPath((Resolve-PullRequestPath -Path $Path))
+    $prefix = $root + [IO.Path]::DirectorySeparatorChar
+    if (-not $fullPath.StartsWith($prefix, [StringComparison]::Ordinal)) {
+        throw 'The overview artifact path must be inside the publication directory.'
+    }
+
+    $relative = [IO.Path]::GetRelativePath($root, $fullPath)
+    $current = $root
+    $parts = $relative.Split([char[]] @([IO.Path]::DirectorySeparatorChar, [IO.Path]::AltDirectorySeparatorChar), [StringSplitOptions]::RemoveEmptyEntries)
+    for ($index = -1; $index -lt $parts.Length; $index++) {
+        if ($index -ge 0) { $current = Join-Path $current $parts[$index] }
+        try {
+            $attributes = [IO.File]::GetAttributes($current)
+        } catch [IO.FileNotFoundException] {
+            # A new archive may not exist yet, but its parent must already exist.
+            if ($index -eq ($parts.Length - 1)) { break }
+            throw
+        }
+        if (($attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) {
+            throw 'Overview artifact paths cannot traverse a symbolic link.'
+        }
+    }
+    $fullPath
+}
+
+# Picks the matching legacy or run-specific manifest without rewriting either.
+function Get-OverviewHtmlManifest {
+    param(
+        [Parameter(Mandatory)][System.Collections.IDictionary] $Snapshot,
+        [Parameter(Mandatory)][string] $PublicationDirectory
+    )
+
+    $legacy = Join-Path $PublicationDirectory 'html.json'
+    $legacyHtml = $null
+    if ([IO.File]::Exists($legacy)) {
+        $legacy = Resolve-OverviewArtifactPath -Path $legacy -PublicationDirectory $PublicationDirectory
+        $legacyHtml = ConvertFrom-JsonVerbatim -Text (Read-PullRequestFileText -Path $legacy)
+        if (-not (Test-JsonProperty -Node $legacyHtml -Name 'sourceHash') -or $legacyHtml['sourceHash'] -isnot [string]) {
+            throw 'The overview HTML manifest has no source hash.'
+        }
+        if ($legacyHtml['sourceHash'] -ceq $Snapshot['markdownHash']) {
+            return @{ path = $legacy; html = $legacyHtml }
+        }
+    }
+    $runId = $Snapshot['runId']
+    if ($runId -isnot [string] -or $runId -cnotmatch '^[0-9a-f]{32}$') {
+        throw 'The overview snapshot has an invalid run identifier.'
+    }
+    $generation = Join-Path (Join-Path $PublicationDirectory $runId) 'html.json'
+    if ([IO.File]::Exists($generation)) {
+        $generation = Resolve-OverviewArtifactPath -Path $generation -PublicationDirectory $PublicationDirectory
+        return @{ path = $generation; html = ConvertFrom-JsonVerbatim -Text (Read-PullRequestFileText -Path $generation) }
+    }
+    if ($null -ne $legacyHtml) {
+        # A previous generation remains evidence; prepare this run separately.
+        return @{ path = $generation; html = $null }
+    }
+    $null
+}
+
 function Invoke-OverviewWrite {
     param(
         [Parameter(Mandatory)][System.Collections.IDictionary] $Result,
@@ -226,26 +296,57 @@ function Invoke-InitialOverviewPublication {
                 $result['snapshot'] = $snapshot
                 if ($snapshot['target']['platform'] -eq 'azureDevOps') {
                     $result['stage'] = 'renderHtml'
-                    $htmlPath = Join-Path $OutputDirectory 'overview-publication\report.html'
-                    $htmlManifestPath = Join-Path $OutputDirectory 'overview-publication\html.json'
-                    if ([IO.File]::Exists($htmlManifestPath)) {
-                        $html = ConvertFrom-JsonVerbatim -Text ((Read-PullRequestFileText -Path ($htmlManifestPath)))
+                    $publicationDirectory = Join-Path $OutputDirectory 'overview-publication'
+                    $htmlPath = Join-Path $publicationDirectory 'report.html'
+                    $htmlManifestPath = Join-Path $publicationDirectory 'html.json'
+                    $existingHtml = Get-OverviewHtmlManifest -Snapshot $snapshot -PublicationDirectory $publicationDirectory
+                    if ($null -ne $existingHtml -and $null -ne $existingHtml['html']) {
+                        $html = $existingHtml['html']
+                        $htmlManifestPath = $existingHtml['path']
+                        if (Test-JsonProperty -Node $html -Name 'htmlPath') {
+                            if ($html['htmlPath'] -isnot [string] -or [string]::IsNullOrWhiteSpace($html['htmlPath'])) {
+                                throw 'The overview HTML manifest has an invalid report path.'
+                            }
+                            $htmlPath = $html['htmlPath']
+                        }
+                        $htmlPath = Resolve-OverviewArtifactPath -Path $htmlPath -PublicationDirectory $publicationDirectory
                         if ($html['sourceHash'] -cne $snapshot['markdownHash'] -or
                             (Get-ReviewReportHash -Bytes ((Read-PullRequestFileBytes -Path ($htmlPath)))) -cne $html['htmlHash']) {
                             throw 'The frozen HTML report no longer matches its snapshot.'
                         }
                     } else {
+                        if ($null -ne $existingHtml) {
+                            $htmlManifestPath = $existingHtml['path']
+                            $generationDirectory = Split-Path -Parent $htmlManifestPath
+                            $null = Resolve-OverviewArtifactPath -Path $generationDirectory -PublicationDirectory $publicationDirectory
+                            [IO.Directory]::CreateDirectory($generationDirectory) | Out-Null
+                            $htmlPath = Resolve-OverviewArtifactPath -Path (Join-Path $generationDirectory 'report.html') -PublicationDirectory $publicationDirectory
+                            if ([IO.File]::Exists($htmlPath) -or [IO.File]::Exists((Join-Path $generationDirectory 'report.zip'))) {
+                                throw 'Unrecorded overview artifacts already exist for this snapshot.'
+                            }
+                        }
                         $html = & $RenderHtml $snapshot['markdownPath'] $htmlPath
                         Write-PullRequestOutputFileAtomically -Path $htmlManifestPath -Content (ConvertTo-JsonText -Value $html)
                     }
                     $snapshot['htmlPath'] = $htmlPath
                     $snapshot['htmlHash'] = $html['htmlHash']
-                    $archivePath = Join-Path $OutputDirectory 'overview-publication\report.zip'
+                    $archivePath = Join-Path (Split-Path -Parent $htmlPath) 'report.zip'
+                    if (Test-JsonProperty -Node $html -Name 'archivePath') {
+                        if ($html['archivePath'] -isnot [string] -or [string]::IsNullOrWhiteSpace($html['archivePath'])) {
+                            throw 'The overview HTML manifest has an invalid archive path.'
+                        }
+                        $archivePath = $html['archivePath']
+                    }
+                    $archivePath = Resolve-OverviewArtifactPath -Path $archivePath -PublicationDirectory $publicationDirectory
                     if (Test-JsonProperty -Node $html -Name 'archiveHash') {
                         if ((Get-ReviewReportHash -Bytes ((Read-PullRequestFileBytes -Path ($archivePath)))) -cne $html['archiveHash']) {
                             throw 'The frozen HTML archive no longer matches its snapshot.'
                         }
                     } else {
+                        # An unrecorded archive may belong to another interrupted attempt.
+                        if ([IO.File]::Exists($archivePath)) {
+                            throw 'An unrecorded overview archive already exists.'
+                        }
                         $archive = Write-OverviewArchive -HtmlPath $htmlPath -ArchivePath $archivePath
                         $html['archiveHash'] = $archive['archiveHash']
                         Write-PullRequestOutputFileAtomically -Path $htmlManifestPath -Content (ConvertTo-JsonText -Value $html)

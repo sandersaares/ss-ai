@@ -23,7 +23,8 @@ use crate::selection::{Candidate, Comment, Journal, Provider, RemoteClaim, State
 use crate::target::{Platform, Target};
 use crate::transport::Transport;
 use crate::{
-    Clock, Http, HttpResponse, NativeHttp, NativeProcess, Process, ProcessOutput, SystemClock,
+    Clock, Http, HttpResponse, NativeHttp, NativeProcess, OverviewInput, OverviewRender, Process,
+    ProcessOutput, SystemClock,
 };
 
 // Pin concrete binary/test boundary contracts without promising a supported Rust SDK.
@@ -31,6 +32,8 @@ static_assertions::assert_impl_all!(SystemClock: UnwindSafe, RefUnwindSafe);
 static_assertions::assert_impl_all!(NativeProcess: UnwindSafe, RefUnwindSafe);
 static_assertions::assert_impl_all!(ProcessOutput: UnwindSafe, RefUnwindSafe);
 static_assertions::assert_impl_all!(HttpResponse: UnwindSafe, RefUnwindSafe);
+static_assertions::assert_impl_all!(OverviewInput<'static>: UnwindSafe, RefUnwindSafe);
+static_assertions::assert_impl_all!(OverviewRender: UnwindSafe, RefUnwindSafe);
 // reqwest's blocking client owns a worker join handle without these guarantees.
 static_assertions::assert_not_impl_any!(NativeHttp: UnwindSafe, RefUnwindSafe);
 

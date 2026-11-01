@@ -5,6 +5,7 @@ mod cargo;
 mod command;
 mod context;
 mod git;
+mod overview;
 mod workflow;
 
 pub use cargo::run as run_cargo;
