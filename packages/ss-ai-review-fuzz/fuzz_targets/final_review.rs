@@ -7,23 +7,38 @@
 )]
 
 use std::cell::{Cell, RefCell};
-use std::fs;
+use std::fs::remove_file;
 use std::io;
 use std::path::PathBuf;
+use std::sync::LazyLock;
 use std::time::Duration;
 
 use jiff::Timestamp;
 use libfuzzer_sys::fuzz_target;
 use ohno::AppError;
-use serde_json::{Value, json};
+use serde_json::{Value, from_slice, from_str, json, to_vec};
 use ss_ai_review::{
     Clock, FinalReviewInput, Http, HttpResponse, Process, ProcessOutput, publish_final_review,
 };
 use ss_ai_runtime::FileTransaction;
 
+/// Shares immutable capture data while each case owns its provider state.
+static FIXTURES: LazyLock<(Value, Value)> = LazyLock::new(|| {
+    (
+        from_str(include_str!(
+            "../../../tests/fixtures/ss-review-native-capture/github.json"
+        ))
+        .unwrap(),
+        from_str(include_str!(
+            "../../../tests/fixtures/ss-review-native-capture/github-expected.json"
+        ))
+        .unwrap(),
+    )
+});
+
 /// Models accepted writes separately from the response returned to the caller.
-struct Provider {
-    responses: Value,
+struct Provider<'a> {
+    responses: &'a Value,
     fault: u8,
     fault_index: usize,
     requests: Cell<usize>,
@@ -34,10 +49,12 @@ struct Provider {
     summary: RefCell<Option<String>>,
 }
 
-impl Provider {
+impl Provider<'_> {
     /// Bounds all provider activity, including erroneous retries and pagination.
     fn request(&self) {
         let count = self.requests.get() + 1;
+        // An arbitrary workload guard with headroom for capture, writes, and
+        // readback of the bounded plan; this is not a provider protocol limit.
         assert!(count <= 48, "provider request budget exhausted");
         self.requests.set(count);
     }
@@ -90,9 +107,9 @@ impl Provider {
 
     /// Implements only the routes used by this publication; all others fail.
     fn response(&self, route: &str, input: &[u8]) -> io::Result<Value> {
-        let responses = &self.responses;
+        let responses = self.responses;
         if route == "graphql" {
-            let request: Value = serde_json::from_slice(input).unwrap();
+            let request: Value = from_slice(input).unwrap();
             let query = request["query"].as_str().unwrap();
             let variables = &request["variables"];
             if query.contains("states:[PENDING]") {
@@ -177,7 +194,7 @@ impl Provider {
     }
 }
 
-impl Process for Provider {
+impl Process for Provider<'_> {
     fn execute(
         &self,
         program: &str,
@@ -188,15 +205,11 @@ impl Process for Provider {
         assert_eq!(program, "gh");
         assert_eq!(arguments[0], "api");
         let response = self.response(&arguments[1], input)?;
-        Ok(ProcessOutput::new(
-            true,
-            serde_json::to_vec(&response).unwrap(),
-            vec![],
-        ))
+        Ok(ProcessOutput::new(true, to_vec(&response).unwrap(), vec![]))
     }
 }
 
-impl Http for Provider {
+impl Http for Provider<'_> {
     fn send(&self, _: &str, _: &str, _: &str, _: Option<&[u8]>) -> Result<HttpResponse, AppError> {
         panic!("GitHub publication must not use HTTP")
     }
@@ -217,19 +230,14 @@ impl Clock for FixedClock {
 
 /// Runs one transaction and checks that its durable result blocks replay.
 fn exercise(bytes: &[u8]) {
+    // An arbitrary small workload that still exercises ordered findings and
+    // failures at different positions in a publication.
     let count = usize::from(bytes[0] % 3) + 1;
     let fault = bytes[1] % 6;
     let fault_index = usize::from(bytes[2]) % count;
-    let fixture: Value = serde_json::from_str(include_str!(
-        "../../../tests/fixtures/ss-review-native-capture/github.json"
-    ))
-    .unwrap();
-    let expected: Value = serde_json::from_str(include_str!(
-        "../../../tests/fixtures/ss-review-native-capture/github-expected.json"
-    ))
-    .unwrap();
+    let (fixture, expected) = &*FIXTURES;
     let provider = Provider {
-        responses: fixture["responses"].clone(),
+        responses: &fixture["responses"],
         fault,
         fault_index,
         requests: Cell::new(0),
@@ -265,7 +273,7 @@ fn exercise(bytes: &[u8]) {
         .join("../../target")
         .join(format!("final-review-fuzz-{}.json", std::process::id()));
     let mut journal = FileTransaction::open(&path, &FixedClock).unwrap();
-    match fs::remove_file(&path) {
+    match remove_file(&path) {
         Ok(()) => {}
         Err(error) if error.kind() == io::ErrorKind::NotFound => {}
         Err(error) => panic!("cannot reset journal: {error}"),
@@ -305,11 +313,12 @@ fn exercise(bytes: &[u8]) {
         requests,
         "replay contacted provider"
     );
-    fs::remove_file(&path).unwrap();
+    remove_file(&path).unwrap();
 }
 
 fuzz_target!(|input: &[u8]| {
     // A small fixed prefix selects a bounded plan and one publication failure.
+    // The upper length is an arbitrary input-size cap; trailing bytes are ignored.
     if input.len() < 3 || input.len() > 64 {
         return;
     }

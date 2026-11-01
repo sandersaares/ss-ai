@@ -1,7 +1,7 @@
 //! Composes the final review transaction with the provider-specific operations.
 
 use std::any::type_name;
-use std::fmt;
+use std::fmt::{Debug, Formatter, Result as FmtResult};
 use std::path::Path;
 
 use ohno::AppError;
@@ -47,8 +47,8 @@ pub struct FinalReviewInput<'a> {
     pub tenant: Option<&'a str>,
 }
 
-impl fmt::Debug for FinalReviewInput<'_> {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+impl Debug for FinalReviewInput<'_> {
+    fn fmt(&self, f: &mut Formatter<'_>) -> FmtResult {
         f.debug_struct(type_name::<Self>())
             .field("finding_count", &self.plan.len())
             .field("approve_merge", &self.approve_merge)
@@ -115,6 +115,8 @@ pub fn publish_final_review(
             "Pull request is closed; explicit authorization is required",
         ));
     }
+    // Completing a PR can move its merge base while the reviewed diff remains
+    // immutable; the source commit must still match for every publication.
     if !state
         .get("sourceCommit")
         .and_then(Value::as_str)
@@ -262,6 +264,7 @@ impl Effects for ProviderEffects<'_> {
             Platform::GitHub => {
                 final_review_github::start(&self.transport, &self.target, &self.state)
             }
+
             Platform::AzureDevOps => {
                 final_review_ado::start(&mut self.transport, &self.target, &self.state)
             }
@@ -378,5 +381,34 @@ impl Effects for ProviderEffects<'_> {
                 final_review_ado::discard(&mut self.transport, &self.target, &review)
             }
         }
+    }
+}
+
+#[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
+mod tests {
+    use serde_json::json;
+
+    use super::FinalReviewInput;
+
+    #[test]
+    fn final_review_input_debug_formats() {
+        let target = json!({"platform": "gitHub"});
+        let identity = json!({"id": "reviewer"});
+        let plan = [json!({"body": "finding"})];
+        let input = FinalReviewInput {
+            target: &target,
+            plan: &plan,
+            summary_body: "summary",
+            expected_evidence_hash: "hash",
+            expected_identity: &identity,
+            source_commit: "source",
+            merge_base_commit: "base",
+            discard_pending_review: false,
+            publish_closed: true,
+            approve_merge: false,
+            tenant: None,
+        };
+        _ = format!("{input:?}");
     }
 }

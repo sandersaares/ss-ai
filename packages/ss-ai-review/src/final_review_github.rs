@@ -11,13 +11,14 @@ use crate::json::{array, boolean, field, nullable_field, text};
 use crate::target::{Platform, Target, escape};
 use crate::transport::Transport;
 
-// GitHub limits an unnested connection page to 100 nodes.
+// Use GitHub's maximum unnested connection page size.
 const PAGE_SIZE: u32 = 100;
 // Nested thread/comment pages multiply their node count; match capture's bound.
 const THREAD_PAGE_SIZE: u32 = 50;
-// A finite limit rejects a provider that never terminates its connection.
+// This arbitrarily generous cap bounds work if a provider never terminates.
 const MAX_PAGES: usize = 1000;
-// GitHub permits one pending review per account.
+// GitHub permits one pending review per account; this arbitrary small page
+// leaves room for unexpected extra records without fetching a full page.
 const PENDING_PAGE_SIZE: u32 = 10;
 
 const PENDING: &str = "query($owner:String!,$repo:String!,$num:Int!,$login:String!,$size:Int!){
@@ -498,17 +499,26 @@ fn connection(
     let mut seen = HashSet::new();
     let mut nodes = Vec::new();
     for _ in 0..MAX_PAGES {
-        let page = if let Some(page) = first.take() {
+        let mut page = if let Some(page) = first.take() {
             page
         } else {
             variables
                 .as_object_mut()
                 .ok_or_else(|| fail("service", "Invalid query variables"))?
                 .insert("cur".to_owned(), json!(cursor));
-            let response = transport.graphql(query, &variables)?;
-            node(&response, path)?.clone()
+            let mut response = transport.graphql(query, &variables)?;
+            response
+                .pointer_mut(path)
+                .filter(|value| value.is_object())
+                .ok_or_else(|| fail("service", format!("Missing GitHub node {path}")))?
+                .take()
         };
-        nodes.extend_from_slice(array(field(&page, "nodes")?)?);
+        array(field(&page, "nodes")?)?;
+        let page_nodes = page
+            .get_mut("nodes")
+            .and_then(Value::as_array_mut)
+            .ok_or_else(|| fail("service", "Expected an array in service evidence"))?;
+        nodes.append(page_nodes);
         let info = field(&page, "pageInfo")?;
         if !boolean(field(info, "hasNextPage")?)? {
             return Ok(nodes);
@@ -582,15 +592,16 @@ mod tests {
 
     use jiff::Timestamp;
     use ohno::AppError;
-    use serde_json::{Value, json};
+    use serde_json::{Value, from_slice, json};
 
     use super::{
-        add, complete, discard, file_identity, reopen, start, state, verify, verify_findings,
+        add, complete, connection, discard, file_identity, reopen, start, state, verify,
+        verify_findings,
     };
-    use crate::error::{classification, fail};
+    use crate::error::fail;
     use crate::target::Target;
     use crate::transport::Transport;
-    use crate::{Clock, Http, HttpResponse, Process, ProcessOutput};
+    use crate::{Clock, Http, HttpResponse, Process, ProcessOutput, classification};
 
     /// Strict scripted process proves routes, bodies and number of attempts.
     struct Script {
@@ -633,7 +644,7 @@ mod tests {
             assert_eq!(program, "gh");
             assert_eq!(arguments.get(1), Some(&route));
             if route == "graphql" {
-                let payload: Value = serde_json::from_slice(input).unwrap();
+                let payload: Value = from_slice(input).unwrap();
                 assert_eq!(payload["variables"], variables);
                 self.queries
                     .borrow_mut()
@@ -911,6 +922,95 @@ mod tests {
         assert_eq!(result["comments"][1]["isPublished"], false);
         assert_eq!(result["comments"][0]["threadId"], "thread");
         assert_eq!(result["comments"][1]["side"], "LEFT");
+        script.done();
+    }
+
+    #[test]
+    fn connection_preserves_supplied_and_fetched_nodes() {
+        let script = Script::new(vec![(
+            "graphql",
+            json!({"cur":"next"}),
+            true,
+            json!({"data":{"connection":{"nodes":[{"id":"second","body":"evidence"}],
+                "pageInfo":{"hasNextPage":false,"endCursor":null}}}}),
+        )]);
+        let target = target();
+        let transport = Transport::new(&target, None, &script, &NoHttp, &NoWait);
+        let first = json!({"nodes":[{"id":"first","body":"evidence"}],
+            "pageInfo":{"hasNextPage":true,"endCursor":"next"}});
+        let result = connection(
+            &transport,
+            "query",
+            json!({}),
+            "/data/connection",
+            Some(first),
+        )
+        .unwrap();
+        assert_eq!(
+            result,
+            vec![
+                json!({"id":"first","body":"evidence"}),
+                json!({"id":"second","body":"evidence"}),
+            ]
+        );
+        script.done();
+    }
+
+    #[test]
+    fn connection_rejects_malformed_pages_and_cursor_cycles() {
+        for page in [
+            json!({"pageInfo":{"hasNextPage":false}}),
+            json!({"nodes":null,"pageInfo":{"hasNextPage":false}}),
+            json!({"nodes":{},"pageInfo":{"hasNextPage":false}}),
+            json!({"nodes":[]}),
+            json!({"nodes":[],"pageInfo":{"hasNextPage":true,"endCursor":null}}),
+        ] {
+            let script = Script::new(vec![]);
+            let target = target();
+            let transport = Transport::new(&target, None, &script, &NoHttp, &NoWait);
+            let error = connection(
+                &transport,
+                "query",
+                json!({}),
+                "/data/connection",
+                Some(page),
+            )
+            .unwrap_err();
+            assert_eq!(classification(&error), "service");
+            script.done();
+        }
+
+        let script = Script::new(vec![(
+            "graphql",
+            json!({"cur":"same"}),
+            true,
+            json!({"data":{"connection":{"nodes":[],"pageInfo":{
+                "hasNextPage":true,"endCursor":"same"}}}}),
+        )]);
+        let target = target();
+        let transport = Transport::new(&target, None, &script, &NoHttp, &NoWait);
+        let first = json!({"nodes":[],"pageInfo":{"hasNextPage":true,"endCursor":"same"}});
+        let error = connection(
+            &transport,
+            "query",
+            json!({}),
+            "/data/connection",
+            Some(first),
+        )
+        .unwrap_err();
+        assert_eq!(classification(&error), "service");
+        script.done();
+
+        let script = Script::new(vec![(
+            "graphql",
+            json!({"cur":null}),
+            true,
+            json!({"data":{}}),
+        )]);
+        let transport = Transport::new(&target, None, &script, &NoHttp, &NoWait);
+        let error =
+            connection(&transport, "query", json!({}), "/data/connection", None).unwrap_err();
+        assert_eq!(classification(&error), "service");
         script.done();
     }
 

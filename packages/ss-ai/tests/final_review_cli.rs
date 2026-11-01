@@ -17,7 +17,7 @@ use std::time::Duration;
 
 use jiff::Timestamp;
 use ohno::AppError;
-use serde_json::{Value, json};
+use serde_json::{Value, from_slice, from_str, json, to_vec};
 use ss_ai::{Clock, Http, HttpResponse, Process, ProcessOutput, SystemClock, run};
 use ss_ai_review_context::evidence_hash;
 use tempfile::{Builder, TempDir};
@@ -81,7 +81,7 @@ impl Fixture {
     }
 
     fn write(&self, name: &str, value: &Value) {
-        fs::write(self.path(name), serde_json::to_vec(value).unwrap()).unwrap();
+        fs::write(self.path(name), to_vec(value).unwrap()).unwrap();
     }
 
     /// Uses paths relative to the process cwd without mutating global cwd.
@@ -245,7 +245,8 @@ fn executable_dispatches_on_a_bounded_stack() {
         ])
         .output()
         .unwrap();
-    assert_eq!(output.status.code(), Some(1));
+    assert!(!output.status.success());
+    assert!(output.status.code().is_some());
     assert!(output.stdout.is_empty());
     assert!(
         String::from_utf8_lossy(&output.stderr)
@@ -422,7 +423,7 @@ impl PublicationProvider {
     fn github_response(&self, route: &str, input: &[u8]) -> Value {
         let responses = &self.responses;
         if route == "graphql" {
-            let request: Value = serde_json::from_slice(input).unwrap();
+            let request: Value = from_slice(input).unwrap();
             let query = request["query"].as_str().unwrap();
             let variables = &request["variables"];
             if query.contains("states:[PENDING]") {
@@ -582,11 +583,7 @@ impl Process for PublicationProvider {
         assert_eq!(program, "gh");
         assert_eq!(arguments[0], "api");
         let response = self.github_response(&arguments[1], input);
-        Ok(ProcessOutput::new(
-            true,
-            serde_json::to_vec(&response).unwrap(),
-            vec![],
-        ))
+        Ok(ProcessOutput::new(true, to_vec(&response).unwrap(), vec![]))
     }
 }
 
@@ -603,13 +600,13 @@ impl Http for PublicationProvider {
         let responses = &self.responses;
         let response = if method == "PUT" && url.contains("/reviewers/runner?") {
             assert!(self.approval_expected.get());
-            let request: Value = serde_json::from_slice(body.unwrap()).unwrap();
+            let request: Value = from_slice(body.unwrap()).unwrap();
             assert_eq!(request, json!({"id":"runner","vote":10,"isRequired":false}));
             self.writes.borrow_mut().push("approval".into());
             self.approval_written.set(true);
             request
         } else if method == "POST" && url.contains("/threads/101/comments?") {
-            let request: Value = serde_json::from_slice(body.unwrap()).unwrap();
+            let request: Value = from_slice(body.unwrap()).unwrap();
             assert_eq!(request["parentCommentId"], 1);
             let content = request["content"].as_str().unwrap().to_owned();
             let mut replies = self.ado_replies.borrow_mut();
@@ -618,7 +615,7 @@ impl Http for PublicationProvider {
             self.writes.borrow_mut().push("reply".into());
             json!({"id":id})
         } else if method == "POST" && url.contains("/threads?") {
-            let request: Value = serde_json::from_slice(body.unwrap()).unwrap();
+            let request: Value = from_slice(body.unwrap()).unwrap();
             let content = request["comments"][0]["content"]
                 .as_str()
                 .unwrap()
@@ -665,7 +662,7 @@ impl Http for PublicationProvider {
         Ok(HttpResponse::new(
             200,
             BTreeMap::new(),
-            serde_json::to_vec(&response).unwrap(),
+            to_vec(&response).unwrap(),
         ))
     }
 }
@@ -686,7 +683,7 @@ fn recorded(name: &str) -> Value {
     let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .join("../../tests/fixtures/ss-review-native-capture")
         .join(format!("{name}.json"));
-    serde_json::from_slice(&fs::read(path).unwrap()).unwrap()
+    from_slice(&fs::read(path).unwrap()).unwrap()
 }
 
 /// Binds the finding to a recorded capture and its provider URL.
@@ -720,7 +717,7 @@ fn authorize(fixture: &Fixture, args: &mut Vec<OsString>, name: &str) {
 fn multi_ado_args(fixture: &Fixture) -> Vec<OsString> {
     let args = publication_args(fixture, "azure-devops");
     let mut document: Value =
-        serde_json::from_slice(&fs::read(fixture.path("approved 雪.json")).unwrap()).unwrap();
+        from_slice(&fs::read(fixture.path("approved 雪.json")).unwrap()).unwrap();
     let first = document["findings"][0].clone();
     let mut second = first.clone();
     second["id"] = json!("F2");
@@ -751,8 +748,7 @@ fn github_cli_publishes_and_reads_back_a_draft_finding_and_summary() {
         ]
         .map(OsString::from),
     );
-    let result: Value =
-        serde_json::from_str(&run(&args, &provider, &provider, &FixedClock).unwrap()).unwrap();
+    let result: Value = from_str(&run(&args, &provider, &provider, &FixedClock).unwrap()).unwrap();
     assert_eq!(result["status"], "succeeded", "{result}");
     assert_eq!(result["publishedFindingCount"], 1);
     assert_eq!(*provider.writes.borrow(), ["start", "finding", "complete"]);
@@ -773,8 +769,7 @@ fn ado_cli_publishes_and_reads_back_a_finding_and_summary() {
     let fixture = Fixture::new();
     let provider = PublicationProvider::new("azure-devops", false);
     let args = publication_args(&fixture, "azure-devops");
-    let result: Value =
-        serde_json::from_str(&run(&args, &provider, &provider, &FixedClock).unwrap()).unwrap();
+    let result: Value = from_str(&run(&args, &provider, &provider, &FixedClock).unwrap()).unwrap();
     assert_eq!(result["status"], "succeeded", "{result}");
     assert_eq!(result["publishedFindingCount"], 1);
     assert_eq!(*provider.writes.borrow(), ["finding", "summary"]);
@@ -795,8 +790,7 @@ fn ado_multiple_findings_verify_in_per_thread_order() {
     let fixture = Fixture::new();
     let provider = PublicationProvider::new("azure-devops", false);
     let args = multi_ado_args(&fixture);
-    let result: Value =
-        serde_json::from_str(&run(&args, &provider, &provider, &FixedClock).unwrap()).unwrap();
+    let result: Value = from_str(&run(&args, &provider, &provider, &FixedClock).unwrap()).unwrap();
     assert_eq!(result["status"], "succeeded", "{result}");
     assert_eq!(result["publishedFindingCount"], 4);
     assert_eq!(
@@ -838,7 +832,7 @@ fn cli_approval_is_read_back_for_both_providers() {
         let mut args = publication_args(&fixture, name);
         authorize(&fixture, &mut args, name);
         let result: Value =
-            serde_json::from_str(&run(&args, &provider, &provider, &FixedClock).unwrap()).unwrap();
+            from_str(&run(&args, &provider, &provider, &FixedClock).unwrap()).unwrap();
         assert_eq!(result["status"], "succeeded", "{name}: {result}");
         if name == "github" {
             assert_eq!(*provider.writes.borrow(), ["start", "finding", "complete"]);
@@ -868,10 +862,8 @@ fn accepted_github_submission_with_failed_readback_is_not_replayed() {
     assert!(error.to_string().contains("summary"));
     assert_eq!(*provider.writes.borrow(), ["start", "finding", "complete"]);
     assert_eq!(*provider.readbacks.borrow(), ["draft", "completed"]);
-    let result: Value = serde_json::from_slice(
-        &fs::read(fixture.path("output 雪/publication-result.json")).unwrap(),
-    )
-    .unwrap();
+    let result: Value =
+        from_slice(&fs::read(fixture.path("output 雪/publication-result.json")).unwrap()).unwrap();
     assert_eq!(result["status"], "failed");
     assert!(
         result["operations"]

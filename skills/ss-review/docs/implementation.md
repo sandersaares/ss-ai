@@ -1070,10 +1070,11 @@ from the captured commit pair and fails if either commit is unavailable.
 
 Service-specific change identities remain adapter data where a platform needs
 them to place comments. The installed `ss-ai git diff` operation owns
-exact Git comparison and path/hunk parsing. The PowerShell adapter maps the
-result into the reviewed-commit model and retains finding lookup and hunk
-membership. Parser fixtures invoke the same native parser; isolated Rust
-integration tests exercise the real Git process boundary.
+exact Git comparison and path/hunk parsing. Final review publication uses the
+native comparison directly to resolve finding anchors and hunk membership.
+Retained PowerShell consumers map the result into their reviewed-commit model.
+Parser fixtures invoke the same native parser; isolated Rust integration tests
+exercise the real Git process boundary.
 
 ## Finding rendering
 

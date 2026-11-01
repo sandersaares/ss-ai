@@ -670,11 +670,11 @@ mod tests {
     use std::io;
     use std::path::Path;
 
-    use serde_json::{Value, json};
+    use serde_json::{Value, from_str, json};
     use ss_ai_runtime::{caused_by, classification};
 
-    use super::{canonical_capture_from_evidence, document, finish_publication, identity_matches};
-    use crate::evidence_hash;
+    use super::{document, finish_publication, identity_matches};
+    use crate::{canonical_capture_from_evidence, evidence_hash};
 
     #[test]
     fn canonical_evidence_matches_saved_captures_independent_of_capture_time() {
@@ -696,8 +696,8 @@ mod tests {
                 ),
             ),
         ] {
-            let evidence: Value = serde_json::from_str(evidence).unwrap();
-            let saved: Value = serde_json::from_str(saved).unwrap();
+            let evidence: Value = from_str(evidence).unwrap();
+            let saved: Value = from_str(saved).unwrap();
             let canonical = canonical_capture_from_evidence(&evidence).unwrap();
             let later = document(&evidence, "2030-01-01T00:00:00Z").unwrap();
 
@@ -728,7 +728,7 @@ mod tests {
 
     #[test]
     fn canonical_evidence_rejects_malformed_provider_data() {
-        let evidence: Value = serde_json::from_str(include_str!(
+        let evidence: Value = from_str(include_str!(
             "../../../tests/fixtures/ss-review-native-capture/github-context.json"
         ))
         .unwrap();

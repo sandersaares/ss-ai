@@ -2,7 +2,7 @@
 
 use std::ffi::OsString;
 use std::fs;
-use std::io::{ErrorKind as IoErrorKind, Write};
+use std::io::{ErrorKind as StdIoErrorKind, Write};
 use std::path::{Path, PathBuf, absolute};
 use std::time::Duration;
 
@@ -10,14 +10,18 @@ use clap::Parser;
 use clap::error::ErrorKind;
 use jiff::Timestamp;
 use ohno::{AppError, EnrichableExt};
-use serde_json::{Value, json};
+use serde_json::{Value, json, to_string};
+use ss_ai_git::compare;
 use ss_ai_review::{
     FinalReviewInput, capture_target, final_review_check_prior, publish_final_review,
 };
 use ss_ai_review_context::{
     canonical_capture_from_evidence, evidence_hash, parse_workflow_json, read_capture,
 };
-use ss_ai_review_workflow::{audit, review_publication_plan};
+use ss_ai_review_workflow::{
+    audit::test_merge_approval,
+    review_publication_plan::{preflight, prepare as prepare_publication, read_approved},
+};
 use ss_ai_runtime::{Clock, FileTransaction, Process, caused_by, fail, read_bytes};
 
 use crate::Http;
@@ -100,7 +104,7 @@ pub(crate) fn run(
     let mut journal = FileTransaction::open(&result_path, clock)?;
     final_review_check_prior(&mut journal, &target)?;
     probe_output(&output)?;
-    let approved = review_publication_plan::read_approved(&cli.approved_findings_path, clock)?;
+    let approved = read_approved(&cli.approved_findings_path, clock)?;
     let context = read_capture(&cli.context_path, clock)?;
     let identity = context
         .get("authenticatedIdentity")
@@ -139,7 +143,7 @@ pub(crate) fn run(
     let source = text(&approved, "reviewedSourceCommit")?;
     let base = text(&approved, "reviewedMergeBaseCommit")?;
     let approve_merge = match &cli.merge_approval_path {
-        Some(path) => audit::test_merge_approval(path, context_url, source, clock)?,
+        Some(path) => test_merge_approval(path, context_url, source, clock)?,
         None => false,
     };
     if approve_merge
@@ -161,13 +165,13 @@ pub(crate) fn run(
         ))
     })?;
     // Refuse locally knowable mismatches before launching Git or contacting a provider.
-    review_publication_plan::preflight(&approved, &context, &diagnostics, approve_merge)?;
-    let comparison = ss_ai_git::compare(process, &cli.repository_path, base, source).map_err(|error| {
+    preflight(&approved, &context, &diagnostics, approve_merge)?;
+    let comparison = compare(process, &cli.repository_path, base, source).map_err(|error| {
         error.enrich(format!(
             "Ensure the checkout contains reviewed commits {base} and {source}; fetch missing commits with git fetch"
         ))
     })?;
-    let prepared = review_publication_plan::prepare(
+    let prepared = prepare_publication(
         &approved,
         &context,
         &comparison,
@@ -202,7 +206,7 @@ pub(crate) fn run(
         clock,
         |evidence| evidence_hash(&canonical_capture_from_evidence(evidence)?),
     )?;
-    Ok(serde_json::to_string(&result)?)
+    Ok(to_string(&result)?)
 }
 
 /// Confirms a sibling file can be created, flushed, and removed before effects.
@@ -227,7 +231,7 @@ fn probe_output(directory: &Path) -> Result<(), AppError> {
                 cleanup?;
                 return Ok(());
             }
-            Err(error) if error.kind() == IoErrorKind::AlreadyExists => continue,
+            Err(error) if error.kind() == StdIoErrorKind::AlreadyExists => continue,
             Err(error) => return Err(error.into()),
         }
     }

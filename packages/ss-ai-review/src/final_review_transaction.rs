@@ -15,11 +15,11 @@ use std::path::Path;
 use ohno::AppError;
 use serde::de::{Error as _, MapAccess, SeqAccess, Visitor};
 use serde::{Deserialize, Deserializer};
-use serde_json::{Value, json};
+use serde_json::{Map, Value, from_slice, json, to_vec_pretty};
 use ss_ai_runtime::FileTransaction;
 
-use crate::Clock;
-use crate::error::{classification, fail};
+use crate::error::fail;
+use crate::{Clock, classification};
 
 /// Provider effects retain their review handle in the composition layer.
 pub(crate) trait Effects {
@@ -45,7 +45,7 @@ impl Journal for FileTransaction<'_> {
     }
 
     fn write(&mut self, value: &Value) -> Result<(), AppError> {
-        self.write_bytes(&serde_json::to_vec_pretty(value)?)
+        self.write_bytes(&to_vec_pretty(value)?)
     }
 }
 
@@ -182,7 +182,7 @@ impl<'de> Visitor<'de> for UniqueVisitor {
     }
 
     fn visit_map<A: MapAccess<'de>>(self, mut map: A) -> Result<Self::Value, A::Error> {
-        let mut values = serde_json::Map::new();
+        let mut values = Map::new();
         let mut names = HashSet::new();
         while let Some(key) = map.next_key::<String>()? {
             // PowerShell consumers compare property names without ASCII case.
@@ -204,7 +204,7 @@ fn check_prior_inner(journal: &mut dyn Journal, target: &Value) -> Result<(), Ap
         return Ok(());
     };
     let bytes = bytes.strip_prefix(&[0xef, 0xbb, 0xbf]).unwrap_or(&bytes);
-    let old: UniqueValue = serde_json::from_slice(bytes).map_err(|error| {
+    let old: UniqueValue = from_slice(bytes).map_err(|error| {
         fail(
             "invalidState",
             format!("Malformed publication record: {error}"),
@@ -268,9 +268,19 @@ fn check_prior_inner(journal: &mut dyn Journal, target: &Value) -> Result<(), Ap
     Ok(())
 }
 
+/// Tracks which journal operations may follow the validated prefix.
+#[derive(PartialEq, Eq)]
+enum OperationPhase {
+    AwaitingStart,
+    PublishingFindings,
+    FindingsVerified,
+    ApprovalRecorded,
+    ReviewCompleted,
+}
+
 /// Rejects incomplete or reordered schema-1 operation lists before replacement.
 fn valid_operations(operations: &[Value]) -> bool {
-    let mut phase = 0;
+    let mut phase = OperationPhase::AwaitingStart;
     let mut findings = HashSet::new();
     let mut reopen = HashSet::new();
     for (index, op) in operations.iter().enumerate() {
@@ -287,16 +297,33 @@ fn valid_operations(operations: &[Value]) -> bool {
         }
         let id = op["findingId"].as_str();
         match op["operation"].as_str() {
-            Some("startReview") if index == 0 && id.is_none() => phase = 1,
-            Some("newLineThread" | "newFileThread" | "reply") if phase == 1 => {
+            Some("startReview") if index == 0 && id.is_none() => {
+                phase = OperationPhase::PublishingFindings;
+            }
+            Some("newLineThread" | "newFileThread" | "reply")
+                if phase == OperationPhase::PublishingFindings =>
+            {
                 if id.is_none_or(|id| id.is_empty() || !findings.insert(id)) {
                     return false;
                 }
             }
-            Some("verifyFindings") if phase == 1 && id.is_none() => phase = 2,
-            Some("approveReview") if phase == 2 && id.is_none() => phase = 3,
-            Some("completeReview") if matches!(phase, 2 | 3) && id.is_none() => phase = 4,
-            Some("reopenThread") if phase == 4 => {
+            Some("verifyFindings")
+                if phase == OperationPhase::PublishingFindings && id.is_none() =>
+            {
+                phase = OperationPhase::FindingsVerified;
+            }
+            Some("approveReview") if phase == OperationPhase::FindingsVerified && id.is_none() => {
+                phase = OperationPhase::ApprovalRecorded;
+            }
+            Some("completeReview")
+                if matches!(
+                    phase,
+                    OperationPhase::FindingsVerified | OperationPhase::ApprovalRecorded
+                ) && id.is_none() =>
+            {
+                phase = OperationPhase::ReviewCompleted;
+            }
+            Some("reopenThread") if phase == OperationPhase::ReviewCompleted => {
                 if id.is_none_or(|id| !findings.contains(id) || !reopen.insert(id)) {
                     return false;
                 }
@@ -304,7 +331,7 @@ fn valid_operations(operations: &[Value]) -> bool {
             _ => return false,
         }
     }
-    phase == 4
+    phase == OperationPhase::ReviewCompleted
 }
 
 /// Builds the schema-1 operation record shared with PowerShell readers.
@@ -581,6 +608,52 @@ fn verify_comments(
     Ok(())
 }
 
+/// Confirms the completed review, verdict, approval and findings against readback.
+fn verify_completed(
+    result: &Value,
+    plan: &[Value],
+    summary: &str,
+    approve: bool,
+    approval_index: Option<usize>,
+    verification: &Value,
+) -> Result<(), AppError> {
+    if verification["isPublished"] != true || verification["body"].as_str() != Some(summary) {
+        return Err(fail(
+            "service",
+            "Published review or summary does not match",
+        ));
+    }
+    if result["platform"] == "gitHub"
+        && verification["state"] != if approve { "APPROVED" } else { "COMMENTED" }
+    {
+        return Err(fail(
+            "service",
+            "Published GitHub review verdict does not match",
+        ));
+    }
+    if let Some(index) = approval_index {
+        let receipt = &result["operations"][index]["receipt"];
+        let approval = &verification["approval"];
+        let matching_id = receipt["id"]
+            .as_str()
+            .zip(approval["id"].as_str())
+            .is_some_and(|(expected, actual)| {
+                !expected.is_empty() && expected.eq_ignore_ascii_case(actual)
+            });
+        if !matching_id
+            || approval["vote"] != 10
+            || !approval["isRequired"].is_boolean()
+            || approval["isRequired"] != receipt["isRequired"]
+        {
+            return Err(fail(
+                "service",
+                "Published Azure DevOps approval does not match",
+            ));
+        }
+    }
+    verify_comments(result, plan, verification, true)
+}
+
 /// Returns the compact schema-1 outcome consumed by the command layer.
 fn outcome(result: &Value, path: &str) -> Value {
     let operations = result["operations"]
@@ -760,41 +833,14 @@ fn execute_inner(
         let verification = effect(journal, &mut result, None, "verify", true, || {
             effects.verify()
         })?;
-        if verification["isPublished"] != true || verification["body"].as_str() != Some(summary) {
-            return Err(fail(
-                "service",
-                "Published review or summary does not match",
-            ));
-        }
-        if target["platform"] == "gitHub"
-            && verification["state"] != if approve { "APPROVED" } else { "COMMENTED" }
-        {
-            return Err(fail(
-                "service",
-                "Published GitHub review verdict does not match",
-            ));
-        }
-        if let Some(index) = approval_index {
-            let receipt = &result["operations"][index]["receipt"];
-            let approval = &verification["approval"];
-            let matching_id = receipt["id"]
-                .as_str()
-                .zip(approval["id"].as_str())
-                .is_some_and(|(expected, actual)| {
-                    !expected.is_empty() && expected.eq_ignore_ascii_case(actual)
-                });
-            if !matching_id
-                || approval["vote"] != 10
-                || !approval["isRequired"].is_boolean()
-                || approval["isRequired"] != receipt["isRequired"]
-            {
-                return Err(fail(
-                    "service",
-                    "Published Azure DevOps approval does not match",
-                ));
-            }
-        }
-        verify_comments(&result, plan, &verification, true)?;
+        verify_completed(
+            &result,
+            plan,
+            summary,
+            approve,
+            approval_index,
+            &verification,
+        )?;
         Ok(())
     })();
 
@@ -876,12 +922,17 @@ fn execute_inner(
 }
 
 #[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
     use super::{Effects, Journal, check_prior_inner, execute_inner};
+    use crate::classification;
     use crate::error::fail;
     use ohno::AppError;
-    use serde_json::{Value, json};
+    use serde_json::{Value, json, to_string, to_vec};
 
+    /// Models complete durable records; raw bytes take precedence on reads.
+    ///
+    /// A refused replacement leaves both the stored record and history intact.
     #[derive(Default)]
     struct Memory {
         record: Option<Value>,
@@ -889,6 +940,8 @@ mod tests {
         history: Vec<Value>,
         writes: usize,
         fail_at: Option<usize>,
+        fail_verification_record: bool,
+        failure_triggered: bool,
     }
 
     impl Journal for Memory {
@@ -896,10 +949,7 @@ mod tests {
             if let Some(raw) = &self.raw {
                 return Ok(Some(raw.clone()));
             }
-            Ok(self
-                .record
-                .as_ref()
-                .map(|value| serde_json::to_vec(value).unwrap()))
+            Ok(self.record.as_ref().map(|value| to_vec(value).unwrap()))
         }
 
         fn write(&mut self, value: &Value) -> Result<(), AppError> {
@@ -907,7 +957,15 @@ mod tests {
                 .writes
                 .checked_add(1)
                 .expect("Test writes fit in usize");
-            if self.fail_at == Some(self.writes) {
+            let failed_verification = self.fail_verification_record
+                && value["operations"].as_array().is_some_and(|operations| {
+                    operations.iter().any(|operation| {
+                        operation["operation"] == "verifyFindings"
+                            && operation["outcome"] == "failed"
+                    })
+                });
+            if self.fail_at == Some(self.writes) || failed_verification {
+                self.failure_triggered = true;
                 return Err(fail("io", "Journal refused replacement"));
             }
             self.record = Some(value.clone());
@@ -916,6 +974,7 @@ mod tests {
         }
     }
 
+    /// Models provider effects and controlled deviations in their readback.
     #[derive(Default)]
     struct Provider {
         calls: Vec<String>,
@@ -940,6 +999,7 @@ mod tests {
             Ok(())
         }
 
+        /// Matches `plan()` and effect receipts unless a scenario corrupts evidence.
         fn verification(&self, published: bool) -> Value {
             let state = if !published {
                 if self.bad_pre_state {
@@ -1169,6 +1229,42 @@ mod tests {
             ..Memory::default()
         };
         check_prior_inner(&mut journal, &target("gitHub")).unwrap();
+    }
+
+    #[test]
+    fn journal_operation_order_requires_completed_review_before_follow_up() {
+        let start = super::operation("startReview", None, &Value::Null, false);
+        let finding = super::operation("reply", Some("f"), &Value::Null, false);
+        let verify = super::operation("verifyFindings", None, &Value::Null, false);
+        let approve = super::operation("approveReview", None, &Value::Null, false);
+        let complete = super::operation("completeReview", None, &Value::Null, false);
+        let reopen = super::operation("reopenThread", Some("f"), &Value::Null, false);
+
+        assert!(super::valid_operations(&[
+            start.clone(),
+            finding.clone(),
+            verify.clone(),
+            complete.clone(),
+            reopen.clone()
+        ]));
+        assert!(super::valid_operations(&[
+            start.clone(),
+            finding.clone(),
+            verify.clone(),
+            approve.clone(),
+            complete.clone(),
+            reopen.clone()
+        ]));
+        assert!(!super::valid_operations(&[
+            start.clone(),
+            finding.clone(),
+            verify.clone(),
+            reopen,
+            complete.clone()
+        ]));
+        assert!(!super::valid_operations(&[
+            start, finding, approve, verify, complete
+        ]));
     }
 
     #[test]
@@ -1403,7 +1499,7 @@ mod tests {
             "operations": [start,
                 super::operation("verifyFindings", None, &Value::Null, false),
                 super::operation("completeReview", None, &Value::Null, false)]});
-        let encoded = serde_json::to_string(&previous).unwrap();
+        let encoded = to_string(&previous).unwrap();
         for duplicate in [
             encoded.replace(
                 "\"status\":\"failed\"",
@@ -1435,8 +1531,10 @@ mod tests {
 
     #[test]
     fn journal_failures_never_authorize_another_effect_or_replay() {
-        // Fail each durable write through completion, including after an effect.
-        for fail_at in 2..=11 {
+        let mut baseline = Memory::default();
+        run(&mut baseline, &mut Provider::default(), "gitHub", false).unwrap();
+        // The initial write has no prior record to protect; test every later write.
+        for fail_at in 2..=baseline.writes {
             let mut journal = Memory {
                 fail_at: Some(fail_at),
                 ..Memory::default()
@@ -1444,6 +1542,7 @@ mod tests {
             let mut provider = Provider::default();
             _ = run(&mut journal, &mut provider, "gitHub", false)
                 .expect_err(&format!("write {fail_at} must fail"));
+            assert!(journal.failure_triggered);
             assert!(
                 !provider.calls.iter().any(|call| call == "discard"),
                 "{fail_at}"
@@ -1456,14 +1555,24 @@ mod tests {
     #[test]
     fn failed_verification_record_write_prevents_draft_cleanup() {
         let mut journal = Memory {
-            fail_at: Some(8),
+            fail_verification_record: true,
             ..Memory::default()
         };
         let mut provider = Provider {
             bad_pre: true,
             ..Provider::default()
         };
-        _ = run(&mut journal, &mut provider, "gitHub", false).unwrap_err();
+        let error = run(&mut journal, &mut provider, "gitHub", false).unwrap_err();
+        assert_eq!(classification(&error), "journalFailure");
+        assert!(journal.failure_triggered);
+        assert!(
+            journal.record.as_ref().unwrap()["operations"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|operation| operation["operation"] == "verifyFindings"
+                    && operation["outcome"] == "succeeded")
+        );
         assert_eq!(provider.calls, ["start", "add", "verify_findings"]);
         _ = check_prior_inner(&mut journal, &target("gitHub")).unwrap_err();
     }

@@ -12,7 +12,7 @@ use crate::anchors::resolve_anchor_in_diff;
 use crate::approved::{
     check_approved_schema, check_approved_value, check_follow_up, identifier_matches,
 };
-use crate::markdown;
+use crate::markdown::render;
 use crate::workflow_plan::parse_json;
 
 /// Reads and validates an approved artifact without rereading it for planning.
@@ -110,7 +110,7 @@ pub fn preflight(
             follow_up_count = follow_up_count.saturating_add(1);
         }
     }
-    markdown::render(&json!({
+    render(&json!({
         "operation": "summary", "findings": findings, "platform": platform,
         "followUpCount": follow_up_count, "diagnostics": diagnostics
     }))
@@ -138,11 +138,13 @@ pub fn prepare(
     preflight(approved, context, diagnostics, allow_empty)?;
     let platform = text(context, "platform")?;
 
-    // The comparison exposes its endpoints through serialization, not getters.
     // Anchoring against another revision would publish against unreviewed code.
-    let comparison_value = serde_json::to_value(comparison)?;
-    if comparison_value.get("oldCommit") != approved.get("reviewedMergeBaseCommit")
-        || comparison_value.get("newCommit") != approved.get("reviewedSourceCommit")
+    if approved
+        .get("reviewedMergeBaseCommit")
+        .and_then(Value::as_str)
+        != Some(comparison.old_commit())
+        || approved.get("reviewedSourceCommit").and_then(Value::as_str)
+            != Some(comparison.new_commit())
     {
         return Err(invalid("Comparison does not match the reviewed commits"));
     }
@@ -155,7 +157,7 @@ pub fn prepare(
     let mut replies = Vec::new();
     for finding in findings {
         let id = text(finding, "id")?;
-        let body = markdown::render(&json!({"operation": "comment", "finding": finding}))
+        let body = render(&json!({"operation": "comment", "finding": finding}))
             .map_err(|error| invalid(format!("Finding '{id}' cannot be rendered: {error}")))?;
         if body.as_str().is_none_or(|value| value.trim().is_empty()) {
             return Err(invalid(format!("Finding '{id}' rendered to no text")));
@@ -190,7 +192,7 @@ pub fn prepare(
             }));
         }
     }
-    let summary = markdown::render(&json!({
+    let summary = render(&json!({
         "operation": "summary", "findings": findings, "platform": platform,
         "followUpCount": replies.len(), "diagnostics": diagnostics
     }))
@@ -264,7 +266,7 @@ mod tests {
     use std::io;
     use std::path::Path;
 
-    use serde_json::{Value, json};
+    use serde_json::{Value, json, to_vec};
     use ss_ai_git::{Comparison, compare};
     use ss_ai_review_context::evidence_hash;
     use ss_ai_runtime::{Process, ProcessOutput};
@@ -291,6 +293,7 @@ mod tests {
         compare(&Git, Path::new("."), old, new).unwrap()
     }
 
+    /// Supplies resolved and active threads with string and numeric identifiers.
     fn capture() -> Value {
         json!({
             "schemaVersion": 3, "platform": "gitHub",
@@ -321,6 +324,7 @@ mod tests {
             "consequence": "Impact", "recommendedAction": "Fix", "anchor": anchor})
     }
 
+    /// Binds findings to the supplied capture's reviewed commits and evidence.
     #[expect(
         clippy::needless_pass_by_value,
         reason = "Fixtures construct and pass owned JSON values"
@@ -418,6 +422,36 @@ mod tests {
                 &document,
                 &context,
                 &comparison(&"c".repeat(40), &"b".repeat(40)),
+                &json!({}),
+                false
+            )
+            .is_err()
+        );
+        assert!(
+            prepare(
+                &document,
+                &context,
+                &comparison(&"a".repeat(40), &"c".repeat(40)),
+                &json!({}),
+                false
+            )
+            .is_err()
+        );
+        assert!(
+            prepare(
+                &document,
+                &context,
+                &comparison(&"A".repeat(40), &"b".repeat(40)),
+                &json!({}),
+                false
+            )
+            .is_err()
+        );
+        assert!(
+            prepare(
+                &document,
+                &context,
+                &comparison(&"a".repeat(40), &"B".repeat(40)),
                 &json!({}),
                 false
             )
@@ -525,7 +559,7 @@ mod tests {
             json!([finding("F", json!({"kind":"file","path":"src/lib.rs"}))]),
         );
         assert_eq!(
-            parse_approved(&serde_json::to_vec(&document).unwrap()).unwrap(),
+            parse_approved(&to_vec(&document).unwrap()).unwrap(),
             document
         );
         let duplicate_root = br#"{"schemaVersion":2,"schemaVersion":2,"target":null,"reviewedSourceCommit":null,"reviewedMergeBaseCommit":null,"reviewedContextHash":null,"findings":[]}"#;
@@ -534,9 +568,9 @@ mod tests {
         assert!(parse_approved(duplicate_nested).is_err());
         let mut malformed = document.clone();
         malformed["findings"][0]["title"] = Value::Null;
-        assert!(parse_approved(&serde_json::to_vec(&malformed).unwrap()).is_err());
+        assert!(parse_approved(&to_vec(&malformed).unwrap()).is_err());
         malformed = document;
         malformed["reviewedContextHash"] = json!("invalid");
-        assert!(parse_approved(&serde_json::to_vec(&malformed).unwrap()).is_err());
+        assert!(parse_approved(&to_vec(&malformed).unwrap()).is_err());
     }
 }

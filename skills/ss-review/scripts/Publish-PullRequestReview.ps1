@@ -1,4 +1,6 @@
 #Requires -Version 7.6
+# Preserve the named skill interface while the native command owns validation
+# and the publication transaction. Ref: pwsh-calls/publish-pull-request-review.md.
 [CmdletBinding(PositionalBinding = $false)]
 param(
     [Parameter(Mandatory)][string] $Url,
@@ -34,6 +36,7 @@ foreach ($argument in @(
 )) { $arguments.Add($argument) }
 if ($DiscardPendingReview) { $arguments.Add('--discard-pending-review') }
 if ($PublishToClosedPullRequest) { $arguments.Add('--publish-to-closed-pull-request') }
+# Forward explicitly supplied values even when empty so native validation can reject them.
 if ($PSBoundParameters.ContainsKey('MergeApprovalPath')) { $arguments.Add("--merge-approval-path=$MergeApprovalPath") }
 if ($PSBoundParameters.ContainsKey('Tenant')) { $arguments.Add("--tenant=$Tenant") }
 if ($PSBoundParameters.ContainsKey('NowUtc')) { $arguments.Add("--now-utc=$($NowUtc.ToUniversalTime().ToString('o', [Globalization.CultureInfo]::InvariantCulture))") }

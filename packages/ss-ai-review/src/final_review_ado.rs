@@ -781,7 +781,7 @@ mod tests {
 
     use jiff::Timestamp;
     use ohno::AppError;
-    use serde_json::{Map, Value, json};
+    use serde_json::{Map, Value, from_slice, json, to_vec};
 
     use super::{
         add, approve, complete, discard, file_identity, reopen, start, state, verify,
@@ -842,12 +842,12 @@ mod tests {
                 .expect("unexpected request");
             assert_eq!(method, expected_method);
             assert_eq!(url, expected_url);
-            let actual = body.map(|bytes| serde_json::from_slice::<Value>(bytes).unwrap());
+            let actual = body.map(|bytes| from_slice::<Value>(bytes).unwrap());
             assert_eq!(actual, expected_body);
             Ok(HttpResponse::new(
                 200,
                 BTreeMap::new(),
-                serde_json::to_vec(&response).unwrap(),
+                to_vec(&response).unwrap(),
             ))
         }
     }
