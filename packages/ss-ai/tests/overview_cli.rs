@@ -13,7 +13,7 @@ use std::collections::BTreeMap;
 use std::ffi::OsString;
 use std::fs;
 use std::io;
-use std::path::{Path, PathBuf};
+use std::path::{Path, PathBuf, absolute};
 use std::process::Command;
 use std::sync::mpsc::{self, Receiver, Sender};
 use std::thread;
@@ -531,9 +531,10 @@ fn cli_reuses_completed_retry_artifact_and_preserves_orphan() {
     // without modifying the orphan.
     let pending = azure_publish(fixture.path(), &provider, true);
     let snapshot = &pending["snapshot"];
-    let root = fixture
-        .path()
-        .join("output 雪/overview-publication")
+    // The CLI resolves the output path before recording artifact paths.
+    let root = absolute(fixture.path().join("output 雪"))
+        .unwrap()
+        .join("overview-publication")
         .join(snapshot["runId"].as_str().unwrap());
     let retry = root.join(".overview-attempt-fixture");
     fs::create_dir_all(&retry).unwrap();
