@@ -7,7 +7,10 @@
     reason = "Internal record types define closed, validated workflow schemas"
 )]
 
-pub use assessment::{Assessment, Disposition, Judgment};
+pub use assessment::{
+    Assessment, BatchJudgmentItem, BatchJudgmentRequest, BatchReadItem, BatchReadRequest,
+    Disposition, Judgment,
+};
 pub use checkpoint::Note;
 pub use error::AssessmentError;
 pub use objects::{Change, Content, Inventory, Side, change_id, commit};

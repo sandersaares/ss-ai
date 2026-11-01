@@ -133,27 +133,22 @@ Approval history reconstruction stays in native evidence rather than consuming
 the assessor's context. The skill assigns each PR's semantic assessment to a fresh
 GPT 6.1 Sol worker with medium reasoning and regular context. The orchestrator
 receives decisions rather than source or discussion evidence.
-Workers process deterministic bounded source/discussion units and persist
-typed observations with exact references before planned handoffs to fresh
-contexts. Unit notes do not grant approval or notice authority. Each exact
-changed-path record still needs a final judgment, and discussion needs its
-own aggregate. The orchestrator verifies newly completed immutable work;
-replays and replacements do not extend the handoff budget. A fresh final
-worker reads all judgments, discussion observations, and explicit concerns and
-interactions, and independently examines combined effects using relevant exact
-evidence. Every recorded concern/check needs an evidence-backed disposition.
-Digest-bound dependencies invalidate affected aggregates when a note changes.
-Serialized evidence and metadata
-pages have a byte budget as well as item/character limits.
+Workers receive bounded batches of independently addressable evidence pages.
+Transport fragments do not require individual semantic notes. Each exact
+changed-path record needs a final judgment, and discussion needs an observation.
+A worker independently examines combined effects using relevant exact evidence.
+Every recorded concern or interaction needs an evidence-backed disposition.
+Digest-bound dependencies invalidate affected judgments when their inputs change.
+Serialized evidence and metadata pages have a byte budget as well as item and
+character limits.
 All dispositions require complete readable evidence. Delivery or context
 failures remain unfinished work and cannot authorize a needs-review notice;
 genuine uncertainty after examination still prevents approval.
-Complete delivery cannot prove that a note captured every implication. Workers
-do not recursively summarize until arbitrary work fits; a cumulative set that
-exceeds regular-context examination remains explicitly incomplete.
-If a worker ends before completing an assessment, the orchestrator permits one
-replacement on the same snapshot. Repeated incomplete work remains an explicit
-incomplete result, not a significance judgment or approval.
+Complete delivery cannot prove comprehension. A cumulative set that exceeds
+regular-context examination remains explicitly incomplete. The retained per-PR
+budget bounds elapsed time, native commands, and worker reservations across
+interruptions and stale recovery, leaving time for freshness and publication.
+Incomplete work never becomes a significance judgment or approval.
 Only complete insignificant work can become a live
 publication; dry runs end without remote writes. Unknown content and
 insufficient evidence cannot become success-shaped empty work. The policy permits

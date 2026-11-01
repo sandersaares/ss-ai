@@ -1,7 +1,8 @@
 # Native command recipes
 
 Run commands directly through the installed executable. Expand named
-placeholders rather than assembling JSON or writing state-management scripts.
+placeholders rather than writing state-management scripts. JSON supplied to
+batch commands is a request, not the retained workflow state.
 All commands return JSON; nonzero exits and stderr diagnostics are explicit
 failures, not permission to stop at recoverable staleness. Let an in-flight
 command finish rather than starting a duplicate.
@@ -27,6 +28,7 @@ command finish rather than starting a duplicate.
 | `RATIONALE` | Concise semantic judgment grounded in the returned evidence. |
 | `PREVIOUS` | Current `decisionDigest` or `cumulativeDigest` when deliberately replacing a judgment; omit the argument for a new judgment. |
 | `ATTRIBUTION` | The user's required agent attribution, such as `[Copilot speaking]`. |
+| `BATCH_JSON` | Compact JSON request described below, quoted as one argument. |
 
 # Stage 1: discovery and history
 
@@ -55,19 +57,38 @@ $ErrorActionPreference = 'Stop'
 $PSNativeCommandUseErrorActionPreference = $true
 
 ss-ai autoreapprove prepare --state-path "{{RUN}}" --pull-request-id "{{PR}}" --snapshot-digest "{{SNAPSHOT}}"
+ss-ai autoreapprove start-worker --state-path "{{RUN}}" --pull-request-id "{{PR}}" --snapshot-digest "{{SNAPSHOT}}"
 ss-ai autoreapprove assessment --state-path "{{RUN}}" --pull-request-id "{{PR}}" --snapshot-digest "{{SNAPSHOT}}" --after "{{AFTER_CHANGE}}"
+ss-ai autoreapprove read-batch --state-path "{{RUN}}" --pull-request-id "{{PR}}" --snapshot-digest "{{SNAPSHOT}}" --batch-json '{{BATCH_JSON}}'
 ss-ai autoreapprove read --state-path "{{RUN}}" --pull-request-id "{{PR}}" --snapshot-digest "{{SNAPSHOT}}" --reference "{{REFERENCE}}" --offset "{{OFFSET}}"
 ss-ai autoreapprove source-context --state-path "{{RUN}}" --pull-request-id "{{PR}}" --snapshot-digest "{{SNAPSHOT}}" --change-id "{{SOURCE_CHANGE}}" --side "{{SIDE}}" --start-line "{{START_LINE}}" --line-count "{{LINE_COUNT}}"
 ```
 
 Preparation returns the selected context and the first bounded metadata page.
+Its `progress` provides preflight counts. `readToken` identifies immutable
+evidence and registered context; `stateToken` identifies the current assessment
+state. Reserve each worker with `start-worker` before
+dispatch; its returned `assessmentBudget` shows reservations and limits.
 Follow `nextOffset` through the assessment inventory, even when a page contains
 fewer changes than requested. Native metadata and evidence responses fit within
 16 KiB of pretty-printed UTF-8 JSON, including the final newline. The read
 character limit is an upper bound; JSON escaping and multibyte text can shorten
-a page. Consume one response per tool call rather than printing concatenated
-pages or the retained run. If a tool truncates delivery, lower `--limit` and
-replay the same offset before continuing.
+a page. Do not print the retained run. If a tool truncates delivery, reduce
+the requested batch and replay the same offsets before continuing.
+
+A batch request has the shape
+`{"readToken":"TOKEN","items":[{"reference":"policy","offset":0,"limit":1024},{"reference":"discussion","offset":0,"limit":1024}]}`.
+Use distinct references and positive limits. The response has `items`, a new
+`stateToken`, the `readToken`, and `progress`. Each item carries its own
+`nextOffset` and `contentDigest`. Multiple batches may use the same read token
+for independent references without waiting for receipt updates. A continuation
+of a mutable semantic record must also supply the preceding `contentDigest`;
+ordinary `read` accepts only its first page, so use `read-batch` for further
+pages. Registering source context changes the read token. A batch
+whose combined response exceeds the native limit fails without committing any
+receipts; retry smaller batches. If the host truncates a successful response,
+reacquire a fresh `readToken` with `assessment` and repeat those pages before
+proceeding. Repeated pages do not prove that the worker understood them.
 
 `documentReads` reports `reference`, `totalCharacters`, nullable `readOffset`,
 and `complete` for policy and discussion. Each present source side exposes its
@@ -109,22 +130,12 @@ own path and revision. Identical excerpt text does not merge comments.
 The native `discussionDigest` binds the complete document. Do not reconstruct
 discussion from the retained run or skip outdated or repeated objections.
 
-Repeating `prepare` on the same snapshot preserves recorded reads and judgments.
-A replacement worker follows the inventory from the first page, checking each
-`decision` and `decisionDigest` and the `cumulative` judgment. Reread evidence needed for your own judgment
-from offset zero and follow its returned offsets; overlapping reads are allowed.
-Native read coverage does not establish that a replacement worker has seen the evidence.
-Finish missing work and retain existing judgments unless deliberately replacing them
-with their current digests. Never edit the run JSON or recreate the assessment
-to resume it.
-For a planned handoff, the next worker starts `units --after` at `nextUnitOffset`
-to locate `nextUnitId` without replaying completed metadata, or
-starts final change aggregation at `nextChangeOffset`. The final cumulative
-worker reads every final judgment, discussion observation, and explicit check,
-and reacquires exact evidence needed for interactions. Native `results` exposes
-`assessmentProgress` with `changeCount`, `judgedChangeCount`, `nextChangeOffset`,
-`unitCount`, `completedUnitCount`, `nextUnitId`, `nextUnitOffset`, `completedWorkCount`,
-`checkpointCount`, and `handoffLimit`, without source or semantic conclusions.
+Repeating `prepare` preserves reads and judgments. A replacement worker follows
+the inventory and reacquires the evidence it needs; earlier receipts do not
+establish that worker's knowledge. Retain judgments unless deliberately
+replacing them with their current digests. Never edit the run JSON or recreate
+the assessment to resume it. `assessmentProgress` reports changed paths,
+delivered transport units, their characters, and semantic work separately.
 
 ```powershell
 ss-ai autoreapprove units --state-path "{{RUN}}" --pull-request-id "{{PR}}" --snapshot-digest "{{SNAPSHOT}}" --after "{{AFTER}}" --limit "{{LIMIT}}" --reference "{{DOCUMENT}}"
@@ -146,35 +157,30 @@ Additional placeholders:
 | `CHECK` | Native concern or interaction ID returned by `checks`. |
 
 Other placeholders retain their definitions above/below. Follow each returned
-`nextOffset`. Unit metadata contains a stable parent identifier, original reference,
-binding references, exact half-open scalar ranges and digests. Read returned
-`unit:ID` and `binding:ID` references completely, then record notes citing
-that exact unit and any context used. Binding digests group records; exact
-identities and links remain in original unit text. Reacquire related units and
-original evidence when a fragment alone does not explain its context.
-Every unit requires a note even when the complete original document was read.
-Use `note:ID`, `judgment:CHANGE_ID`, `discussion-note`, `check:ID`, and
-`resolution:ID` through the same bounded `read` command. Metadata includes
-current note/resolution digests for conditional replacement.
-A judgment displayed in metadata does not satisfy its dedicated `read`
-receipt. Use the returned unit offset with the unfiltered unit list; document
-filters have their own offsets.
-
-The discussion aggregate requires all discussion notes and relevant exact
-evidence. Source aggregation requires every note for that exact change.
+`nextOffset`. Unit metadata gives exact ranges and bindings, but direct
+assessments need no unit notes. Record one `discussion` observation from the
+complete discussion and policy; include material concerns and interactions.
 All check resolutions require exact evidence, the originating semantic record,
-and the check itself. Missing or stale dependencies block every disposition.
-Replacing notes or judgments invalidates dependent aggregates and resolutions.
-`checkpoint` accepts only a newly completed unit or final change judgment;
-replay and replacement never increase `completedWorkCount`. It returns scalar
-progress, not approval authority.
+and the check itself. Replacements invalidate dependent records. `checkpoint`
+is for a context-pressure handoff after new semantic work, not for each batch.
 
 # Stage 3: judgments and completion
 
 ```powershell
 ss-ai autoreapprove judge --state-path "{{RUN}}" --pull-request-id "{{PR}}" --snapshot-digest "{{SNAPSHOT}}" --change-id "{{CHANGE}}" --disposition "{{DISPOSITION}}" --rationale "{{RATIONALE}}" --evidence "{{REFERENCE}}" --previous-digest "{{PREVIOUS}}"
+ss-ai autoreapprove judge-batch --state-path "{{RUN}}" --pull-request-id "{{PR}}" --snapshot-digest "{{SNAPSHOT}}" --batch-json '{{BATCH_JSON}}'
 ss-ai autoreapprove complete --state-path "{{RUN}}" --pull-request-id "{{PR}}" --snapshot-digest "{{SNAPSHOT}}"
 ```
+
+A judgment batch has the shape
+`{"stateToken":"TOKEN","items":[{"id":"CHANGE_ID","judgment":{"disposition":"insignificant","rationale":"Evidence-based explanation","evidence":["CHANGE_ID:patch"],"concerns":[],"interactions":[]},"previousDigest":null}]}`.
+Each item names a distinct changed path; `cumulative` is not allowed in a
+batch. Use the latest `stateToken`. Each replacement needs its current
+`decisionDigest`; use null for a new judgment. The utility validates and
+commits the entire batch atomically and returns each digest, a new token, and
+progress. On a stale token or any invalid item no judgments are committed.
+Use the ordinary `judge` command for the independently reasoned cumulative
+judgment.
 
 Repeat `--evidence` for additional returned references. A change judgment must
 cite its `CHANGE_ID:patch`. The cumulative judgment must cite both `policy` and
@@ -183,9 +189,10 @@ for explicit cumulative obligations. The cumulative judgment cannot introduce
 unchecked obligations; record them on the relevant unit or change first.
 Every change judgment requires complete policy, required patch,
 and applicable requested context reads, regardless of disposition. Cited optional
-evidence also requires complete delivery. A cumulative judgment requires
-complete policy, discussion, all final change judgment and discussion-aggregate
-reads, every check and disposition, and all requested context reads.
+evidence also requires complete delivery. A cumulative judgment binds all final
+path judgments, the discussion observation, every check and disposition, and
+all requested context. A replacement worker must read what it needs to reason
+independently rather than treating those bindings as comprehension.
 Opaque source can retain uncertainty, but
 unexamined readable content cannot become a completed semantic refusal.
 Omit `--previous-digest` for a new judgment; replacement requires
@@ -193,8 +200,8 @@ the current digest from `assessment` and rejects conflicting updates.
 Missing work is not an empty successful assessment. Completion
 requires all readable evidence for every disposition: mandatory patches,
 requested ranges, policy, and discussion. Delivery, context, and
-worker limits cannot be hidden behind notes. All unit notes, final source
-judgments, discussion aggregation, check dispositions, and an independent
+worker limits cannot be hidden behind notes. Final source
+judgments, discussion observation, check dispositions, and an independent
 cumulative judgment are mandatory. Native delivery does not prove comprehension
 or that notes captured every implication. Delivery, context, and
 worker limits leave incomplete work; do not loop over the inventory to invent

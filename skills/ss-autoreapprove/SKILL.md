@@ -122,6 +122,11 @@ authority or conduct additional service experiments.
 
 # Stage 3: assess exact source changes
 
+For each eligible snapshot, run native `prepare` to capture the exact comparison
+and obtain the preflight progress counts. Reserve a worker with `start-worker`
+before dispatch. The reservation persists even if dispatch or the session fails;
+never dispatch without it.
+
 Dispatch one fresh subagent per eligible PR with explicit spawn arguments
 `model: "gpt-6.1-sol"`, `reasoning_effort: "medium"`, and
 `context_tier: "default"` (regular context), including replacements. This isolates
@@ -132,65 +137,46 @@ unavailable, report the assessment as blocked; do not approve.
 
 Give the worker the absolute installed skill root, absolute run path, PR ID,
 exact inspection snapshot digest, and [assessment assignment](assessment.md).
-The worker owns native preparation, evidence reads, judgments, and completion
+The worker owns evidence reads, judgments, and completion
 for that PR only. Do not pass another PR's evidence, conversation history, or
 an orchestrator-generated semantic conclusion. Do not reuse a worker for another
 PR, load source or discussion in the orchestrator, or dispatch a full review.
 
-Wait for the worker and verify its returned completion status and digest using
-native `results`. A delivered tool result is not command success; inspect the
-native exit status and diagnostics. Workers cannot publish, ask human decision
-questions, or delegate further.
+Use one focused worker for the whole assessment when its actual context permits.
+Its assignment prohibits skill reinvocation and unrelated tools, but a host
+without tool allowlists cannot enforce that restriction. The native preflight
+reports changed paths, evidence units, their character count, and
+`minimumUnitEvidencePages`, a theoretical lower bound excluding policy, extra
+context, JSON overhead, and repeated delivery. Compare these with available
+worker context and the remaining native budget. These counts are not
+model-token or model-request measurements.
 
-Workers process native bounded evidence units rather than loading the full comparison
-into one context. Each changed path requires an exact operation/patch document;
-workers request captured-side context when necessary. Requested ranges cannot
-be abandoned to complete an assessment. Snapshot-bound unit notes retain exact
-ranges, observations, interfaces/invariants, interactions, and concerns.
-They do not grant approval or notice authority. A planned `checkpoint` is not a completed assessment or a
-premature worker failure. Require native `checkpoint` acceptance, then read
-native `results` and verify that `assessmentProgress.completedWorkCount`
-increased because a new unit note or final change judgment completed, the snapshot is unchanged,
-and `assessmentDigest` is still null before dispatching the next fresh worker.
-Pass the original assignment and scalar progress, not the previous worker's
-conclusions. The final worker reads every durable judgment, discussion observation,
-and explicit concern/interaction disposition, reacquires relevant exact evidence, and owns
-the cumulative judgment. The orchestrator never synthesizes semantic results.
-Native discussion separates semantic bodies and source excerpts from approval
-bookkeeping. Unit coverage must still include the complete document, including its
-shared historical excerpts; compact presentation does not reduce coverage.
-Only one worker may be active for a PR. Allow no more planned handoffs than
-the native `assessmentProgress.handoffLimit`, derived from immutable unit and
-changed-path counts; the final cumulative worker is separate.
-Use the same explicit model and context configuration for every unit.
-Native `unitCount`, `completedUnitCount`, `nextUnitId`, and `nextUnitOffset` locate missing unit
-notes; `judgedChangeCount` and `nextChangeOffset` locate final source judgments.
-Replayed reads, identical notes, replacement notes, and discussion aggregation
-alone are not new completed work. Preserve the separate replacement and
-stale-evidence budgets below. Do not raise model context or recursively summarize
-until an arbitrary assessment fits. If the complete cumulative judgment/check
-set and necessary exact evidence do not fit, report explicit incomplete work.
-Summary omission remains a semantic risk: delivery receipts cannot prove that
-every material objection or interaction survived the notes.
+The worker batches independently addressable evidence pages and path judgments,
+then reasons independently about the cumulative change. Do not require unit
+notes, a separate source-aggregation pass, or a fixed fragment-count handoff.
+Only one worker may be active for a PR. Use a planned `checkpoint` only for
+genuine context pressure, after new semantic work; a replacement must
+reacquire evidence needed for its own decisions. Permit at most three workers
+for one PR across planned handoffs, recovery, and stale snapshots. Before every
+dispatch, including replacements, obtain a new native worker reservation.
+Reservations measure authorized dispatch attempts, not confirmed worker starts.
 
-An interrupted or prematurely returned worker leaves unfinished work, not
-permission. A returned synchronous task has ended; do not use `write_agent` to resume it.
-If native `results` still reports `assessmentRequired` with a null
-`assessmentDigest`, and the worker ended before completing required reads or
-judgments, dispatch at most one replacement worker per PR and snapshot.
-This permits recovery from premature termination without an unbounded retry loop.
-Confirm the previous worker has ended or stop it before replacement; never
-overlap workers for the same PR. Give the fresh worker the same run path and snapshot digest,
-the original assignment, and the incomplete-work diagnostic. It must inspect
-persisted progress through native commands and acquire its own evidence.
-Do not pass the previous worker's semantic conclusions or assess source in the
-orchestrator. Use the same explicit model and context configuration, including replacements.
-If the replacement also returns incomplete, report the PR as incomplete and
-retain the run and diagnostic. Do not use `refresh`, a new run, or a needs-review notice to recover
-unfinished assessment work. Staleness follows the separate recovery procedure;
-unrelated tooling failures remain explicit failures, not permission to replace
-workers repeatedly. A completed significant or uncertain assessment is not
-unfinished work and follows stage 4.
+Wait for the worker and verify its completion and digest using native `results`.
+A delivered tool result is not command success. A stopped or interrupted
+worker leaves unfinished work, not permission. If the worker exits prematurely,
+confirm it has ended before a replacement starts; use the same assignment,
+model, snapshot, and run path. Do not pass semantic conclusions or conduct the
+assessment in the orchestrator. Do not create a new run, refresh, or notify to
+recover unfinished work. A completed significant or uncertain assessment follows
+stage 4. A legacy assessment remains on its original protocol; retain its run
+for compatible continuation or effect reconciliation.
+
+The persisted per-PR budget includes inspection and assessment and reserves
+time for freshness and publication. A `budgetExceeded` result is incomplete,
+never a semantic refusal. Do not dispatch further work or start a new run to
+reset the budget. The native utility counts commands and elapsed time, not
+model requests; enforce an upper target of 40 serial model requests when the
+host exposes that measurement. If it does not, report the count as unavailable.
 
 # Stage 4: publish or retain the dry-run result
 
@@ -241,8 +227,9 @@ After another stale result, call `refresh` to persist and report explicit
 Refresh reacquires complete current source, discussion, policies, and approval
 authority. Read its returned decision: an active notice, current approval,
 withdrawal, or other ineligibility may end the work without assessment.
-For `assessmentRequired`, dispatch a fresh worker on the new snapshot and
-repeat stages 3 and 4. Never reuse old judgments or the old assessment digest,
+For `assessmentRequired`, dispatch a fresh worker on the new snapshot only if
+the original time, command, and worker budgets still permit it, and repeat
+stages 3 and 4. Never reuse old judgments or the old assessment digest,
 even when the changed-path list looks unchanged. Refresh discards the obsolete
 assessment and isolates the next publication intent from the previous one.
 Dry-run inspection failures use the same bounded recovery without remote writes.
@@ -300,10 +287,22 @@ notices or file findings automatically.
 
 For each assessed PR, report the final `assessmentProgress` even when work is
 unfinished: changed paths judged versus total, explicitly delivered evidence
-units versus total, unit notes completed, and planned handoffs. State whether
+units versus total, and planned handoffs. State whether
 the cumulative judgment and assessment are complete. Unit delivery and notes
 are not path judgments or evidence of comprehension. The delivered unit
 character count covers unique prefixes read through unit references; reads of
 whole documents and repeated delivery are not included. Do not estimate command
 counts, model requests, elapsed phase times, repeated bytes, or budget usage
 from these figures. Report those metrics as unavailable when not measured.
+
+When `assessmentBudget` is present, report its native work-command count,
+limit, last observed elapsed time, exhaustion diagnostic, and reserved publication
+time, worker reservations versus their limit, evidence pages and text bytes
+produced, and read and judgment batch counts. These counts include repeated
+pages and cannot establish what the model received or understood. Unique and
+repeated evidence bytes are unavailable. The last observation is not a
+measurement of the current time or of an individual phase. Model request and
+actual worker counts are unavailable unless the orchestration environment
+supplies them. A `budgetExceeded` diagnostic or an
+exhausted budget leaves the assessment incomplete: do not approve or post a
+needs-review notice. Preserve the run and its journals for effect reconciliation.

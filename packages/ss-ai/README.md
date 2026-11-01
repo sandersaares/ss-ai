@@ -161,6 +161,14 @@ without counting rereads or reads through original document references.
 `unitCount` and `unitCharacters` describe the unit manifest. These counts do not
 measure comprehension, model requests, command calls, or elapsed time.
 
+New runs expose an `assessmentBudget` per inspected candidate. It records
+native work commands and the latest observed clock time, not model requests
+or worker counts. Assessment work stops before the overall deadline to leave
+time for freshness checks and publication. Budget exhaustion or a backwards
+clock leaves work incomplete and cannot authorize approval or a needs-review
+notice. An already-attempted remote effect remains eligible for its original
+reconciliation even after the budget expires.
+
 Discovery excludes drafts before checking commit recency. Drafts do not appear
 in the inventory, counts, or results. Inspection, refresh, or publication
 preflight removes a PR that has become a draft and returns no item for it.
@@ -290,9 +298,10 @@ indeterminate decisions; obtain fresh evidence in a new run.
 
 ## Source assessment and publication
 
-The installed `ss-autoreapprove` command recipes cover `prepare`, `assessment`,
-`read`, `source-context`, `units`, `note`, `checks`, `resolve`, `checkpoint`,
-`judge`, `complete`, `publish`, and `notify`. Each requires the absolute
+The installed `ss-autoreapprove` command recipes cover `prepare`, `start-worker`,
+`assessment`, `read`, `read-batch`, `source-context`, `units`, `note`, `checks`,
+`resolve`, `checkpoint`, `judge`, `judge-batch`, `complete`, `publish`, and
+`notify`. Each requires the absolute
 `--state-path`, positive `--pull-request-id`, and exact `--snapshot-digest`.
 Preparation uses isolated Git objects, never a checkout. It compares exact
 original-approved/current source trees, including merge-derived content and removals after force-pushes.
@@ -318,6 +327,19 @@ judgments. Results expose nullable `assessmentProgress` with `changeCount`,
 `judgedChangeCount`, `nextChangeOffset`, `unitCount`, `completedUnitCount`,
 `nextUnitId`, `nextUnitOffset`, `completedWorkCount`, `checkpointCount`, and `handoffLimit`
 without source or per-change rationales.
+
+New assessments use `assessmentProtocol: directV1` and expose `readToken` and
+`stateToken`. `read-batch --batch-json` accepts a JSON object with `readToken` and distinct
+`items`, each containing `reference`, scalar `offset`, and positive character
+`limit`. Its bounded response contains independently paged items, both tokens,
+and progress. Concurrent independent reads can reuse the same read token;
+mutable-record continuations require their prior `contentDigest`. Registering
+context changes the read token. Ordinary `read` accepts only the first page of
+a mutable semantic record; use `read-batch` to continue it. `judge-batch --batch-json` accepts a state token and distinct changed-path
+items with `id`, a complete `judgment`, and nullable `previousDigest`. Both
+commands validate and commit atomically; stale tokens, malformed items, and
+oversized responses leave the assessment unchanged. The cumulative judgment
+uses `judge`, not `judge-batch`. Batch input is not the retained workflow record.
 
 Every change exposes a mandatory `requiredPatch` read-progress record and
 `hunkCount`. Its patch document contains snapshot/change identity, both side
@@ -362,22 +384,20 @@ list. Each item supplies its `unit`, raw `reference`, `bindingReference`, `noteR
 nullable `noteDigest`, nullable `readOffset`, and Boolean `completed`.
 `nextUnitOffset` addresses the unfiltered list, allowing workers to resume
 without replaying completed metadata pages. Filtered lists have separate offsets.
-Read every returned `unit:ID` and `binding:ID` through the ordinary reader. Units cover each
-original document exactly once through half-open scalar ranges; their text
+Units cover each original document exactly once through half-open scalar ranges; their text
 concatenates those ranges in order. The stable parent identifier groups a source
 change or discussion thread; bounded bindings identify each record by collection
 and digests. Exact identities, locations, and excerpt links remain in the original
 unit text. Read other units with the same parent and reacquire original evidence
 as needed to interpret a fragment.
-Complete unit coverage also satisfies the original document's required read.
+Complete unit and binding coverage also satisfies the original document's required read.
 
 `note` takes `--unit-id`, `--observations`, `--interfaces`, repeated `--evidence`,
 optional repeated `--concern` and `--interaction`, and optional
-`--previous-digest`. A unit note cites its raw unit and requires complete
-delivery of its evidence and applicable requested context. Notes have no
-disposition. Each unit note requires a complete read of its binding reference.
-`--unit-id discussion` records the single discussion aggregate
-after all discussion unit notes and relevant exact evidence have been read.
+`--previous-digest`. Notes have no disposition. Direct assessments require a
+single `--unit-id discussion` observation citing complete discussion and relevant
+exact evidence, not a note per transport unit. The legacy protocol retains its
+original per-unit note and discussion aggregation requirements.
 Notes accept at most 8,192 serialized UTF-8 bytes before dependency bindings.
 New notes return `noteDigest`; replacements require the current digest.
 
@@ -390,11 +410,11 @@ Read `note:ID`, `judgment:CHANGE_ID`, `discussion-note`, `check:ID`, and
 `resolution:ID` through the same bounded reader.
 A semantic record shown in metadata is not its dedicated read receipt.
 
-`checkpoint` accepts planned handoff only after newly completed immutable work:
-a unit note or final change judgment. It returns scalar progress.
-Replay and replacement do not increase `completedWorkCount`. `handoffLimit`
-is the immutable unit count plus changed-path count; worker replacement and
-staleness have separate limits. Only one assessment worker runs per PR.
+`checkpoint` accepts planned handoff only after newly completed immutable work.
+It returns scalar progress. Replay and replacement do not increase
+`completedWorkCount`. Direct assessments permit bounded handoffs, and each
+worker dispatch must first consume a persistent `start-worker` reservation.
+Only one assessment worker runs per PR.
 Notes and checkpoints never authorize approval or a needs-review notice.
 
 `judge` takes `--change-id` (an exact ID or `cumulative`), `--disposition`,
@@ -406,20 +426,19 @@ without an edit-category allowlist. Replacing a judgment requires
 from `assessment`. Identical retries are idempotent; conflicting writes fail.
 Every change judgment must cite its patch reference and requires complete policy,
 patch, and applicable requested-context reads. Cited optional evidence also
-requires complete delivery. Change aggregation reads every note for its exact
-changed-path record and relevant exact source. A cumulative judgment requires
-complete policy, discussion, all final change judgments, discussion observations,
-every check and its disposition, and all requested-context reads. Its concern
+requires complete delivery. A cumulative judgment binds all final change
+judgments, discussion observations, every check and disposition, and all
+requested-context reads. Its concern
 and interaction arrays are empty: new obligations are recorded on a unit or
 change and resolved before cumulative completion.
-Completion requires every unit note, final change judgment, discussion aggregate,
+Completion requires every final change judgment, discussion observation,
 check disposition, and an independent cumulative judgment, plus complete policy,
 discussion, every patch, and every requested range for every disposition.
 This includes an empty changed-path inventory. Replacing a note or judgment
 invalidates dependent aggregates and resolutions through exact input digests.
-Source judgments cite raw evidence and unit/discussion notes, not other final
-judgments, checks, or resolutions. Check dispositions cannot cite other
-resolutions. The dependency hierarchy is fixed rather than recursively summarized.
+Source judgments cite raw evidence, not other final judgments, checks, or
+resolutions. Check dispositions cannot cite other resolutions. The dependency
+hierarchy is fixed rather than recursively summarized.
 Unexamined readable evidence remains incomplete work, not semantic uncertainty.
 Opaque source still permits a non-insignificant judgment. A significant
 or uncertain member or check disposition cannot be hidden by a cumulative insignificant judgment.
@@ -462,7 +481,7 @@ These records are created and updated only through the native commands.
 
 | Record | Fields |
 | --- | --- |
-| Assessment | `snapshotDigest`, `policyDigest`, `discussionDigest`, `inventory`, `inventoryDigest`, `sourceEvidence` map of change ID to source document, `sourceEvidenceDigest`, `contexts` map of stable reference to range, `checkpoints`, exact `documents`, `reads` map of reference to contiguous character count, `decisions` map of change ID to judgment, nullable `cumulative`, Boolean `complete`, nullable `assessmentDigest`. |
+| Assessment | `protocol: directV1` for new assessments; absent for legacy assessments. `snapshotDigest`, `policyDigest`, `discussionDigest`, `inventory`, `inventoryDigest`, `sourceEvidence` map of change ID to source document, `sourceEvidenceDigest`, `contexts` map of stable reference to range, `checkpoints`, exact `documents`, `reads` map of reference to contiguous character count, `decisions` map of change ID to judgment, nullable `cumulative`, Boolean `complete`, nullable `assessmentDigest`. |
 | Inventory | Full `oldCommit`, `newCommit`, `oldTree`, `newTree`; complete ordered `changes`; Boolean `complete`. Equal trees require empty changes. |
 | Change | SHA-256 `id` binding kind and both sides; `kind` (`A`, `D`, `M`, `T`, `R`); nullable `old`, `new`. |
 | Side | Exact UTF-8 Git `path`, full `object` ID, `mode`, and `content`. |

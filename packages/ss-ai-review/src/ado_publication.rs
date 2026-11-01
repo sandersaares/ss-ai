@@ -485,6 +485,9 @@ impl<'a> Store<'a> {
                     )),
                 );
             }
+            if let Some(deadline) = input.effect_deadline {
+                deadline.check(clock)?;
+            }
             operation.vote_state = EffectState::Intent;
             self.save(&operation)?;
             match api.transport.ado_write_once(

@@ -6,7 +6,7 @@
 )]
 
 use std::cell::{Cell, RefCell};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::ffi::OsString;
 use std::fmt::Write;
 use std::fs;
@@ -104,6 +104,19 @@ impl Clock for FixedClock {
 
     fn wait(&self, _: Duration) -> Result<(), AppError> {
         panic!("No test response requires a timed retry")
+    }
+}
+
+/// Gives budget tests a controlled command time without waiting.
+struct OffsetClock(Duration);
+
+impl Clock for OffsetClock {
+    fn now(&self) -> Timestamp {
+        FixedClock.now() + self.0
+    }
+
+    fn wait(&self, _: Duration) -> Result<(), AppError> {
+        panic!("Budget scenarios require no timed retry")
     }
 }
 
@@ -523,6 +536,32 @@ impl Process for Provider {
             }
             if self.fault.get() == "postPush" {
                 evidence["pullRequest"]["head"]["sha"] = json!("f".repeat(40));
+            }
+            if self.fault.get() == "postDismissal" {
+                evidence["pullRequest"]["head"]["sha"] = json!("f".repeat(40));
+                evidence["reviews"]
+                    .as_array_mut()
+                    .unwrap()
+                    .last_mut()
+                    .unwrap()["state"] = json!("DISMISSED");
+                evidence["timeline"]
+                    .as_array_mut()
+                    .unwrap()
+                    .last_mut()
+                    .unwrap()["state"] = json!("DISMISSED");
+                evidence["timeline"].as_array_mut().unwrap().push(json!({
+                    "__typename": "ReviewDismissedEvent", "id": "renewal-dismissal",
+                    "review": {"id": "renewal-review"}, "previousReviewState": "APPROVED",
+                    "createdAt": "2026-09-28T09:10:00Z",
+                    "pullRequestCommit": {"commit": {"oid": "f".repeat(40)}}
+                }));
+            }
+            if self.fault.get() == "postWrongCommit" {
+                evidence["reviews"]
+                    .as_array_mut()
+                    .unwrap()
+                    .last_mut()
+                    .unwrap()["commit_id"] = json!("f".repeat(40));
             }
             if self.fault.get() == "duplicate" {
                 let mut duplicate = review.clone();
@@ -961,6 +1000,31 @@ fn invoke(
         provider,
         provider,
         &FixedClock,
+        &root.parent().unwrap().join("host-store"),
+    )?)?)
+}
+
+/// Dispatches one command at a controlled time against the same persisted run.
+fn invoke_at(
+    root: &Path,
+    provider: &Provider,
+    operation: &str,
+    args: &[String],
+    clock: &dyn Clock,
+) -> Result<Value, AppError> {
+    let mut arguments = vec![
+        OsString::from("ss-ai"),
+        "autoreapprove".into(),
+        operation.into(),
+        "--state-path".into(),
+        root.join("run.json").into_os_string(),
+    ];
+    arguments.extend(args.iter().map(OsString::from));
+    Ok(serde_json::from_str(&run_in(
+        &arguments,
+        provider,
+        provider,
+        clock,
         &root.parent().unwrap().join("host-store"),
     )?)?)
 }
@@ -2558,6 +2622,709 @@ fn publish(root: &Path, provider: &Provider, snapshot: &str) -> Result<Value, Ap
 }
 
 #[test]
+fn exhausted_assessment_budget_survives_resume_without_remote_effects() {
+    let _guard = PROCESS_TEST_LOCK
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner);
+    let repository = Sources::new();
+    let scope = TempDir::new().unwrap();
+    let root = scope.path().join("budget");
+    let provider = repository.provider(false);
+    let (snapshot, _) = prepare(&root, &provider, true);
+    let arguments = [
+        "--pull-request-id".into(),
+        provider.number.to_string(),
+        "--snapshot-digest".into(),
+        snapshot.clone(),
+    ];
+    let clock = OffsetClock(Duration::from_mins(8));
+    let error = invoke_at(&root, &provider, "assessment", &arguments, &clock).unwrap_err();
+    assert_eq!(ss_ai::classification(&error), "budgetExceeded");
+
+    let results = invoke(&root, &provider, "results", &[]).unwrap();
+    assert_eq!(results["items"][0]["status"], "failed");
+    assert_eq!(results["items"][0]["assessmentBudget"]["exhausted"], true);
+    assert_eq!(
+        results["items"][0]["assessmentBudget"]["diagnostic"],
+        "timeLimit"
+    );
+    work(&root, &provider, "assessment", &snapshot, &[]).unwrap_err();
+    assert_eq!(provider.writes.get(), 0);
+}
+
+#[test]
+fn expired_publication_budget_never_starts_an_approval() {
+    let _guard = PROCESS_TEST_LOCK
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner);
+    let repository = Sources::new();
+    let scope = TempDir::new().unwrap();
+    let root = scope.path().join("budget");
+    let provider = repository.provider(false);
+    let (snapshot, prepared) = prepare(&root, &provider, false);
+    assess(&root, &provider, &snapshot, &prepared);
+    let arguments = [
+        "--pull-request-id".into(),
+        provider.number.to_string(),
+        "--snapshot-digest".into(),
+        snapshot.clone(),
+        "--repository-url".into(),
+        provider.url().into(),
+        "--attribution".into(),
+        "[Copilot speaking]".into(),
+    ];
+    let clock = OffsetClock(Duration::from_mins(9));
+    let error = invoke_at(&root, &provider, "publish", &arguments, &clock).unwrap_err();
+    assert_eq!(ss_ai::classification(&error), "budgetExceeded");
+    assert_eq!(provider.writes.get(), 0);
+    publish(&root, &provider, &snapshot).unwrap_err();
+    assert_eq!(provider.writes.get(), 0);
+}
+
+#[test]
+fn expired_publication_budget_never_starts_a_review_notice() {
+    let _guard = PROCESS_TEST_LOCK
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner);
+    let repository = Sources::new();
+    let scope = TempDir::new().unwrap();
+    let root = scope.path().join("budget-notice");
+    let provider = repository.provider(false);
+    let (snapshot, prepared) = prepare(&root, &provider, false);
+    assess_as(&root, &provider, &snapshot, &prepared, "significant");
+    let arguments = [
+        "--pull-request-id".into(),
+        provider.number.to_string(),
+        "--snapshot-digest".into(),
+        snapshot.clone(),
+        "--repository-url".into(),
+        provider.url().into(),
+        "--attribution".into(),
+        "[Copilot speaking]".into(),
+    ];
+    let clock = OffsetClock(Duration::from_mins(9));
+    let error = invoke_at(&root, &provider, "notify", &arguments, &clock).unwrap_err();
+    assert_eq!(ss_ai::classification(&error), "budgetExceeded");
+    notify(&root, &provider, &snapshot).unwrap_err();
+    assert_eq!(provider.writes.get(), 0);
+}
+
+#[test]
+fn worker_reservations_survive_resume_and_cannot_authorize_effects_after_exhaustion() {
+    let _guard = PROCESS_TEST_LOCK
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner);
+    let repository = Sources::new();
+    let scope = TempDir::new().unwrap();
+    let root = scope.path().join("workers");
+    let provider = repository.provider(false);
+    let (snapshot, _) = prepare(&root, &provider, false);
+    for expected in 1..=3 {
+        let result = work(&root, &provider, "start-worker", &snapshot, &[]).unwrap();
+        assert_eq!(
+            result["items"][0]["assessmentBudget"]["workerReservations"],
+            expected
+        );
+    }
+    let error = work(&root, &provider, "start-worker", &snapshot, &[]).unwrap_err();
+    assert_eq!(ss_ai::classification(&error), "budgetExceeded");
+    let result = invoke(&root, &provider, "results", &[]).unwrap();
+    assert_eq!(
+        result["items"][0]["assessmentBudget"]["diagnostic"],
+        "workerLimit"
+    );
+    work(&root, &provider, "assessment", &snapshot, &[]).unwrap_err();
+    publish(&root, &provider, &snapshot).unwrap_err();
+    assert_eq!(provider.writes.get(), 0);
+}
+
+#[test]
+fn stale_refresh_retains_time_work_and_worker_budgets() {
+    let _guard = PROCESS_TEST_LOCK
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner);
+    let repository = Sources::new();
+    let scope = TempDir::new().unwrap();
+    let root = scope.path().join("refresh-budget");
+    let provider = repository.provider(false);
+    let (snapshot, prepared) = prepare(&root, &provider, false);
+    work(&root, &provider, "start-worker", &snapshot, &[]).unwrap();
+    assess(&root, &provider, &snapshot, &prepared);
+    let before = invoke(&root, &provider, "results", &[]).unwrap();
+    let before_budget = &before["items"][0]["assessmentBudget"];
+    provider.evidence.borrow_mut()["pullRequest"]["body"] = json!("New discussion evidence.");
+    assert_eq!(
+        publish(&root, &provider, &snapshot).unwrap()["items"][0]["status"],
+        "staleDuringExecution"
+    );
+    let refreshed = refresh(&root, &provider).unwrap();
+    let after_budget = &refreshed["items"][0]["assessmentBudget"];
+    assert_eq!(
+        after_budget["startedAtMilliseconds"],
+        before_budget["startedAtMilliseconds"]
+    );
+    assert_eq!(after_budget["workerReservations"], 1);
+    assert!(
+        after_budget["workCommands"].as_u64().unwrap()
+            >= before_budget["workCommands"].as_u64().unwrap()
+    );
+    assert_eq!(provider.writes.get(), 0);
+}
+
+#[test]
+fn batch_commands_record_delivery_and_reject_partial_transactions() {
+    let _guard = PROCESS_TEST_LOCK
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner);
+    let repository = Sources::new();
+    let scope = TempDir::new().unwrap();
+    let root = scope.path().join("batch");
+    let provider = repository.provider(false);
+    let (snapshot, prepared) = prepare(&root, &provider, true);
+    let token = prepared["readToken"].as_str().unwrap();
+    let bad = json!({"readToken":token,"items":[
+        {"reference":"policy","offset":0,"limit":100},
+        {"reference":"missing","offset":0,"limit":100}
+    ]});
+    work(
+        &root,
+        &provider,
+        "read-batch",
+        &snapshot,
+        &["--batch-json".into(), bad.to_string()],
+    )
+    .unwrap_err();
+    let page = work(&root, &provider, "assessment", &snapshot, &[]).unwrap();
+    assert!(page["documentReads"][0]["readOffset"].is_null());
+    let good = json!({"readToken":token,"items":[
+        {"reference":"policy","offset":0,"limit":100},
+        {"reference":"discussion","offset":0,"limit":100}
+    ]});
+    let response = work(
+        &root,
+        &provider,
+        "read-batch",
+        &snapshot,
+        &["--batch-json".into(), good.to_string()],
+    )
+    .unwrap();
+    assert_eq!(response["items"].as_array().unwrap().len(), 2);
+    let result = invoke(&root, &provider, "results", &[]).unwrap();
+    let budget = &result["items"][0]["assessmentBudget"];
+    assert_eq!(budget["readBatches"], 1);
+    assert_eq!(budget["evidencePagesProduced"], 2);
+    assert!(budget["deliveredTextBytesProduced"].as_u64().unwrap() > 0);
+    assert!(budget["uniqueEvidenceBytes"].is_null());
+    assert_eq!(provider.writes.get(), 0);
+}
+
+/// Exercises the dispatcher output, including the executable's trailing newline.
+fn canary_invoke(
+    root: &Path,
+    provider: &Provider,
+    operation: &str,
+    args: &[String],
+) -> Result<Value, AppError> {
+    let mut arguments = vec![
+        OsString::from("ss-ai"),
+        "autoreapprove".into(),
+        operation.into(),
+        "--state-path".into(),
+        root.join("run.json").into_os_string(),
+    ];
+    arguments.extend(args.iter().map(OsString::from));
+    let output = run_in(
+        &arguments,
+        provider,
+        provider,
+        &FixedClock,
+        &root.parent().unwrap().join("host-store"),
+    )?;
+    assert!(output.len() < 16_384, "{operation}: {}", output.len());
+    let value: Value = serde_json::from_str(&output)?;
+    // The assessment boundary budgets pretty JSON even when the CLI emits compact JSON.
+    assert!(serde_json::to_vec_pretty(&value)?.len() < 16_384);
+    Ok(value)
+}
+
+/// Binds a bounded canary command to the prepared snapshot.
+fn canary_work(
+    root: &Path,
+    provider: &Provider,
+    snapshot: &str,
+    operation: &str,
+    args: &[String],
+) -> Result<Value, AppError> {
+    let mut input = vec![
+        "--pull-request-id".into(),
+        provider.number.to_string(),
+        "--snapshot-digest".into(),
+        snapshot.into(),
+    ];
+    input.extend_from_slice(args);
+    canary_invoke(root, provider, operation, &input)
+}
+
+/// Follows native offsets and rejects gaps or duplicate path identities.
+fn canary_pages(
+    root: &Path,
+    provider: &Provider,
+    snapshot: &str,
+) -> (BTreeMap<String, String>, BTreeSet<String>, usize) {
+    let mut after = 0_usize;
+    let mut paths = BTreeMap::new();
+    let mut judged = BTreeSet::new();
+    let mut pages = 0;
+    loop {
+        let response = canary_work(
+            root,
+            provider,
+            snapshot,
+            "assessment",
+            &[
+                "--after".into(),
+                after.to_string(),
+                "--limit".into(),
+                "1000".into(),
+            ],
+        )
+        .unwrap();
+        let changes = response["changes"].as_array().unwrap();
+        assert!(!changes.is_empty());
+        pages += 1;
+        for change in changes {
+            let id = change["id"].as_str().unwrap();
+            let path = change["new"]["path"].as_str().unwrap();
+            assert!(paths.insert(id.to_owned(), path.to_owned()).is_none());
+            if !change["decision"].is_null() {
+                judged.insert(id.to_owned());
+            }
+        }
+        let Some(next) = response["nextOffset"].as_u64() else {
+            break;
+        };
+        let next = usize::try_from(next).unwrap();
+        assert_eq!(next, after + changes.len());
+        assert!(next > after);
+        after = next;
+    }
+    (paths, judged, pages)
+}
+
+/// Confirms atomic failure and exact Unicode delivery after a smaller retry.
+fn canary_unicode_batch(
+    root: &Path,
+    provider: &Provider,
+    snapshot: &str,
+    read_token: &str,
+    id: &str,
+    old_text: &str,
+    new_text: &str,
+) {
+    let references = [format!("{id}:old"), format!("{id}:new")];
+    let request = json!({"readToken": read_token, "items": references.iter().map(|reference|
+        json!({"reference": reference, "offset": 0, "limit": 4096})
+    ).collect::<Vec<_>>()});
+    let run_path = root.join("run.json");
+    let before = fs::read(&run_path).unwrap();
+    let error = canary_work(
+        root,
+        provider,
+        snapshot,
+        "read-batch",
+        &["--batch-json".into(), request.to_string()],
+    )
+    .unwrap_err();
+    assert_eq!(ss_ai::classification(&error), "evidenceDelivery");
+    // An unsuccessful command consumes work budget but commits no read receipt
+    // or evidence-page accounting, which are separate persisted contracts.
+    assert_only_work_commands_changed(&run_path, &before, 1);
+    let before: Value = serde_json::from_slice(&before).unwrap();
+    let after: Value = serde_json::from_slice(&fs::read(&run_path).unwrap()).unwrap();
+    assert_eq!(
+        before["inventory"][0]["assessment"]["reads"],
+        after["inventory"][0]["assessment"]["reads"]
+    );
+    for field in ["readBatches", "evidencePages", "deliveredTextBytes"] {
+        assert_eq!(
+            before["inventory"][0]["assessmentBudget"][field],
+            after["inventory"][0]["assessmentBudget"][field]
+        );
+    }
+
+    let mut delivered = [String::new(), String::new()];
+    let mut offset = 0;
+    let mut first = None;
+    loop {
+        let request = json!({"readToken": read_token, "items": references.iter().map(|reference|
+            json!({"reference": reference, "offset": offset, "limit": 600})
+        ).collect::<Vec<_>>()});
+        let args = ["--batch-json".into(), request.to_string()];
+        let response = canary_work(root, provider, snapshot, "read-batch", &args).unwrap();
+        if first.is_none() {
+            let replay = canary_work(root, provider, snapshot, "read-batch", &args).unwrap();
+            assert_eq!(response["items"], replay["items"]);
+            first = Some(());
+        }
+        let items = response["items"].as_array().unwrap();
+        for (index, item) in items.iter().enumerate() {
+            assert_eq!(item["reference"], references[index]);
+            assert_eq!(item["offset"], offset);
+            delivered[index].push_str(item["text"].as_str().unwrap());
+        }
+        if items.iter().all(|item| item["complete"] == true) {
+            break;
+        }
+        let next = usize::try_from(items[0]["nextOffset"].as_u64().unwrap()).unwrap();
+        assert_eq!(items[1]["nextOffset"], next);
+        assert!(next > offset);
+        offset = next;
+    }
+    assert_eq!(delivered[0], old_text);
+    assert_eq!(delivered[1], new_text);
+}
+
+#[test]
+fn native_scale_canary_pages_and_recovers_oversized_unicode_batches() {
+    let _guard = PROCESS_TEST_LOCK
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner);
+    // The varied judgment metadata forces summary pages to shrink, while the
+    // unchanged Unicode body makes each source side individually pageable.
+    let fixture_root = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("..")
+        .join("..")
+        .join("target");
+    fs::create_dir_all(&fixture_root).unwrap();
+    let scope = TempDir::new_in(fixture_root).unwrap();
+    let repository = scope.path().join("repository");
+    fs::create_dir_all(&repository).unwrap();
+    let unicode = "é🤖\"\\\n".repeat(1500);
+    let old_text = format!("old\n{unicode}");
+    let new_text = format!("new\n{unicode}");
+    git(&repository, &["init", "--quiet"]);
+    for index in 0..30 {
+        let content = if index == 0 {
+            old_text.as_str()
+        } else {
+            "old\n"
+        };
+        fs::write(repository.join(format!("path-{index:03}.txt")), content).unwrap();
+    }
+    git(&repository, &["add", "."]);
+    git(&repository, &["commit", "--quiet", "-m", "Original"]);
+    let old = git(&repository, &["rev-parse", "HEAD"]);
+    for index in 0..30 {
+        let content = if index == 0 {
+            new_text.as_str()
+        } else {
+            "new\n"
+        };
+        fs::write(repository.join(format!("path-{index:03}.txt")), content).unwrap();
+    }
+    git(&repository, &["add", "."]);
+    git(&repository, &["commit", "--quiet", "-m", "Changed"]);
+    let new = git(&repository, &["rev-parse", "HEAD"]);
+    let root = scope.path().join("run");
+    fs::create_dir_all(&root).unwrap();
+    fs::write(
+        root.join("policy.md"),
+        include_str!("../../../skills/ss-autoreapprove/significance.md"),
+    )
+    .unwrap();
+    let provider = Provider::new(&repository, &old, &new);
+    canary_invoke(
+        &root,
+        &provider,
+        "discover",
+        &[
+            "--repository-url".into(),
+            provider.url().into(),
+            "--policy-path".into(),
+            root.join("policy.md").to_str().unwrap().into(),
+            "--dry-run".into(),
+        ],
+    )
+    .unwrap();
+    let inspected = canary_invoke(
+        &root,
+        &provider,
+        "inspect",
+        &[
+            "--repository-url".into(),
+            provider.url().into(),
+            "--pull-request-id".into(),
+            provider.number.to_string(),
+        ],
+    )
+    .unwrap();
+    assert_eq!(inspected["items"][0]["status"], "assessmentRequired");
+    let snapshot = inspected["items"][0]["snapshotDigest"].as_str().unwrap();
+    let prepared = canary_work(&root, &provider, snapshot, "prepare", &[]).unwrap();
+    let read_token = prepared["readToken"].as_str().unwrap().to_owned();
+    let (paths, initially_judged, initial_pages) = canary_pages(&root, &provider, snapshot);
+    assert!(initially_judged.is_empty());
+    let expected_paths = (0..30)
+        .map(|index| format!("path-{index:03}.txt"))
+        .collect::<BTreeSet<_>>();
+    assert_eq!(
+        paths.values().cloned().collect::<BTreeSet<_>>(),
+        expected_paths
+    );
+    assert_eq!(paths.len(), expected_paths.len());
+    let id = paths
+        .iter()
+        .find(|(_, path)| *path == "path-000.txt")
+        .unwrap()
+        .0;
+    canary_unicode_batch(
+        &root,
+        &provider,
+        snapshot,
+        &read_token,
+        id,
+        &old_text,
+        &new_text,
+    );
+
+    let mut raw = vec!["policy".to_owned()];
+    raw.extend(paths.keys().map(|id| format!("{id}:patch")));
+    for group in raw.chunks(4) {
+        let request = json!({"readToken":read_token,"items":group.iter().map(|reference|
+            json!({"reference":reference,"offset":0,"limit":4096})
+        ).collect::<Vec<_>>()});
+        let response = canary_work(
+            &root,
+            &provider,
+            snapshot,
+            "read-batch",
+            &["--batch-json".into(), request.to_string()],
+        )
+        .unwrap();
+        assert!(
+            response["items"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .all(|item| item["complete"] == true)
+        );
+    }
+    let ids = paths.keys().cloned().collect::<Vec<_>>();
+    let mut pages = vec![initial_pages];
+    let mut expected_judged = BTreeSet::new();
+    for group in ids.chunks(15) {
+        let current = canary_work(&root, &provider, snapshot, "assessment", &[]).unwrap();
+        let request = json!({"stateToken": current["stateToken"], "items": group.iter().map(|id|
+            json!({"id":id, "judgment":{
+                "disposition":"insignificant", "rationale":"synthetic rationale ".repeat(120),
+                "evidence":[format!("{id}:patch")], "concerns":[], "interactions":[]
+            }, "previousDigest":null})
+        ).collect::<Vec<_>>()});
+        canary_work(
+            &root,
+            &provider,
+            snapshot,
+            "judge-batch",
+            &["--batch-json".into(), request.to_string()],
+        )
+        .unwrap();
+        expected_judged.extend(group.iter().cloned());
+        let (seen, judged, count) = canary_pages(&root, &provider, snapshot);
+        assert_eq!(seen, paths);
+        assert_eq!(judged, expected_judged);
+        pages.push(count);
+    }
+    assert!(pages[0] < pages[1] && pages[1] < pages[2], "{pages:?}");
+    assert_eq!(provider.writes.get(), 0);
+}
+
+#[test]
+fn legacy_run_without_assessment_refuses_new_work_without_mutation() {
+    let _guard = PROCESS_TEST_LOCK
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner);
+    let repository = Sources::new();
+    let scope = TempDir::new().unwrap();
+    let root = scope.path().join("legacy");
+    let provider = repository.provider(false);
+    let inspected = discover_inspect(&root, &provider, false);
+    let snapshot = inspected["items"][0]["snapshotDigest"].as_str().unwrap();
+    let path = root.join("run.json");
+    let mut record: Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+    record
+        .as_object_mut()
+        .unwrap()
+        .remove("assessmentBudgetEnabled");
+    record["inventory"][0]
+        .as_object_mut()
+        .unwrap()
+        .remove("assessmentBudget");
+    fs::write(&path, serde_json::to_vec(&record).unwrap()).unwrap();
+    let before = fs::read(&path).unwrap();
+    assert_eq!(
+        ss_ai::classification(&work(&root, &provider, "prepare", snapshot, &[]).unwrap_err()),
+        "invalidState"
+    );
+    assert_eq!(fs::read(&path).unwrap(), before);
+    assert_eq!(provider.writes.get(), 0);
+}
+
+#[test]
+fn legacy_completed_assessments_reconcile_effects_without_the_old_binary() {
+    let _guard = PROCESS_TEST_LOCK
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner);
+    let repository = Sources::new();
+    for ado in [false, true] {
+        for fault in ["unknown", "postPush", "noticeUnknown"] {
+            let scope = TempDir::new().unwrap();
+            let root = scope.path().join("legacy");
+            let provider = repository.provider(ado);
+            let (snapshot, _) = prepare(&root, &provider, false);
+            // An empty schema-14 assessment has the same manifest in both protocols.
+            // Remove only fields that did not exist in schema 14 before adding legacy work.
+            let path = root.join("run.json");
+            let mut record: Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+            record
+                .as_object_mut()
+                .unwrap()
+                .remove("assessmentBudgetEnabled");
+            let entry = record["inventory"][0].as_object_mut().unwrap();
+            entry.remove("assessmentBudget");
+            entry
+                .get_mut("assessment")
+                .unwrap()
+                .as_object_mut()
+                .unwrap()
+                .remove("protocol");
+            fs::write(&path, serde_json::to_vec(&record).unwrap()).unwrap();
+            let prepared = work(&root, &provider, "assessment", &snapshot, &[]).unwrap();
+            assert_eq!(prepared["assessmentProtocol"], "legacy");
+            let disposition = if fault == "noticeUnknown" {
+                "significant"
+            } else {
+                "insignificant"
+            };
+            assess_as(&root, &provider, &snapshot, &prepared, disposition);
+            provider.fault.set(fault);
+            if fault == "noticeUnknown" {
+                notify(&root, &provider, &snapshot).unwrap_err();
+            } else if fault == "unknown" {
+                assert_eq!(
+                    publish(&root, &provider, &snapshot).unwrap()["error"]["kind"],
+                    "ambiguousWrite"
+                );
+            } else {
+                assert_eq!(
+                    publish(&root, &provider, &snapshot).unwrap()["items"][0]["status"],
+                    "staleDuringExecution"
+                );
+            }
+            let writes = provider.writes.get();
+            assert!(writes > 0);
+            let before = fs::read(&path).unwrap();
+            assert_eq!(
+                ss_ai::classification(&refresh(&root, &provider).unwrap_err()),
+                "ambiguousWrite"
+            );
+            assert_eq!(fs::read(&path).unwrap(), before);
+            if fault == "unknown" || fault == "noticeUnknown" {
+                provider.fault.set("");
+                let new_root = scope.path().join("new-run");
+                let (new_snapshot, new_prepared) = prepare(&new_root, &provider, false);
+                assess(&new_root, &provider, &new_snapshot, &new_prepared);
+                assert_eq!(
+                    ss_ai::classification(
+                        &publish(&new_root, &provider, &new_snapshot).unwrap_err()
+                    ),
+                    "ambiguousWrite"
+                );
+                assert_eq!(provider.writes.get(), writes);
+                provider.fault.set(fault);
+            }
+            let later = OffsetClock(Duration::from_mins(10));
+            let args = [
+                "--pull-request-id".into(),
+                provider.number.to_string(),
+                "--snapshot-digest".into(),
+                snapshot.clone(),
+                "--repository-url".into(),
+                provider.url().into(),
+                "--attribution".into(),
+                "[Copilot speaking]".into(),
+            ];
+            let operation = if fault == "noticeUnknown" {
+                "notify"
+            } else {
+                "publish"
+            };
+            let reconciled = invoke_at(&root, &provider, operation, &args, &later);
+            if let Err(error) = &reconciled {
+                assert_ne!(ss_ai::classification(error), "budgetExceeded");
+            }
+            assert_eq!(provider.writes.get(), writes);
+        }
+    }
+}
+
+#[test]
+fn identifiable_dismissed_renewal_is_stale_not_an_unknown_effect() {
+    let _guard = PROCESS_TEST_LOCK
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner);
+    let repository = Sources::new();
+    let scope = TempDir::new().unwrap();
+    let root = scope.path().join("dismissed");
+    let provider = repository.provider(false);
+    let (snapshot, prepared) = prepare(&root, &provider, false);
+    assess(&root, &provider, &snapshot, &prepared);
+    provider.fault.set("postDismissal");
+    let result = publish(&root, &provider, &snapshot).unwrap();
+    assert_eq!(result["items"][0]["status"], "staleDuringExecution");
+    assert_eq!(provider.writes.get(), 1);
+    let recovered = publish(&root, &provider, &snapshot).unwrap();
+    assert_eq!(recovered["items"][0]["status"], "staleDuringExecution");
+    assert_eq!(provider.writes.get(), 1);
+}
+
+#[test]
+fn mismatched_owned_review_remains_ambiguous_until_original_run_reconciles() {
+    let _guard = PROCESS_TEST_LOCK
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner);
+    let repository = Sources::new();
+    let scope = TempDir::new().unwrap();
+    let root = scope.path().join("first");
+    let provider = repository.provider(false);
+    let (snapshot, prepared) = prepare(&root, &provider, false);
+    assess(&root, &provider, &snapshot, &prepared);
+    let new_root = scope.path().join("second");
+    let (new_snapshot, new_prepared) = prepare(&new_root, &provider, false);
+    assess(&new_root, &provider, &new_snapshot, &new_prepared);
+    provider.fault.set("postWrongCommit");
+    let result = publish(&root, &provider, &snapshot).unwrap();
+    assert_eq!(result["error"]["kind"], "ambiguousWrite");
+    assert_eq!(provider.writes.get(), 1);
+
+    provider.fault.set("");
+    // Both runs share the host journal; an unverified owned effect blocks a new write.
+    assert_eq!(
+        ss_ai::classification(&publish(&new_root, &provider, &new_snapshot).unwrap_err()),
+        "ambiguousWrite"
+    );
+    assert_eq!(provider.writes.get(), 1);
+
+    provider.evidence.borrow_mut()["reviews"]
+        .as_array_mut()
+        .unwrap()
+        .last_mut()
+        .unwrap()["commit_id"] = json!(repository.new);
+    let recovered = publish(&root, &provider, &snapshot).unwrap();
+    assert_eq!(recovered["items"][0]["status"], "reapproved");
+    assert_eq!(provider.writes.get(), 1);
+}
+
+#[test]
 fn native_git_assessment_and_guarded_publication_have_exact_effect_boundaries() {
     let _guard = PROCESS_TEST_LOCK
         .lock()
@@ -2736,6 +3503,30 @@ fn recorded_git_rejects_unknown_commands_and_changed_source(repository: &Sources
     }
 }
 
+/// Rejected work consumes its durable budget without changing assessment evidence.
+fn assert_only_work_commands_changed(path: &Path, before: &[u8], commands: u64) {
+    let before: Value = serde_json::from_slice(before).unwrap();
+    let mut after: Value = serde_json::from_slice(&fs::read(path).unwrap()).unwrap();
+    assert_eq!(
+        after["inventory"][0]["assessmentBudget"]["workCommands"],
+        before["inventory"][0]["assessmentBudget"]["workCommands"]
+            .as_u64()
+            .unwrap()
+            + commands
+    );
+    after["inventory"][0]["assessmentBudget"]["workCommands"] =
+        before["inventory"][0]["assessmentBudget"]["workCommands"].clone();
+    assert_eq!(after, before);
+}
+
+#[test]
+fn rejected_pagination_preserves_assessment_evidence() {
+    let _guard = PROCESS_TEST_LOCK
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner);
+    pagination_requires_complete_contiguous_snapshot_bound_unicode_evidence();
+}
+
 /// Exercises paging once, independently of the publication fault matrices.
 fn pagination_requires_complete_contiguous_snapshot_bound_unicode_evidence() {
     let repository = TempDir::new().unwrap();
@@ -2789,7 +3580,7 @@ fn pagination_requires_complete_contiguous_snapshot_bound_unicode_evidence() {
     let before = fs::read(&path).unwrap();
     read(&snapshot, 1, page_limit).unwrap_err();
     read(&"f".repeat(64), 0, page_limit).unwrap_err();
-    assert_eq!(fs::read(&path).unwrap(), before);
+    assert_only_work_commands_changed(&path, &before, 1);
 
     let first = read(&snapshot, 0, page_limit).unwrap();
     assert_eq!(
@@ -2809,7 +3600,7 @@ fn pagination_requires_complete_contiguous_snapshot_bound_unicode_evidence() {
 
     let before = fs::read(&path).unwrap();
     read(&snapshot, page_limit + 1, page_limit).unwrap_err();
-    assert_eq!(fs::read(&path).unwrap(), before);
+    assert_only_work_commands_changed(&path, &before, 1);
     for reference in ["policy", "discussion"] {
         read_evidence(&root, &provider, &snapshot, reference, None, None);
     }
@@ -3372,7 +4163,7 @@ fn incomplete_evidence_does_not_authorize_approval_or_needs_review_publication()
             )
             .unwrap_err();
             work(scope.path(), &provider, "complete", &snapshot, &[]).unwrap_err();
-            assert_eq!(fs::read(scope.path().join("run.json")).unwrap(), before);
+            assert_only_work_commands_changed(&scope.path().join("run.json"), &before, 3);
             notify(scope.path(), &provider, &snapshot).unwrap_err();
             publish(scope.path(), &provider, &snapshot).unwrap_err();
             let result = invoke(scope.path(), &provider, "results", &[]).unwrap();

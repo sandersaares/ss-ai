@@ -107,10 +107,11 @@ that the assessor chose enough context; needed evidence outside the captured
 sides remains explicitly missing.
 There is no filename, size, or edit-category exemption.
 
-The orchestrator dispatches a fresh GPT 6.1 Sol assessment worker per eligible PR
-with explicit medium reasoning and regular context. That worker owns preparation,
-bounded evidence reads, judgments, and completion. It returns scalar results and
-a concise reason, not source or discussion text, and cannot publish.
+The orchestrator prepares the comparison and reserves a GPT 6.1 Sol assessment
+worker per eligible PR with explicit medium reasoning and regular context.
+The worker owns bounded evidence reads, judgments, and completion. It returns
+scalar results and a concise reason, not source or discussion text, and cannot
+publish.
 
 Evidence and metadata responses have a serialized UTF-8 byte budget, including
 JSON escaping and pretty formatting, so a character-count bound cannot hide
@@ -128,47 +129,24 @@ An immutable evidence-unit manifest partitions every required patch and the
 complete discussion into bounded exact ranges. It prefers complete hunks,
 threads, and review bodies, groups interleaved replies by their retained parent,
 and splits oversized records or single lines without omission. Each unit retains
-its original reference, scalar ranges, content digests, and a reference to
-source/thread binding references. Bindings use bounded record and thread digests;
-the original unit text retains exact identities, locations, and links. Workers
-read the bindings before recording a unit note and reacquire related original
-units as needed to interpret fragments.
-Sharing excerpt text never merges its referencing threads.
+its original reference, scalar ranges, content digests, and source/thread
+bindings. Sharing excerpt text never merges its referencing threads. The direct
+protocol delivers independently addressable pages in bounded atomic batches;
+transport fragments do not need individual semantic notes. A discussion
+observation retains material objections, and each changed-path record receives
+one final judgment. Atomic judgment batches bind each judgment to exact evidence.
 
-Workers record typed unit notes with observations, interfaces/invariants,
-interactions, concerns, and exact references. Notes are not approval judgments.
-Notes may cite binding metadata alongside exact evidence, but bindings cannot
-replace the exact unit or discussion text. Every cited binding requires a
-complete read and remains bound to the immutable snapshot.
-Each exact changed-path record still needs a single final judgment after its
-aggregator reads all unit notes and relevant exact source. The discussion
-aggregate covers every discussion note, including original bodies and unique
-historical excerpts. It can bind relevant source notes without replacing the
-required discussion notes.
+The worker independently examines combined effects and relevant exact evidence.
+Every recorded concern or interaction requires a rationale and exact supporting
+evidence. Significant or uncertain members and check dispositions prevent a
+favorable cumulative judgment from authorizing renewal. Replacements invalidate
+dependent records through their bound digests.
 
-Native checkpoints require newly completed immutable work: a unit note or final
-change judgment. Replays and replacement records earn no new progress.
-The immutable unit and changed-path counts bound planned handoffs; the separate
-replacement and stale-recovery budgets still apply. Workers do not overlap and
-do not increase model context. Scalar progress keeps semantic evidence out of
-the orchestrator.
-
-The fresh cumulative worker reads every final change judgment, discussion
-observation, and explicit concern/interaction disposition. It independently
-examines combined effects and reacquires relevant exact evidence. Every recorded
-concern or interaction requires a rationale and exact supporting evidence.
-Significant or uncertain members and check dispositions prevent a favorable
-aggregate from authorizing renewal. Replacing a note invalidates dependent
-aggregates through their bound digests; unrelated notes remain available.
-
-Completion requires all raw unit ranges, requested context, unit notes, final
-change judgments, discussion aggregation, check dispositions, and the independent
-cumulative judgment, including with an empty source inventory. Native receipts
-prove delivery, not comprehension. Notes can omit an implication even when
-coverage is complete; synthetic adversarial evaluation reduces that risk but
-does not prove semantic equivalence. There is no recursive summary hierarchy
-or guarantee that an arbitrary PR fits: a cumulative set that cannot be examined
-with its necessary exact evidence remains explicitly incomplete.
+Completion requires all required raw evidence and requested context, final
+change judgments, the discussion observation, check dispositions, and an
+independent cumulative judgment, including for an empty source inventory.
+Native receipts prove delivery, not comprehension. A cumulative set that cannot
+be examined with its necessary evidence remains explicitly incomplete.
 
 Tool-output, context, and worker limits are incomplete evidence, not substantive
 uncertainty. They neither freeze a semantic refusal nor authorize a notice.
@@ -176,17 +154,13 @@ Judgment recording rejects unread readable source for every disposition, and
 completion independently checks the same boundary. Actual semantic uncertainty
 and intrinsically opaque source remain fail-closed review outcomes.
 
-A returned synchronous worker cannot receive a continuation message. After
-native results confirm an unfinished assessment, the skill permits one fresh
-replacement per PR and snapshot, with no overlapping workers. The replacement
-uses the original run and snapshot, reads native inventory and judgment progress,
-and acquires its own evidence rather than inheriting the earlier worker's
-conclusions. Repeating preparation preserves progress; evidence reads permit
-replay from zero and judgments use conditional digests for deliberate replacement.
-This bounds recovery from a premature return without weakening native coverage
-or treating it as staleness. A second incomplete worker leaves explicit
-unfinished work. Stale evidence retains its separate refresh budget, and
-unrelated tooling failures remain failures.
+A replacement worker uses the original run and snapshot and acquires the
+evidence needed for its own decisions. Repeating preparation preserves progress;
+judgments use conditional digests for deliberate replacement. A persistent
+per-PR budget reserves time for publication and bounds native work commands and
+worker dispatch reservations across interruption and stale recovery. Exhaustion
+leaves explicit unfinished work. Existing legacy assessments retain their
+original protocol and remain available for publication-effect reconciliation.
 
 ## Material evidence
 
@@ -506,7 +480,7 @@ object and content digest, without copying the range's body into state.
 `assessment.rs` owns
 context selection, bounded contiguous reads, conditional judgment replacement,
 coverage, and completion digests. `units.rs` supplies exact source/discussion
-partitions; `checkpoint.rs` binds typed notes, fixed-level aggregates, explicit
+partitions; `checkpoint.rs` binds discussion observations, judgments, explicit
 check dispositions, and monotonic handoff progress. Producers and consumers use the same validation,
 so missing data cannot become an empty successful result. Timestamps use the shared
 Jiff parser and injectable clock; the reapproval workflow has no independent
@@ -518,7 +492,9 @@ New context removes the affected change's unit notes and judgment, their
 dependents, the discussion aggregate, check dispositions, and the cumulative
 judgment. Unrelated change judgments remain intact. Failed context acquisition stays
 in the run as incomplete evidence, with no approval or notice authority.
-Incompatible run contracts require a new run rather than migrated read receipts.
+Legacy assessments retain their original contract rather than migrating their
+receipts or judgments. The current utility can reconcile their publication
+effects through the unchanged host journals.
 
 `discussion.rs` projects captured history into compact, provider-tagged semantic
 documents. It does not participate in authority or freshness comparisons.

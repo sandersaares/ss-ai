@@ -157,6 +157,7 @@ pub(crate) struct Input<'a> {
     pub(crate) source_commit: &'a str,
     pub(crate) attribution: &'a str,
     pub(crate) explanation: &'a str,
+    pub(crate) effect_deadline: Option<crate::assessment_budget::EffectDeadline>,
 }
 
 #[derive(Debug, Deserialize, Serialize)]
@@ -678,6 +679,9 @@ impl<'a> Store<'a> {
                 )),
             );
         }
+        if let Some(deadline) = input.effect_deadline {
+            deadline.check(clock)?;
+        }
         operation.state = State::WriteIntent;
         operation.effect = Some(Effect {
             kind: EffectKind::ReviewCreate,
@@ -830,22 +834,34 @@ impl<'a> Store<'a> {
                 )),
             );
         };
-        let review_id =
-            match matching_review(review, &operation) {
-                Ok(id) => id,
-                Err(error) => return self.finish(
-                    operation,
-                    State::Stale,
-                    Outcome::StaleDuringExecution,
-                    None,
-                    Some((
-                        "staleEvidence",
-                        &format!(
-                            "Approval effect exists but is not the expected valid approval: {error}"
-                        ),
-                    )),
-                ),
-            };
+        let review_id = match identify_review(review, &operation) {
+            Ok(id) => id,
+            Err(error) => return self.finish(
+                operation,
+                State::WriteUnknown,
+                Outcome::Failed,
+                None,
+                Some((
+                    "ambiguousWrite",
+                    &format!(
+                        "Approval may exist but its identity or source cannot be verified: {error}"
+                    ),
+                )),
+            ),
+        };
+        // Dismissal changes approval standing but does not erase the owned effect.
+        if !matches!(text(field(review, "state")?)?, "APPROVED" | "DISMISSED") {
+            return self.finish(
+                operation,
+                State::WriteUnknown,
+                Outcome::Failed,
+                None,
+                Some((
+                    "ambiguousWrite",
+                    "The matching review is not a submitted approval",
+                )),
+            );
+        }
         let verification = verify(&fresh, &operation, &self.record.scope, clock.now());
         operation.verification = Some(Verification {
             observed_at: clock.now().to_string(),
@@ -970,18 +986,27 @@ fn publication_data_directory(root: &Path, windows: bool) -> PathBuf {
     }
 }
 
-fn matching_review(review: &Value, operation: &Operation) -> Result<String, AppError> {
+/// Identifies the owned effect independently of its later approval standing.
+fn identify_review(review: &Value, operation: &Operation) -> Result<String, AppError> {
     if identifier(field(field(review, "user")?, "id")?)? != operation.audit.account_id
         || text(field(review, "commit_id")?)? != operation.audit.source_commit
         || text(field(review, "body")?)? != operation.body
-        || text(field(review, "state")?)? != "APPROVED"
     {
         return Err(fail(
             "staleEvidence",
-            "Remote approval does not match the intended account, source, body, and state",
+            "Remote review does not match the intended account, source, and body",
         ));
     }
     Ok(text(field(review, "node_id")?)?.to_owned())
+}
+
+/// Publication acknowledgement and valid standing require an approved review.
+fn matching_review(review: &Value, operation: &Operation) -> Result<String, AppError> {
+    let id = identify_review(review, operation)?;
+    if text(field(review, "state")?)? != "APPROVED" {
+        return Err(fail("staleEvidence", "Remote review is not approved"));
+    }
+    Ok(id)
 }
 
 pub(crate) fn hash(value: &impl Serialize) -> Result<String, AppError> {

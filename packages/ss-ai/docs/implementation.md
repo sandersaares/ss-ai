@@ -65,18 +65,17 @@ in the covered original ranges rather than being repeated on every fragment.
 Workers use the stable parent to reacquire related evidence. Unit bounds reserve regular worker
 context for policy, exact follow-up evidence, and reasoning.
 
-`checkpoint.rs` owns notes, fixed-level discussion aggregation, explicit concern
-and interaction records, evidence-backed dispositions, and dependency digests.
-The manifest supplies each unit note's mandatory source and binding dependencies.
-Notes must cite their exact unit; the discussion aggregate must cite raw evidence
-and consume every discussion unit note. Note validation rejects dependencies on
-later semantic records to keep aggregation acyclic, rather than maintaining a
-separate source-and-metadata allowlist. The shared dependency reader validates
-all citations for existence, complete delivery, and digest binding at both
-recording and reload boundaries. Bindings supplement rather than replace source.
-It does not own approval authority or provider effects. Replacements invalidate
-transitive aggregates instead of preserving conclusions derived from obsolete
-notes. The cumulative judgment binds all final change judgments, discussion
-observations, checks, and dispositions. Read receipts establish delivery only.
-Monotonic completed-work identities bound handoffs without rewarding replay or
-replacement, independently of the skill's worker-replacement and stale budgets.
+`checkpoint.rs` owns discussion observations, explicit concern and interaction
+records, evidence-backed dispositions, and dependency digests. The direct protocol
+does not require a semantic note for every transport unit. Atomic batch requests
+stage all reads or judgments against a state token before committing, reducing
+round trips without allowing partial results. The legacy protocol retains its
+original notes, aggregate requirements, serialization, and digest calculation so
+the current utility can reconcile existing publication journals. Unknown
+protocols fail validation rather than being interpreted as legacy.
+
+The shared dependency reader validates citations and bindings at recording and
+reload boundaries. Replacements invalidate transitive dependent records. The
+cumulative judgment binds final judgments, discussion, checks, and dispositions;
+read receipts establish delivery only. The review run persists time, work, and
+worker reservations before work so recovery cannot renew those budgets.

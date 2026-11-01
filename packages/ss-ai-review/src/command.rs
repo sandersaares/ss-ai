@@ -24,7 +24,7 @@ use crate::selection::{self, State, valid_session};
 use crate::target::{Platform, Target, escape};
 use crate::transport::Transport;
 use crate::{Clock, Http, Process};
-use ss_ai_assessment::{ContextRequest, Note, SourceSide};
+use ss_ai_assessment::{BatchJudgmentRequest, BatchReadRequest, ContextRequest, Note, SourceSide};
 
 /// Named-input command hierarchy used by the installed skills.
 ///
@@ -95,6 +95,8 @@ enum Autoreapprove {
     },
     /// Fetch exact source objects and initialize a bounded assessment assignment.
     Prepare(WorkInput),
+    /// Reserve one assessment worker before dispatch.
+    StartWorker(WorkInput),
     /// Page through complete changed-path metadata.
     Assessment {
         #[command(flatten)]
@@ -170,6 +172,20 @@ enum Autoreapprove {
         offset: usize,
         #[arg(long, default_value = "4096")]
         limit: NonZeroUsize,
+    },
+    /// Deliver multiple independently addressable evidence pages atomically.
+    ReadBatch {
+        #[command(flatten)]
+        input: WorkInput,
+        #[arg(long)]
+        batch_json: String,
+    },
+    /// Record multiple changed-path judgments in one conditional transaction.
+    JudgeBatch {
+        #[command(flatten)]
+        input: WorkInput,
+        #[arg(long)]
+        batch_json: String,
     },
     /// Register required captured-source context and return its first bounded page.
     SourceContext {
@@ -508,6 +524,7 @@ fn execute(
                 )?
             }
             action @ (Autoreapprove::Prepare(_)
+            | Autoreapprove::StartWorker(_)
             | Autoreapprove::Assessment { .. }
             | Autoreapprove::Units { .. }
             | Autoreapprove::Checks { .. }
@@ -515,6 +532,8 @@ fn execute(
             | Autoreapprove::Resolve { .. }
             | Autoreapprove::Checkpoint(_)
             | Autoreapprove::Read { .. }
+            | Autoreapprove::ReadBatch { .. }
+            | Autoreapprove::JudgeBatch { .. }
             | Autoreapprove::SourceContext { .. }
             | Autoreapprove::Judge { .. }
             | Autoreapprove::Complete(_)) => work(action, process, clock)?,
@@ -658,6 +677,7 @@ fn work(
 ) -> Result<Value, AppError> {
     let (input, action) = match command {
         Autoreapprove::Prepare(input) => (input, WorkAction::Prepare),
+        Autoreapprove::StartWorker(input) => (input, WorkAction::StartWorker),
         Autoreapprove::Assessment {
             input,
             after,
@@ -737,6 +757,34 @@ fn work(
                 reference,
                 offset,
                 limit,
+            },
+        ),
+        Autoreapprove::ReadBatch { input, batch_json } => (
+            input,
+            WorkAction::ReadBatch {
+                request: serde_json::from_str::<BatchReadRequest>(&batch_json).map_err(
+                    |error| {
+                        crate::error::caused_by(
+                            "invalidInput",
+                            "Malformed evidence batch".to_owned(),
+                            error,
+                        )
+                    },
+                )?,
+            },
+        ),
+        Autoreapprove::JudgeBatch { input, batch_json } => (
+            input,
+            WorkAction::JudgeBatch {
+                request: serde_json::from_str::<BatchJudgmentRequest>(&batch_json).map_err(
+                    |error| {
+                        crate::error::caused_by(
+                            "invalidInput",
+                            "Malformed judgment batch".to_owned(),
+                            error,
+                        )
+                    },
+                )?,
             },
         ),
         Autoreapprove::SourceContext {

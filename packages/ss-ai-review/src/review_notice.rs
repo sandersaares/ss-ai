@@ -575,6 +575,9 @@ impl<'a> Store<'a> {
                 "Notice explanation or attribution conflicts with its reserved marker",
             ));
         }
+        if let Some(deadline) = input.effect_deadline {
+            deadline.check(clock)?;
+        }
         self.record.attempts.push(Attempt {
             run_id: input.run_id.to_owned(),
             marker,
