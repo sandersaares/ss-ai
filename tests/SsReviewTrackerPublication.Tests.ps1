@@ -568,6 +568,18 @@ BeforeAll {
             }) | Out-Null
     }
 
+    # A native journal with an acknowledged creation must include its durable receipt and plan hash.
+    function Write-NativeFiledJournal {
+        param([Parameter(Mandatory)][string] $OutputDirectory)
+
+        Write-TrackerJournal -OutputDirectory $OutputDirectory -Status 'failed' -CreationOutcome @('succeeded') -PlanHash ('a' * 64)
+        $path = Get-TrackerPublicationResultPath -OutputDirectory $OutputDirectory
+        $journal = Read-JsonFixture -Path $path
+        $journal['operations'][0]['itemNodeId'] = 'I_101'
+        $journal['operations'][0]['url'] = 'https://github.com/octo/widget/issues/101'
+        Write-JsonFixture -Path $path -Value $journal | Out-Null
+    }
+
     # --- Executable ------------------------------------------------------------------------------
 
     # Lays out a complete, valid set of inputs and hands back the paths, so a test that is about one
@@ -603,8 +615,8 @@ BeforeAll {
 
     # Runs the composition root in a child process and reports its streams separately.
     #
-    # Every test that uses this asserts a refusal the run reaches before it builds a transport, so
-    # the suite stays offline; a case that got past preflight would try to reach a service.
+    # Restrict the child search path to the native test executable so a regressed preflight cannot
+    # invoke the provider CLI, even if an authenticated CLI is available to the test runner.
     function Invoke-PublishReviewTrackerItems {
         param(
             [Parameter(Mandatory)]
@@ -620,6 +632,15 @@ BeforeAll {
 
         $startInfo = [System.Diagnostics.ProcessStartInfo]::new()
         $startInfo.FileName = $script:PowerShellPath
+        $nativePath = (Get-Command ss-ai -CommandType Application -ErrorAction Stop | Select-Object -First 1).Source
+        $nativeDirectory = Split-Path -Parent $nativePath
+        foreach ($provider in @('gh', 'gh.exe', 'az', 'az.exe')) {
+            if (Test-Path -LiteralPath (Join-Path $nativeDirectory $provider)) {
+                throw "The native test directory contains a provider executable: $provider"
+            }
+        }
+        $startInfo.WorkingDirectory = [string] $Fixture['root']
+        $startInfo.Environment['PATH'] = $nativeDirectory
         $arguments = @(
             '-NoProfile'
             '-NonInteractive'
@@ -1956,94 +1977,22 @@ Describe 'Publication failure classification' {
     }
 }
 
-Describe 'Tracker publication composition root' {
-    # The composition root cannot be run against a service from this suite, so the two orderings it
-    # alone is responsible for are read out of its syntax tree. Both are guarantees a failed run
-    # depends on: a journal that reached disk before the first creation, and an account of what
-    # exists that reaches the caller before the failure is reported.
-    BeforeAll {
-        $script:ExecutableAst = [System.Management.Automation.Language.Parser]::ParseFile(
-            (Join-Path $script:ExecutableRoot 'Publish-ReviewTrackerItems.ps1'),
-            [ref] $null,
-            [ref] $null)
-
-        function Find-ExecutableCommand {
-            param([Parameter(Mandatory)][string] $Name)
-
-            $found = $script:ExecutableAst.FindAll({
-                    param($node)
-                    $node -is [System.Management.Automation.Language.CommandAst] -and
-                    [string] $node.GetCommandName() -ceq $Name
-                }, $true)
-
-            , @($found)
-        }
-    }
-
-    It 'writes the journal before it files anything' {
-        $write = Find-ExecutableCommand -Name 'Write-TrackerPublicationResult'
-        $publish = Find-ExecutableCommand -Name 'Invoke-TrackerPublication'
-
-        # The fresh run and the continuation each write the journal before the run begins; whichever
-        # path is taken, the journal is on disk before anything is filed.
-        $write.Count | Should -BeGreaterThan 0
-        $publish.Count | Should -Be 1
-        foreach ($entry in $write) {
-            $entry.Extent.StartOffset | Should -BeLessThan $publish[0].Extent.StartOffset
-        }
-    }
-
-    It 'checks the source snapshot before rendering, transport or continuation writes' {
-        $binding = Find-ExecutableCommand -Name 'Assert-ApprovedFindingContext'
-        $binding.Count | Should -Be 1
-        foreach ($name in @('New-TrackerItemSet', 'New-PullRequestTransport', 'Write-TrackerPublicationResult', 'Set-TrackerPublicationAcceptedRewrite')) {
-            $commands = Find-ExecutableCommand -Name $name
-            $commands.Count | Should -BeGreaterThan 0
-            foreach ($command in $commands) {
-                $binding[0].Extent.StartOffset | Should -BeLessThan $command.Extent.StartOffset
-            }
-        }
-    }
-
-    It 'emits the outcome before it reports a failed run' {
-        $publish = Find-ExecutableCommand -Name 'Invoke-TrackerPublication'
-        $try = $publish[0].Parent
-        while ($null -ne $try -and $try -isnot [System.Management.Automation.Language.TryStatementAst]) {
-            $try = $try.Parent
-        }
-
-        $try | Should -Not -BeNullOrEmpty
-        $try.CatchClauses.Count | Should -Be 1
-
-        # The failure is held rather than raised, so the account of what exists reaches the caller
-        # whatever became of the run.
-        $catch = $try.CatchClauses[0]
-        @($catch.Body.FindAll({
-                    param($node)
-                    $node -is [System.Management.Automation.Language.ThrowStatementAst]
-                }, $true)).Count | Should -Be 0
-
-        $outcome = Find-ExecutableCommand -Name 'New-TrackerPublicationOutcome'
-        $assert = Find-ExecutableCommand -Name 'Assert-TrackerPublicationComplete'
-
-        $outcome.Count | Should -Be 1
-        $assert.Count | Should -Be 1
-        $try.Extent.EndOffset | Should -BeLessThan $outcome[0].Extent.StartOffset
-        $outcome[0].Extent.StartOffset | Should -BeLessThan $assert[0].Extent.StartOffset
-    }
-}
+# Native tracker_transaction.rs tests publishes_one_item_at_a_time_and_returns_summary_only_after_final_readback
+# and each_failed_journal_write_prevents_further_effects_and_replay exercise durable intent and
+# interruption boundaries. tracker_publication_plan.rs tests evidence before diagnostics, and
+# SsReviewNativeTrackerIntegration.Tests.ps1 checks failed outcome output before nonzero exit.
 
 Describe 'Tracker publication preflight' {
     # Everything asserted here is refused before the run builds a transport, which is what keeps the
     # whole suite offline and is itself the property under test: a run that cannot proceed leaves
     # the tracker and publication records unchanged, retaining only the coordination lock.
     It 'refuses <Case> before tracker writes' -ForEach @(
-        @{ Case = 'a null fingerprint'; Change = { param($approved, $context) $approved['reviewedContextHash'] = $null }; Expected = '*requires a non-null reviewedContextHash*'; OmitContext = $false }
-        @{ Case = 'a missing fingerprint'; Change = { param($approved, $context) $approved.Remove('reviewedContextHash') }; Expected = "*missing 'reviewedContextHash'*"; OmitContext = $false }
-        @{ Case = 'a missing capture'; Change = { param($approved, $context) }; Expected = '*require -ContextPath*'; OmitContext = $true }
-        @{ Case = 'changed discussion'; Change = { param($approved, $context) $context['threads'][0]['comments'][0]['content'] = 'Unchecked edit.' }; Expected = '*not bound to this checked capture*'; OmitContext = $false }
-        @{ Case = 'a changed source'; Change = { param($approved, $context) $context['pullRequest']['reviewedSourceCommit'] = 'unchecked-source' }; Expected = '*not bound to this checked capture*'; OmitContext = $false }
-        @{ Case = 'another pull request'; Change = { param($approved, $context) $context['pullRequestUrl'] = 'https://github.com/octo/widget/pull/8' }; Expected = '*not bound to this checked capture*'; OmitContext = $false }
+        @{ Case = 'a null fingerprint'; Change = { param($approved, $context) $approved['reviewedContextHash'] = $null }; Expected = '*requires a reviewed context hash*'; OmitContext = $false }
+        @{ Case = 'a missing fingerprint'; Change = { param($approved, $context) $approved.Remove('reviewedContextHash') }; Expected = '*approved set schema*'; OmitContext = $false }
+        @{ Case = 'a missing capture'; Change = { param($approved, $context) }; Expected = '*requires its capture*'; OmitContext = $true }
+        @{ Case = 'changed discussion'; Change = { param($approved, $context) $context['threads'][0]['comments'][0]['content'] = 'Unchecked edit.' }; Expected = '*not bound to this capture*'; OmitContext = $false }
+        @{ Case = 'a changed source'; Change = { param($approved, $context) $context['pullRequest']['reviewedSourceCommit'] = 'unchecked-source' }; Expected = '*not bound to this capture*'; OmitContext = $false }
+        @{ Case = 'another pull request'; Change = { param($approved, $context) $context['pullRequestUrl'] = 'https://github.com/octo/widget/pull/8' }; Expected = '*not bound to this capture*'; OmitContext = $false }
     ) {
         $context = New-TestContext -Thread @(New-TestThread -Id 'T1' -Comment @(New-TestComment -Id 'C1'))
         $approved = New-TestApproved -Context $context
@@ -2071,7 +2020,7 @@ Describe 'Tracker publication preflight' {
         $run = Invoke-PublishReviewTrackerItems -Fixture $fixture -ExtraArgument $Arguments
 
         $run['exitCode'] | Should -Not -Be 0
-        Get-SingleLineErrorText -Text $run['standardError'] | Should -BeLike '*focus-area cache diagnostics record*'
+        Get-SingleLineErrorText -Text $run['standardError'] | Should -BeLike '*diagnostics*missing*'
         @(Get-ChildItem -LiteralPath $fixture['outputDirectory'] -Force).Name | Should -Be @('tracker-publication-result.json.lock')
     }
 
@@ -2081,7 +2030,7 @@ Describe 'Tracker publication preflight' {
 
         $run['exitCode'] | Should -Not -Be 0
         $run['standardOutput'] | Should -BeExactly ''
-        Get-SingleLineErrorText -Text $run['standardError'] | Should -BeLike '*names no GitHub repository*'
+        Get-SingleLineErrorText -Text $run['standardError'] | Should -BeLike '*GitHub tracker requires a repository*'
     }
 
     It 'refuses an Azure DevOps field for a GitHub tracker' {
@@ -2092,7 +2041,7 @@ Describe 'Tracker publication preflight' {
         )
 
         $run['exitCode'] | Should -Not -Be 0
-        Get-SingleLineErrorText -Text $run['standardError'] | Should -BeLike '*-WorkItemType was supplied for a GitHub tracker*'
+        Get-SingleLineErrorText -Text $run['standardError'] | Should -BeLike '*Azure DevOps metadata*GitHub tracker*'
     }
 
     It 'refuses an Azure DevOps tracker carrying no work item type' {
@@ -2102,7 +2051,7 @@ Describe 'Tracker publication preflight' {
         )
 
         $run['exitCode'] | Should -Not -Be 0
-        Get-SingleLineErrorText -Text $run['standardError'] | Should -BeLike '*requires -WorkItemType*'
+        Get-SingleLineErrorText -Text $run['standardError'] | Should -BeLike '*requires a work item type*'
     }
 
     It 'refuses an approved artifact holding no findings' {
@@ -2117,7 +2066,7 @@ Describe 'Tracker publication preflight' {
         $run = Invoke-PublishReviewTrackerItems -Fixture $fixture -ExtraArgument @('-Url', 'https://github.com/octo/widget')
 
         $run['exitCode'] | Should -Not -Be 0
-        Get-SingleLineErrorText -Text $run['standardError'] | Should -BeLike '*holds no findings*'
+        Get-SingleLineErrorText -Text $run['standardError'] | Should -BeLike '*empty review*no tracker items*'
     }
 
     It 'refuses a follow-up it was given no capture to resolve' {
@@ -2127,17 +2076,17 @@ Describe 'Tracker publication preflight' {
         $run = Invoke-PublishReviewTrackerItems -Fixture $fixture -ExtraArgument @('-Url', 'https://github.com/octo/widget')
 
         $run['exitCode'] | Should -Not -Be 0
-        Get-SingleLineErrorText -Text $run['standardError'] | Should -BeLike '*no captured discussion was supplied*'
+        Get-SingleLineErrorText -Text $run['standardError'] | Should -BeLike '*Follow-up requires a captured discussion*'
     }
 
     It 'refuses to file over the journal an earlier run left' {
         $fixture = New-TrackerFixture
-        Write-TrackerJournal -OutputDirectory ([string] $fixture['outputDirectory']) -Status 'failed' -CreationOutcome @('succeeded')
+        Write-NativeFiledJournal -OutputDirectory ([string] $fixture['outputDirectory'])
 
         $run = Invoke-PublishReviewTrackerItems -Fixture $fixture -ExtraArgument @('-Url', 'https://github.com/octo/widget')
 
         $run['exitCode'] | Should -Not -Be 0
-        Get-SingleLineErrorText -Text $run['standardError'] | Should -BeLike '*would file the review into the tracker a second time*'
+        Get-SingleLineErrorText -Text $run['standardError'] | Should -BeLike '*Prior tracker publication requires reconciliation*'
     }
 
     # The journal is read before anything else is judged, because a new one is written over it and a
@@ -2145,7 +2094,7 @@ Describe 'Tracker publication preflight' {
     It 'leaves the journal an earlier run left exactly as it was' {
         $fixture = New-TrackerFixture
         $journalPath = Get-TrackerPublicationResultPath -OutputDirectory ([string] $fixture['outputDirectory'])
-        Write-TrackerJournal -OutputDirectory ([string] $fixture['outputDirectory']) -Status 'failed' -CreationOutcome @('succeeded')
+        Write-NativeFiledJournal -OutputDirectory ([string] $fixture['outputDirectory'])
         $before = [System.Convert]::ToBase64String([System.IO.File]::ReadAllBytes($journalPath))
 
         Invoke-PublishReviewTrackerItems -Fixture $fixture -ExtraArgument @('-Url', 'https://github.com/octo/widget') | Out-Null
@@ -2160,14 +2109,14 @@ Describe 'Tracker publication preflight' {
         $run = Invoke-PublishReviewTrackerItems -Fixture $fixture -ExtraArgument @('-Url', 'https://github.com/octo/widget')
 
         $run['exitCode'] | Should -Not -Be 0
-        Get-SingleLineErrorText -Text $run['standardError'] | Should -BeLike '*focus-area cache diagnostics record*'
+        Get-SingleLineErrorText -Text $run['standardError'] | Should -BeLike '*diagnostics*missing*'
     }
 
-    It 'leaves only the coordination lock in the output directory when it refuses' {
+    It 'leaves the output directory untouched when destination validation refuses' {
         $fixture = New-TrackerFixture
         $run = Invoke-PublishReviewTrackerItems -Fixture $fixture -ExtraArgument @('-Url', 'https://github.com/octo')
 
         $run['exitCode'] | Should -Not -Be 0
-        @(Get-ChildItem -LiteralPath ([string] $fixture['outputDirectory']) -Force).Name | Should -Be @('tracker-publication-result.json.lock')
+        @(Get-ChildItem -LiteralPath ([string] $fixture['outputDirectory']) -Force).Count | Should -Be 0
     }
 }

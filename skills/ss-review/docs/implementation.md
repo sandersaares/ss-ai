@@ -1086,7 +1086,7 @@ the same substantive block builder. Destination renderers add only their
 required wrappers. This makes "approved prose equals published prose" an
 architectural property rather than a convention between separate formatters.
 The native workflow renderer supplies this shared prose to final review
-publication and to tracker publication through its PowerShell adapter.
+publication and tracker publication.
 
 Each prose section label is separated from its unchanged content by a blank line.
 This lets lists, code fences, and other Markdown blocks begin at the start of a
@@ -1181,6 +1181,10 @@ teaching pull request adapters about issue management.
 Tracker publication uses the same approved findings and deterministic rendering
 but a different transaction model. A tracker item is visible immediately and
 cannot participate in a review-level draft.
+
+`Publish-ReviewTrackerItems.ps1` preserves the named skill interface while
+`ss-ai review publish-tracker-items` owns local preparation, provider preflight,
+and the retained journal transaction.
 
 All items are rendered and validated before creation begins. Creation then
 proceeds one item at a time, with read-back verification before the next item.

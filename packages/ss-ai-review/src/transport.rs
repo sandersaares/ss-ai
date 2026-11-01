@@ -18,6 +18,7 @@ use serde_json::{Value, json};
 use crate::error::fail;
 use crate::json::{array, field};
 use crate::target::{Platform, Target, escape};
+use crate::tracker_target::TrackerTarget;
 use crate::{Clock, Process};
 
 /// Provides an injectable HTTP boundary for Azure DevOps.
@@ -37,6 +38,23 @@ pub trait Http {
         token: &str,
         body: Option<&[u8]>,
     ) -> Result<HttpResponse, AppError>;
+
+    /// Sends a JSON Patch document using its distinct media type.
+    ///
+    /// Implementations that do not support JSON Patch refuse the request
+    /// instead of sending it as ordinary JSON.
+    fn send_json_patch(
+        &self,
+        _method: &str,
+        _url: &str,
+        _token: &str,
+        _body: Option<&[u8]>,
+    ) -> Result<HttpResponse, AppError> {
+        Err(fail(
+            "service",
+            "JSON Patch HTTP requests are not supported",
+        ))
+    }
 
     /// Sends attachment bytes without interpreting them as JSON.
     ///
@@ -104,14 +122,14 @@ impl NativeHttp {
         })
     }
 
-    /// Builds both request forms through the same credential and client boundary.
+    /// Builds requests through the same credential and client boundary.
     fn request(
         &self,
         method: &str,
         url: &str,
         token: &str,
         body: Option<&[u8]>,
-        binary: bool,
+        kind: HttpBodyKind,
     ) -> Result<reqwest::blocking::Request, AppError> {
         let mut request = self
             .client
@@ -119,7 +137,7 @@ impl NativeHttp {
             .bearer_auth(token)
             .header(
                 "Accept",
-                if binary && method == "GET" {
+                if matches!(kind, HttpBodyKind::Binary) && method == "GET" {
                     "application/octet-stream"
                 } else {
                     "application/json"
@@ -129,10 +147,10 @@ impl NativeHttp {
             request = request
                 .header(
                     "Content-Type",
-                    if binary {
-                        "application/octet-stream"
-                    } else {
-                        "application/json; charset=utf-8"
+                    match kind {
+                        HttpBodyKind::Json => "application/json; charset=utf-8",
+                        HttpBodyKind::JsonPatch => "application/json-patch+json",
+                        HttpBodyKind::Binary => "application/octet-stream",
                     },
                 )
                 .body(body.to_owned());
@@ -157,6 +175,17 @@ impl NativeHttp {
     }
 }
 
+/// Selects the request media type without changing authentication handling.
+#[derive(Clone, Copy)]
+enum HttpBodyKind {
+    /// Ordinary provider JSON.
+    Json,
+    /// JSON Patch operations.
+    JsonPatch,
+    /// Attachment bytes.
+    Binary,
+}
+
 impl Http for NativeHttp {
     /// Sends JSON bytes directly so the Azure CLI cannot alter service Unicode.
     fn send(
@@ -166,7 +195,17 @@ impl Http for NativeHttp {
         token: &str,
         body: Option<&[u8]>,
     ) -> Result<HttpResponse, AppError> {
-        self.execute(self.request(method, url, token, body, false)?)
+        self.execute(self.request(method, url, token, body, HttpBodyKind::Json)?)
+    }
+
+    fn send_json_patch(
+        &self,
+        method: &str,
+        url: &str,
+        token: &str,
+        body: Option<&[u8]>,
+    ) -> Result<HttpResponse, AppError> {
+        self.execute(self.request(method, url, token, body, HttpBodyKind::JsonPatch)?)
     }
 
     fn send_binary(
@@ -176,7 +215,7 @@ impl Http for NativeHttp {
         token: &str,
         body: Option<&[u8]>,
     ) -> Result<HttpResponse, AppError> {
-        self.execute(self.request(method, url, token, body, true)?)
+        self.execute(self.request(method, url, token, body, HttpBodyKind::Binary)?)
     }
 }
 
@@ -208,6 +247,25 @@ impl<'a> Transport<'a> {
     /// Azure tokens are acquired lazily when the first request needs one.
     pub(crate) fn new(
         target: &Target,
+        tenant: Option<&str>,
+        process: &'a dyn Process,
+        http: &'a dyn Http,
+        clock: &'a dyn Clock,
+    ) -> Self {
+        Self {
+            platform: target.platform,
+            collection: target.collection_url.clone(),
+            tenant: tenant.map(str::to_owned),
+            token: None,
+            process,
+            http,
+            clock,
+        }
+    }
+
+    /// Binds tracker coordinates without requiring a pull request target.
+    pub(crate) fn new_tracker(
+        target: &TrackerTarget,
         tenant: Option<&str>,
         process: &'a dyn Process,
         http: &'a dyn Http,
@@ -309,7 +367,16 @@ impl<'a> Transport<'a> {
         method: &str,
         body: &Value,
     ) -> Result<Value, AppError> {
-        let page = self.ado_request(path, method, Some(body), &[], "7.1", false)?;
+        let page = self.ado_request(
+            path,
+            method,
+            Some(body),
+            &[],
+            "7.1",
+            AdoRequestKind::Json {
+                retry_refusals: false,
+            },
+        )?;
         if page.continuation.is_some() {
             return Err(fail("ambiguousWrite", "Unexpected ADO write continuation"));
         }
@@ -649,7 +716,41 @@ impl<'a> Transport<'a> {
         query: &[(&str, String)],
         version: &str,
     ) -> Result<Page, AppError> {
-        self.ado_request(path, method, body, query, version, true)
+        self.ado_request(
+            path,
+            method,
+            body,
+            query,
+            version,
+            AdoRequestKind::Json {
+                retry_refusals: true,
+            },
+        )
+    }
+
+    /// Sends a JSON Patch write, retrying only explicit rate-limit refusals.
+    pub(crate) fn ado_json_patch(
+        &mut self,
+        path: &str,
+        method: &str,
+        body: &Value,
+        query: &[(&str, String)],
+        version: &str,
+    ) -> Result<Page, AppError> {
+        if self.platform != Platform::AzureDevOps || !matches!(method, "POST" | "PATCH") {
+            return Err(fail(
+                "invalidInput",
+                "Invalid Azure DevOps JSON Patch request",
+            ));
+        }
+        self.ado_request(
+            path,
+            method,
+            Some(body),
+            query,
+            version,
+            AdoRequestKind::JsonPatch,
+        )
     }
 
     /// Keeps ordinary transport recovery separate from freshness-bound publication.
@@ -660,17 +761,10 @@ impl<'a> Transport<'a> {
         body: Option<&Value>,
         query: &[(&str, String)],
         version: &str,
-        retry_refusals: bool,
+        kind: AdoRequestKind,
     ) -> Result<Page, AppError> {
         let body = body.map(serde_json::to_vec).transpose()?;
-        let response = self.ado_response(
-            path,
-            method,
-            body.as_deref(),
-            query,
-            version,
-            AdoRequestKind::Json { retry_refusals },
-        )?;
+        let response = self.ado_response(path, method, body.as_deref(), query, version, kind)?;
         let read = method == "GET";
         let text = String::from_utf8(response.body).map_err(|error| {
             crate::error::caused_by(
@@ -782,6 +876,7 @@ impl<'a> Transport<'a> {
         let binary = matches!(kind, AdoRequestKind::Binary);
         let retry_refusals = match kind {
             AdoRequestKind::Json { retry_refusals } => retry_refusals,
+            AdoRequestKind::JsonPatch => true,
             AdoRequestKind::Binary => read,
         };
         let mut transient_attempt = 0_u32;
@@ -789,10 +884,10 @@ impl<'a> Transport<'a> {
         let mut refreshed = false;
         loop {
             let token = self.access_token()?.to_owned();
-            let response = if binary {
-                self.http.send_binary(method, &url, &token, body)
-            } else {
-                self.http.send(method, &url, &token, body)
+            let response = match kind {
+                AdoRequestKind::Json { .. } => self.http.send(method, &url, &token, body),
+                AdoRequestKind::JsonPatch => self.http.send_json_patch(method, &url, &token, body),
+                AdoRequestKind::Binary => self.http.send_binary(method, &url, &token, body),
             };
             let response = match response {
                 Ok(response) => response,
@@ -893,6 +988,8 @@ enum GithubResponseMode {
 enum AdoRequestKind {
     /// JSON requests select whether a refusal may be replayed.
     Json { retry_refusals: bool },
+    /// JSON Patch writes retry explicit rate-limit refusals.
+    JsonPatch,
     /// Attachment reads may retry; uploads are single-attempt writes.
     Binary,
 }
@@ -1140,17 +1237,22 @@ mod tests {
     use ohno::AppError;
     use serde_json::json;
 
-    use super::{Http, HttpResponse, NativeHttp, Transport};
+    use super::{Http, HttpBodyKind, HttpResponse, NativeHttp, Transport};
     use crate::error::fail;
-    use crate::target::Target;
+    use crate::target::{Platform, Target};
+    use crate::tracker_target::{TrackerTarget, TrackerTargetInput};
     use crate::{Clock, Process, ProcessOutput, classification};
+
+    /// Captures the selected HTTP boundary alongside request evidence.
+    type CapturedCall = (String, String, Vec<u8>, &'static str);
 
     /// Supplies deterministic token acquisition and scripted HTTP responses.
     struct Fixture {
         replies: RefCell<VecDeque<Result<HttpResponse, AppError>>>,
-        calls: RefCell<Vec<(String, String, Vec<u8>)>>,
+        calls: RefCell<Vec<CapturedCall>>,
         tokens: Cell<usize>,
         waits: Cell<usize>,
+        delays: RefCell<Vec<Duration>>,
     }
 
     impl Fixture {
@@ -1160,7 +1262,29 @@ mod tests {
                 calls: RefCell::new(Vec::new()),
                 tokens: Cell::new(0),
                 waits: Cell::new(0),
+                delays: RefCell::new(Vec::new()),
             }
+        }
+
+        fn respond(
+            &self,
+            method: &str,
+            url: &str,
+            token: &str,
+            body: Option<&[u8]>,
+            kind: &'static str,
+        ) -> Result<HttpResponse, AppError> {
+            assert_eq!(token, "fixture-token");
+            self.calls.borrow_mut().push((
+                method.to_owned(),
+                url.to_owned(),
+                body.unwrap_or_default().to_vec(),
+                kind,
+            ));
+            self.replies
+                .borrow_mut()
+                .pop_front()
+                .expect("unexpected request")
         }
     }
 
@@ -1177,10 +1301,11 @@ mod tests {
             Timestamp::UNIX_EPOCH
         }
 
-        fn wait(&self, _: Duration) -> Result<(), AppError> {
+        fn wait(&self, duration: Duration) -> Result<(), AppError> {
             // An unexpected replay must fail immediately rather than loop forever.
             assert!(self.waits.get() < 5);
             self.waits.set(self.waits.get() + 1);
+            self.delays.borrow_mut().push(duration);
             Ok(())
         }
     }
@@ -1193,7 +1318,17 @@ mod tests {
             token: &str,
             body: Option<&[u8]>,
         ) -> Result<HttpResponse, AppError> {
-            self.send_binary(method, url, token, body)
+            self.respond(method, url, token, body, "json")
+        }
+
+        fn send_json_patch(
+            &self,
+            method: &str,
+            url: &str,
+            token: &str,
+            body: Option<&[u8]>,
+        ) -> Result<HttpResponse, AppError> {
+            self.respond(method, url, token, body, "json-patch")
         }
 
         fn send_binary(
@@ -1203,16 +1338,7 @@ mod tests {
             token: &str,
             body: Option<&[u8]>,
         ) -> Result<HttpResponse, AppError> {
-            assert_eq!(token, "fixture-token");
-            self.calls.borrow_mut().push((
-                method.to_owned(),
-                url.to_owned(),
-                body.unwrap_or_default().to_vec(),
-            ));
-            self.replies
-                .borrow_mut()
-                .pop_front()
-                .expect("unexpected request")
+            self.respond(method, url, token, body, "binary")
         }
     }
 
@@ -1229,6 +1355,44 @@ mod tests {
     }
 
     #[test]
+    fn tracker_constructor_routes_without_a_pull_request() {
+        let fixture = Fixture::new(vec![response(200, br#"{"id":7}"#)]);
+        let azure = TrackerTarget::resolve(TrackerTargetInput {
+            url: Some("https://dev.azure.com/org/project/_workitems"),
+            ..Default::default()
+        })
+        .unwrap();
+        let mut transport =
+            Transport::new_tracker(&azure, Some("tenant"), &fixture, &fixture, &fixture);
+        assert_eq!(transport.platform, Platform::AzureDevOps);
+        assert_eq!(
+            transport.ado_collection(),
+            Some("https://dev.azure.com/org")
+        );
+        assert_eq!(transport.tenant.as_deref(), Some("tenant"));
+        assert_eq!(fixture.tokens.get(), 0);
+        assert_eq!(
+            transport.request("_apis/resource", "GET", None).unwrap(),
+            json!({"id": 7})
+        );
+        assert_eq!(fixture.tokens.get(), 1);
+        assert_eq!(
+            fixture.calls.borrow()[0].1,
+            "https://dev.azure.com/org/_apis/resource?api-version=7.1"
+        );
+
+        let github = TrackerTarget::resolve(TrackerTargetInput {
+            url: Some("https://github.com/owner/repo"),
+            ..Default::default()
+        })
+        .unwrap();
+        let transport = Transport::new_tracker(&github, None, &fixture, &fixture, &fixture);
+        assert_eq!(transport.platform, Platform::GitHub);
+        assert_eq!(transport.ado_collection(), None);
+        assert_eq!(fixture.tokens.get(), 1);
+    }
+
+    #[test]
     fn native_requests_preserve_binary_body_and_content_type() {
         let http = NativeHttp::new().unwrap();
         let bytes = b"\0\xff<\x80";
@@ -1238,7 +1402,7 @@ mod tests {
                 "https://example.test/attachment",
                 "token",
                 Some(bytes),
-                true,
+                HttpBodyKind::Binary,
             )
             .unwrap();
         assert_eq!(
@@ -1250,7 +1414,13 @@ mod tests {
         assert_eq!(request.headers()["authorization"], "Bearer token");
 
         let json = http
-            .request("POST", "https://example.test/", "token", Some(b"{}"), false)
+            .request(
+                "POST",
+                "https://example.test/",
+                "token",
+                Some(b"{}"),
+                HttpBodyKind::Json,
+            )
             .unwrap();
         assert_eq!(
             json.headers()["content-type"],
@@ -1258,10 +1428,173 @@ mod tests {
         );
         assert_eq!(json.headers()["accept"], "application/json");
         let download = http
-            .request("GET", "https://example.test/", "token", None, true)
+            .request(
+                "GET",
+                "https://example.test/",
+                "token",
+                None,
+                HttpBodyKind::Binary,
+            )
             .unwrap();
         assert_eq!(download.headers()["accept"], "application/octet-stream");
         assert!(!download.headers().contains_key("content-type"));
+    }
+
+    #[test]
+    fn native_json_patch_preserves_method_bytes_and_headers() {
+        let http = NativeHttp::new().unwrap();
+        let body =
+            "[{\"op\":\"add\",\"path\":\"/fields/System.Title\",\"value\":\"ä\"}]".as_bytes();
+        let request = http
+            .request(
+                "PATCH",
+                "https://example.test/workitem",
+                "token",
+                Some(body),
+                HttpBodyKind::JsonPatch,
+            )
+            .unwrap();
+        assert_eq!(request.method(), "PATCH");
+        assert_eq!(
+            request.headers()["content-type"],
+            "application/json-patch+json"
+        );
+        assert_eq!(request.headers()["accept"], "application/json");
+        assert!(request.headers()["authorization"].is_sensitive());
+        assert_eq!(
+            request.headers()["authorization"].to_str().unwrap(),
+            format!("Bearer {}", "token")
+        );
+        assert_eq!(request.body().unwrap().as_bytes().unwrap(), body);
+    }
+
+    #[test]
+    fn json_patch_uses_injected_boundary_for_post_and_patch() {
+        let fixture = Fixture::new(vec![
+            response(200, br#"{"id":7}"#),
+            response(200, br#"{"id":7}"#),
+        ]);
+        let target = target();
+        let mut transport = Transport::new(&target, None, &fixture, &fixture, &fixture);
+        let body = json!([{"op": "add", "path": "/fields/System.Title", "value": "ä"}]);
+        let result = transport
+            .ado_json_patch("_apis/wit/workitems/7", "POST", &body, &[], "7.2-preview.3")
+            .unwrap();
+        assert_eq!(result.payload, json!({"id": 7}));
+        assert!(result.continuation.is_none());
+        transport
+            .ado_json_patch(
+                "_apis/wit/workitems/7",
+                "PATCH",
+                &body,
+                &[],
+                "7.2-preview.3",
+            )
+            .unwrap();
+        assert_eq!(fixture.tokens.get(), 1);
+        assert_eq!(fixture.waits.get(), 0);
+        let calls = fixture.calls.borrow();
+        assert_eq!(calls.len(), 2);
+        for (call, method) in calls.iter().zip(["POST", "PATCH"]) {
+            assert_eq!(call.0, method);
+            assert_eq!(
+                call.1,
+                "https://dev.azure.com/org/_apis/wit/workitems/7?api-version=7.2-preview.3"
+            );
+            assert_eq!(call.2, serde_json::to_vec(&body).unwrap());
+            assert_eq!(call.3, "json-patch");
+        }
+    }
+
+    #[test]
+    fn json_patch_writes_do_not_replay_ambiguous_failures_or_refresh_authentication() {
+        let fixture = Fixture::new(vec![
+            response(401, b"expired"),
+            response(503, b"unavailable"),
+            Err(fail("service", "connection failed")),
+            response(200, b"not-json"),
+            response(200, b"<sign-in"),
+        ]);
+        let target = target();
+        let mut transport = Transport::new(&target, None, &fixture, &fixture, &fixture);
+        let body = json!([]);
+        for expected in [
+            "authentication",
+            "ambiguousWrite",
+            "ambiguousWrite",
+            "ambiguousWrite",
+            "ambiguousWrite",
+        ] {
+            let error = transport
+                .ado_json_patch("resource", "PATCH", &body, &[], "7.1")
+                .err()
+                .unwrap();
+            assert_eq!(classification(&error), expected);
+        }
+        assert_eq!(fixture.calls.borrow().len(), 5);
+        assert_eq!(fixture.tokens.get(), 1);
+        assert_eq!(fixture.waits.get(), 0);
+    }
+
+    #[test]
+    fn json_patch_create_retries_explicit_refusals_with_recovery_delays() {
+        let mut headers = BTreeMap::new();
+        headers.insert("retry-after".to_owned(), "3".to_owned());
+        let fixture = Fixture::new(vec![
+            Ok(HttpResponse::new(429, headers, b"limited".to_vec())),
+            response(429, b"limited"),
+            response(201, br#"{"id":7}"#),
+        ]);
+        let target = target();
+        let mut transport = Transport::new(&target, None, &fixture, &fixture, &fixture);
+        let body = json!([{"op": "add", "path": "/fields/System.Title", "value": "Title"}]);
+        let page = transport
+            .ado_json_patch("workitems", "POST", &body, &[], "7.2-preview.3")
+            .unwrap();
+        assert_eq!(page.payload, json!({"id": 7}));
+        assert_eq!(fixture.tokens.get(), 1);
+        assert_eq!(
+            *fixture.delays.borrow(),
+            [Duration::from_secs(3), Duration::from_secs(1)]
+        );
+        let calls = fixture.calls.borrow();
+        assert_eq!(calls.len(), 3);
+        for call in &*calls {
+            assert_eq!(call.0, "POST");
+            assert_eq!(call.2, serde_json::to_vec(&body).unwrap());
+            assert_eq!(call.3, "json-patch");
+        }
+    }
+
+    #[test]
+    fn json_patch_refusal_does_not_authorize_replaying_a_later_ambiguous_write() {
+        let fixture = Fixture::new(vec![
+            response(429, b"limited"),
+            response(503, b"unavailable"),
+        ]);
+        let target = target();
+        let mut transport = Transport::new(&target, None, &fixture, &fixture, &fixture);
+        let error = transport
+            .ado_json_patch("workitems", "POST", &json!([]), &[], "7.1")
+            .err()
+            .unwrap();
+        assert_eq!(classification(&error), "ambiguousWrite");
+        assert_eq!(fixture.waits.get(), 1);
+        assert_eq!(fixture.calls.borrow().len(), 2);
+    }
+
+    #[test]
+    fn json_patch_rejects_non_write_methods_before_authentication() {
+        let fixture = Fixture::new(vec![]);
+        let target = target();
+        let mut transport = Transport::new(&target, None, &fixture, &fixture, &fixture);
+        let error = transport
+            .ado_json_patch("resource", "GET", &json!([]), &[], "7.1")
+            .err()
+            .unwrap();
+        assert_eq!(classification(&error), "invalidInput");
+        assert_eq!(fixture.tokens.get(), 0);
+        assert!(fixture.calls.borrow().is_empty());
     }
 
     #[test]
@@ -1412,6 +1745,9 @@ mod tests {
         }
         JsonOnly
             .send_binary("POST", "https://example.test/", "token", Some(b"\xff"))
+            .unwrap_err();
+        JsonOnly
+            .send_json_patch("PATCH", "https://example.test/", "token", Some(b"[]"))
             .unwrap_err();
     }
 

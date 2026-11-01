@@ -34,6 +34,12 @@ mod renewal;
 mod review_notice;
 mod selection;
 mod target;
+mod tracker_ado;
+mod tracker_body;
+mod tracker_github;
+mod tracker_publication;
+mod tracker_target;
+mod tracker_transaction;
 mod transport;
 
 mod error {
@@ -49,6 +55,15 @@ pub use overview_snapshot::overview_text_is_publishable;
 pub use ss_ai_runtime::{
     Clock, NativeProcess, Process, ProcessOutput, SystemClock, classification,
 };
+#[doc(hidden)]
+pub use tracker_body::fuzz_tracker_body;
+pub use tracker_publication::{
+    TrackerAcceptance, TrackerPublicationInput, publish_tracker_items,
+    tracker_publication_check_prior,
+};
+pub use tracker_target::{resolve_tracker_target, validate_tracker_arguments};
+#[doc(hidden)]
+pub use tracker_transaction::fuzz_tracker_transaction;
 pub use transport::{Http, HttpResponse, NativeHttp};
 
 #[cfg(test)]

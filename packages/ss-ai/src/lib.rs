@@ -7,6 +7,7 @@ mod context;
 mod final_review;
 mod git;
 mod overview;
+mod tracker;
 mod workflow;
 
 pub use cargo::run as run_cargo;

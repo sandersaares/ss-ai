@@ -43,7 +43,9 @@ Audit and projection operations share the captured-evidence serializer and
 exact Git comparison with other review commands. Final review publication
 combines these local operations with provider effects and a retained journal
 lock in `ss-ai-review`; its PowerShell entry point preserves the named interface.
-Tracker publication remains in PowerShell and uses the same native renderer.
+Tracker publication combines the native renderer with provider-specific
+preflight and per-item journaled creation and verification. Its PowerShell
+entry point retains the named skill interface.
 The Cargo inventory has no provider or
 network dependency. The focused packages support targeted test builds and
 incremental reuse; a cold build of the complete executable still builds its
