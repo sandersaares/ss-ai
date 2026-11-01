@@ -6,6 +6,7 @@ $PSNativeCommandUseErrorActionPreference = $true
 
 BeforeAll {
     $script:Publisher = [IO.Path]::GetFullPath((Join-Path $PSScriptRoot '../skills/ss-review/scripts/Publish-PullRequestReview.ps1'))
+    $script:TrackerPublisher = [IO.Path]::GetFullPath((Join-Path $PSScriptRoot '../skills/ss-review/scripts/Publish-ReviewTrackerItems.ps1'))
     $script:PowerShell = (Get-Process -Id $PID).Path
     $script:FixtureRoot = Join-Path $PSScriptRoot ('.publication-adapter-' + [guid]::NewGuid().ToString('N'))
     $script:Bin = Join-Path $script:FixtureRoot 'fake bin'
@@ -61,7 +62,8 @@ exit 19
             [string] $Output,
             [string] $ErrorText = '',
             [int] $NativeExit = 0,
-            [switch] $MissingCli
+            [switch] $MissingCli,
+            [string] $PublisherPath = $script:Publisher
         )
 
         $record = Join-Path $script:FixtureRoot ('record-' + [guid]::NewGuid().ToString('N') + '.json')
@@ -83,7 +85,7 @@ exit 19
         } else {
             $script:Bin + [IO.Path]::PathSeparator + $env:PATH
         }
-        foreach ($argument in @('-NoProfile', '-NonInteractive', '-File', $script:Publisher) + $Arguments) {
+        foreach ($argument in @('-NoProfile', '-NonInteractive', '-File', $PublisherPath) + $Arguments) {
             $start.ArgumentList.Add($argument)
         }
 
@@ -203,5 +205,52 @@ Describe 'Missing native final review publication command' {
         $result.record | Should -BeNullOrEmpty
         $result.providerInvoked | Should -BeFalse
         [IO.Directory]::Exists((Join-Path $script:Work 'publication output')) | Should -BeFalse
+    }
+}
+
+Describe 'Native tracker publication adapter' -Skip:$IsWindows {
+    It 'forwards destination, adjudication coordinates and Unicode without changing the result' {
+        $arguments = @(
+            '-Url', 'https://dev.azure.com/org/project',
+            '-ApprovedFindingsPath', 'approved findings 雪.json',
+            '-DiagnosticsPath', 'cache diagnostics.json',
+            '-OutputDirectory', 'publication output',
+            '-ContextPath', 'checked capture.json',
+            '-WorkItemType', 'Bug', '-AreaPath', 'project\Area',
+            '-DescriptionField', 'Microsoft.VSTS.TCM.ReproSteps',
+            '-ParentWorkItemId', '42', '-AcceptStoredRewrite',
+            '-AcceptWorkItemId', '43', '-AcceptExpectedBodyHash', 'expected',
+            '-AcceptStoredBodyHash', 'stored', '-Tenant', 'tenant name'
+        )
+        $json = '{"status":"needsAdjudication","message":"café 🤖","items":[]}'
+        $result = Invoke-PublicationAdapter -PublisherPath $script:TrackerPublisher -Arguments $arguments -Output $json -ErrorText 'decision needed' -NativeExit 19
+        $result.exitCode | Should -Not -Be 0
+        $result.output.TrimEnd("`r", "`n") | Should -BeExactly $json
+        $result.error | Should -Match 'decision needed'
+        $result.record.cwd | Should -BeExactly $script:Work
+        $result.record.arguments[0] | Should -BeExactly 'review'
+        $result.record.arguments[1] | Should -BeExactly 'publish-tracker-items'
+        $named = @($result.record.arguments | Select-Object -Skip 2)
+        foreach ($argument in @(
+            '--url=https://dev.azure.com/org/project',
+            '--approved-findings-path=approved findings 雪.json',
+            '--diagnostics-path=cache diagnostics.json',
+            '--output-directory=publication output',
+            '--context-path=checked capture.json', '--work-item-type=Bug',
+            '--area-path=project\Area', '--description-field=Microsoft.VSTS.TCM.ReproSteps',
+            '--parent-work-item-id=42', '--accept-stored-rewrite',
+            '--accept-work-item-id=43', '--accept-expected-body-hash=expected',
+            '--accept-stored-body-hash=stored', '--tenant=tenant name'
+        )) {
+            @($named | Where-Object { $_ -ceq $argument }).Count | Should -Be 1 -Because $argument
+        }
+    }
+
+    It 'does not fall back to a provider when the native command is missing' {
+        $arguments = @('-ApprovedFindingsPath', 'approved.json', '-DiagnosticsPath', 'diagnostics.json', '-OutputDirectory', 'output')
+        $result = Invoke-PublicationAdapter -PublisherPath $script:TrackerPublisher -Arguments $arguments -Output '' -MissingCli
+        $result.exitCode | Should -Not -Be 0
+        $result.output | Should -BeNullOrEmpty
+        $result.providerInvoked | Should -BeFalse
     }
 }

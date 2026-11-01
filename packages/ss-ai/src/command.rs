@@ -5,7 +5,7 @@ use std::path::Path;
 
 use ohno::AppError;
 
-use crate::{Clock, Http, Process, cargo, context, final_review, git, overview, workflow};
+use crate::{Clock, Http, Process, cargo, context, final_review, git, overview, tracker, workflow};
 
 /// Runs a complete command with injected external boundaries.
 pub fn run(
@@ -68,6 +68,15 @@ fn dispatch(
             .is_some_and(|argument| argument == "publish-final-review")
     {
         return final_review::run(arguments, process, http, clock);
+    }
+    if arguments
+        .get(1)
+        .is_some_and(|argument| argument == "review")
+        && arguments
+            .get(2)
+            .is_some_and(|argument| argument == "publish-tracker-items")
+    {
+        return tracker::run(arguments, process, http, clock);
     }
     if arguments
         .get(1)

@@ -1,6 +1,6 @@
 [package]
 name = "ss-ai-review-fuzz"
-description = "Bounded provider capture and overview fuzz targets for ss-ai-review"
+description = "Bounded provider capture and publication fuzz targets for ss-ai-review"
 version = "0.1.0"
 publish = false
 authors.workspace = true
@@ -41,6 +41,20 @@ bench = false
 [[bin]]
 name = "final_review"
 path = "fuzz_targets/final_review.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "tracker_body"
+path = "fuzz_targets/tracker_body.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "tracker_transaction"
+path = "fuzz_targets/tracker_transaction.rs"
 test = false
 doc = false
 bench = false

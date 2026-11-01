@@ -84,7 +84,7 @@ fn execute() -> Result<ExitCode, AppError> {
     if arguments.get(1).is_some_and(|arg| arg == "review")
         && arguments
             .get(2)
-            .is_some_and(|arg| arg == "publish-final-review")
+            .is_some_and(|arg| arg == "publish-final-review" || arg == "publish-tracker-items")
         && !arguments
             .iter()
             .any(|arg| arg == "--help" || arg == "-h" || arg == "--version" || arg == "-V")

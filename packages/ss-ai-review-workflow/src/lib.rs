@@ -18,5 +18,6 @@ pub mod report_html;
 pub mod report_tools;
 pub mod review_publication_plan;
 pub mod review_work;
+pub mod tracker_publication_plan;
 pub mod worker_input;
 pub mod workflow_plan;

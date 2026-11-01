@@ -210,7 +210,7 @@ pub(crate) fn run(
 }
 
 /// Confirms a sibling file can be created, flushed, and removed before effects.
-fn probe_output(directory: &Path) -> Result<(), AppError> {
+pub(crate) fn probe_output(directory: &Path) -> Result<(), AppError> {
     // Create-new protects other files; a bounded collision retry accommodates
     // concurrent invocations without hiding unrelated I/O errors.
     for attempt in 0..100 {
@@ -239,9 +239,9 @@ fn probe_output(directory: &Path) -> Result<(), AppError> {
 }
 
 /// Applies an explicit timestamp without replacing the retry wait boundary.
-struct FixedClock<'a> {
-    timestamp: Option<Timestamp>,
-    clock: &'a dyn Clock,
+pub(crate) struct FixedClock<'a> {
+    pub(crate) timestamp: Option<Timestamp>,
+    pub(crate) clock: &'a dyn Clock,
 }
 impl Clock for FixedClock<'_> {
     fn now(&self) -> Timestamp {
@@ -253,7 +253,7 @@ impl Clock for FixedClock<'_> {
 }
 
 /// Rejects a result destination that could replace one of its own inputs.
-fn reject_alias(output: &Path, input: &Path) -> Result<(), AppError> {
+pub(crate) fn reject_alias(output: &Path, input: &Path) -> Result<(), AppError> {
     let input = absolute(input)?;
     if output == input
         || (output.exists() && input.exists() && same_file::is_same_file(output, &input)?)

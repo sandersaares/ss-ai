@@ -31,3 +31,13 @@ cargo +nightly fuzz run --fuzz-dir . final_review
 
 The target covers GitHub file findings without approval or follow-up actions.
 It does not inject journal failures or model Azure DevOps publication.
+
+The `tracker_transaction` target drives tracker publication with an in-memory
+journal and scripted provider effects. Bounded plans cover both providers,
+write interruptions, lost responses, read failures, and explicit acceptance
+continuations. It checks durable intent and receipt ordering, prevents repeated
+creation of accepted items, and rejects changed continuation evidence.
+
+```text
+cargo +nightly fuzz run --fuzz-dir . tracker_transaction
+```

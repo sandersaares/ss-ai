@@ -258,6 +258,46 @@ fn executable_dispatches_on_a_bounded_stack() {
 }
 
 #[test]
+#[cfg_attr(miri, ignore = "requires a native subprocess")]
+fn tracker_publication_dispatches_on_a_bounded_stack() {
+    let fixture = Fixture::new();
+    let output = command()
+        .current_dir(fixture.directory.path())
+        .env("PATH", fixture.directory.path())
+        .args(["review", "publish-tracker-items", "--help"])
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let help = String::from_utf8(output.stdout).unwrap();
+    for option in [
+        "--url",
+        "--platform",
+        "--organization",
+        "--project",
+        "--repository",
+        "--approved-findings-path",
+        "--context-path",
+        "--diagnostics-path",
+        "--output-directory",
+        "--work-item-type",
+        "--area-path",
+        "--description-field",
+        "--parent-work-item-id",
+        "--accept-stored-rewrite",
+        "--accept-work-item-id",
+        "--accept-expected-body-hash",
+        "--accept-stored-body-hash",
+        "--tenant",
+    ] {
+        assert!(help.contains(option), "missing {option}: {help}");
+    }
+}
+
+#[test]
 fn valid_records_reach_only_the_offline_provider() {
     let fixture = Fixture::new();
     reaches_provider(&fixture.args(), "finding without merge approval");

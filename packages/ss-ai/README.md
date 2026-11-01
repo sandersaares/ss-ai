@@ -28,8 +28,8 @@ installation-only optimization.
 
 Every input is named. Commands emit one UTF-8 JSON object on stdout after
 success, except `--help` and `--version`. Failures return a nonzero exit status.
-Most write diagnostics to stderr without a JSON result. Final review publication
-instead emits its outcome when the review was published but a follow-up failed.
+Most write diagnostics to stderr without a JSON result. Publication commands
+also emit durable partial outcomes when a transaction needs intervention.
 
 ```powershell
 ss-ai review select --repository-url "{{REPOSITORY_URL}}" `
@@ -256,6 +256,51 @@ threads. An ambiguous write requires human reconciliation, not automatic retry.
 A follow-up failure emits `publishedWithFollowUpFailure` and exits nonzero; do
 not republish the review. Initial overview, tracker, and Markdown delivery
 retain their separate workflows and authority boundaries.
+
+## Tracker publication
+
+`ss-ai review publish-tracker-items` files approved findings as GitHub issues
+or Azure DevOps work items. The tracker destination is independent of the
+reviewed pull request. The
+[`Publish-ReviewTrackerItems.ps1` recipe](../../skills/ss-review/pwsh-calls/file-tracker-items.md)
+retains the named PowerShell interface.
+
+```powershell
+#Requires -Version 7.6
+
+Set-StrictMode -Version Latest
+$ErrorActionPreference = 'Stop'
+$PSNativeCommandUseErrorActionPreference = $true
+
+ss-ai review publish-tracker-items --url "{{TRACKER_URL}}" `
+  --approved-findings-path "{{APPROVED_FINDINGS_PATH}}" `
+  --context-path "{{CONTEXT_PATH}}" --diagnostics-path "{{DIAGNOSTICS_PATH}}" `
+  --output-directory "{{OUTPUT_DIRECTORY}}"
+```
+
+| Input | Meaning |
+| --- | --- |
+| `TRACKER_URL` | Browser URL of the destination repository or project. |
+| `APPROVED_FINDINGS_PATH` | Approved finding artifact. |
+| `CONTEXT_PATH` | Matching checked capture for a pull request review; omit for a local review. |
+| `DIAGNOSTICS_PATH` | Focus-area cache diagnostics for the summary. |
+| `OUTPUT_DIRECTORY` | Session directory for `tracker-publication-result.json`. |
+
+Azure DevOps requires `--work-item-type` and `--area-path`; it also accepts
+`--description-field`, `--parent-work-item-id`, and `--tenant`. Explicit
+`--platform`, `--organization`, `--project`, and `--repository` can name or
+adjust the destination. The command renders all items before contacting the
+tracker, journals each creation before dispatch, and verifies each item before
+creating the next. It returns the review summary to the caller rather than
+filing it as a work item.
+
+A partial or ambiguous creation requires reconciliation rather than a fresh
+retry. A body rewrite that needs a person's decision returns
+`needsAdjudication` with the item and body hashes. Only an explicit acceptance
+using `--accept-stored-rewrite`, `--accept-work-item-id`,
+`--accept-expected-body-hash`, and `--accept-stored-body-hash` can continue that
+same publication. The command returns its partial outcome and exits nonzero
+when publication does not complete.
 
 ## Review report tools
 
