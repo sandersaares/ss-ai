@@ -47,3 +47,12 @@ including ADO's reviewer PUT and audit-thread POST. These methods do not wait
 and replay a rate-limit refusal: publication must refresh authority before any
 new effect. ADO sign-in documents or malformed successful write replies are
 ambiguous effects, not proof that the service made no change.
+
+Final review publication also performs live capture and evidence checks before
+remote writes. An explicitly authorized pre-existing GitHub draft discard is
+the exception to the review journal: it follows preflight but precedes the
+journal. The subsequent transaction persists each effect's intent and outcome,
+distinguishes refusals from ambiguous writes, and requires reconciliation rather
+than replay after a possible effect. Azure DevOps approval is a separate
+journaled reviewer update that preserves `isRequired`; its findings are already
+visible before the summary is posted.

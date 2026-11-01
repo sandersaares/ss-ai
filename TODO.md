@@ -18,18 +18,25 @@ Improvement ideas to revisit when the repo matures.
 - **Evaluation cache/task publication.** Assess shared access to
   `dev/ss-cargo-deps-tidy/evals/Generate-FoloFullTask.ps1` and add transaction
   protection where needed; use disposable checkouts for standalone preparation.
+- **Make concurrent worker-input diagnostics testing deterministic.** The
+  default-parallel Rust suite can fail
+  `worker_input::concurrent_reads_preserve_diagnostics` when a reader exhausts
+  the bounded shared-file contention retries. The same failure occurred in
+  full-suite runs of parent 848274ecbd117bfabceae6732eac506012d43fb9 and
+  descendant 6808c65a42ea87d7cac204042e8a4e5ed580cb5f, with only the test
+  assertion instrumented to print its error. Replace the test's retry
+  scheduling with controlled synchronization and assert the diagnostics
+  explicitly, without increasing production retry budgets or serializing the
+  suite.
 
 ## Skill design
 
-- **Migrate ss-review command families to Rust.** Replace the remaining complete
-  families in order: overview publication; final review
-  publication; and trackers. Provider capture, local context, finding, audit,
-  rendering, report tooling, coverage, worker-input, instruction preparation, and cache commands
-  use native operations through PowerShell adapters. Retire the adapters after
-  their callers migrate while preserving the hybrid workflow's records,
-  transaction boundaries and authority gates. Until retirement, consolidate
-  the capture and workflow process-launching logic while preserving their
-  distinct output contracts and instruction-cache dependencies.
+- **Migrate ss-review tracker publication to Rust.** Provider capture, local
+  context, finding, audit, rendering, report tooling, coverage, worker-input,
+  instruction preparation, cache, overview publication, and final review
+  publication use native operations through PowerShell adapters. Retire the
+  adapters after their callers migrate while preserving the hybrid workflow's
+  records, transaction boundaries and authority gates.
 - **Detect hard-linked capture lock files.** Reject aliased retained sibling
   locks before waiting when portable file identity can be checked without
   interfering with other lock holders. Until then, self-contention fails

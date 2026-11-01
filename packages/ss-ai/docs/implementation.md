@@ -40,8 +40,10 @@ in `ss-ai-review`. The command composition supplies local report rendering from
 `ss-ai-review-workflow`, so provider transactions do not depend on presentation
 tools and the package dependencies remain one-way.
 Audit and projection operations share the captured-evidence serializer and
-exact Git comparison with other review commands. PowerShell adapters keep the
-remaining publication commands compatible without duplicating finding prose.
+exact Git comparison with other review commands. Final review publication
+combines these local operations with provider effects and a retained journal
+lock in `ss-ai-review`; its PowerShell entry point preserves the named interface.
+Tracker publication remains in PowerShell and uses the same native renderer.
 The Cargo inventory has no provider or
 network dependency. The focused packages support targeted test builds and
 incremental reuse; a cold build of the complete executable still builds its

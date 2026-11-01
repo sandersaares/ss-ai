@@ -17,3 +17,17 @@ The scripts cap page and response counts and fail immediately if the collector
 requests an unscripted response. No provider credentials or network access are
 needed. The seed corpus includes complete and rejected sequences for both
 providers.
+
+The `final_review` target exercises GitHub publication with bounded finding
+plans and accepted writes whose responses are lost, as well as failed draft and
+submitted-review readbacks. It checks that a second invocation cannot contact
+the provider after a potentially published transaction. Process, HTTP, and
+clock effects are fake; the durable journal uses the checkout's `target`
+directory and a process-specific file name.
+
+```text
+cargo +nightly fuzz run --fuzz-dir . final_review
+```
+
+The target covers GitHub file findings without approval or follow-up actions.
+It does not inject journal failures or model Azure DevOps publication.

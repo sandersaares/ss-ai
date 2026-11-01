@@ -14,6 +14,10 @@ mod capture;
 mod clock;
 mod command;
 mod discovery;
+mod final_review;
+mod final_review_ado;
+mod final_review_github;
+mod final_review_transaction;
 mod github_approval;
 mod github_capture;
 mod identity;
@@ -38,6 +42,7 @@ mod error {
 
 pub use capture::{capture_target, collect_capture};
 pub use command::{run, run_in};
+pub use final_review::{FinalReviewInput, final_review_check_prior, publish_final_review};
 pub use overview::{OverviewInput, OverviewRender, publish_overview};
 #[doc(hidden)]
 pub use overview_snapshot::overview_text_is_publishable;

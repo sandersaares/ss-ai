@@ -1,4 +1,10 @@
 ```powershell
+#Requires -Version 7.6
+
+Set-StrictMode -Version Latest
+$ErrorActionPreference = 'Stop'
+$PSNativeCommandUseErrorActionPreference = $true
+
 pwsh -NoProfile -NonInteractive -File "{{SKILL_ROOT}}/scripts/Publish-PullRequestReview.ps1" `
   -Url "{{PR_URL}}" `
   -ApprovedFindingsPath "{{SESSION_STATE}}/approved-findings.json" `
@@ -21,8 +27,13 @@ Placeholders to replace:
 
 For Azure DevOps, append `-Tenant "{{TENANT}}"` when a tenant was supplied.
 
+The named-argument PowerShell entry point delegates to `ss-ai review publish-final-review`.
+It retains the existing arguments, including the optional `-DiscardPendingReview`,
+`-PublishToClosedPullRequest`, `-MergeApprovalPath`, `-Tenant`, and `-NowUtc`.
+Use the switches only under the authority described in phase 9.
+
 The script consumes the full refreshed capture programmatically. Any agent inspection of its metadata or discussion uses `query-pr-context.md`; do not open the capture or substitute query results for `-ContextPath`. Handle the publication status and errors as phase 9 describes, without blindly replaying a write.
 
 The last preflight read checks both live commits and discussion before any remote write. Changed evidence refuses publication; return to phase 8, revalidate the intervening delta and renew human approval when required. Never replace the checked capture just to satisfy this guard.
 
-When a merge-decision record exists, append `-MergeApprovalPath "{{SESSION_STATE}}\merge-approval.json"`. The command validates the record's schema and binding to the PR and approved source commit before deriving the merge verdict. A true decision submits a GitHub approval or an approving ADO vote. Omit this argument only when no merge decision exists; resolve malformed or stale records rather than bypassing the check.
+When a merge-decision record exists, append `-MergeApprovalPath "{{SESSION_STATE}}/merge-approval.json"`. The command validates the record's schema and binding to the PR and approved source commit before deriving the merge verdict. A true decision submits a GitHub approval or an approving ADO vote. Omit this argument only when no merge decision exists; resolve malformed or stale records rather than bypassing the check.

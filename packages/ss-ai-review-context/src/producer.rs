@@ -153,9 +153,7 @@ pub fn prepare_capture<'a>(
 impl CapturePreparation<'_> {
     /// Validates and publishes the sidecar before making the capture visible.
     pub fn publish(self, context: &Value, fetched_utc: &str) -> Result<Value, AppError> {
-        let mut document = document(context, fetched_utc)?;
-        validate_capture_keys(&document)?;
-        validate_capture_structure(&document)?;
+        let mut document = validated_document(context, fetched_utc)?;
         if !matches_target(&document, &self.target_url) {
             return Err(fail(
                 "invalidInput",
@@ -493,6 +491,28 @@ fn sidecar_path(path: &Path) -> PathBuf {
     name.into()
 }
 
+/// Builds a validated capture for comparing fresh provider evidence.
+///
+/// The returned capture uses a fixed timestamp and includes no authorship
+/// decisions. Pass it to [`evidence_hash`](crate::evidence_hash) to compare it
+/// with an audited capture independently of capture time or classification.
+///
+/// # Errors
+///
+/// Rejects evidence that cannot produce a valid canonical capture.
+pub fn canonical_capture_from_evidence(evidence: &Value) -> Result<Value, AppError> {
+    // The epoch is a neutral timestamp; evidence fingerprints exclude capture time.
+    validated_document(evidence, "1970-01-01T00:00:00Z")
+}
+
+/// Applies the same validation to published and in-memory captures.
+fn validated_document(context: &Value, fetched_utc: &str) -> Result<Value, AppError> {
+    let document = document(context, fetched_utc)?;
+    validate_capture_keys(&document)?;
+    validate_capture_structure(&document)?;
+    Ok(document)
+}
+
 /// Converts provider evidence into the ordered canonical capture model.
 fn document(context: &Value, fetched_utc: &str) -> Result<Value, AppError> {
     for name in ["reviewers", "revisions", "threads"] {
@@ -650,10 +670,90 @@ mod tests {
     use std::io;
     use std::path::Path;
 
-    use serde_json::json;
+    use serde_json::{Value, from_str, json};
     use ss_ai_runtime::{caused_by, classification};
 
-    use super::{finish_publication, identity_matches};
+    use super::{document, finish_publication, identity_matches};
+    use crate::{canonical_capture_from_evidence, evidence_hash};
+
+    #[test]
+    fn canonical_evidence_matches_saved_captures_independent_of_capture_time() {
+        for (evidence, saved) in [
+            (
+                include_str!(
+                    "../../../tests/fixtures/ss-review-native-capture/github-context.json"
+                ),
+                include_str!(
+                    "../../../tests/fixtures/ss-review-native-capture/github-expected.json"
+                ),
+            ),
+            (
+                include_str!(
+                    "../../../tests/fixtures/ss-review-native-capture/azure-devops-context.json"
+                ),
+                include_str!(
+                    "../../../tests/fixtures/ss-review-native-capture/azure-devops-expected.json"
+                ),
+            ),
+        ] {
+            let evidence: Value = from_str(evidence).unwrap();
+            let saved: Value = from_str(saved).unwrap();
+            let canonical = canonical_capture_from_evidence(&evidence).unwrap();
+            let later = document(&evidence, "2030-01-01T00:00:00Z").unwrap();
+
+            assert_ne!(canonical.get("fetchedUtc"), saved.get("fetchedUtc"));
+            assert_eq!(
+                evidence_hash(&canonical).unwrap(),
+                evidence_hash(&saved).unwrap()
+            );
+            assert_eq!(
+                evidence_hash(&canonical).unwrap(),
+                evidence_hash(&later).unwrap()
+            );
+
+            let mut changed = evidence.clone();
+            changed
+                .get_mut("pullRequest")
+                .unwrap()
+                .as_object_mut()
+                .unwrap()
+                .insert("title".to_owned(), json!("Changed title"));
+            let changed = canonical_capture_from_evidence(&changed).unwrap();
+            assert_ne!(
+                evidence_hash(&canonical).unwrap(),
+                evidence_hash(&changed).unwrap()
+            );
+        }
+    }
+
+    #[test]
+    fn canonical_evidence_rejects_malformed_provider_data() {
+        let evidence: Value = from_str(include_str!(
+            "../../../tests/fixtures/ss-review-native-capture/github-context.json"
+        ))
+        .unwrap();
+        let mut missing_threads = evidence.clone();
+        missing_threads.as_object_mut().unwrap().remove("threads");
+        let mut invalid_comment = evidence.clone();
+        invalid_comment
+            .pointer_mut("/threads/0/comments/0")
+            .unwrap()
+            .as_object_mut()
+            .unwrap()
+            .insert("authorship".to_owned(), json!("unknown"));
+        let mut wrong_casing = evidence;
+        wrong_casing
+            .pointer_mut("/threads/0/comments/0")
+            .unwrap()
+            .as_object_mut()
+            .unwrap()
+            .insert("Content".to_owned(), json!("ambiguous"));
+
+        for invalid in [missing_threads, invalid_comment, wrong_casing] {
+            let error = canonical_capture_from_evidence(&invalid).unwrap_err();
+            assert_eq!(classification(&error), "invalidInput");
+        }
+    }
 
     #[test]
     fn publication_classifies_failures_before_and_after_link() {

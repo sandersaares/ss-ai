@@ -4,6 +4,7 @@
 mod cargo;
 mod command;
 mod context;
+mod final_review;
 mod git;
 mod overview;
 mod workflow;
