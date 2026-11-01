@@ -83,15 +83,15 @@ Describe 'Automatic reapproval repository scope instructions' {
     It 'uses progress-verified source handoffs without confusing them with failed workers' {
         $assignment = Get-Content -LiteralPath (Join-Path $skill 'assessment.md') -Raw
         $script:Prompt | Should -Match 'planned `checkpoint` is not a completed assessment'
-        $script:Prompt | Should -Match '`assessmentProgress.judgedChangeCount` increased'
+        $script:Prompt | Should -Match '`assessmentProgress.completedWorkCount`\s+increased'
         $script:Prompt | Should -Match 'snapshot is unchanged'
-        $script:Prompt | Should -Match 'no more source handoffs than the native\s+`assessmentProgress.changeCount`'
+        $script:Prompt | Should -Match '`assessmentProgress.handoffLimit`'
         $script:Prompt | Should -Match 'final cumulative worker is separate'
-        $assignment | Should -Match 'at most ten new changes or\s+65,536 source characters'
+        $assignment | Should -Match 'at most ten new units or final changes and 65,536 delivered evidence'
         $assignment | Should -Match 'Do not record a cumulative judgment or call `complete` at a checkpoint'
         $assignment | Should -Match 'When a fresh worker starts with no unjudged changes'
-        $assignment | Should -Match 'Do not infer the cumulative outcome\s+merely from individual dispositions'
-        $script:Recipes | Should -Match 'next worker starts at `nextChangeOffset`'
+        $assignment | Should -Match 'Do not infer the cumulative outcome merely from individual dispositions'
+        $script:Recipes | Should -Match 'starts final change aggregation at `nextChangeOffset`'
     }
 
     It 'keeps output and context limits separate from semantic uncertainty' {
@@ -112,6 +112,37 @@ Describe 'Automatic reapproval repository scope instructions' {
         $script:Recipes | Should -Match 'Native read coverage does not establish that a replacement worker has seen the evidence'
         $script:Recipes | Should -Match 'retain existing judgments unless deliberately replacing them'
         $script:Recipes | Should -Match 'with their current digests'
+    }
+
+    It 'requires complete semantic discussion and shared historical excerpts' {
+        $assignment = Get-Content -LiteralPath (Join-Path $skill 'assessment.md') -Raw
+        $script:Recipes | Should -Match 'Discussion is a compact semantic document, not approval bookkeeping'
+        $script:Recipes | Should -Match '`discussionDigest` binds the complete document'
+        $script:Recipes | Should -Match 'Identical excerpt text does not merge comments'
+        $assignment | Should -Match 'Discussion includes all description, review, and comment bodies'
+        $assignment | Should -Match 'Read all unique excerpts'
+        $assignment | Should -Match 'Historical\s+excerpts may describe code absent from both comparison endpoints'
+        $script:Prompt | Should -Match 'compact presentation does not reduce coverage'
+    }
+
+    It 'requires exact patches, context, and typed checkpoint handoffs without approval authority' {
+        $assignment = Get-Content -LiteralPath (Join-Path $skill 'assessment.md') -Raw
+        $assignment | Should -Match '`CHANGE_ID:patch`'
+        $assignment | Should -Match '`:old`'
+        $assignment | Should -Match '`:new`'
+        $assignment | Should -Match 'Do not recursively summarize'
+        $assignment | Should -Match 'and replay toward the character budget'
+        $assignment | Should -Match 'Notes contain behavioral observations'
+        $assignment | Should -Match 'They are\s+not approval judgments'
+        $assignment | Should -Match 'summaries preserved every implication'
+        $script:Recipes | Should -Match 'Every unit requires a note'
+        $script:Recipes | Should -Match 'Replacing notes or judgments invalidates dependent aggregates'
+        $script:Recipes | Should -Match '`sourceEvidenceDigest`'
+        $help = & ss-ai autoreapprove source-context --help | Out-String
+        $LASTEXITCODE | Should -Be 0
+        foreach ($argument in @('change-id', 'side', 'start-line', 'line-count', 'limit', 'snapshot-digest')) {
+            $help | Should -Match "\-\-$argument"
+        }
     }
 
     It 'reports every in-range result with linked identity and service approval time' {
@@ -166,7 +197,7 @@ Describe 'Automatic reapproval provider fixtures' {
         $recipes = Get-Content -LiteralPath (Join-Path $skill 'commands.md') -Raw
         $help = & ss-ai autoreapprove --help | Out-String
         $LASTEXITCODE | Should -Be 0
-        foreach ($command in @('discover', 'results', 'inspect', 'refresh', 'prepare', 'assessment', 'read', 'judge', 'complete', 'publish', 'notify')) {
+        foreach ($command in @('discover', 'results', 'inspect', 'refresh', 'prepare', 'assessment', 'read', 'source-context', 'units', 'note', 'checks', 'resolve', 'checkpoint', 'judge', 'complete', 'publish', 'notify')) {
             $recipes | Should -Match "(?m)^ss-ai autoreapprove $command "
             $help | Should -Match "(?m)^\s+$command\s"
         }

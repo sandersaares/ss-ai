@@ -14,6 +14,7 @@ use crate::api::Api;
 use crate::approval::{Decision, Evidence};
 use crate::assessment::{Assessment, Judgment};
 use crate::clock::{is_recent, timestamp};
+use crate::discussion;
 use crate::error::{classification, fail};
 use crate::github_approval::Evidence as GitHubEvidence;
 use crate::journal::{FileJournal, read_bytes};
@@ -23,6 +24,10 @@ use crate::publication::{self, Outcome, Receipt, Scope};
 use crate::review_notice::{self, AutomaticApproval, Notice};
 use crate::target::{Platform, Target};
 use crate::{Clock, Process};
+use ss_ai_assessment::{ContextRequest, Note};
+
+/// Checkpoint notes and dependency-bound aggregates require a fresh assessment contract.
+const RUN_SCHEMA: u32 = 14;
 
 /// Durable metadata-only stage; recent candidates still require approval assessment.
 #[derive(Debug, Deserialize, Serialize)]
@@ -173,7 +178,7 @@ impl DiscoveryRecord {
     }
 
     fn validate(&self) -> Result<(), AppError> {
-        if self.schema_version != 8
+        if self.schema_version != RUN_SCHEMA
             || Uuid::parse_str(&self.run_id).is_err()
             || self.repository_id.trim().is_empty()
             || self.account_id.trim().is_empty()
@@ -221,7 +226,7 @@ impl DiscoveryRecord {
                         snapshot,
                         &self.policy.sha256,
                         &self.policy.content,
-                        &serde_json::to_string_pretty(evidence)?,
+                        &discussion::render(evidence)?,
                     )?;
                     if assessment.status(false) == "failed" && entry.execution_error.is_none() {
                         return Err(fail(
@@ -419,37 +424,19 @@ impl DiscoveryRecord {
         let Some(bytes) = journal.read_bytes()? else {
             return Ok(None);
         };
-        let mut document: Value = serde_json::from_slice(&bytes).map_err(|error| {
+        let document: Value = serde_json::from_slice(&bytes).map_err(|error| {
             crate::error::caused_by(
                 "invalidState",
                 "Malformed discovery record".to_owned(),
                 error,
             )
         })?;
-        // Schema-7 runs predate bounded refresh and have no consumed recovery attempts.
-        if document.get("schemaVersion") == Some(&json!(7)) {
-            *document
-                .get_mut("schemaVersion")
-                .ok_or_else(|| fail("invalidState", "Missing schema version"))? = json!(8);
-            let entries = document
-                .get_mut("inventory")
-                .and_then(Value::as_array_mut)
-                .ok_or_else(|| fail("invalidState", "Malformed schema-7 inventory"))?;
-            for entry in entries {
-                let entry = entry
-                    .as_object_mut()
-                    .ok_or_else(|| fail("invalidState", "Malformed schema-7 entry"))?;
-                if entry.contains_key("recovery") {
-                    return Err(fail(
-                        "invalidState",
-                        "Schema-7 entry cannot contain recovery state",
-                    ));
-                }
-                entry.insert(
-                    "recovery".to_owned(),
-                    serde_json::to_value(Recovery::default())?,
-                );
-            }
+        // Earlier contracts cannot establish that judgments considered all requested context.
+        if document.get("schemaVersion") != Some(&json!(RUN_SCHEMA)) {
+            return Err(fail(
+                "invalidState",
+                "Unsupported discovery schema; use the original utility for retained effects or start a fresh run",
+            ));
         }
         let mut run: Self = serde_json::from_value(document).map_err(|error| {
             crate::error::caused_by(
@@ -911,7 +898,7 @@ pub(crate) fn discover(
         run
     } else {
         DiscoveryRecord {
-            schema_version: 8,
+            schema_version: RUN_SCHEMA,
             run_id: Uuid::new_v4().to_string(),
             repository_url: input.repository.web_url.clone(),
             repository_id,
@@ -1284,9 +1271,33 @@ pub(crate) enum WorkAction {
         after: usize,
         limit: NonZeroUsize,
     },
+    Units {
+        reference: Option<String>,
+        after: usize,
+        limit: NonZeroUsize,
+    },
+    Checks {
+        after: usize,
+        limit: NonZeroUsize,
+    },
+    Note {
+        id: String,
+        note: Note,
+        previous_digest: Option<String>,
+    },
+    Resolve {
+        id: String,
+        judgment: Judgment,
+        previous_digest: Option<String>,
+    },
+    Checkpoint,
     Read {
         reference: String,
         offset: usize,
+        limit: NonZeroUsize,
+    },
+    SourceContext {
+        request: ContextRequest,
         limit: NonZeroUsize,
     },
     Judge {
@@ -1729,7 +1740,7 @@ pub(crate) fn work(
             "Snapshot changed or assessment preparation failed",
         ));
     }
-    let discussion = serde_json::to_string_pretty(evidence)?;
+    let discussion = discussion::render(evidence)?;
     if matches!(action, WorkAction::Prepare) && entry.assessment.is_none() {
         let (old, new) = entry.source_endpoints()?;
         match objects::prepare(
@@ -1739,8 +1750,14 @@ pub(crate) fn work(
             new,
             run.tenant.as_deref(),
         ) {
-            Ok(inventory) => {
-                entry.assessment = Some(Assessment::new(inventory, snapshot, &run.policy.sha256)?);
+            Ok((inventory, patches)) => {
+                entry.assessment = Some(Assessment::new(
+                    inventory,
+                    &patches,
+                    snapshot,
+                    &run.policy.sha256,
+                    &discussion,
+                )?);
             }
             Err(error) => {
                 entry.execution_error = Some(Diagnostic::from_error(&error));
@@ -1762,6 +1779,41 @@ pub(crate) fn work(
             &run.policy.content,
             &discussion,
         )?,
+        WorkAction::Units {
+            reference,
+            after,
+            limit,
+        } => assessment.units_for(reference.as_deref(), after, limit.get().min(100))?,
+        WorkAction::Checks { after, limit } => assessment.checks(after, limit.get().min(100))?,
+        WorkAction::Note {
+            id,
+            note,
+            previous_digest,
+        } => {
+            let digest = assessment.note(
+                &id,
+                note,
+                previous_digest.as_deref(),
+                &run.policy.content,
+                &discussion,
+            )?;
+            json!({"snapshotDigest":snapshot, "recorded":id, "noteDigest":digest})
+        }
+        WorkAction::Resolve {
+            id,
+            judgment,
+            previous_digest,
+        } => {
+            let digest = assessment.resolve(
+                &id,
+                judgment,
+                previous_digest.as_deref(),
+                &run.policy.content,
+                &discussion,
+            )?;
+            json!({"snapshotDigest":snapshot, "recorded":id, "resolutionDigest":digest})
+        }
+        WorkAction::Checkpoint => assessment.checkpoint()?,
         WorkAction::Read {
             reference,
             offset,
@@ -1773,6 +1825,26 @@ pub(crate) fn work(
             &run.policy.content,
             &discussion,
         )?,
+        WorkAction::SourceContext { request, limit } => {
+            match assessment.source_context(request, limit.get(), &run.policy.content, &discussion)
+            {
+                Ok(result) => result,
+                Err(error) => {
+                    // A failed attempt to acquire needed context is unfinished evidence, never
+                    // permission to ignore that request and publish a semantic refusal.
+                    if assessment.digest.is_none() {
+                        entry.execution_error = Some(Diagnostic::from_error(&error.into()));
+                        finish_state(&mut run);
+                        run.save(&journal)?;
+                        return Err(fail(
+                            "evidenceDelivery",
+                            "Captured source context acquisition failed; retained assessment is incomplete",
+                        ));
+                    }
+                    return Err(error.into());
+                }
+            }
+        }
         WorkAction::Judge {
             id,
             judgment,
