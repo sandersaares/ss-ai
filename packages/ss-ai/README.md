@@ -218,7 +218,7 @@ The producer and consumer validate the full record, including excluded PRs.
 
 | Record | Fields |
 | --- | --- |
-| Run | `schemaVersion: 8`; UUID `runId`; canonical `repositoryUrl`; nonempty string `repositoryId`, `accountId`, `utilityVersion`; `platform` (`gitHub` or `azureDevOps`); nullable string `tenant`; `policy`; Boolean `dryRun`, `enumerationComplete`; `state`; `inventory`; nullable `error` and positive integer `errorPullRequestId`. A PR-bound publication failure records its originating PR; only that PR's owned operation can recover the failed run. |
+| Run | `schemaVersion: 14`; UUID `runId`; canonical `repositoryUrl`; nonempty string `repositoryId`, `accountId`, `utilityVersion`; `platform` (`gitHub` or `azureDevOps`); nullable string `tenant`; `policy`; Boolean `dryRun`, `enumerationComplete`; `state`; `inventory`; nullable `error` and positive integer `errorPullRequestId`. A PR-bound publication failure records its originating PR; only that PR's owned operation can recover the failed run. |
 | Policy | Absolute UTF-8 `sourcePath`; nonempty UTF-8 `content`; lowercase hexadecimal `sha256` of the captured content bytes. |
 | Inventory entry | Unique positive integer `pullRequestId`; canonical `url`; nonempty `title`; `draft: false`; `recency`; `recovery`; nullable `inspection`, `assessment`, `executionError`, `publication`, `reviewNotice`, and `automaticApproval`. Entries are in ascending PR order. |
 | Recovery | `attemptIds`: ordered distinct UUIDs, at most the recovery limit, excluding the run ID; nullable `stale` (`staleEvidence`) and `error` (`retryExhausted`, only at the limit). The last attempt ID selects the current PR's host-journal `runId`; the initial attempt uses the enclosing run ID. |
@@ -239,16 +239,14 @@ all timestamps are future-dated. Failed recency has a check time and error,
 without a latest timestamp or complete evidence.
 An inspection's digest covers its capture time and complete evidence. Fresh
 recovery captures also bind the recovery attempt ID, so a repeated observation
-cannot reuse an earlier snapshot digest. Existing schema-8 captures without
-that binding remain readable.
+cannot reuse an earlier snapshot digest.
 Freshness comparisons use the [material-evidence projections](docs/reapproval.md#material-evidence)
 for both newly captured and richer retained observations. Existing records and
 their digests are not rewritten; immutable assessment and journal bindings remain exact.
 Consumers recompute its conclusion and validate its run identity.
-Schema-7 records load with empty recovery state; their original journal identities,
-assessment contracts, and uncertain effects remain unchanged. Other older run
-schemas require a fresh run. Valid retained draft entries from older runs are
-removed on access.
+Other run schemas require a fresh run. Reconcile retained effects with the utility
+version that created them; never rewrite their records to adopt another schema.
+Valid retained draft entries are removed on access.
 
 ADO inspections ignore deleted threads and comments as authority while retaining
 their tombstones and audit evidence in snapshots. They report `noPriorApproval` when no
@@ -286,10 +284,11 @@ indeterminate decisions; obtain fresh evidence in a new run.
 ## Source assessment and publication
 
 The installed `ss-autoreapprove` command recipes cover `prepare`, `assessment`,
-`read`, `judge`, `complete`, `publish`, and `notify`. Each requires the absolute
+`read`, `source-context`, `units`, `note`, `checks`, `resolve`, `checkpoint`,
+`judge`, `complete`, `publish`, and `notify`. Each requires the absolute
 `--state-path`, positive `--pull-request-id`, and exact `--snapshot-digest`.
 Preparation uses isolated Git objects, never a checkout. It compares exact
-original-approved/current source trees, including removals after force-pushes.
+original-approved/current source trees, including merge-derived content and removals after force-pushes.
 It does not read historical target tips, execute source, or initialize submodules.
 
 `assessment` accepts nonnegative `--after` and positive `--limit` (default 10,
@@ -299,30 +298,124 @@ Metadata and evidence pages fit within 16 KiB of pretty-printed UTF-8 JSON
 including the trailing newline. Follow `nextOffset`; serialized byte limits
 can shorten either kind of page. A metadata item that cannot fit fails with
 `evidenceDelivery`, not a semantic refusal.
-Offsets are character offsets, not bytes, and must extend contiguous reads
+Offsets count Unicode scalar values, not bytes or UTF-16 code units, and must extend contiguous reads
 or replay an already read region. References are `policy`, `discussion`, and
-`CHANGE_ID:old` / `CHANGE_ID:new` for present source sides.
+`CHANGE_ID:patch`, `CHANGE_ID:old` / `CHANGE_ID:new` for present source sides,
+and stable context references returned by `source-context`.
 Evidence pages include `totalCharacters`. Metadata includes `documentReads`
 for policy/discussion and `content` on each source side; text content exposes
 `progress`. Progress contains `reference`, `totalCharacters`, nullable
 `readOffset`, and `complete`. A null offset means no read, including for empty
 text. `pendingChangeCount` and nullable `nextChangeOffset` identify missing
 judgments. Results expose nullable `assessmentProgress` with `changeCount`,
-`judgedChangeCount`, and `nextChangeOffset` without source or per-change rationales.
+`judgedChangeCount`, `nextChangeOffset`, `unitCount`, `completedUnitCount`,
+`nextUnitId`, `nextUnitOffset`, `completedWorkCount`, `checkpointCount`, and `handoffLimit`
+without source or per-change rationales.
+
+Every change exposes a mandatory `requiredPatch` read-progress record and
+`hunkCount`. Its patch document contains snapshot/change identity, both side
+bindings, ordered hunk ranges, and exact unified patch text with three context
+lines. All changed readable text is required, including additions/deletions.
+Rename/mode-only operations still require the document. Full-side `content.progress`
+is marked `optionalContext`; unchanged text is not mandatory solely because a
+side exists. `sourceEvidenceDigest` binds the complete source manifest.
+
+`source-context` takes `--change-id`, `--side old|new`, positive one-based
+`--start-line`, positive `--line-count`, and positive `--limit` (default 4,096).
+The range must name complete existing lines of a captured readable side.
+It registers required evidence and returns its first bounded page, stable
+`reference`, and exact `context` binding. Continue using ordinary `read`.
+Repeated requests are idempotent. Assessment and change metadata expose
+`requestedContextCount` and nullable `nextContextReference` for pending ranges.
+Requested context is required for every disposition. Failed context acquisition
+retains an incomplete assessment and diagnostic, without notice authority.
+Registering a new range invalidates its change judgment and the cumulative
+judgment; record them again after reading the range. Repeating an existing
+request does not invalidate judgments.
+Finalized assessments permit existing evidence replay, not new ranges.
+
+The `discussion` reference contains compact JSON with `schemaVersion: 1` and
+`platform`. GitHub supplies `pullRequest`, `reviews`, `comments`,
+`reviewComments`, and `hunks`; ADO supplies `pullRequest`, `sourceCommit`,
+`iterationCommits`, and `threads`. `iterationCommits` maps iteration identifiers
+to source commits for interpreting historical inline coordinates.
+Discussion records preserve provider field names, bodies, stable
+authorship, reply relationships, available thread state, and source locations.
+GitHub comments reference exact shared excerpt text through `hunkReference`;
+`hunks` maps its SHA-256 reference to that text. A null reference preserves a
+null excerpt, and an absent reference preserves an absent excerpt. Deleted ADO
+comment tombstones preserve absent identifiers and bodies. Read the
+complete document, including all shared excerpts. Approval reconstruction and
+policy records remain in native authority evidence, not this discussion document.
+`discussionDigest` binds the document's exact UTF-8 bytes.
+
+`units` accepts `--after`, `--limit`, and optional `--reference discussion|CHANGE_ID:patch`.
+It returns bounded `items` and `nextOffset` over the selected immutable unit
+list. Each item supplies its `unit`, raw `reference`, `bindingReference`, `noteReference`,
+nullable `noteDigest`, nullable `readOffset`, and Boolean `completed`.
+`nextUnitOffset` addresses the unfiltered list, allowing workers to resume
+without replaying completed metadata pages. Filtered lists have separate offsets.
+Read every returned `unit:ID` and `binding:ID` through the ordinary reader. Units cover each
+original document exactly once through half-open scalar ranges; their text
+concatenates those ranges in order. The stable parent identifier groups a source
+change or discussion thread; bounded bindings identify each record by collection
+and digests. Exact identities, locations, and excerpt links remain in the original
+unit text. Read other units with the same parent and reacquire original evidence
+as needed to interpret a fragment.
+Complete unit coverage also satisfies the original document's required read.
+
+`note` takes `--unit-id`, `--observations`, `--interfaces`, repeated `--evidence`,
+optional repeated `--concern` and `--interaction`, and optional
+`--previous-digest`. A unit note cites its raw unit and requires complete
+delivery of its evidence and applicable requested context. Notes have no
+disposition. Each unit note requires a complete read of its binding reference.
+`--unit-id discussion` records the single discussion aggregate
+after all discussion unit notes and relevant exact evidence have been read.
+Notes accept at most 8,192 serialized UTF-8 bytes before dependency bindings.
+New notes return `noteDigest`; replacements require the current digest.
+
+`checks` pages every recorded concern/interaction and returns `id`, `origin`,
+`kind`, `reference`, `resolutionReference`, and nullable `resolutionDigest`.
+`resolve` takes `--check-id`, `--disposition`, `--rationale`, repeated `--evidence`,
+and optional `--previous-digest`. It requires complete reads of the check,
+its originating record, exact supporting evidence, and requested context.
+Read `note:ID`, `judgment:CHANGE_ID`, `discussion-note`, `check:ID`, and
+`resolution:ID` through the same bounded reader.
+A semantic record shown in metadata is not its dedicated read receipt.
+
+`checkpoint` accepts planned handoff only after newly completed immutable work:
+a unit note or final change judgment. It returns scalar progress.
+Replay and replacement do not increase `completedWorkCount`. `handoffLimit`
+is the immutable unit count plus changed-path count; worker replacement and
+staleness have separate limits. Only one assessment worker runs per PR.
+Notes and checkpoints never authorize approval or a needs-review notice.
 
 `judge` takes `--change-id` (an exact ID or `cumulative`), `--disposition`,
-`--rationale` and repeated `--evidence`. Judgments apply the installed policy's
+`--rationale`, repeated `--evidence`, and optional repeated `--concern` and
+`--interaction` for change judgments. Judgments apply the installed policy's
 significant-design-change and likely-performance/correctness-regression criteria,
 without an edit-category allowlist. Replacing a judgment requires
 `--previous-digest` matching its current `decisionDigest` or `cumulativeDigest`
 from `assessment`. Identical retries are idempotent; conflicting writes fail.
-Every change judgment requires complete policy and readable source-side reads.
-A cumulative judgment requires complete policy and discussion reads.
-Completion requires every inventory entry, a cumulative judgment, and complete
-policy, discussion, and readable changed-text reads for every disposition.
+Every change judgment must cite its patch reference and requires complete policy,
+patch, and applicable requested-context reads. Cited optional evidence also
+requires complete delivery. Change aggregation reads every note for its exact
+changed-path record and relevant exact source. A cumulative judgment requires
+complete policy, discussion, all final change judgments, discussion observations,
+every check and its disposition, and all requested-context reads. Its concern
+and interaction arrays are empty: new obligations are recorded on a unit or
+change and resolved before cumulative completion.
+Completion requires every unit note, final change judgment, discussion aggregate,
+check disposition, and an independent cumulative judgment, plus complete policy,
+discussion, every patch, and every requested range for every disposition.
+This includes an empty changed-path inventory. Replacing a note or judgment
+invalidates dependent aggregates and resolutions through exact input digests.
+Source judgments cite raw evidence and unit/discussion notes, not other final
+judgments, checks, or resolutions. Check dispositions cannot cite other
+resolutions. The dependency hierarchy is fixed rather than recursively summarized.
 Unexamined readable evidence remains incomplete work, not semantic uncertainty.
 Opaque source still permits a non-insignificant judgment. A significant
-or uncertain member cannot be hidden by a cumulative insignificant judgment.
+or uncertain member or check disposition cannot be hidden by a cumulative insignificant judgment.
 Completed judgments are immutable.
 `complete` returns `snapshotDigest`, `status`, `assessmentDigest`, and nullable
 `error`. An uncertain evaluation returns `failed` with a diagnostic and makes the
@@ -362,12 +455,20 @@ These records are created and updated only through the native commands.
 
 | Record | Fields |
 | --- | --- |
-| Assessment | `snapshotDigest`, `policyDigest`, `inventory`, `inventoryDigest`, exact `documents`, `reads` map of reference to contiguous character count, `decisions` map of change ID to judgment, nullable `cumulative`, Boolean `complete`, nullable `assessmentDigest`. |
+| Assessment | `snapshotDigest`, `policyDigest`, `discussionDigest`, `inventory`, `inventoryDigest`, `sourceEvidence` map of change ID to source document, `sourceEvidenceDigest`, `contexts` map of stable reference to range, `checkpoints`, exact `documents`, `reads` map of reference to contiguous character count, `decisions` map of change ID to judgment, nullable `cumulative`, Boolean `complete`, nullable `assessmentDigest`. |
 | Inventory | Full `oldCommit`, `newCommit`, `oldTree`, `newTree`; complete ordered `changes`; Boolean `complete`. Equal trees require empty changes. |
 | Change | SHA-256 `id` binding kind and both sides; `kind` (`A`, `D`, `M`, `T`, `R`); nullable `old`, `new`. |
 | Side | Exact UTF-8 Git `path`, full `object` ID, `mode`, and `content`. |
 | Content | `kind: text` with UTF-8 `text`, `binary` / `tooLarge` with byte `size`, or `submodule`. Unreadable content is never empty text. |
-| Judgment | `disposition` (`insignificant`, `significant`, `uncertain`); nonempty `rationale`; nonempty unique `evidence` references. |
+| Source document | `snapshotDigest`, `changeId`, `kind`, nullable `old` / `new` source bindings, exact `patch` text, ordered `hunks` (`oldStart`, `oldCount`, `newStart`, `newCount`). |
+| Source binding | Exact `path`, `object`, `mode`, and `contentKind` matching the inventory. |
+| Context range | `request` (`changeId`, `side`, `startLine`, `lineCount`), `snapshotDigest`, `source` binding, zero-based half-open `startByte` / `endByte` and `startCharacter` / `endCharacter`, and exact UTF-8 `contentDigest`. Its reference is `CHANGE_ID:context:SHA256`, with the digest binding the complete range record. |
+| Judgment | `disposition` (`insignificant`, `significant`, `uncertain`); nonempty `rationale`; nonempty unique `evidence` references; `concerns` and `interactions` arrays of nonempty text. |
+| Checkpoints | Immutable `units`, `manifestDigest`; `notes` map of unit ID to bound note; nullable bound `discussion`; `aggregates` map of judgment ID to dependency digests; `resolutions` map of check ID to bound judgment; unique `completedWork` identities; nonnegative `handoffs` and `checkpointProgress`. |
+| Evidence unit | `id`, `snapshotDigest`, `parent`, original `reference`, ordered `ranges`, source/thread `bindings`, `totalCharacters`, `contentDigest`. Each range has `startCharacter`, exclusive `endCharacter`, and exact UTF-8 `contentDigest`. |
+| Note | Nonempty `observations` and `interfaces`; `concerns` and `interactions` arrays; nonempty unique `evidence` references. |
+| Bound record | Typed `value` and exact reference-to-content-digest `dependencies`. |
+| Check | `id`, originating note/judgment `origin`, `kind` (`concern` or `interaction`), `observation`, and original supporting `evidence`. Its identity binds the originating record digest. |
 
 Selected documents are exactly `significance-policy`, `assessment-contract`,
 and `approval-discussion`. Inventory and assessment digests bind their content,
@@ -378,6 +479,10 @@ readable. Path/mode changes, additions, and removals have no categorical restric
 opaque content cannot support an insignificant judgment. Risk assessment remains
 the agent's judgment under the installed policy. Unsupported record schemas require a
 new run rather than reinterpretation under a different judgment contract.
+Native coverage proves delivery, not comprehension or that a summary captured
+every implication. Workers must examine the complete final judgment/concern set
+and necessary exact evidence. Context exhaustion remains incomplete; recursive
+summarization and larger context are not substitutes.
 
 ### Publication records and recovery
 

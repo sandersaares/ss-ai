@@ -80,13 +80,32 @@ excluded PRs as counts. The window limits candidates, not approval history.
 
 Isolated Git-object access supplies exact paths, modes and content without executing
 reviewed code. Typed, snapshot-bound judgments cover every change and the cumulative
-result. Every judgment requires the policy and all readable sides of its change;
-the cumulative judgment requires complete policy and discussion reads.
+result. Every judgment requires the policy, its complete operation/patch document,
+and all requested context for its change; the cumulative judgment requires
+complete policy, discussion, and requested-context reads.
 Every completed outcome requires all readable evidence, not just favorable outcomes.
+The discussion document contains complete semantic discussion rather than the
+retained approval record. It preserves description and review bodies, comments,
+authorship, reply relationships, available thread state, and source locations.
+GitHub inline comments reference a shared table of exact excerpt text. Workers
+read every shared excerpt as part of the complete document; sharing does not
+permit skipping historical context or dropping repeated comments.
 Opaque source still prevents an insignificant outcome;
 absent sides represent additions or deletions, not missing evidence. Structural or
 behavioral edits are not automatically significant. Mixed significant or uncertain
 judgments prevent approval. See the package command contract for schemas and bounds.
+
+Patches retain all changed text with three surrounding lines. Complete captured
+readable sides remain available for deliberate context reads. Assessors request
+exact line ranges when hunks do not establish enclosing logic, interfaces,
+invariants, interactions, or an objection's relevance. Requested ranges become
+mandatory evidence. A newly registered range invalidates the affected change's
+unit notes and judgment, their dependents, the discussion aggregate, all check
+dispositions, and the cumulative judgment. Repeating an existing request leaves
+records intact. Native coverage cannot prove
+that the assessor chose enough context; needed evidence outside the captured
+sides remains explicitly missing.
+There is no filename, size, or edit-category exemption.
 
 The orchestrator dispatches a fresh GPT 6.1 Sol assessment worker per eligible PR
 with explicit medium reasoning and regular context. That worker owns preparation,
@@ -98,20 +117,55 @@ JSON escaping and pretty formatting, so a character-count bound cannot hide
 tool truncation. Metadata pages shrink at complete change boundaries and return
 their actual next offset; a single oversized item fails explicitly. Evidence
 pages advance only through returned characters and expose total length.
+Page sizing includes the exact serialized context binding, including its path;
+metadata that leaves no room for the next character fails explicitly.
 Native read progress distinguishes unread empty text from an explicitly read
 empty document and distinguishes opaque content from pending text delivery.
 Read receipts track native delivery, not model comprehension; a truncated tool
 response must be replayed with a smaller limit.
 
-Each worker examines a small source unit and records its judgments before
-returning a planned checkpoint. The orchestrator verifies increased native
-judgment counts on the unchanged snapshot before starting a fresh worker.
-Each checkpoint adds at least one judgment, bounding source handoffs by the
-inventory size rather than a retry loop. Workers do not overlap. The final
-worker reads durable judgment pages and complete discussion, reacquiring source
-needed for cross-change reasoning. Individual favorable judgments do not
-replace a cumulative semantic assessment. Native scalar progress avoids
-loading source or per-change rationales into the orchestrator.
+An immutable evidence-unit manifest partitions every required patch and the
+complete discussion into bounded exact ranges. It prefers complete hunks,
+threads, and review bodies, groups interleaved replies by their retained parent,
+and splits oversized records or single lines without omission. Each unit retains
+its original reference, scalar ranges, content digests, and a reference to
+source/thread binding references. Bindings use bounded record and thread digests;
+the original unit text retains exact identities, locations, and links. Workers
+read the bindings before recording a unit note and reacquire related original
+units as needed to interpret fragments.
+Sharing excerpt text never merges its referencing threads.
+
+Workers record typed unit notes with observations, interfaces/invariants,
+interactions, concerns, and exact references. Notes are not approval judgments.
+Each exact changed-path record still needs a single final judgment after its
+aggregator reads all unit notes and relevant exact source. The discussion
+aggregate covers every discussion note, including original bodies and unique
+historical excerpts. It can bind relevant source notes without replacing the
+required discussion notes.
+
+Native checkpoints require newly completed immutable work: a unit note or final
+change judgment. Replays and replacement records earn no new progress.
+The immutable unit and changed-path counts bound planned handoffs; the separate
+replacement and stale-recovery budgets still apply. Workers do not overlap and
+do not increase model context. Scalar progress keeps semantic evidence out of
+the orchestrator.
+
+The fresh cumulative worker reads every final change judgment, discussion
+observation, and explicit concern/interaction disposition. It independently
+examines combined effects and reacquires relevant exact evidence. Every recorded
+concern or interaction requires a rationale and exact supporting evidence.
+Significant or uncertain members and check dispositions prevent a favorable
+aggregate from authorizing renewal. Replacing a note invalidates dependent
+aggregates through their bound digests; unrelated notes remain available.
+
+Completion requires all raw unit ranges, requested context, unit notes, final
+change judgments, discussion aggregation, check dispositions, and the independent
+cumulative judgment, including with an empty source inventory. Native receipts
+prove delivery, not comprehension. Notes can omit an implication even when
+coverage is complete; synthetic adversarial evaluation reduces that risk but
+does not prove semantic equivalence. There is no recursive summary hierarchy
+or guarantee that an arbitrary PR fits: a cumulative set that cannot be examined
+with its necessary exact evidence remains explicitly incomplete.
 
 Tool-output, context, and worker limits are incomplete evidence, not substantive
 uncertainty. They neither freeze a semantic refusal nor authorize a notice.
@@ -191,8 +245,9 @@ or forgets such effects.
 An existing publication receipt also requires retained host evidence of a
 preflight-only operation; missing host history is not proof that no write occurred.
 
-`discovery.rs` owns the schema-8 recovery record and result metadata. Schema-7
-runs migrate with no consumed attempts and unchanged initial host identities.
+`discovery.rs` owns the schema-14 run, recovery record, and result metadata.
+Incompatible run schemas require a fresh run; retained effects require
+reconciliation with their original utility version.
 Discovery discards draft PRs before recency checks. Valid older records drop
 draft entries when loaded, and inspection, refresh, or publication preflight removes
 a PR found to have become a draft without consuming the stale-recovery budget.
@@ -202,7 +257,7 @@ Each fresh attempt adds a UUID used as that PR's host-journal run identity;
 the enclosing run ID stays fixed. The snapshot digest also binds this UUID,
 so equal evidence and timestamps cannot reuse an earlier snapshot. This preserves
 canceled preflight records and prevents a new assessment from colliding with an
-old immutable journal operation. Existing schema-8 snapshots remain readable.
+old immutable journal operation.
 Notification staleness is recorded separately from an uncertain assessment's
 diagnostic, so neither condition conceals the other.
 
@@ -431,12 +486,54 @@ publication. Reconciliation failures identify the review node, REST review ID
 and state, related GraphQL review/dismissal IDs and states, endpoints, pagination
 methods, and collection sizes without including discussion bodies.
 
-`objects.rs` prepares isolated exact source inventories. `assessment.rs` owns
+`objects.rs` prepares isolated exact source inventories and compares captured
+blob pairs using fixed Myers behavior, no indent heuristic, and unified context.
+Blob comparison avoids repository attributes and preserves the raw inventory's
+rename/type pairing. An opaque side contributes no invented text; all text from
+the readable side remains required and the document identifies both kinds.
+Capture budgets and full retained blobs remain unchanged.
+
+The shared Git parser validates exact old-to-new reconstruction from each patch
+using forward-only captured-line iterators, including unchanged gaps, CRLF, and
+missing-final-newline markers. It retains
+ordered ranges without changing the existing full-review range output.
+`source.rs` binds operation metadata and ranges to the snapshot and inventory.
+Its context records bind line, byte, and Unicode-scalar bounds to a captured
+object and content digest, without copying the range's body into state.
+`assessment.rs` owns
 context selection, bounded contiguous reads, conditional judgment replacement,
-coverage, and completion digests. Producers and consumers use the same validation,
+coverage, and completion digests. `units.rs` supplies exact source/discussion
+partitions; `checkpoint.rs` binds typed notes, fixed-level aggregates, explicit
+check dispositions, and monotonic handoff progress. Producers and consumers use the same validation,
 so missing data cannot become an empty successful result. Timestamps use the shared
 Jiff parser and injectable clock; the reapproval workflow has no independent
 clock or retry timer.
+
+The required patch manifest has its own digest; completion also binds all
+requested ranges. Every command validates these against retained source.
+New context removes the affected change's unit notes and judgment, their
+dependents, the discussion aggregate, check dispositions, and the cumulative
+judgment. Unrelated change judgments remain intact. Failed context acquisition stays
+in the run as incomplete evidence, with no approval or notice authority.
+Incompatible run contracts require a new run rather than migrated read receipts.
+
+`discussion.rs` projects captured history into compact, provider-tagged semantic
+documents. It does not participate in authority or freshness comparisons.
+Provider-shaped locations retain missing and null distinctions, including
+outdated inline positions. Exact hunk text shares a SHA-256 reference while
+comments retain their own paths, authors, revisions, and reply relationships.
+ADO discussion retains a compact iteration-to-source-commit map so earlier
+inline coordinates remain interpretable. Deleted comment tombstones do not
+require removed identifiers or bodies. Human replies in service threads remain present.
+Native validation and work
+dispatch use the same renderer, and the assessment binds its exact document
+bytes and projection version through `discussionDigest`. Incompatible read
+offsets and judgments are not migrated to another projection.
+
+Large individual source documents and discussion still require complete worker reads. Context
+exhaustion remains incomplete work. Checkpointed source/discussion summaries
+are a separate design decision tracked in the repository [TODO](../../../TODO.md);
+read receipts alone cannot establish that a summary preserves every objection.
 
 `publication.rs` dispatches the provider transaction and acquires the stable
 account/repository/PR lock before the run lock. `ado_publication.rs` owns ADO's
@@ -481,6 +578,13 @@ the total character count; only exact-content comparisons collect the complete
 text in a caller-owned buffer. Explicit helper page limits are nonzero. Focused
 pagination coverage checks small Unicode pages, replay, overlap, gaps, incomplete evidence,
 stale snapshots, and the hard response cap through the same persisted commands.
+Controlled contention registers distinct captured-context ranges under the retained
+run lock and verifies neither range nor its progress is overwritten. Synthetic
+sparse/dense fixtures measure every serialized page separately from source
+characters and requested context. Sparse edits require at least 90% fewer
+mandatory source characters; dense replacements have no reduction guarantee.
+The bounded `ss-ai-assessment/fuzz` target exercises exact patch parsing and
+read/context/judgment operation ordering without contacting a provider.
 
 Publication-only matrices share an immutable editorial source repository and
 its captured commit IDs. Their journals, host stores, and provider state remain

@@ -17,7 +17,7 @@ pub(crate) fn prepare(
     old: &str,
     new: &str,
     tenant: Option<&str>,
-) -> Result<Inventory, AppError> {
+) -> Result<(Inventory, Vec<String>), AppError> {
     commit(old)?;
     commit(new)?;
     let temporary = TempDir::new()?;
@@ -105,7 +105,44 @@ pub(crate) fn prepare(
         complete: true,
     };
     inventory.validate()?;
-    Ok(inventory)
+    // Blob comparisons avoid path attributes and preserve the raw inventory's rename/type
+    // pairing. An absent or opaque side contributes empty text, not an invented readable blob.
+    let empty = line(git(process, root, &["hash-object", "-w", "--stdin"])?)?;
+    commit(&empty)?;
+    let mut patches = Vec::new();
+    for change in &inventory.changes {
+        patches.push(String::from_utf8(git(
+            process,
+            root,
+            &[
+                "diff",
+                "--text",
+                "--no-ext-diff",
+                "--no-textconv",
+                "--no-color",
+                "--no-relative",
+                "--no-renames",
+                "--diff-algorithm=myers",
+                "--no-indent-heuristic",
+                "--unified=3",
+                "--inter-hunk-context=0",
+                "--output-indicator-new=+",
+                "--output-indicator-old=-",
+                "--output-indicator-context= ",
+                "--no-prefix",
+                readable_object(change.old.as_ref(), &empty),
+                readable_object(change.new.as_ref(), &empty),
+                "--",
+            ],
+        )?)?);
+    }
+    Ok((inventory, patches))
+}
+
+/// Empty blob comparisons expose every available line when the other side is opaque or absent.
+fn readable_object<'a>(side: Option<&'a Side>, empty: &'a str) -> &'a str {
+    side.filter(|side| matches!(side.content, Content::Text { .. }))
+        .map_or(empty, |side| side.object.as_str())
 }
 
 /// NUL-delimited raw diff records preserve arbitrary UTF-8 path spelling without C-quote parsing.
