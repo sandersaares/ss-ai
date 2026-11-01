@@ -446,6 +446,112 @@ fn context_binding_that_cannot_fit_does_not_record_evidence_delivery() {
 }
 
 #[test]
+fn failed_first_context_page_retains_required_work_and_invalidates_prior_judgments() {
+    let change = change(
+        &("nested/".repeat(3_000) + "file"),
+        Content::Text { text: "old".into() },
+        Content::Text { text: "new".into() },
+    );
+    let id = change.id.clone();
+    let mut assessment = assessment(inventory(vec![change]), "discussion");
+    for reference in ["policy", "discussion", &format!("{id}:patch")] {
+        deliver(&mut assessment, reference, "policy", "discussion").unwrap();
+    }
+    let mut after = 0;
+    loop {
+        let page = assessment.units(after, 100).unwrap();
+        for unit in page["items"].as_array().unwrap() {
+            let reference = unit["reference"].as_str().unwrap();
+            deliver(&mut assessment, reference, "policy", "discussion").unwrap();
+            deliver(
+                &mut assessment,
+                unit["bindingReference"].as_str().unwrap(),
+                "policy",
+                "discussion",
+            )
+            .unwrap();
+            assessment
+                .note(
+                    unit["unit"]["id"].as_str().unwrap(),
+                    fixture_note(reference),
+                    None,
+                    "policy",
+                    "discussion",
+                )
+                .unwrap();
+            deliver(
+                &mut assessment,
+                unit["noteReference"].as_str().unwrap(),
+                "policy",
+                "discussion",
+            )
+            .unwrap();
+        }
+        let Some(next) = page["nextOffset"].as_u64() else {
+            break;
+        };
+        after = usize::try_from(next).unwrap();
+    }
+    assessment
+        .record(
+            &id,
+            judgment(&id, Disposition::Insignificant),
+            None,
+            "policy",
+            "discussion",
+        )
+        .unwrap();
+    deliver(
+        &mut assessment,
+        &format!("judgment:{id}"),
+        "policy",
+        "discussion",
+    )
+    .unwrap();
+    assessment
+        .note(
+            "discussion",
+            fixture_note("discussion"),
+            None,
+            "policy",
+            "discussion",
+        )
+        .unwrap();
+    deliver(&mut assessment, "discussion-note", "policy", "discussion").unwrap();
+    assessment
+        .record(
+            "cumulative",
+            judgment("cumulative", Disposition::Insignificant),
+            None,
+            "policy",
+            "discussion",
+        )
+        .unwrap();
+    assessment
+        .source_context(
+            ContextRequest {
+                change_id: id.clone(),
+                side: SourceSide::Old,
+                start_line: NonZeroUsize::MIN,
+                line_count: NonZeroUsize::MIN,
+            },
+            usize::MAX,
+            "policy",
+            "discussion",
+        )
+        .unwrap_err();
+    let saved = serde_json::to_value(&assessment).unwrap();
+    assert_eq!(saved["contexts"].as_object().unwrap().len(), 1);
+    assert!(saved["decisions"].get(&id).is_none());
+    assert!(saved["cumulative"].is_null());
+    let mut reloaded: Assessment = serde_json::from_value(saved).unwrap();
+    reloaded
+        .validate("snapshot", "policy", "policy", "discussion")
+        .unwrap();
+    reloaded.finish("policy", "discussion").unwrap_err();
+}
+
+#[test]
 fn unread_source_cannot_be_bulk_judged_uncertain_or_completed_as_a_refusal() {
     let change = change(
         "source.rs",

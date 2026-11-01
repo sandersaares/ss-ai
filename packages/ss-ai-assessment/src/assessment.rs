@@ -7,7 +7,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 
-use crate::checkpoint::Checkpoints;
+use crate::checkpoint::{CheckIndex, Checkpoints};
 use crate::required_optional;
 use crate::source::{SourceContext, SourceEvidence};
 use crate::{Content, ContextRequest, Inventory, Side};
@@ -225,22 +225,23 @@ impl Assessment {
                 return Err(error::InvalidContextBinding::classified());
             }
         }
-        self.validate_checkpoints(policy_content, discussion)?;
+        let checks = self.check_index()?;
+        self.validate_checkpoints_indexed(policy_content, discussion, &checks)?;
         for (id, decision) in &self.decisions {
-            self.validate_judgment(id, decision)?;
+            self.validate_judgment_indexed(id, decision, Some(&checks))?;
             self.judgment_reads(id, policy_content, discussion)?;
-            self.cited_reads(decision, policy_content, discussion)?;
+            self.cited_reads_indexed(decision, policy_content, discussion, Some(&checks))?;
         }
         if let Some(cumulative) = &self.cumulative {
-            self.validate_judgment("cumulative", cumulative)?;
+            self.validate_judgment_indexed("cumulative", cumulative, Some(&checks))?;
             self.judgment_reads("cumulative", policy_content, discussion)?;
-            self.cited_reads(cumulative, policy_content, discussion)?;
+            self.cited_reads_indexed(cumulative, policy_content, discussion, Some(&checks))?;
         }
         for (reference, offset) in &self.reads {
-            self.validate_reference(reference)?;
+            self.validate_reference_indexed(reference, Some(&checks))?;
             if *offset
                 > self
-                    .content(reference, policy_content, discussion)?
+                    .content_indexed(reference, policy_content, discussion, &checks)?
                     .chars()
                     .count()
             {
@@ -545,8 +546,22 @@ impl Assessment {
         policy: &str,
         discussion: &str,
     ) -> Result<(), AssessmentError> {
+        self.cited_reads_indexed(judgment, policy, discussion, None)
+    }
+
+    fn cited_reads_indexed(
+        &self,
+        judgment: &Judgment,
+        policy: &str,
+        discussion: &str,
+        checks: Option<&CheckIndex>,
+    ) -> Result<(), AssessmentError> {
         for reference in &judgment.evidence {
-            self.require_read(reference, &self.content(reference, policy, discussion)?)?;
+            let content = match checks {
+                Some(checks) => self.content_indexed(reference, policy, discussion, checks)?,
+                None => self.content(reference, policy, discussion)?,
+            };
+            self.require_read(reference, &content)?;
         }
         Ok(())
     }
@@ -636,6 +651,15 @@ impl Assessment {
     }
 
     fn validate_judgment(&self, id: &str, judgment: &Judgment) -> Result<(), AssessmentError> {
+        self.validate_judgment_indexed(id, judgment, None)
+    }
+
+    fn validate_judgment_indexed(
+        &self,
+        id: &str,
+        judgment: &Judgment,
+        checks: Option<&CheckIndex>,
+    ) -> Result<(), AssessmentError> {
         if judgment.rationale.trim().is_empty() || judgment.evidence.is_empty() {
             return Err(error::MissingJudgmentEvidence::classified());
         }
@@ -651,7 +675,7 @@ impl Assessment {
         }
         let mut references = HashSet::new();
         for reference in &judgment.evidence {
-            self.validate_reference(reference)?;
+            self.validate_reference_indexed(reference, checks)?;
             if !references.insert(reference) {
                 return Err(error::RepeatedJudgmentEvidence::classified());
             }
@@ -725,6 +749,20 @@ impl Assessment {
     }
 
     fn validate_reference(&self, reference: &str) -> Result<(), AssessmentError> {
+        self.validate_reference_indexed(reference, None)
+    }
+
+    fn validate_reference_indexed(
+        &self,
+        reference: &str,
+        checks: Option<&CheckIndex>,
+    ) -> Result<(), AssessmentError> {
+        if let (Some(id), Some(checks)) = (reference.strip_prefix("check:"), checks) {
+            return checks
+                .get(id)
+                .map(|_| ())
+                .ok_or_else(error::UnknownCheck::classified);
+        }
         if matches!(reference, "policy" | "discussion") {
             return Ok(());
         }
@@ -812,6 +850,21 @@ impl Assessment {
             Some(Content::Text { text }) => Ok(Cow::Borrowed(text)),
             _ => Err(error::UnreadableEvidence::classified()),
         }
+    }
+
+    /// Reuse check records during validation instead of rebuilding them per reference.
+    pub(crate) fn content_indexed<'a>(
+        &'a self,
+        reference: &str,
+        policy: &'a str,
+        discussion: &'a str,
+        checks: &CheckIndex,
+    ) -> Result<Cow<'a, str>, AssessmentError> {
+        if let Some(id) = reference.strip_prefix("check:") {
+            let check = checks.get(id).ok_or_else(error::UnknownCheck::classified)?;
+            return Ok(Cow::Owned(serde_json::to_string(check)?));
+        }
+        self.content(reference, policy, discussion)
     }
 }
 

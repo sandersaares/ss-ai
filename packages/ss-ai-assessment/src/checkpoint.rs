@@ -45,6 +45,9 @@ pub(crate) struct Check {
     pub(crate) evidence: Vec<String>,
 }
 
+/// A validation pass reuses the same immutable check records for every dependency.
+pub(crate) type CheckIndex = BTreeMap<String, Check>;
+
 /// Immutable work bounds planned handoffs independently of replacement and stale recovery.
 #[derive(Debug, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -288,7 +291,20 @@ impl Assessment {
         policy: &str,
         discussion: &str,
     ) -> Result<BTreeMap<String, String>, AssessmentError> {
-        let mut dependencies = self.dependencies(&judgment.evidence, policy, discussion)?;
+        let checks = self.check_index()?;
+        self.aggregate_dependencies_indexed(id, judgment, policy, discussion, &checks)
+    }
+
+    fn aggregate_dependencies_indexed(
+        &self,
+        id: &str,
+        judgment: &Judgment,
+        policy: &str,
+        discussion: &str,
+        checks: &CheckIndex,
+    ) -> Result<BTreeMap<String, String>, AssessmentError> {
+        let mut dependencies =
+            self.dependencies_indexed(&judgment.evidence, policy, discussion, checks)?;
         if id == "cumulative" {
             for change in &self.inventory.changes {
                 self.bind_read(
@@ -299,12 +315,13 @@ impl Assessment {
                 )?;
             }
             self.bind_read("discussion-note", &mut dependencies, policy, discussion)?;
-            for check in self.check_records()? {
-                self.bind_read(
+            for check in checks.values() {
+                self.bind_read_indexed(
                     &format!("check:{}", check.id),
                     &mut dependencies,
                     policy,
                     discussion,
+                    checks,
                 )?;
                 self.bind_read(
                     &format!("resolution:{}", check.id),
@@ -337,6 +354,15 @@ impl Assessment {
         policy: &str,
         discussion: &str,
     ) -> Result<(), AssessmentError> {
+        self.validate_checkpoints_indexed(policy, discussion, &self.check_index()?)
+    }
+
+    pub(crate) fn validate_checkpoints_indexed(
+        &self,
+        policy: &str,
+        discussion: &str,
+        checks: &CheckIndex,
+    ) -> Result<(), AssessmentError> {
         let sources = self
             .source_evidence
             .iter()
@@ -367,7 +393,7 @@ impl Assessment {
             if bound.dependencies != self.note_dependencies(id, &bound.value, policy, discussion)? {
                 return Err(error::InvalidCheckpointNote::classified());
             }
-            self.validate_dependencies(&bound.dependencies, policy, discussion)?;
+            self.validate_dependencies(&bound.dependencies, policy, discussion, checks)?;
         }
         if let Some(bound) = &self.checkpoints.discussion {
             if bound.dependencies
@@ -375,7 +401,7 @@ impl Assessment {
             {
                 return Err(error::InvalidCheckpointNote::classified());
             }
-            self.validate_dependencies(&bound.dependencies, policy, discussion)?;
+            self.validate_dependencies(&bound.dependencies, policy, discussion, checks)?;
         }
         if self.checkpoints.aggregates.len()
             != self
@@ -392,16 +418,14 @@ impl Assessment {
                 self.decisions.get(id)
             }
             .ok_or_else(error::StaleAggregate::classified)?;
-            if *dependencies != self.aggregate_dependencies(id, judgment, policy, discussion)? {
+            if *dependencies
+                != self.aggregate_dependencies_indexed(id, judgment, policy, discussion, checks)?
+            {
                 return Err(error::StaleAggregate::classified());
             }
         }
-        let checks = self.check_records()?;
         for (id, bound) in &self.checkpoints.resolutions {
-            let check = checks
-                .iter()
-                .find(|check| check.id == *id)
-                .ok_or_else(error::UnknownCheck::classified)?;
+            let check = checks.get(id).ok_or_else(error::UnknownCheck::classified)?;
             if bound.value.rationale.trim().is_empty()
                 || !bound.value.concerns.is_empty()
                 || !bound.value.interactions.is_empty()
@@ -418,13 +442,20 @@ impl Assessment {
             {
                 return Err(error::InvalidCheckpointNote::classified());
             }
-            let mut expected = self.dependencies(&bound.value.evidence, policy, discussion)?;
-            self.bind_read(&format!("check:{id}"), &mut expected, policy, discussion)?;
+            let mut expected =
+                self.dependencies_indexed(&bound.value.evidence, policy, discussion, checks)?;
+            self.bind_read_indexed(
+                &format!("check:{id}"),
+                &mut expected,
+                policy,
+                discussion,
+                checks,
+            )?;
             self.bind_read(&check.origin, &mut expected, policy, discussion)?;
             if expected != bound.dependencies {
                 return Err(error::StaleAggregate::classified());
             }
-            self.validate_dependencies(&bound.dependencies, policy, discussion)?;
+            self.validate_dependencies(&bound.dependencies, policy, discussion, checks)?;
         }
         Ok(())
     }
@@ -616,14 +647,32 @@ impl Assessment {
         Ok(dependencies)
     }
 
+    fn dependencies_indexed(
+        &self,
+        references: &[String],
+        policy: &str,
+        discussion: &str,
+        checks: &CheckIndex,
+    ) -> Result<BTreeMap<String, String>, AssessmentError> {
+        let mut dependencies = BTreeMap::new();
+        for reference in references {
+            if dependencies.contains_key(reference) {
+                return Err(error::RepeatedJudgmentEvidence::classified());
+            }
+            self.bind_read_indexed(reference, &mut dependencies, policy, discussion, checks)?;
+        }
+        Ok(dependencies)
+    }
+
     fn validate_dependencies(
         &self,
         dependencies: &BTreeMap<String, String>,
         policy: &str,
         discussion: &str,
+        checks: &CheckIndex,
     ) -> Result<(), AssessmentError> {
         for (reference, digest) in dependencies {
-            let content = self.content(reference, policy, discussion)?;
+            let content = self.content_indexed(reference, policy, discussion, checks)?;
             self.require_read(reference, &content)?;
             if *digest != document_digest(&content) {
                 return Err(error::StaleAggregate::classified());
@@ -691,6 +740,28 @@ impl Assessment {
             )?;
         }
         Ok(checks)
+    }
+
+    pub(crate) fn check_index(&self) -> Result<CheckIndex, AssessmentError> {
+        let mut checks = BTreeMap::new();
+        for check in self.check_records()? {
+            checks.entry(check.id.clone()).or_insert(check);
+        }
+        Ok(checks)
+    }
+
+    fn bind_read_indexed(
+        &self,
+        reference: &str,
+        dependencies: &mut BTreeMap<String, String>,
+        policy: &str,
+        discussion: &str,
+        checks: &CheckIndex,
+    ) -> Result<(), AssessmentError> {
+        let content = self.content_indexed(reference, policy, discussion, checks)?;
+        self.require_read(reference, &content)?;
+        dependencies.insert(reference.to_owned(), document_digest(&content));
+        Ok(())
     }
 
     /// A new mandatory range makes prior observations of that change incomplete.

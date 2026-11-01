@@ -3642,6 +3642,200 @@ fn measured_read(
     (bytes, responses)
 }
 
+/// Recorded resolutions survive reload and constrain publication on both providers.
+#[test]
+fn concern_resolution_survives_reload_and_vetoes_favorable_aggregate() {
+    let _guard = PROCESS_TEST_LOCK
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner);
+    let sources = Sources::new();
+    for ado in [false, true] {
+        for disposition in ["significant", "uncertain"] {
+            let scope = TempDir::new().unwrap();
+            let provider = sources.provider(ado);
+            let (snapshot, prepared) = prepare(scope.path(), &provider, false);
+            let id = prepared["changes"][0]["id"].as_str().unwrap();
+            let patch = format!("{id}:patch");
+            for reference in ["policy", "discussion", patch.as_str()] {
+                read_evidence(scope.path(), &provider, &snapshot, reference, None, None);
+            }
+            work(
+                scope.path(),
+                &provider,
+                "judge",
+                &snapshot,
+                &[
+                    "--change-id".into(),
+                    id.into(),
+                    "--disposition".into(),
+                    "insignificant".into(),
+                    "--rationale".into(),
+                    "The source change is editorial.".into(),
+                    "--evidence".into(),
+                    patch.clone(),
+                    "--concern".into(),
+                    "Examine the recorded concern.".into(),
+                ],
+            )
+            .unwrap();
+            let checkpoint = work(scope.path(), &provider, "checkpoint", &snapshot, &[]).unwrap();
+            assert!(checkpoint["checkpointCount"].as_u64().unwrap() > 0);
+            work(scope.path(), &provider, "checkpoint", &snapshot, &[]).unwrap_err();
+            fixture_checkpoint_inputs(scope.path(), &provider, &snapshot, "cumulative").unwrap();
+            let checks = work(scope.path(), &provider, "checks", &snapshot, &[]).unwrap();
+            let items = checks["items"].as_array().unwrap();
+            assert_eq!(items.len(), 1);
+            let check = &items[0];
+            let check_id = check["id"].as_str().unwrap();
+            let check_ref = check["reference"].as_str().unwrap();
+            let resolution_ref = check["resolutionReference"].as_str().unwrap();
+            assert_eq!(check["origin"], format!("judgment:{id}"));
+            read_evidence(scope.path(), &provider, &snapshot, check_ref, None, None);
+            let resolve = |disposition: &str| {
+                vec![
+                    "--check-id".into(),
+                    check_id.into(),
+                    "--disposition".into(),
+                    disposition.into(),
+                    "--rationale".into(),
+                    "Evidence supports this disposition.".into(),
+                    "--evidence".into(),
+                    patch.clone(),
+                ]
+            };
+            let first = work(
+                scope.path(),
+                &provider,
+                "resolve",
+                &snapshot,
+                &resolve("insignificant"),
+            )
+            .unwrap();
+            let digest = first["resolutionDigest"].as_str().unwrap();
+            read_evidence(
+                scope.path(),
+                &provider,
+                &snapshot,
+                resolution_ref,
+                None,
+                None,
+            );
+            let cumulative = [
+                "--change-id".into(),
+                "cumulative".into(),
+                "--disposition".into(),
+                "insignificant".into(),
+                "--rationale".into(),
+                "Combined source is editorial.".into(),
+                "--evidence".into(),
+                "policy".into(),
+                "--evidence".into(),
+                "discussion".into(),
+            ];
+            work(scope.path(), &provider, "judge", &snapshot, &cumulative).unwrap();
+            work(
+                scope.path(),
+                &provider,
+                "resolve",
+                &snapshot,
+                &resolve(disposition),
+            )
+            .unwrap_err();
+            let mut replacement = resolve(disposition);
+            replacement.extend(["--previous-digest".into(), digest.into()]);
+            work(scope.path(), &provider, "resolve", &snapshot, &replacement).unwrap();
+            let resumed = work(scope.path(), &provider, "assessment", &snapshot, &[]).unwrap();
+            assert!(resumed["cumulative"].is_null());
+            read_evidence(
+                scope.path(),
+                &provider,
+                &snapshot,
+                resolution_ref,
+                None,
+                None,
+            );
+            work(scope.path(), &provider, "judge", &snapshot, &cumulative).unwrap();
+            let complete = work(scope.path(), &provider, "complete", &snapshot, &[]).unwrap();
+            assert_eq!(
+                complete["status"],
+                if disposition == "significant" {
+                    "needsReview"
+                } else {
+                    "failed"
+                }
+            );
+            publish(scope.path(), &provider, &snapshot).unwrap_err();
+            assert_eq!(provider.writes.get(), 0);
+        }
+    }
+}
+
+/// A failed acquisition after favorable work remains a persisted execution failure.
+#[test]
+fn failed_context_after_favorable_judgments_cannot_authorize_effects() {
+    let _guard = PROCESS_TEST_LOCK
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner);
+    let sources = Sources::new();
+    for ado in [false, true] {
+        let scope = TempDir::new().unwrap();
+        let provider = sources.provider(ado);
+        let (snapshot, prepared) = prepare(scope.path(), &provider, false);
+        let id = prepared["changes"][0]["id"].as_str().unwrap();
+        for reference in ["policy".into(), "discussion".into(), format!("{id}:patch")] {
+            read_evidence(scope.path(), &provider, &snapshot, &reference, None, None);
+        }
+        for (change, evidence) in [
+            (id, format!("{id}:patch")),
+            ("cumulative", "discussion".into()),
+        ] {
+            work(
+                scope.path(),
+                &provider,
+                "judge",
+                &snapshot,
+                &[
+                    "--change-id".into(),
+                    change.into(),
+                    "--disposition".into(),
+                    "insignificant".into(),
+                    "--rationale".into(),
+                    "The examined evidence is editorial.".into(),
+                    "--evidence".into(),
+                    evidence,
+                    "--evidence".into(),
+                    "policy".into(),
+                ],
+            )
+            .unwrap();
+        }
+        work(
+            scope.path(),
+            &provider,
+            "source-context",
+            &snapshot,
+            &[
+                "--change-id".into(),
+                id.into(),
+                "--side".into(),
+                "new".into(),
+                "--start-line".into(),
+                "999".into(),
+                "--line-count".into(),
+                "1".into(),
+            ],
+        )
+        .unwrap_err();
+        work(scope.path(), &provider, "complete", &snapshot, &[]).unwrap_err();
+        notify(scope.path(), &provider, &snapshot).unwrap_err();
+        publish(scope.path(), &provider, &snapshot).unwrap_err();
+        let result = invoke(scope.path(), &provider, "results", &[]).unwrap();
+        assert!(!result["items"][0]["error"].is_null());
+        assert!(result["items"][0]["assessmentDigest"].is_null());
+        assert_eq!(provider.writes.get(), 0);
+    }
+}
+
 /// Requests are required work on both providers; acquisition failure is never notice authority.
 #[test]
 fn source_context_missing_delivery_and_failed_acquisition_cannot_authorize_effects() {

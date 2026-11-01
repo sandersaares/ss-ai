@@ -733,6 +733,87 @@ fn recorded_concerns_require_exact_dispositions_and_cannot_be_erased_by_favorabl
 }
 
 #[test]
+fn many_check_dependencies_remain_exact_and_reject_tampering() {
+    let mut assessment = fixture("discussion", "old", "new");
+    note_units(&mut assessment, "discussion");
+    let unit = units(&assessment).remove(0);
+    let mut observation = note(unit["reference"].as_str().unwrap());
+    // Multiple checks on one origin exercise repeated lookup and cross-check citations.
+    observation.concerns = (0..32).map(|index| format!("Concern {index}")).collect();
+    assessment
+        .note(
+            unit["unit"]["id"].as_str().unwrap(),
+            observation,
+            unit["noteDigest"].as_str(),
+            "policy",
+            "discussion",
+        )
+        .unwrap();
+    read(
+        &mut assessment,
+        unit["noteReference"].as_str().unwrap(),
+        "discussion",
+    );
+    let checks = assessment.checks(0, 100).unwrap()["items"]
+        .as_array()
+        .unwrap()
+        .clone();
+    assert_eq!(checks.len(), 32);
+    for check in &checks {
+        let content: Value = serde_json::from_str(&read(
+            &mut assessment,
+            check["reference"].as_str().unwrap(),
+            "discussion",
+        ))
+        .unwrap();
+        assert_eq!(content["id"], check["id"]);
+        assert_eq!(content["origin"], check["origin"]);
+    }
+    for check in &checks {
+        let mut resolution = judgment("cumulative", Disposition::Insignificant);
+        resolution
+            .evidence
+            .push(checks[0]["reference"].as_str().unwrap().into());
+        assessment
+            .resolve(
+                check["id"].as_str().unwrap(),
+                resolution,
+                None,
+                "policy",
+                "discussion",
+            )
+            .unwrap();
+        read(
+            &mut assessment,
+            check["resolutionReference"].as_str().unwrap(),
+            "discussion",
+        );
+    }
+    aggregate(&mut assessment, "discussion");
+    assessment
+        .validate("snapshot", "policy", "policy", "discussion")
+        .unwrap();
+    let saved = serde_json::to_value(&assessment).unwrap();
+    let mut corrupt = saved.clone();
+    let id = checks[1]["id"].as_str().unwrap();
+    let reference = checks[0]["reference"].as_str().unwrap();
+    corrupt["checkpoints"]["resolutions"][id]["dependencies"]
+        .as_object_mut()
+        .unwrap()
+        .remove(reference);
+    let corrupt: Assessment = serde_json::from_value(corrupt).unwrap();
+    corrupt
+        .validate("snapshot", "policy", "policy", "discussion")
+        .unwrap_err();
+    let mut corrupt = saved;
+    corrupt["reads"][reference] = json!(0);
+    let corrupt: Assessment = serde_json::from_value(corrupt).unwrap();
+    corrupt
+        .validate("snapshot", "policy", "policy", "discussion")
+        .unwrap_err();
+}
+
+#[test]
 fn empty_inventory_still_requires_discussion_notes_and_independent_cumulative_work() {
     let mut assessment = fixture("", "", "");
     assert_eq!(assessment.progress()["unitCount"], 1);
