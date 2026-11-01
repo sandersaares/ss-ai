@@ -275,7 +275,7 @@ impl Assessment {
             object.insert("contentDigest".into(), json!(content_digest));
             items.push(page);
         }
-        let mut response = json!({"items": items, "stateToken": staged.state_token()?, "readToken": staged.read_token()?, "progress": staged.progress()});
+        let mut response = json!({"items": items, "stateToken": staged.state_token()?, "readToken": staged.read_token()?, "progress": staged.progress_with_evidence(policy, discussion)?});
         if let Err(error) = check_response(&response) {
             // The batch envelope may require continuation even when the page
             // alone could include its binding.
@@ -302,7 +302,7 @@ impl Assessment {
                 discussion,
                 false,
             )?;
-            response = json!({"items": [page], "stateToken": retry.state_token()?, "readToken": retry.read_token()?, "progress": retry.progress()});
+            response = json!({"items": [page], "stateToken": retry.state_token()?, "readToken": retry.read_token()?, "progress": retry.progress_with_evidence(policy, discussion)?});
             check_response(&response)?;
             staged = retry;
         }
@@ -357,7 +357,7 @@ impl Assessment {
             let digest = staged.record(&item.id, item.judgment, None, policy, discussion)?;
             items.push(json!({"id": item.id, "digest": digest}));
         }
-        let response = json!({"items": items, "stateToken": staged.state_token()?, "progress": staged.progress()});
+        let response = json!({"items": items, "stateToken": staged.state_token()?, "progress": staged.progress_with_evidence(policy, discussion)?});
         check_response(&response)?;
         *self = staged;
         Ok(response)
@@ -372,13 +372,30 @@ impl Assessment {
 
     /// Reports delivery and semantic progress without loading evidence.
     ///
-    /// Direct assessments include `minimumUnitEvidencePages`, a theoretical lower
-    /// bound derived from source and discussion Unicode scalar counts. UTF-8,
-    /// JSON, and binding overhead can increase the actual number of pages. Policy,
-    /// requested context, and repeated delivery are not included. This is not a
-    /// latency or model-turn estimate.
+    /// Direct assessments expose the transport manifest as an estimate, not
+    /// required unit work. Use [`Self::progress_with_evidence`] for coverage.
     #[must_use]
     pub fn progress(&self) -> Value {
+        let unit_characters = self.checkpoints.units.iter().fold(0_usize, |sum, unit| {
+            sum.saturating_add(unit.total_characters)
+        });
+        if self.protocol == Protocol::DirectV1 {
+            return json!({
+                "changeCount": self.inventory.changes.len(),
+                "judgedChangeCount": self.decisions.len(),
+                "nextChangeOffset": self.inventory.changes.iter().position(|change| !self.decisions.contains_key(&change.id)),
+                "preflightEstimate": {
+                    "transportFragmentCount": self.checkpoints.units.len(),
+                    "transportFragmentCharacters": unit_characters,
+                    "minimumTransportEvidencePages": unit_characters.div_ceil(RESPONSE_BYTES)
+                },
+                "completedWorkCount": self.checkpoints.completed_work.len(),
+                "directHandoffCount": self.checkpoints.handoffs,
+                "directHandoffLimit": DIRECT_HANDOFF_LIMIT,
+                "cumulativeJudgmentRecorded": self.cumulative.is_some(),
+                "assessmentComplete": self.complete
+            });
+        }
         let delivered_units = self
             .checkpoints
             .units
@@ -394,10 +411,7 @@ impl Assessment {
                     .min(unit.total_characters),
             )
         });
-        let unit_characters = self.checkpoints.units.iter().fold(0_usize, |sum, unit| {
-            sum.saturating_add(unit.total_characters)
-        });
-        let mut result = json!({
+        json!({
             "changeCount": self.inventory.changes.len(),
             "judgedChangeCount": self.decisions.len(),
             "nextChangeOffset": self.inventory.changes.iter().position(|change| !self.decisions.contains_key(&change.id)),
@@ -406,32 +420,87 @@ impl Assessment {
             "deliveredUnitCharacters": delivered_unit_characters,
             "unitCharacters": unit_characters,
             "completedUnitCount": self.checkpoints.notes.len(),
-            "nextUnitOffset": self.checkpoints.units.iter().position(|unit| if self.protocol == Protocol::Legacy {
-                !self.checkpoints.notes.contains_key(&unit.id)
-            } else { !self.unit_delivered(unit) }),
-            "nextUnitId": self.checkpoints.units.iter().find(|unit| if self.protocol == Protocol::Legacy {
-                !self.checkpoints.notes.contains_key(&unit.id)
-            } else { !self.unit_delivered(unit) }).map(|unit| &unit.id),
+            "nextUnitOffset": self.checkpoints.units.iter().position(|unit| !self.checkpoints.notes.contains_key(&unit.id)),
+            "nextUnitId": self.checkpoints.units.iter().find(|unit| !self.checkpoints.notes.contains_key(&unit.id)).map(|unit| &unit.id),
             "nextUndeliveredUnitId": self.checkpoints.units.iter().find(|unit| !self.unit_delivered(unit)).map(|unit| &unit.id),
             "completedWorkCount": self.checkpoints.completed_work.len(),
             "checkpointCount": self.checkpoints.handoffs,
-            "handoffLimit": if self.protocol == Protocol::Legacy {
-                self.checkpoints.units.len().saturating_add(self.inventory.changes.len())
-            } else { DIRECT_HANDOFF_LIMIT },
-            "directHandoffCount": (self.protocol == Protocol::DirectV1).then_some(self.checkpoints.handoffs),
-            "directHandoffLimit": (self.protocol == Protocol::DirectV1).then_some(DIRECT_HANDOFF_LIMIT),
+            "handoffLimit": self.checkpoints.units.len().saturating_add(self.inventory.changes.len()),
+            "directHandoffCount": null,
+            "directHandoffLimit": null,
             "cumulativeJudgmentRecorded": self.cumulative.is_some(),
             "assessmentComplete": self.complete
-        });
-        if self.protocol == Protocol::DirectV1
-            && let Some(object) = result.as_object_mut()
-        {
-            object.insert(
-                "minimumUnitEvidencePages".into(),
-                json!(unit_characters.div_ceil(RESPONSE_BYTES)),
-            );
+        })
+    }
+
+    /// Reports required evidence coverage using the captured policy and discussion.
+    pub fn progress_with_evidence(
+        &self,
+        policy: &str,
+        discussion: &str,
+    ) -> Result<Value, AssessmentError> {
+        let mut result = self.progress();
+        if self.protocol == Protocol::Legacy {
+            return Ok(result);
         }
-        result
+        // The validated manifest partitions each original document exactly once;
+        // use its lengths and binding receipts instead of rebuilding every patch.
+        let mut manifest = BTreeMap::<&str, (usize, bool)>::new();
+        for unit in &self.checkpoints.units {
+            let entry = manifest.entry(&unit.reference).or_insert((0, true));
+            entry.0 = entry
+                .0
+                .checked_add(unit.total_characters)
+                .ok_or_else(error::InvalidUnitManifest::classified)?;
+            entry.1 &= self.unit_delivered(unit);
+        }
+        let mut total = 0_usize;
+        let mut delivered = 0_usize;
+        let mut next = None;
+        let mut visit = |reference: &str, length: usize| {
+            total = total.saturating_add(1);
+            if self.reads.get(reference).copied() == Some(length)
+                || manifest
+                    .get(reference)
+                    .is_some_and(|(_, complete)| *complete)
+            {
+                delivered = delivered.saturating_add(1);
+            } else if next.is_none() {
+                next = Some(json!({
+                    "reference": reference,
+                    "offset": self.reads.get(reference).copied().unwrap_or(0)
+                }));
+            }
+        };
+        visit("policy", policy.chars().count());
+        visit("discussion", discussion.chars().count());
+        for change in &self.inventory.changes {
+            let reference = format!("{}:patch", change.id);
+            let (length, _) = manifest
+                .get(reference.as_str())
+                .ok_or_else(error::InvalidUnitManifest::classified)?;
+            visit(&reference, *length);
+        }
+        for (reference, context) in &self.contexts {
+            visit(reference, context.character_count()?);
+        }
+        let checks = self.check_records()?;
+        let unresolved = checks
+            .iter()
+            .filter(|check| !self.checkpoints.resolutions.contains_key(&check.id))
+            .count();
+        let object = result
+            .as_object_mut()
+            .ok_or_else(error::InvalidAssessmentBinding::classified)?;
+        object.insert("requiredDocumentCount".into(), json!(total));
+        object.insert("deliveredRequiredDocumentCount".into(), json!(delivered));
+        object.insert("nextRequiredRead".into(), json!(next));
+        object.insert(
+            "discussionObservationRecorded".into(),
+            json!(self.checkpoints.discussion.is_some()),
+        );
+        object.insert("unresolvedCheckCount".into(), json!(unresolved));
+        Ok(result)
     }
 
     /// Semantic refusal includes completed uncertainty, but not unfinished or failed preparation.
@@ -616,7 +685,7 @@ impl Assessment {
             "discussionDigest": self.discussion_digest,
             "sourceEvidenceDigest": self.source_evidence_digest,
             "unitManifestDigest": self.checkpoints.manifest_digest,
-            "progress": self.progress(),
+            "progress": self.progress_with_evidence(policy, discussion)?,
             "discussionNoteReference": "discussion-note",
             "discussionNoteDigest": self.checkpoints.discussion.as_ref().map(hash).transpose()?,
             "requestedContextCount": self.contexts.len(),

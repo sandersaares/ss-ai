@@ -154,12 +154,14 @@ Use a new run path for a fresh scan. A discovery candidate still requires
 approval assessment and freshness checks; discovery is not authorization to
 publish.
 
-For an assessment, `assessmentProgress` separates judged changed paths from
-evidence-unit delivery and completed unit notes. `deliveredUnitCount` and
-`deliveredUnitCharacters` count contiguous prefixes read through unit references,
-without counting rereads or reads through original document references.
-`unitCount` and `unitCharacters` describe the unit manifest. These counts do not
+For a direct assessment, `assessmentProgress` reports judged changed paths
+and completed required documents and requested context ranges. A required
+document is delivered when a complete document read or its complete bound
+units satisfy the assessment's coverage rules. `nextRequiredRead` identifies a
+valid whole-document continuation when work remains. Transport fragment counts
+describe the manifest, not outstanding semantic work. These counts do not
 measure comprehension, model requests, command calls, or elapsed time.
+Legacy assessments retain their unit-delivery and note progress.
 
 New runs expose an `assessmentBudget` per inspected candidate. It records
 native work commands and the latest observed clock time, not model requests
@@ -323,10 +325,10 @@ for policy/discussion and `content` on each source side; text content exposes
 `progress`. Progress contains `reference`, `totalCharacters`, nullable
 `readOffset`, and `complete`. A null offset means no read, including for empty
 text. `pendingChangeCount` and nullable `nextChangeOffset` identify missing
-judgments. Results expose nullable `assessmentProgress` with `changeCount`,
-`judgedChangeCount`, `nextChangeOffset`, `unitCount`, `completedUnitCount`,
-`nextUnitId`, `nextUnitOffset`, `completedWorkCount`, `checkpointCount`, and `handoffLimit`
-without source or per-change rationales.
+judgments. Results expose nullable `assessmentProgress` without source or
+per-change rationales. Direct progress includes required-document delivery,
+judged paths, discussion observation, unresolved checks, and cumulative
+completion; legacy progress includes unit-note and checkpoint work.
 
 New assessments use `assessmentProtocol: directV1` and expose `readToken` and
 `stateToken`. `read-batch --batch-json` accepts a JSON object with `readToken` and distinct

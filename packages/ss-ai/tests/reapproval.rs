@@ -2772,6 +2772,43 @@ fn stale_refresh_retains_time_work_and_worker_budgets() {
 }
 
 #[test]
+fn completed_direct_results_report_required_coverage_without_legacy_work() {
+    let _guard = PROCESS_TEST_LOCK
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner);
+    let repository = Sources::new();
+    let scope = TempDir::new().unwrap();
+    let root = scope.path().join("direct-progress");
+    let provider = repository.provider(false);
+    let (snapshot, prepared) = prepare(&root, &provider, true);
+    assess(&root, &provider, &snapshot, &prepared);
+    let result = invoke(&root, &provider, "results", &[]).unwrap();
+    let progress = &result["items"][0]["assessmentProgress"];
+    assert_eq!(progress["assessmentComplete"], true);
+    assert_eq!(
+        progress["deliveredRequiredDocumentCount"],
+        progress["requiredDocumentCount"]
+    );
+    assert_eq!(progress["judgedChangeCount"], progress["changeCount"]);
+    assert_eq!(progress["nextRequiredRead"], Value::Null);
+    assert_eq!(progress["nextChangeOffset"], Value::Null);
+    assert_eq!(progress["unresolvedCheckCount"], 0);
+    assert_eq!(progress["cumulativeJudgmentRecorded"], true);
+    for field in [
+        "unitCount",
+        "deliveredUnitCount",
+        "completedUnitCount",
+        "nextUnitId",
+        "nextUnitOffset",
+        "nextUndeliveredUnitId",
+        "minimumUnitEvidencePages",
+    ] {
+        assert!(progress.get(field).is_none(), "{field}");
+    }
+    assert_eq!(provider.writes.get(), 0);
+}
+
+#[test]
 fn batch_commands_record_delivery_and_reject_partial_transactions() {
     let _guard = PROCESS_TEST_LOCK
         .lock()

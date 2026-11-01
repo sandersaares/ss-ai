@@ -122,6 +122,109 @@ fn summary_exposes_the_current_state_token_within_the_response_budget() {
 }
 
 #[test]
+fn direct_progress_tracks_required_documents_and_context_continuations() {
+    let mut assessment = fixture("discussion", 1);
+    let id = assessment.inventory.changes[0].id.clone();
+    let initial = assessment
+        .progress_with_evidence("policy", "discussion")
+        .unwrap();
+    assert_eq!(initial["requiredDocumentCount"], 3);
+    assert_eq!(initial["deliveredRequiredDocumentCount"], 0);
+    assert_eq!(
+        initial["nextRequiredRead"],
+        json!({"reference":"policy", "offset":0})
+    );
+    assessment
+        .read("policy", 0, 1, "policy", "discussion")
+        .unwrap();
+    let partial = assessment
+        .progress_with_evidence("policy", "discussion")
+        .unwrap();
+    assert_eq!(partial["deliveredRequiredDocumentCount"], 0);
+    assert_eq!(
+        partial["nextRequiredRead"],
+        json!({"reference":"policy", "offset":1})
+    );
+    read(&mut assessment, "policy", "policy", "discussion");
+    read(&mut assessment, "discussion", "policy", "discussion");
+    read(
+        &mut assessment,
+        &format!("{id}:patch"),
+        "policy",
+        "discussion",
+    );
+    let context = assessment
+        .source_context(
+            ContextRequest {
+                change_id: id,
+                side: SourceSide::New,
+                start_line: NonZeroUsize::new(1).unwrap(),
+                line_count: NonZeroUsize::new(1).unwrap(),
+            },
+            1,
+            "policy",
+            "discussion",
+        )
+        .unwrap();
+    let reference = context["reference"].as_str().unwrap();
+    let partial = assessment
+        .progress_with_evidence("policy", "discussion")
+        .unwrap();
+    assert_eq!(partial["requiredDocumentCount"], 4);
+    assert_eq!(partial["deliveredRequiredDocumentCount"], 3);
+    assert_eq!(
+        partial["nextRequiredRead"],
+        json!({"reference":reference, "offset":1})
+    );
+    read(&mut assessment, reference, "policy", "discussion");
+    let delivered = assessment
+        .progress_with_evidence("policy", "discussion")
+        .unwrap();
+    assert_eq!(delivered["deliveredRequiredDocumentCount"], 4);
+    assert_eq!(delivered["nextRequiredRead"], Value::Null);
+}
+
+#[test]
+fn many_small_pages_keep_required_document_progress_exact() {
+    let discussion = "😀x\n".repeat(12_000);
+    let mut assessment = fixture(&discussion, 25);
+    read(&mut assessment, "policy", "policy", &discussion);
+    let token = assessment.read_token().unwrap();
+    let mut offset = 0;
+    loop {
+        let response = assessment
+            .read_batch(
+                BatchReadRequest {
+                    read_token: token.clone(),
+                    items: vec![BatchReadItem {
+                        reference: "discussion".into(),
+                        offset,
+                        limit: 1_000,
+                        content_digest: None,
+                    }],
+                },
+                "policy",
+                &discussion,
+            )
+            .unwrap();
+        let progress = &response["progress"];
+        assert_eq!(progress["requiredDocumentCount"], 27);
+        if response["items"][0]["complete"] == true {
+            assert_eq!(progress["deliveredRequiredDocumentCount"], 2);
+            break;
+        }
+        assert_eq!(progress["deliveredRequiredDocumentCount"], 1);
+        let next = usize::try_from(response["items"][0]["nextOffset"].as_u64().unwrap()).unwrap();
+        assert!(next > offset);
+        assert_eq!(
+            progress["nextRequiredRead"],
+            json!({"reference":"discussion", "offset":next})
+        );
+        offset = next;
+    }
+}
+
+#[test]
 fn read_token_allows_independent_batches_and_rejects_stale_contexts() {
     let mut assessment = fixture("discussion", 1);
     let id = assessment.inventory.changes[0].id.clone();
@@ -271,12 +374,18 @@ fn minimum_page_bound_uses_unit_characters_and_is_direct_only() {
     let discussion = "😀".repeat(17_000);
     let assessment = fixture(&discussion, 0);
     let progress = assessment.progress();
-    assert_eq!(progress["unitCharacters"], 17_000);
-    assert_eq!(progress["minimumUnitEvidencePages"], 2);
+    assert_eq!(
+        progress["preflightEstimate"]["transportFragmentCharacters"],
+        17_000
+    );
+    assert_eq!(
+        progress["preflightEstimate"]["minimumTransportEvidencePages"],
+        2
+    );
     let mut legacy = serde_json::to_value(assessment).unwrap();
     legacy.as_object_mut().unwrap().remove("protocol");
     let legacy: Assessment = serde_json::from_value(legacy).unwrap();
-    assert!(legacy.progress().get("minimumUnitEvidencePages").is_none());
+    assert!(legacy.progress().get("preflightEstimate").is_none());
 }
 
 fn read_item(reference: &str, limit: usize) -> BatchReadItem {
@@ -426,7 +535,10 @@ fn empty_documents_deliver_bindings_inline() {
     let page = assessment.read(reference, 0, 1, "", "").unwrap();
     assert_eq!(page["unit"]["bindingReference"], binding);
     assert!(page["unit"]["bindings"].is_array());
-    assert_eq!(assessment.progress()["deliveredUnitCount"], 1);
+    assert_eq!(
+        assessment.progress_with_evidence("", "").unwrap()["deliveredRequiredDocumentCount"],
+        2
+    );
     let binding_page = assessment.read(binding, 0, usize::MAX, "", "").unwrap();
     let binding_content: Value =
         serde_json::from_str(binding_page["text"].as_str().unwrap()).unwrap();
@@ -526,11 +638,21 @@ fn unit_pages_inline_bindings_with_unicode_and_contiguous_offsets() {
         if page["complete"] == true {
             break;
         }
-        assert_eq!(assessment.progress()["deliveredUnitCount"], 0);
+        assert_eq!(
+            assessment
+                .progress_with_evidence("policy", &discussion)
+                .unwrap()["deliveredRequiredDocumentCount"],
+            0
+        );
         assert_eq!(page["nextOffset"], offset);
     }
     assert_eq!(content, discussion);
-    assert_eq!(assessment.progress()["deliveredUnitCount"], 1);
+    assert_eq!(
+        assessment
+            .progress_with_evidence("policy", &discussion)
+            .unwrap()["deliveredRequiredDocumentCount"],
+        1
+    );
 }
 
 #[test]
@@ -552,7 +674,10 @@ fn oversized_binding_uses_continuation_without_false_receipts() {
     assert_eq!(page["text"], "x");
     assert!(page["unit"].get("bindings").is_none());
     assert_eq!(page["unit"]["bindingReference"], binding);
-    assert_eq!(assessment.progress()["deliveredUnitCount"], 0);
+    assert_eq!(
+        assessment.progress_with_evidence("policy", "x").unwrap()["deliveredRequiredDocumentCount"],
+        0
+    );
     assert!(
         serde_json::to_value(&assessment).unwrap()["reads"]
             .get(binding)
@@ -560,7 +685,10 @@ fn oversized_binding_uses_continuation_without_false_receipts() {
     );
     let page = assessment.read(binding, 0, 1, "policy", "x").unwrap();
     assert_eq!(page["complete"], false);
-    assert_eq!(assessment.progress()["deliveredUnitCount"], 0);
+    assert_eq!(
+        assessment.progress_with_evidence("policy", "x").unwrap()["deliveredRequiredDocumentCount"],
+        0
+    );
     let mut offset = 1;
     loop {
         let page = assessment
@@ -574,7 +702,10 @@ fn oversized_binding_uses_continuation_without_false_receipts() {
         assert!(next > offset);
         offset = next;
     }
-    assert_eq!(assessment.progress()["deliveredUnitCount"], 1);
+    assert_eq!(
+        assessment.progress_with_evidence("policy", "x").unwrap()["deliveredRequiredDocumentCount"],
+        1
+    );
 }
 
 #[test]
@@ -603,7 +734,10 @@ fn batch_envelope_can_fall_back_to_binding_continuation() {
     assert!(response["items"][0]["unit"].get("bindings").is_none());
     assert_eq!(response["items"][0]["unit"]["bindingReference"], binding);
     assert!(serde_json::to_vec_pretty(&response).unwrap().len() < 16_384);
-    assert_eq!(assessment.progress()["deliveredUnitCount"], 0);
+    assert_eq!(
+        assessment.progress_with_evidence("policy", "x").unwrap()["deliveredRequiredDocumentCount"],
+        0
+    );
     assert!(
         serde_json::to_value(&assessment).unwrap()["reads"]
             .get(binding)
@@ -635,7 +769,12 @@ fn oversized_batch_does_not_commit_inline_binding_receipts() {
             .get(binding)
             .is_none()
     );
-    assert_eq!(assessment.progress()["deliveredUnitCount"], 0);
+    assert_eq!(
+        assessment
+            .progress_with_evidence(&policy, &discussion)
+            .unwrap()["deliveredRequiredDocumentCount"],
+        0
+    );
 }
 
 #[test]
@@ -963,6 +1102,27 @@ fn cumulative_binds_explicit_checks_and_resolutions() {
         .unwrap();
     assert!(!assessment.is_legacy());
     let summary = assessment.summary(0, 0, "policy", "discussion").unwrap();
+    let progress = &summary["progress"];
+    assert_eq!(progress["requiredDocumentCount"], 3);
+    assert_eq!(progress["deliveredRequiredDocumentCount"], 3);
+    assert_eq!(progress["nextRequiredRead"], Value::Null);
+    assert_eq!(progress["judgedChangeCount"], progress["changeCount"]);
+    assert_eq!(progress["nextChangeOffset"], Value::Null);
+    assert_eq!(progress["discussionObservationRecorded"], true);
+    assert_eq!(progress["unresolvedCheckCount"], 0);
+    assert_eq!(progress["cumulativeJudgmentRecorded"], true);
+    assert_eq!(progress["assessmentComplete"], true);
+    for field in [
+        "unitCount",
+        "deliveredUnitCount",
+        "completedUnitCount",
+        "nextUnitId",
+        "nextUnitOffset",
+        "nextUndeliveredUnitId",
+        "minimumUnitEvidencePages",
+    ] {
+        assert!(progress.get(field).is_none(), "{field}");
+    }
     let inputs = digest_inputs(&assessment, summary["contract"].as_str().unwrap());
     let expected = format!(
         "{:x}",

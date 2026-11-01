@@ -234,7 +234,7 @@ fn execute(arguments: &Arguments, state: &mut State) -> Result<Value, AppError> 
             json!({"status":assessment.status(true), "assessmentDigest":assessment.digest, "rationale":assessment.rationale()})
         }
         "results" => json!({"status":assessment.status(true), "assessmentDigest":assessment.digest,
-            "rationale":assessment.rationale(), "progress":assessment.progress(),
+            "rationale":assessment.rationale(), "progress":assessment.progress_with_evidence(policy, discussion)?,
             "responses":state.responses, "deliveredBytes":state.delivered_bytes, "deliveredCharacters":state.delivered_characters}),
         _ => return Err(fail("invalidInput", "Unknown synthetic operation")),
     };

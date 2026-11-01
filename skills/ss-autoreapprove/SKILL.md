@@ -145,9 +145,10 @@ PR, load source or discussion in the orchestrator, or dispatch a full review.
 Use one focused worker for the whole assessment when its actual context permits.
 Its assignment prohibits skill reinvocation and unrelated tools, but a host
 without tool allowlists cannot enforce that restriction. The native preflight
-reports changed paths, evidence units, their character count, and
-`minimumUnitEvidencePages`, a theoretical lower bound excluding policy, extra
-context, JSON overhead, and repeated delivery. Compare these with available
+reports changed paths and a `preflightEstimate` with transport fragments,
+their character count, and `minimumTransportEvidencePages`, a theoretical manifest-based lower bound
+excluding policy, extra context, JSON overhead, and repeated delivery.
+Fragments are not required semantic work. Compare these with available
 worker context and the remaining native budget. These counts are not
 model-token or model-request measurements.
 
@@ -286,14 +287,14 @@ is incomplete. Do not post follow-up discussion beyond native needs-review
 notices or file findings automatically.
 
 For each assessed PR, report the final `assessmentProgress` even when work is
-unfinished: changed paths judged versus total, explicitly delivered evidence
-units versus total, and planned handoffs. State whether
-the cumulative judgment and assessment are complete. Unit delivery and notes
-are not path judgments or evidence of comprehension. The delivered unit
-character count covers unique prefixes read through unit references; reads of
-whole documents and repeated delivery are not included. Do not estimate command
-counts, model requests, elapsed phase times, repeated bytes, or budget usage
-from these figures. Report those metrics as unavailable when not measured.
+unfinished: changed paths judged versus total, required documents and requested
+context ranges delivered versus total, unresolved checks, and planned handoffs.
+State whether the discussion observation, cumulative judgment, and assessment
+are complete. Transport fragments are not separate required judgments; legacy
+unit progress applies only to legacy assessments. Delivery does not prove
+comprehension. Do not estimate command counts, model requests, elapsed phase
+times, repeated bytes, or budget usage from these figures. Report those metrics
+as unavailable when not measured.
 
 When `assessmentBudget` is present, report its native work-command count,
 limit, last observed elapsed time, exhaustion diagnostic, and reserved publication

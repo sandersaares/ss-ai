@@ -142,6 +142,9 @@ Describe 'Automatic reapproval repository scope instructions' {
         $script:Prompt | Should -Match 'retained from `reviewNotice.createdAt`'
         $script:Prompt | Should -Match 'service `approvedAt` timestamp, even when issued in a previous invocation'
         $script:Prompt | Should -Match 'External approval valid'
+        $script:Prompt | Should -Match 'required documents and requested\s+context ranges delivered versus total'
+        $script:Prompt | Should -Match 'legacy\s+unit progress applies only to legacy assessments'
+        $script:Prompt | Should -Match 'Transport fragments are not separate required judgments'
     }
 
     It 'excludes draft PRs from work and reports' {

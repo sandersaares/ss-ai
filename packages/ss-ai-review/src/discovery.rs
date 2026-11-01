@@ -435,7 +435,7 @@ impl DiscoveryRecord {
         self.inventory.remove(index);
         finish_state(self);
         self.save(journal)?;
-        let mut summary = self.summary(0, NonZeroUsize::MIN);
+        let mut summary = self.summary(0, NonZeroUsize::MIN)?;
         *summary
             .get_mut("items")
             .ok_or_else(|| fail("invalidState", "Summary lacks items"))? = json!([]);
@@ -494,7 +494,7 @@ impl DiscoveryRecord {
     }
 
     /// Bounded summaries never expand older PRs into per-PR agent work.
-    fn summary(&self, after: u32, limit: NonZeroUsize) -> Value {
+    fn summary(&self, after: u32, limit: NonZeroUsize) -> Result<Value, AppError> {
         let included = self
             .inventory
             .iter()
@@ -510,7 +510,16 @@ impl DiscoveryRecord {
             .take(limit.get())
             .map(|entry| {
                 let decision = entry.decision();
-                json!({
+                let progress = entry
+                    .assessment
+                    .as_ref()
+                    .map(|assessment| {
+                        let (_, evidence) = entry.assessment_inputs()?;
+                        let discussion = discussion::render(evidence)?;
+                        Ok::<_, AppError>(assessment.progress_with_evidence(&self.policy.content, &discussion)?)
+                    })
+                    .transpose()?;
+                Ok::<_, AppError>(json!({
                     "pullRequestId": entry.pull_request_id, "url": entry.url,
                     "title": entry.title,
                     "status": entry.status(self.dry_run),
@@ -520,7 +529,7 @@ impl DiscoveryRecord {
                     "capturedAt": entry.inspection.as_ref().map(|inspection| &inspection.captured_at),
                     "snapshotDigest": entry.inspection.as_ref().and_then(|inspection| inspection.snapshot_digest.as_ref()),
                     "assessmentDigest": entry.assessment.as_ref().and_then(|assessment| assessment.digest.as_ref()),
-                    "assessmentProgress": entry.assessment.as_ref().map(Assessment::progress),
+                    "assessmentProgress": progress,
                     "assessmentBudget": entry.assessment_budget.as_ref().map(AssessmentBudget::diagnostics),
                     "publication": entry.publication,
                     "reviewNotice": entry.review_notice.as_ref().or(match decision {
@@ -534,9 +543,9 @@ impl DiscoveryRecord {
                         "exhausted": entry.recovery.error.is_some()
                     },
                     "error": entry.recovery.error.as_ref().or(entry.recovery.stale.as_ref()).or(entry.execution_error.as_ref()).or_else(|| entry.inspection.as_ref()?.error.as_ref()).or(entry.recency.error.as_ref())
-                })
+                }))
             })
-            .collect::<Vec<_>>();
+            .collect::<Result<Vec<_>, _>>()?;
         let next = if included.len() > limit.get() {
             included
                 .get(limit.get().saturating_sub(1))
@@ -544,7 +553,7 @@ impl DiscoveryRecord {
         } else {
             None
         };
-        json!({
+        Ok(json!({
             "schemaVersion": self.schema_version, "runId": self.run_id,
             "repositoryUrl": self.repository_url, "state": self.state,
             "enumerationComplete": self.enumeration_complete, "dryRun": self.dry_run,
@@ -566,7 +575,7 @@ impl DiscoveryRecord {
                 "indeterminate": self.inventory.iter().filter(|entry| entry.status(self.dry_run) == "indeterminate").count()
             },
             "items": page, "nextAfter": next, "error": self.error
-        })
+        }))
     }
 }
 
@@ -1034,7 +1043,7 @@ pub(crate) fn discover(
         finish_state(&mut run);
         run.save(&journal)?;
     }
-    Ok(run.summary(0, input.limit))
+    run.summary(0, input.limit)
 }
 
 /// Captures candidates, or refreshes clean stale attempts under the publication locks.
@@ -1275,7 +1284,7 @@ pub(crate) fn inspect(
             return Err(error);
         }
     }
-    Ok(run.summary(number.get().saturating_sub(1), NonZeroUsize::MIN))
+    run.summary(number.get().saturating_sub(1), NonZeroUsize::MIN)
 }
 
 /// Attempt identity separates recaptures even when evidence and timestamps match.
@@ -1302,7 +1311,7 @@ pub(crate) fn results(
     let journal = FileJournal::open(path, clock)?;
     let run = DiscoveryRecord::load(&journal)?
         .ok_or_else(|| fail("invalidState", "Discovery record is missing"))?;
-    Ok(run.summary(after, limit))
+    run.summary(after, limit)
 }
 
 /// Classification follows the complete inventory, not whether the current page is empty.
@@ -1672,7 +1681,7 @@ pub(crate) fn publish(
         }
     }
     run.save(&journal)?;
-    Ok(run.summary(input.number.get().saturating_sub(1), NonZeroUsize::MIN))
+    run.summary(input.number.get().saturating_sub(1), NonZeroUsize::MIN)
 }
 
 /// Publishes a completed nonqualifying judgment under the host-before-run lock order.
@@ -1857,7 +1866,7 @@ pub(crate) fn notify(
         }
     }
     run.save(&journal)?;
-    Ok(run.summary(input.number.get().saturating_sub(1), NonZeroUsize::MIN))
+    run.summary(input.number.get().saturating_sub(1), NonZeroUsize::MIN)
 }
 
 /// Reads and updates one immutable-snapshot assessment without provider writes.
@@ -1930,7 +1939,7 @@ pub(crate) fn work(
         }
         assessment_budget_step(&mut run, index, clock, &journal, BudgetPhase::FinishWork)?;
         run.save(&journal)?;
-        return Ok(run.summary(number.get().saturating_sub(1), NonZeroUsize::MIN));
+        return run.summary(number.get().saturating_sub(1), NonZeroUsize::MIN);
     }
     let entry = run
         .inventory
@@ -1959,7 +1968,7 @@ pub(crate) fn work(
                 assessment_budget_step(&mut run, index, clock, &journal, BudgetPhase::FinishWork)?;
                 finish_state(&mut run);
                 run.save(&journal)?;
-                return Ok(run.summary(number.get().saturating_sub(1), NonZeroUsize::MIN));
+                return run.summary(number.get().saturating_sub(1), NonZeroUsize::MIN);
             }
         }
     }
@@ -2019,7 +2028,10 @@ pub(crate) fn work(
             )?;
             json!({"snapshotDigest":snapshot, "recorded":id, "resolutionDigest":digest})
         }
-        WorkAction::Checkpoint => assessment.checkpoint()?,
+        WorkAction::Checkpoint => {
+            assessment.checkpoint()?;
+            assessment.progress_with_evidence(&run.policy.content, &discussion)?
+        }
         WorkAction::Read {
             reference,
             offset,

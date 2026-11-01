@@ -134,8 +134,9 @@ Repeating `prepare` preserves reads and judgments. A replacement worker follows
 the inventory and reacquires the evidence it needs; earlier receipts do not
 establish that worker's knowledge. Retain judgments unless deliberately
 replacing them with their current digests. Never edit the run JSON or recreate
-the assessment to resume it. `assessmentProgress` reports changed paths,
-delivered transport units, their characters, and semantic work separately.
+the assessment to resume it. Direct `assessmentProgress` reports required
+document and context delivery separately from changed-path judgments.
+Transport fragment counts describe the manifest, not unfinished unit work.
 
 ```powershell
 ss-ai autoreapprove units --state-path "{{RUN}}" --pull-request-id "{{PR}}" --snapshot-digest "{{SNAPSHOT}}" --after "{{AFTER}}" --limit "{{LIMIT}}" --reference "{{DOCUMENT}}"

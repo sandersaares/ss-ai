@@ -356,7 +356,8 @@ fn replay(count: usize, sizing: Sizing) -> Result<Replay, AppError> {
     let (mut assessment, patch_bytes, discussion) = initialize(count)?;
     let progress = assessment.progress();
     let units = progress
-        .get("unitCount")
+        .get("preflightEstimate")
+        .and_then(|estimate| estimate.get("transportFragmentCount"))
         .and_then(serde_json::Value::as_u64)
         .and_then(|value| usize::try_from(value).ok())
         .ok_or_else(|| fail("invalidResponse", "Missing unit count"))?;
