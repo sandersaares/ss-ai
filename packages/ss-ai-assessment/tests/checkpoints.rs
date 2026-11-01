@@ -603,6 +603,8 @@ fn binding_citations_never_replace_exact_unit_evidence_or_complete_reads() {
         vec!["policy".into(), binding.into()],
         vec![patch.into(), binding.into()],
         vec![reference.into(), "binding:unknown-unit".into()],
+        vec![reference.into(), "unknown:reference".into()],
+        vec![reference.into(), binding.into(), binding.into()],
     ] {
         let mut observation = note(reference);
         observation.evidence = evidence;
@@ -900,6 +902,46 @@ fn recorded_concerns_require_exact_dispositions_and_cannot_be_erased_by_favorabl
             "Historical objection.",
         )
         .unwrap();
+    let current_unit = units(&assessment)
+        .into_iter()
+        .find(|current| current["unit"]["id"] == unit["unit"]["id"])
+        .unwrap();
+    let discussion_digest = assessment
+        .summary(0, 1, "policy", "Historical objection.")
+        .unwrap()["discussionNoteDigest"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    // These semantic records exist and have complete receipts. Rejecting them
+    // with current replacement digests tests dependency direction, not delivery
+    // or stale-write checks, for both unit and discussion aggregate notes.
+    for semantic in [
+        "discussion-note".to_owned(),
+        format!("judgment:{id}"),
+        check["reference"].as_str().unwrap().to_owned(),
+        check["resolutionReference"].as_str().unwrap().to_owned(),
+    ] {
+        for (note_id, exact, previous) in [
+            (
+                unit["unit"]["id"].as_str().unwrap(),
+                reference,
+                current_unit["noteDigest"].as_str().unwrap(),
+            ),
+            ("discussion", "discussion", discussion_digest.as_str()),
+        ] {
+            let mut observation = note(exact);
+            observation.evidence.push(semantic.clone());
+            assessment
+                .note(
+                    note_id,
+                    observation,
+                    Some(previous),
+                    "policy",
+                    "Historical objection.",
+                )
+                .unwrap_err();
+        }
+    }
     assessment
         .finish("policy", "Historical objection.")
         .unwrap();

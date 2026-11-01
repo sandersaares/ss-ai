@@ -469,14 +469,15 @@ impl Assessment {
         discussion: &str,
     ) -> Result<BTreeMap<String, String>, AssessmentError> {
         validate_note(note)?;
+        // Only discussion aggregation consumes unit notes. Later judgments and
+        // checks cannot feed back into notes; the reader owns citation identity
+        // and delivery, without a second classification of source and metadata.
         if note.evidence.iter().any(|reference| {
-            reference != "policy"
-                && !self.raw_reference(reference)
-                // Bindings supplement exact source without becoming raw evidence.
-                // The dependency reader validates their identity and complete delivery;
-                // the unit or discussion requirements below still demand exact text.
-                && !reference.starts_with("binding:")
-                && !(id == "discussion" && reference.starts_with("note:"))
+            reference == "discussion-note"
+                || ["judgment:", "check:", "resolution:"]
+                    .iter()
+                    .any(|prefix| reference.starts_with(prefix))
+                || (id != "discussion" && reference.starts_with("note:"))
         }) {
             return Err(error::MissingExactEvidence::classified());
         }
