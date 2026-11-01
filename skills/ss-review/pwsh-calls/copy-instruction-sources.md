@@ -19,7 +19,9 @@ ss-ai workflow snapshot-instructions --session-state "{{SESSION_STATE}}" `
 
 The command emits one JSON object with `schemaVersion: 1`, `sourceDirectory`,
 `snapshotIdentity`, `externalFileCount`, and `roots`. Each root has its original absolute `path`,
-snapshot-relative `prefix`, and `fileCount`. Keep this mapping for reference
+snapshot-relative `prefix`, and `fileCount`. When repository instructions are
+selected, `repositoryRoot` provides the same mapping for their root and prefix.
+Keep these mappings for reference
 expansion and learning, and pass the exact `snapshotIdentity` to cache restore.
 `prefix/relative-path` resolves to `path/relative-path`
 in the original instruction tree. On failure, apply the error recovery policy;

@@ -7,8 +7,9 @@
 )]
 
 use std::fs;
+use std::io::Write;
 use std::path::PathBuf;
-use std::process::Command;
+use std::process::{Command, Stdio};
 use std::time::Duration;
 
 use jiff::Timestamp;
@@ -558,6 +559,205 @@ fn tracker_provenance_uses_exact_ids_and_preserves_capture_fallback() {
         assert!(
             render(&json!({"operation":"trackerItem","finding":finding,"context":context}))
                 .is_err()
+        );
+    }
+}
+
+#[test]
+fn captured_singleton_collections_render_like_arrays() {
+    let plain = finding("F1", "reviewer");
+    let mut follow = finding("F2", "reviewer");
+    follow["followUp"] = json!({"threadId":"42","commentId":"7"});
+    let comment = json!({"id":7,"url":"comment"});
+    let baseline_context = json!({"pullRequestUrl":"pr","threads":[
+        {"id":42,"comments":[comment]}
+    ]});
+    for singleton_thread in [false, true] {
+        for singleton_comment in [false, true] {
+            let comments = if singleton_comment {
+                comment.clone()
+            } else {
+                json!([comment])
+            };
+            let thread = json!({"id":42,"comments":comments});
+            let threads = if singleton_thread {
+                thread
+            } else {
+                json!([thread])
+            };
+            let context = json!({"pullRequestUrl":"pr","threads":threads});
+            for record in [&plain, &follow] {
+                let expected = render(&json!({"operation":"trackerItem","finding":record,
+                    "context":baseline_context}))
+                .unwrap();
+                let actual = render(&json!({"operation":"trackerItem","finding":record,
+                    "context":context}))
+                .unwrap();
+                assert_eq!(actual, expected);
+            }
+            for operation in ["document", "auditDocument"] {
+                let expected = render(&json!({"operation":operation,"destination":"tracker",
+                    "findings":[plain,follow],"context":baseline_context}))
+                .unwrap();
+                let actual = render(&json!({"operation":operation,"destination":"tracker",
+                    "findings":[plain,follow],"context":context}))
+                .unwrap();
+                assert_eq!(actual, expected);
+                assert!(
+                    actual
+                        .as_str()
+                        .unwrap()
+                        .contains("**Follows up on**: comment")
+                );
+            }
+        }
+    }
+
+    let directory = TestDirectory::new("singleton-collections");
+    let output = directory.0.join("findings");
+    let combined = directory.0.join("combined.md");
+    let audit = directory.0.join("audit.md");
+    let request = json!({
+        "findings":[plain,follow], "selectedFindingIds":[], "destination":"tracker",
+        "context":{"pullRequestUrl":"pr","threads":{"id":42,"comments":comment}},
+        "outputDirectory":output, "combinedPath":combined, "auditDocumentPath":audit
+    });
+    render_files_json(&serde_json::to_vec(&request).unwrap(), &TestClock).unwrap();
+    assert!(
+        !fs::read_to_string(output.join("F1.md"))
+            .unwrap()
+            .contains("**Follows up on**")
+    );
+    for path in [output.join("F2.md"), combined, audit] {
+        assert!(
+            fs::read_to_string(path)
+                .unwrap()
+                .contains("**Follows up on**: comment")
+        );
+    }
+}
+
+#[test]
+fn captured_singleton_collections_preserve_fallback_and_validation() {
+    let mut follow = finding("F1", "reviewer");
+    follow["followUp"] = json!({"threadId":"t","commentId":"c"});
+    for context in [
+        json!({"pullRequestUrl":"pr"}),
+        json!({"pullRequestUrl":"pr","threads":null}),
+        json!({"pullRequestUrl":"pr","threads":[]}),
+        json!({"pullRequestUrl":"pr","threads":{"id":"t"}}),
+        json!({"pullRequestUrl":"pr","threads":{"id":"t","comments":null}}),
+        json!({"pullRequestUrl":"pr","threads":{"id":"t","comments":[]}}),
+        json!({"pullRequestUrl":"pr","threads":{"id":"other","comments":{"id":"c","url":"wrong"}}}),
+        json!({"pullRequestUrl":"pr","threads":{"id":"t","comments":{"id":"other","url":"wrong"}}}),
+        json!({"pullRequestUrl":"pr","threads":{"id":"t","comments":{"id":"c","url":""}}}),
+    ] {
+        let item =
+            render(&json!({"operation":"trackerItem","finding":follow,"context":context})).unwrap();
+        let body = item["body"].as_str().unwrap();
+        assert!(body.contains("**Follows up on**: pr"), "{context}");
+        assert!(body.ends_with("**Reviewed in**: pr"));
+    }
+
+    let plain = finding("F2", "reviewer");
+    for context in [
+        json!({"threads":true}),
+        json!({"threads":"invalid"}),
+        json!({"threads":12}),
+        json!({"threads":[null]}),
+        json!({"threads":{}}),
+        json!({"threads":{"id":"t","comments":true}}),
+        json!({"threads":{"id":"t","comments":"invalid"}}),
+        json!({"threads":{"id":"t","comments":12}}),
+        json!({"threads":{"id":"t","comments":[null]}}),
+        json!({"threads":{"id":"t","comments":{}}}),
+        json!({"threads":{"id":"t","comments":{"id":"c","url":42}}}),
+    ] {
+        for record in [&plain, &follow] {
+            assert!(
+                render(&json!({"operation":"document","destination":"tracker",
+                "findings":[record],"context":context}))
+                .is_err(),
+                "{context}"
+            );
+        }
+    }
+    for field in ["references", "impactedLocations"] {
+        let mut malformed = plain.clone();
+        malformed[field] = json!({"text":"not an array","path":"file"});
+        assert!(render(&json!({"operation":"trackerItem","finding":malformed})).is_err());
+    }
+    let directory = TestDirectory::new("invalid-singleton");
+    let output = directory.0.join("findings");
+    let request = json!({
+        "findings":[plain], "selectedFindingIds":[], "destination":"tracker",
+        "context":{"threads":{"id":"t","comments":{"id":"c","url":42}}},
+        "outputDirectory":output
+    });
+    assert!(render_files_json(&serde_json::to_vec(&request).unwrap(), &TestClock).is_err());
+    assert!(!output.exists());
+}
+
+#[test]
+#[cfg_attr(miri, ignore = "The PowerShell adapter runs in a separate process")]
+fn powershell_tracker_adapter_preserves_singleton_capture_for_native_documents() {
+    let package = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    let root = package.parent().unwrap().parent().unwrap();
+    let script = "
+#Requires -Version 7.6
+Set-StrictMode -Version Latest
+$ErrorActionPreference = 'Stop'
+$PSNativeCommandUseErrorActionPreference = $true
+. ./skills/ss-review/scripts/lib/JsonValue.ps1
+. ./skills/ss-review/scripts/lib/TrackerItem.ps1
+function Invoke-NativeReviewMarkdown {
+    param([Parameter(Mandatory)][System.Collections.IDictionary] $Request)
+    return $Request
+}
+$inputData = ConvertFrom-Json -InputObject ([Console]::In.ReadToEnd()) -AsHashtable
+$provenance = Get-TrackerItemProvenance -Finding $inputData.finding -Context $inputData.context
+if ($provenance.followUpUrl -cne 'comment') { throw 'PowerShell provenance did not find the comment.' }
+$requests = @(
+    ConvertTo-FindingDestinationDocument -Finding @($inputData.finding) -Destination tracker -Context $inputData.context
+    ConvertTo-FindingAuditDocument -Finding @($inputData.finding) -Destination tracker -Context $inputData.context
+)
+ConvertTo-Json -InputObject $requests -Depth 100 -Compress
+";
+    let mut follow = finding("F1", "reviewer");
+    follow["followUp"] = json!({"threadId":"42","commentId":"7"});
+    let input = json!({"finding":follow,"context":{"pullRequestUrl":"pr",
+        "threads":{"id":42,"comments":{"id":7,"url":"comment"}}}});
+    let mut process = Command::new("pwsh")
+        .args(["-NoProfile", "-NonInteractive", "-Command", script])
+        .current_dir(root)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    process
+        .stdin
+        .take()
+        .unwrap()
+        .write_all(&serde_json::to_vec(&input).unwrap())
+        .unwrap();
+    let output = process.wait_with_output().unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let requests: Vec<Value> = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(requests.len(), 2);
+    for request in requests {
+        assert!(request["context"]["threads"].is_object());
+        assert!(request["context"]["threads"]["comments"].is_object());
+        assert!(
+            render(&request)
+                .unwrap()
+                .as_str()
+                .unwrap()
+                .contains("**Follows up on**: comment")
         );
     }
 }

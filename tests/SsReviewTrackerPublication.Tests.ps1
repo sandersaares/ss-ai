@@ -1089,6 +1089,13 @@ Describe 'Tracker item set' {
         ([string] $items[0]['body']).Contains('Description of F-9', [StringComparison]::Ordinal) | Should -BeTrue
     }
 
+    It 'preserves a timestamp-shaped finding title for publication' {
+        $title = '2026-10-07T00:00:00Z'
+        $items = New-TrackerItemSet -Finding @(New-TestFinding -Id 'F-9' -Title $title)
+
+        $items[0]['title'] | Should -BeExactly $title
+    }
+
     Context 'follow-up resolution' {
         BeforeAll {
             $script:LinkedContext = New-TestContext -Thread @(

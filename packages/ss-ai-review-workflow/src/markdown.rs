@@ -590,12 +590,12 @@ fn provenance<'a>(
     };
     let thread_id = required_text(follow_up, "threadId")?;
     let comment_id = required_text(follow_up, "commentId")?;
-    for thread in array_or_empty(context, "threads")? {
+    for thread in captured_list_or_empty(context, "threads")? {
         object(thread, "thread")?;
         if required_identifier(thread, "id")? != thread_id {
             continue;
         }
-        for comment in array_or_empty(thread, "comments")? {
+        for comment in captured_list_or_empty(thread, "comments")? {
             object(comment, "comment")?;
             if required_identifier(comment, "id")? == comment_id {
                 let url = optional_text(comment, "url")?.unwrap_or("");
@@ -797,10 +797,10 @@ fn context(request: &Value) -> Result<Option<&Value>, String> {
         Some(context) => {
             object(context, "context")?;
             optional_text(context, "pullRequestUrl")?;
-            for thread in array_or_empty(context, "threads")? {
+            for thread in captured_list_or_empty(context, "threads")? {
                 object(thread, "thread")?;
                 required_identifier(thread, "id")?;
-                for comment in array_or_empty(thread, "comments")? {
+                for comment in captured_list_or_empty(thread, "comments")? {
                     object(comment, "comment")?;
                     required_identifier(comment, "id")?;
                     optional_text(comment, "url")?;
@@ -862,6 +862,14 @@ fn array_or_empty<'a>(value: &'a Value, field: &str) -> Result<&'a [Value], Stri
             .as_array()
             .map(Vec::as_slice)
             .ok_or_else(|| format!("{field} must be an array")),
+    }
+}
+
+/// Accepts the singleton-object form used by the canonical capture reader.
+fn captured_list_or_empty<'a>(value: &'a Value, field: &str) -> Result<&'a [Value], String> {
+    match value.get(field) {
+        Some(value @ Value::Object(_)) => Ok(std::slice::from_ref(value)),
+        _ => array_or_empty(value, field),
     }
 }
 

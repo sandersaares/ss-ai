@@ -122,7 +122,7 @@ if ($null -ne $overview) { $request.overview = $overview }
 
 $json = Invoke-NativeReviewWorkflowWithJson `
     -Arguments @('render-markdown-files') -PathOption 'request-path' -Value $request
-$result = ConvertFrom-Json -InputObject $json -AsHashtable -ErrorAction Stop
+$result = ConvertFrom-JsonVerbatim -Text $json
 $auditDocumentFullPath = $result['auditDocumentPath']
 $result['auditDocumentUri'] = if ($auditDocumentFullPath) {
     ([uri]::new($auditDocumentFullPath, [UriKind]::Absolute)).AbsoluteUri

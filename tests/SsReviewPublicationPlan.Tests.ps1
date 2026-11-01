@@ -945,6 +945,71 @@ Describe 'Publication record preflight' {
 }
 
 Describe 'Anchor resolution' {
+    It 'resolves multiple findings and bypasses follow-ups in their original order' {
+        $findings = @(
+            (New-TestFinding -Id 'F-1' -Path './src/app.ps1')
+            (New-TestFinding -Id 'F-2' -Path 'missing' -FollowUpThreadId 'T' -FollowUpCommentId 'C')
+            (New-TestFinding -Id 'F-3' -StartLine 90 -EndLine 90)
+            (New-TestFinding -Id 'F-4' -Path 'docs/readme.md' -Kind 'file')
+        )
+        $anchored = Resolve-PullRequestFindingAnchor -Finding $findings -Diff (New-TestDiff)
+
+        @($anchored | ForEach-Object { $_['findingId'] }) | Should -Be @('F-1', 'F-2', 'F-3', 'F-4')
+        $anchored[0]['anchor']['path'] | Should -BeExactly 'src/app.ps1'
+        $anchored[1]['anchor'] | Should -BeNullOrEmpty
+        $anchored[2]['anchor']['wasDowngraded'] | Should -BeTrue
+        $anchored[3]['anchor']['kind'] | Should -Be 'file'
+    }
+
+    It 'identifies the failing finding after an earlier resolved anchor' {
+        $findings = @(
+            (New-TestFinding -Id 'F-1')
+            (New-TestFinding -Id 'F-2' -Path 'SRC/app.ps1' -Kind 'file')
+        )
+        { Resolve-PullRequestFindingAnchor -Finding $findings -Diff (New-TestDiff) } |
+            Should -Throw -ExpectedMessage "*Finding 'F-2' cannot be anchored*does not change*"
+    }
+
+    It 'reports malformed unreferenced diff evidence against the first anchored finding' {
+        $diff = New-TestDiff
+        $diff['files'] = @($diff['files'][0], @{ path = 'malformed' })
+        $findings = @(
+            (New-TestFinding -Id 'F-0' -FollowUpThreadId 'T' -FollowUpCommentId 'C')
+            (New-TestFinding -Id 'F-1')
+        )
+        { Resolve-PullRequestFindingAnchor -Finding $findings -Diff $diff } |
+            Should -Throw -ExpectedMessage "*Finding 'F-1' cannot be anchored*"
+    }
+
+    It 'stops when the native batch response is incomplete' {
+        Mock Invoke-NativeReviewWorkflowWithJson { '{"results":[]}' }
+        { Resolve-PullRequestFindingAnchor -Finding @(New-TestFinding) -Diff (New-TestDiff) } |
+            Should -Throw -ExpectedMessage "*Finding 'F-1' cannot be anchored*Invalid native anchor resolution response*"
+        Should -Invoke Invoke-NativeReviewWorkflowWithJson -Times 1 -Exactly
+    }
+
+    It 'uses one native request for multiple findings and none for follow-ups' {
+        Mock Invoke-NativeReviewWorkflowWithJson {
+            '{"results":[{"anchor":{"kind":"file","path":"src/app.ps1","wasDowngraded":false}},{"anchor":{"kind":"file","path":"docs/readme.md","wasDowngraded":false}}]}'
+        }
+        $findings = @(
+            (New-TestFinding -Id 'F-1' -Kind 'file')
+            (New-TestFinding -Id 'F-2' -FollowUpThreadId 'T' -FollowUpCommentId 'C')
+            (New-TestFinding -Id 'F-3' -Kind 'file' -Path 'docs/readme.md')
+        )
+        $anchored = Resolve-PullRequestFindingAnchor -Finding $findings -Diff (New-TestDiff)
+        $anchored.Count | Should -Be 3
+        Should -Invoke Invoke-NativeReviewWorkflowWithJson -Times 1 -Exactly -ParameterFilter {
+            $Value['anchors'].Count -eq 2
+        }
+    }
+
+    It 'includes the first finding ID on native process failure' {
+        Mock Invoke-NativeReviewWorkflowWithJson { throw 'native process failed' }
+        { Resolve-PullRequestFindingAnchor -Finding @(New-TestFinding -Id 'F-1') -Diff (New-TestDiff) } |
+            Should -Throw -ExpectedMessage "*Finding 'F-1' cannot be anchored*native process failed*"
+    }
+
     It 'keeps a line anchor the reviewed diff changes' {
         $anchored = Resolve-PullRequestFindingAnchor -Finding @(New-TestFinding -StartLine 3 -EndLine 3) -Diff (New-TestDiff)
 

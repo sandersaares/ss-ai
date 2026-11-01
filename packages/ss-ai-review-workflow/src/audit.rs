@@ -8,7 +8,7 @@ use std::str::FromStr;
 
 use ohno::AppError;
 use serde_json::{Value, json};
-use ss_ai_review_context::read_capture;
+use ss_ai_review_context::{decode_file_text, read_capture};
 use ss_ai_runtime::{Clock, FileTransaction, caused_by, fail, read_bytes};
 
 use crate::findings::read_artifact;
@@ -40,6 +40,9 @@ pub fn add_decisions(
             return Err(error);
         }
     };
+    if plan.items().is_empty() {
+        return Err(invalid("Decision plan must not be empty"));
+    }
     let mut requests = Vec::new();
     for item in plan.items() {
         let PlanItem::Decision(decision) = item else {
@@ -175,8 +178,7 @@ pub fn add_feedback(
     reject_same_file(path, text_path)?;
     let bytes =
         read_bytes(text_path, clock)?.ok_or_else(|| invalid("Feedback text file is missing"))?;
-    let message = String::from_utf8(bytes)
-        .map_err(|error| caused_by("invalidInput", "Feedback text is not UTF-8", error))?;
+    let message = decode_file_text(&bytes);
     text(response_id, "responseId")?;
     if !response_id
         .bytes()

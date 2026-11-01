@@ -8,9 +8,10 @@
 use std::cell::Cell;
 use std::env;
 use std::fs;
-use std::io::{self, BufRead, BufReader, Write};
+use std::io::{self, BufRead, BufReader, Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Child, ChildStdin, ChildStdout, Command, Stdio};
+use std::sync::Mutex;
 use std::time::Duration;
 
 use jiff::Timestamp;
@@ -21,6 +22,9 @@ use ss_ai_review_workflow::audit::{
     set_merge_approval, set_merge_approval_from_files, test_merge_approval,
 };
 use ss_ai_runtime::{Clock, FileTransaction, SystemClock, caused_by, fail};
+
+/// Prevents a concurrent subprocess launch from temporarily inheriting a test's held lock.
+static PROCESS_LAUNCH: Mutex<()> = Mutex::new(());
 
 /// Keeps each integration test's files in the checkout, away from other tests.
 struct Workspace(PathBuf);
@@ -162,6 +166,25 @@ fn plan(workspace: &Workspace, entries: Value) -> PathBuf {
     )
 }
 
+/// Produces the Unicode encodings recognized by the predecessor stream reader.
+fn encoded(text: &str) -> Vec<Vec<u8>> {
+    let mut utf8 = vec![0xef, 0xbb, 0xbf];
+    utf8.extend_from_slice(text.as_bytes());
+    let mut utf16_le = vec![0xff, 0xfe];
+    let mut utf16_be = vec![0xfe, 0xff];
+    for word in text.encode_utf16() {
+        utf16_le.extend_from_slice(&word.to_le_bytes());
+        utf16_be.extend_from_slice(&word.to_be_bytes());
+    }
+    let mut utf32_le = vec![0xff, 0xfe, 0x00, 0x00];
+    let mut utf32_be = vec![0x00, 0x00, 0xfe, 0xff];
+    for character in text.chars() {
+        utf32_le.extend_from_slice(&u32::from(character).to_le_bytes());
+        utf32_be.extend_from_slice(&u32::from(character).to_be_bytes());
+    }
+    vec![utf8, utf16_le, utf16_be, utf32_le, utf32_be]
+}
+
 /// Waits for the PowerShell parent to release a lock before retrying.
 struct ProcessInteropClock {
     waited: Cell<bool>,
@@ -253,6 +276,7 @@ fn audit_interop_helper_reports_real_contention_for_each_operation() {
             &json!({"schemaVersion":1, "kind":"consolidated",
                 "findings":[finding("F-1","a.rs")], "removed":[]}),
         );
+        let launch = PROCESS_LAUNCH.lock().unwrap();
         let lock = FileTransaction::open(&record, &clock).unwrap();
         let mut child = Command::new(env::current_exe().unwrap())
             .args(["native_audit_lock_interop_helper", "--exact", "--nocapture"])
@@ -272,14 +296,17 @@ fn audit_interop_helper_reports_real_contention_for_each_operation() {
         error.read_line(&mut signal).unwrap();
         assert_eq!(signal.trim_end(), "lock-contended");
         drop(lock);
+        drop(launch);
         let mut input = child.stdin.take().unwrap();
         writeln!(input, "retry").unwrap();
         drop(input);
         let output = child.wait_with_output().unwrap();
+        let mut diagnostics = String::new();
+        error.read_to_string(&mut diagnostics).unwrap();
         assert!(
             output.status.success(),
-            "child failed: {}",
-            String::from_utf8_lossy(&output.stdout)
+            "child failed: {}\n{diagnostics}",
+            String::from_utf8_lossy(&output.stdout),
         );
         assert!(record.exists());
     }
@@ -329,6 +356,30 @@ fn decisions_validate_complete_batches_and_preserve_verbatim_feedback() {
     .unwrap();
     assert!(add_decisions(&path, &input, None, false, timestamp, &clock).is_err());
     assert!(read_decisions(&path, &clock).is_err());
+}
+
+#[test]
+fn empty_decision_batches_leave_existing_and_missing_journals_untouched() {
+    let workspace = Workspace::new("empty-decisions");
+    let journal = workspace.path("decisions.json");
+    let lock = workspace.path("decisions.json.lock");
+    let input = plan(&workspace, json!([]));
+    let clock = SystemClock::default();
+    let timestamp = "2026-01-01T00:00:00Z";
+
+    for policy in [false, true] {
+        assert!(add_decisions(&journal, &input, None, policy, timestamp, &clock).is_err());
+        assert!(!journal.exists());
+        assert!(!lock.exists());
+    }
+
+    let original = br#"{"schemaVersion":1,"decisions":[]}"#;
+    fs::write(&journal, original).unwrap();
+    for policy in [false, true] {
+        assert!(add_decisions(&journal, &input, None, policy, timestamp, &clock).is_err());
+        assert_eq!(fs::read(&journal).unwrap(), original);
+        assert!(!lock.exists());
+    }
 }
 
 #[test]
@@ -410,6 +461,132 @@ fn feedback_is_verbatim_idempotent_and_does_not_create_verdicts() {
     assert_eq!(fs::read(&journal).unwrap(), before);
     fs::write(&path, br#"{"schemaVersion":1,"feedback":[{"responseId":"x","findingId":"F-1","text":"a"},{"responseId":"x","findingId":"F-1","text":"a"}]}"#).unwrap();
     assert!(get_feedback(&path, "F-1", &clock).is_err());
+}
+
+#[test]
+#[cfg_attr(miri, ignore = "requires a PowerShell subprocess")]
+fn feedback_text_matches_predecessor_for_bom_encodings() {
+    let workspace = Workspace::new("feedback-encodings");
+    let artifact = workspace.put(
+        "findings.json",
+        &json!({"schemaVersion":1, "kind":"consolidated",
+            "findings":[finding("F-1","src/lib.rs")], "removed":[]}),
+    );
+    let text_path = workspace.path("text.txt");
+    let clock = SystemClock::default();
+    let text = "\u{feff}  first 😀\r\nsecond  ";
+    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let script = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/audit_predecessor.ps1");
+    for (index, bytes) in encoded(text).iter().enumerate() {
+        fs::write(&text_path, bytes).unwrap();
+        let launch = PROCESS_LAUNCH.lock().unwrap();
+        let output = Command::new("pwsh")
+            .args(["-NoLogo", "-NoProfile", "-NonInteractive", "-File"])
+            .arg(&script)
+            .arg("-Root")
+            .arg(&root)
+            .args(["-Mode", "read-text", "-Artifact"])
+            .arg(&artifact)
+            .arg("-Decisions")
+            .arg(workspace.path("unused.json"))
+            .arg("-Context")
+            .arg(workspace.path("unused-context.json"))
+            .arg("-Diff")
+            .arg(&text_path)
+            .output()
+            .unwrap();
+        drop(launch);
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let predecessor: String = serde_json::from_slice(&output.stdout).unwrap();
+        assert_eq!(predecessor, text);
+        let feedback = workspace.path(&format!("feedback-{index}.json"));
+        add_feedback(&feedback, &artifact, "response", "F-1", &text_path, &clock).unwrap();
+        assert_eq!(get_feedback(&feedback, "F-1", &clock).unwrap(), predecessor);
+    }
+}
+
+#[test]
+fn bom_marked_audit_records_preserve_duplicate_key_validation() {
+    let workspace = Workspace::new("audit-record-encodings");
+    let journal = workspace.path("decisions.json");
+    let feedback = workspace.path("feedback.json");
+    let clock = SystemClock::default();
+    let journal_text = r#"{"schemaVersion":1,"decisions":[{"findingId":"F-1","decision":"approved","recordedUtc":"2026-01-01T00:00:00Z"}]}"#;
+    let feedback_text = r#"{"schemaVersion":1,"feedback":[{"responseId":"response","findingId":"F-1","text":"  words 😀  "}]}"#;
+    for (journal_bytes, feedback_bytes) in encoded(journal_text).iter().zip(encoded(feedback_text))
+    {
+        fs::write(&journal, journal_bytes).unwrap();
+        fs::write(&feedback, feedback_bytes).unwrap();
+        assert_eq!(
+            last_decision(&read_decisions(&journal, &clock).unwrap(), "F-1").unwrap(),
+            Some("approved")
+        );
+        assert_eq!(
+            get_feedback(&feedback, "F-1", &clock).unwrap(),
+            "  words 😀  "
+        );
+    }
+    let duplicate = r#"{"schemaVersion":1,"feedback":[],"Feedback":[]}"#;
+    for bytes in encoded(duplicate) {
+        fs::write(&feedback, bytes).unwrap();
+        assert!(get_feedback(&feedback, "F-1", &clock).is_err());
+    }
+}
+
+#[test]
+fn bom_marked_audit_inputs_are_read_during_transactions() {
+    let workspace = Workspace::new("audit-input-encodings");
+    let clock = SystemClock::default();
+    let artifact = workspace.path("findings.json");
+    let input = workspace.path("plan.json");
+    let journal = workspace.path("journal.json");
+    let feedback = workspace.path("feedback.json");
+    let merge = workspace.path("merge.json");
+    let text_path = workspace.path("text.txt");
+    fs::write(&text_path, "reply").unwrap();
+    let findings = json!({"schemaVersion":1, "kind":"consolidated",
+        "findings":[finding("F-1","src/lib.rs")], "removed":[]})
+    .to_string();
+    let plan = r#"{"schemaVersion":1,"decisions":[{"findingId":"F-1","decision":"approved"}]}"#;
+    let decisions = r#"{"schemaVersion":1,"decisions":[]}"#;
+    let responses = r#"{"schemaVersion":1,"feedback":[]}"#;
+    let commit = "b".repeat(40);
+    let merge_decision = json!({"schemaVersion":1,"pullRequestUrl":"https://example.test/pr/1",
+        "approveMerge":true,"approvedSourceCommit":commit})
+    .to_string();
+
+    for ((((findings, plan), decisions), responses), merge_decision) in encoded(&findings)
+        .iter()
+        .zip(encoded(plan))
+        .zip(encoded(decisions))
+        .zip(encoded(responses))
+        .zip(encoded(&merge_decision))
+    {
+        fs::write(&artifact, findings).unwrap();
+        fs::write(&input, plan).unwrap();
+        fs::write(&journal, decisions).unwrap();
+        fs::write(&feedback, responses).unwrap();
+        fs::write(&merge, merge_decision).unwrap();
+        add_feedback(&feedback, &artifact, "response", "F-1", &text_path, &clock).unwrap();
+        add_decisions(
+            &journal,
+            &input,
+            Some(&feedback),
+            false,
+            "2026-01-01T00:00:00Z",
+            &clock,
+        )
+        .unwrap();
+        assert_eq!(
+            read_decisions(&journal, &clock).unwrap()["decisions"][0]["feedback"],
+            "reply"
+        );
+        assert!(test_merge_approval(&merge, "https://example.test/pr/1", &commit, &clock).unwrap());
+    }
 }
 
 #[test]
@@ -596,11 +773,13 @@ fn overlapping_predecessor_and_native_updates_keep_both_transactions() {
         let diff = workspace.put("diff.json", &json!({"files":[]}));
         let record = workspace.path("record.json");
         let clock = SystemClock::default();
+        let launch = PROCESS_LAUNCH.lock().unwrap();
         let transaction = FileTransaction::open(&record, &clock).unwrap();
         let mut contender =
             PredecessorWriter::start(&workspace, mode, &artifact, &record, &context, &diff);
         contender.expect("contended");
         drop(transaction);
+        drop(launch);
         if mode == "feedback-contender" {
             let text = workspace.path("text.txt");
             fs::write(&text, "Native response").unwrap();

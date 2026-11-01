@@ -7,7 +7,7 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use ohno::AppError;
-use tempfile::NamedTempFile;
+use tempfile::Builder;
 
 #[cfg(windows)]
 use std::os::windows::ffi::OsStrExt;
@@ -197,9 +197,16 @@ impl<'a> FileTransaction<'a> {
             .path
             .parent()
             .ok_or_else(|| fail("invalidInput", "File path requires a parent"))?;
-        let mut temporary = NamedTempFile::new_in(parent).map_err(|error| {
-            Failure::caused_by("io", "Cannot create staging file".to_owned(), error)
-        })?;
+        // The distinctive pattern is shared with finding-directory validators.
+        // Random characters retain ample collision resistance for concurrent writers.
+        let mut temporary = Builder::new()
+            .prefix(".ss-ai-transaction-")
+            .rand_bytes(24)
+            .suffix(".tmp")
+            .tempfile_in(parent)
+            .map_err(|error| {
+                Failure::caused_by("io", "Cannot create staging file".to_owned(), error)
+            })?;
         temporary.write_all(bytes).map_err(|error| {
             Failure::caused_by("io", "Cannot write staging file".to_owned(), error)
         })?;

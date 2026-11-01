@@ -172,6 +172,42 @@ fn exact_unicode_pages_and_native_dispatch() {
     assert!(!prompt.contains("{{SKILL_ROOT}}"));
 }
 
+#[test]
+fn focus_preparation_assignment_preserves_repository_source_mapping() {
+    let workspace = Workspace::new("repository-mapping");
+    let scope = workspace.put("scope.md", "Review the repository.");
+    let skill = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../skills/ss-review");
+    let result = create_assignment(
+        &AssignmentOptions {
+            phase: "focusAreas",
+            session_state: &workspace.0,
+            scope_path: &scope,
+            output_directory: &workspace.0.join("attempt"),
+            skill_root: &skill,
+            manifest_path: None,
+            reviewer_id: None,
+            context_path: None,
+            resume: false,
+            repository_instructions: true,
+            include_pre_existing: false,
+        },
+        &TestClock,
+    )
+    .unwrap();
+    let assignment = Path::new(result["assignmentPath"].as_str().unwrap());
+    let prompt = collect(assignment, "prompt");
+    assert!(prompt.contains("Repository instruction authorization: authorized."));
+    assert!(prompt.contains("`repositoryRoot` entry"));
+    assert!(prompt.contains("`roots` alone does not include selected repository instructions"));
+    assert!(prompt.contains(
+        "Pass the applicable source-root mapping (`roots` entry or `repositoryRoot`) to the worker"
+    ));
+    assert!(
+        prompt.contains("Return the source-root mappings, including `repositoryRoot` when present")
+    );
+    assert!(prompt.contains("the source-root mappings including `repositoryRoot` when present"));
+}
+
 /// Computes the largest fitting page directly, independently of the search.
 #[expect(
     clippy::arithmetic_side_effects,

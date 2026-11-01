@@ -8,9 +8,9 @@
     reason = "Line offsets and counters are bounded by the allocated source text"
 )]
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, btree_map::Entry};
 use std::fs;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use ohno::AppError;
 use serde::{Deserialize, Serialize};
@@ -51,7 +51,8 @@ impl SourceSnapshot {
     ///
     /// # Errors
     ///
-    /// Returns an error for links, unreadable entries, or invalid paths.
+    /// Returns an error for links, unreadable entries, invalid paths, or
+    /// distinct paths that normalize to the same source name.
     pub fn read(session: &Path, clock: &dyn Clock) -> Result<Self, AppError> {
         let mut files = BTreeMap::new();
         for root in ["instruction-set-source", "instruction-set-raw"] {
@@ -66,7 +67,12 @@ impl SourceSnapshot {
             }
             read_directory(&directory, &directory, root, clock, &mut files)?;
         }
-        Ok(Self { files })
+        Ok(Self {
+            files: files
+                .into_iter()
+                .map(|(key, (_, lines))| (key, lines))
+                .collect(),
+        })
     }
 
     /// Resolves an exact source selection and checks its contents.
@@ -145,7 +151,7 @@ fn read_directory(
     directory: &Path,
     root: &str,
     clock: &dyn Clock,
-    files: &mut BTreeMap<(String, String), Vec<String>>,
+    files: &mut BTreeMap<(String, String), (PathBuf, Vec<String>)>,
 ) -> Result<(), AppError> {
     let entries = fs::read_dir(directory)
         .map_err(|error| caused_by("io", "Cannot enumerate source directory", error))?;
@@ -172,12 +178,27 @@ fn read_directory(
                 })
                 .collect::<Result<Vec<_>, _>>()?
                 .join("\\");
-            let bytes = read_bytes(&path, clock)?
-                .ok_or_else(|| fail("invalidInput", "Source disappeared during snapshot"))?;
-            files.insert(
-                (root.to_owned(), source_path(&relative)?),
-                text_lines(&decode_text(&bytes)?),
-            );
+            let key = (root.to_owned(), source_path(&relative)?);
+            match files.entry(key) {
+                Entry::Occupied(previous) => {
+                    // Both separators are accepted in source names, so these
+                    // files cannot be distinguished by coverage records.
+                    return Err(fail(
+                        "invalidInput",
+                        format!(
+                            "Source paths {:?} and {:?} collide after separator normalization; rename one of the files",
+                            previous.get().0,
+                            path
+                        ),
+                    ));
+                }
+                Entry::Vacant(entry) => {
+                    let bytes = read_bytes(&path, clock)?.ok_or_else(|| {
+                        fail("invalidInput", "Source disappeared during snapshot")
+                    })?;
+                    entry.insert((path, text_lines(&decode_text(&bytes)?)));
+                }
+            }
         } else {
             return Err(fail(
                 "invalidInput",

@@ -68,6 +68,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
     println!("cargo:rustc-env=SS_AI_FOCUS_BUILD_TARGET={target}");
     println!("cargo:rustc-env=SS_AI_FOCUS_BUILD_PROFILE={profile}");
+    // Integration tests exercise this exact executable against isolated inputs.
+    println!(
+        "cargo:rustc-env=SS_AI_FOCUS_BUILD_SCRIPT={}",
+        env::current_exe()?.display()
+    );
     println!(
         "cargo:rustc-env=SS_AI_FOCUS_BUILD_FINGERPRINT={:x}",
         hash.finalize()
@@ -103,10 +108,24 @@ fn collect(
         if kind.is_dir() {
             collect(root, &path, extension, paths)?;
         } else if kind.is_file() && path.extension().is_some_and(|value| value == extension) {
-            let path = path
-                .to_str()
-                .ok_or_else(|| io::Error::other("Build input path is not Unicode"))?;
-            paths.push(path.replace('\\', "/"));
+            // A literal backslash cannot be distinguished from a normalized
+            // separator in the fingerprint, so fail rather than hash an alias.
+            let components = path
+                .components()
+                .map(|component| {
+                    let name = component
+                        .as_os_str()
+                        .to_str()
+                        .ok_or_else(|| io::Error::other("Build input path is not Unicode"))?;
+                    if name.contains('\\') {
+                        return Err(io::Error::other(format!(
+                            "Build input path {path:?} contains a literal backslash; rename it to avoid an ambiguous fingerprint"
+                        )));
+                    }
+                    Ok(name)
+                })
+                .collect::<io::Result<Vec<_>>>()?;
+            paths.push(components.join("/"));
         }
     }
     Ok(())
