@@ -516,6 +516,182 @@ fn missing_units_block_all_dispositions_even_after_raw_delivery() {
 }
 
 #[test]
+fn unit_notes_accept_binding_citations_alongside_exact_source() {
+    // Binding metadata supplements exact source; citing a required binding must
+    // not change whether a completely delivered unit can be recorded.
+    for include_patch in [false, true] {
+        let mut assessment = fixture("discussion", "old", "new");
+        read(&mut assessment, "policy", "discussion");
+        for unit in units(&assessment) {
+            let id = unit["unit"]["id"].as_str().unwrap();
+            let reference = unit["reference"].as_str().unwrap();
+            let binding = unit["bindingReference"].as_str().unwrap();
+            let source = unit["unit"]["reference"].as_str().unwrap();
+            read(&mut assessment, reference, "discussion");
+            read(&mut assessment, binding, "discussion");
+            let mut observation = note(reference);
+            observation.evidence.push(binding.into());
+            if include_patch && source != "discussion" {
+                read(&mut assessment, source, "discussion");
+                observation.evidence.push(source.into());
+            }
+            assessment
+                .note(id, observation, None, "policy", "discussion")
+                .unwrap();
+        }
+        assessment.checkpoint().unwrap();
+        let restored: Assessment =
+            serde_json::from_value(serde_json::to_value(&assessment).unwrap()).unwrap();
+        restored
+            .validate("snapshot", "policy", "policy", "discussion")
+            .unwrap();
+        restored
+            .validate("different-snapshot", "policy", "policy", "discussion")
+            .unwrap_err();
+        let mut corrupt = serde_json::to_value(&restored).unwrap();
+        let binding = units(&restored)[0]["bindingReference"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        corrupt["reads"][binding] = json!(0);
+        let corrupt: Assessment = serde_json::from_value(corrupt).unwrap();
+        corrupt
+            .validate("snapshot", "policy", "policy", "discussion")
+            .unwrap_err();
+    }
+}
+
+#[test]
+fn binding_citations_never_replace_exact_unit_evidence_or_complete_reads() {
+    // A split patch leaves other required units unread, so reading this unit
+    // cannot itself satisfy delivery of a separately cited whole patch.
+    let new = "new\n".repeat(2_000);
+    let original = fixture("discussion", "old", &new);
+    let unit = units(&original).remove(0);
+    let id = unit["unit"]["id"].as_str().unwrap();
+    let reference = unit["reference"].as_str().unwrap();
+    let binding = unit["bindingReference"].as_str().unwrap();
+    let patch = unit["unit"]["reference"].as_str().unwrap();
+    // Every cited document and the mandatory policy/unit/binding must be fully
+    // delivered, including when the patch itself is completely read.
+    for incomplete in ["policy", reference, binding, patch] {
+        let mut assessment = fixture("discussion", "old", &new);
+        for candidate in ["policy", reference, binding, patch] {
+            if candidate == incomplete {
+                let page = assessment
+                    .read(candidate, 0, 1, "policy", "discussion")
+                    .unwrap();
+                assert_eq!(page["complete"], false);
+            } else {
+                read(&mut assessment, candidate, "discussion");
+            }
+        }
+        let mut observation = note(reference);
+        observation.evidence.extend([binding.into(), patch.into()]);
+        assessment
+            .note(id, observation, None, "policy", "discussion")
+            .unwrap_err();
+        assert_eq!(assessment.progress()["completedUnitCount"], 0);
+        assessment.checkpoint().unwrap_err();
+    }
+    let mut assessment = original;
+    for candidate in ["policy", reference, binding, patch] {
+        read(&mut assessment, candidate, "discussion");
+    }
+    for evidence in [
+        vec![binding.into()],
+        vec!["policy".into(), binding.into()],
+        vec![patch.into(), binding.into()],
+        vec![reference.into(), "binding:unknown-unit".into()],
+        vec![reference.into(), "unknown:reference".into()],
+        vec![reference.into(), binding.into(), binding.into()],
+    ] {
+        let mut observation = note(reference);
+        observation.evidence = evidence;
+        assessment
+            .note(id, observation, None, "policy", "discussion")
+            .unwrap_err();
+    }
+    assert_eq!(assessment.progress()["completedUnitCount"], 0);
+}
+
+#[test]
+fn binding_citations_preserve_required_context_and_reject_summary_substitution() {
+    let mut assessment = fixture("discussion", "old", "new");
+    let unit = units(&assessment).remove(0);
+    let id = unit["unit"]["id"].as_str().unwrap();
+    let reference = unit["reference"].as_str().unwrap();
+    let binding = unit["bindingReference"].as_str().unwrap();
+    let context = assessment
+        .source_context(
+            ContextRequest {
+                change_id: assessment.inventory.changes[0].id.clone(),
+                side: SourceSide::New,
+                start_line: NonZeroUsize::MIN,
+                line_count: NonZeroUsize::MIN,
+            },
+            1,
+            "policy",
+            "discussion",
+        )
+        .unwrap();
+    assert_eq!(context["complete"], false);
+    for candidate in ["policy", reference, binding] {
+        read(&mut assessment, candidate, "discussion");
+    }
+    let mut observation = note(reference);
+    observation.evidence.push(binding.into());
+    assessment
+        .note(id, observation, None, "policy", "discussion")
+        .unwrap_err();
+    read(
+        &mut assessment,
+        context["reference"].as_str().unwrap(),
+        "discussion",
+    );
+    let mut observation = note(reference);
+    observation.evidence.push(binding.into());
+    let digest = assessment
+        .note(id, observation, None, "policy", "discussion")
+        .unwrap();
+    let summary = unit["noteReference"].as_str().unwrap();
+    read(&mut assessment, summary, "discussion");
+    let mut observation = note(reference);
+    observation
+        .evidence
+        .extend([binding.into(), summary.into()]);
+    // A delivered semantic note is still not an admissible unit-source citation,
+    // even alongside exact text and a binding.
+    assessment
+        .note(id, observation, Some(&digest), "policy", "discussion")
+        .unwrap_err();
+}
+
+#[test]
+fn discussion_aggregation_accepts_bindings_but_requires_raw_discussion() {
+    let mut assessment = fixture("discussion", "", "");
+    note_units(&mut assessment, "discussion");
+    let unit = units(&assessment).remove(0);
+    let binding = unit["bindingReference"].as_str().unwrap();
+    let summary = unit["noteReference"].as_str().unwrap();
+    let mut observation = note("discussion");
+    observation.evidence = vec!["policy".into(), binding.into(), summary.into()];
+    assessment
+        .note("discussion", observation, None, "policy", "discussion")
+        .unwrap_err();
+    let mut observation = note("discussion");
+    observation
+        .evidence
+        .extend(["policy".into(), binding.into(), summary.into()]);
+    assessment
+        .note("discussion", observation, None, "policy", "discussion")
+        .unwrap();
+    assessment
+        .validate("snapshot", "policy", "policy", "discussion")
+        .unwrap();
+}
+
+#[test]
 fn checkpoint_replay_and_replacement_do_not_create_progress() {
     let mut assessment = fixture("discussion", "old", "new");
     assessment.checkpoint().unwrap_err();
@@ -726,6 +902,46 @@ fn recorded_concerns_require_exact_dispositions_and_cannot_be_erased_by_favorabl
             "Historical objection.",
         )
         .unwrap();
+    let current_unit = units(&assessment)
+        .into_iter()
+        .find(|current| current["unit"]["id"] == unit["unit"]["id"])
+        .unwrap();
+    let discussion_digest = assessment
+        .summary(0, 1, "policy", "Historical objection.")
+        .unwrap()["discussionNoteDigest"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    // These semantic records exist and have complete receipts. Rejecting them
+    // with current replacement digests tests dependency direction, not delivery
+    // or stale-write checks, for both unit and discussion aggregate notes.
+    for semantic in [
+        "discussion-note".to_owned(),
+        format!("judgment:{id}"),
+        check["reference"].as_str().unwrap().to_owned(),
+        check["resolutionReference"].as_str().unwrap().to_owned(),
+    ] {
+        for (note_id, exact, previous) in [
+            (
+                unit["unit"]["id"].as_str().unwrap(),
+                reference,
+                current_unit["noteDigest"].as_str().unwrap(),
+            ),
+            ("discussion", "discussion", discussion_digest.as_str()),
+        ] {
+            let mut observation = note(exact);
+            observation.evidence.push(semantic.clone());
+            assessment
+                .note(
+                    note_id,
+                    observation,
+                    Some(previous),
+                    "policy",
+                    "Historical objection.",
+                )
+                .unwrap_err();
+        }
+    }
     assessment
         .finish("policy", "Historical objection.")
         .unwrap();
