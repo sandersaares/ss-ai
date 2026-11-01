@@ -297,3 +297,13 @@ for Azure DevOps) and an explicit decision:
 If any assessment, notification, or publication remains unfinished, say the run
 is incomplete. Do not post follow-up discussion beyond native needs-review
 notices or file findings automatically.
+
+For each assessed PR, report the final `assessmentProgress` even when work is
+unfinished: changed paths judged versus total, explicitly delivered evidence
+units versus total, unit notes completed, and planned handoffs. State whether
+the cumulative judgment and assessment are complete. Unit delivery and notes
+are not path judgments or evidence of comprehension. The delivered unit
+character count covers unique prefixes read through unit references; reads of
+whole documents and repeated delivery are not included. Do not estimate command
+counts, model requests, elapsed phase times, repeated bytes, or budget usage
+from these figures. Report those metrics as unavailable when not measured.

@@ -154,6 +154,13 @@ Use a new run path for a fresh scan. A discovery candidate still requires
 approval assessment and freshness checks; discovery is not authorization to
 publish.
 
+For an assessment, `assessmentProgress` separates judged changed paths from
+evidence-unit delivery and completed unit notes. `deliveredUnitCount` and
+`deliveredUnitCharacters` count contiguous prefixes read through unit references,
+without counting rereads or reads through original document references.
+`unitCount` and `unitCharacters` describe the unit manifest. These counts do not
+measure comprehension, model requests, command calls, or elapsed time.
+
 Discovery excludes drafts before checking commit recency. Drafts do not appear
 in the inventory, counts, or results. Inspection, refresh, or publication
 preflight removes a PR that has become a draft and returns no item for it.

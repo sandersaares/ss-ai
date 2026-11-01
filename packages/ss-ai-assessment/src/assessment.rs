@@ -97,17 +97,42 @@ impl Assessment {
     /// Lets orchestration verify planned progress without loading source or semantic judgments.
     #[must_use]
     pub fn progress(&self) -> Value {
+        let delivered_units = self
+            .checkpoints
+            .units
+            .iter()
+            .filter(|unit| {
+                self.reads.get(&unit.reference()).copied() == Some(unit.total_characters)
+            })
+            .count();
+        let delivered_unit_characters = self.checkpoints.units.iter().fold(0_usize, |sum, unit| {
+            sum.saturating_add(
+                self.reads
+                    .get(&unit.reference())
+                    .copied()
+                    .unwrap_or(0)
+                    .min(unit.total_characters),
+            )
+        });
+        let unit_characters = self.checkpoints.units.iter().fold(0_usize, |sum, unit| {
+            sum.saturating_add(unit.total_characters)
+        });
         json!({
             "changeCount": self.inventory.changes.len(),
             "judgedChangeCount": self.decisions.len(),
             "nextChangeOffset": self.inventory.changes.iter().position(|change| !self.decisions.contains_key(&change.id)),
             "unitCount": self.checkpoints.units.len(),
+            "deliveredUnitCount": delivered_units,
+            "deliveredUnitCharacters": delivered_unit_characters,
+            "unitCharacters": unit_characters,
             "completedUnitCount": self.checkpoints.notes.len(),
             "nextUnitOffset": self.checkpoints.units.iter().position(|unit| !self.checkpoints.notes.contains_key(&unit.id)),
             "nextUnitId": self.checkpoints.units.iter().find(|unit| !self.checkpoints.notes.contains_key(&unit.id)).map(|unit| &unit.id),
             "completedWorkCount": self.checkpoints.completed_work.len(),
             "checkpointCount": self.checkpoints.handoffs,
-            "handoffLimit": self.checkpoints.units.len().saturating_add(self.inventory.changes.len())
+            "handoffLimit": self.checkpoints.units.len().saturating_add(self.inventory.changes.len()),
+            "cumulativeJudgmentRecorded": self.cumulative.is_some(),
+            "assessmentComplete": self.complete
         })
     }
 

@@ -200,6 +200,37 @@ fn aggregate(assessment: &mut Assessment, discussion: &str) {
 }
 
 #[test]
+fn progress_distinguishes_delivery_from_semantic_work_and_replays() {
+    let discussion = "A discussion objection.";
+    let mut assessment = fixture(discussion, "old\n", "new\n");
+    let unit = units(&assessment).remove(0);
+    let reference = unit["reference"].as_str().unwrap();
+    let total = unit["unit"]["totalCharacters"].as_u64().unwrap();
+    let before = assessment.progress();
+    assert_eq!(before["deliveredUnitCount"], 0);
+    assert_eq!(before["deliveredUnitCharacters"], 0);
+    assert_eq!(before["completedUnitCount"], 0);
+    assert_eq!(before["judgedChangeCount"], 0);
+    assert_eq!(before["assessmentComplete"], false);
+
+    assessment
+        .read(reference, 0, 1, "policy", discussion)
+        .unwrap();
+    assert_eq!(assessment.progress()["deliveredUnitCharacters"], 1);
+    assessment
+        .read(reference, 0, 1, "policy", discussion)
+        .unwrap();
+    assert_eq!(assessment.progress()["deliveredUnitCharacters"], 1);
+    read(&mut assessment, reference, discussion);
+    let after = assessment.progress();
+    assert_eq!(after["deliveredUnitCount"], 1);
+    assert_eq!(after["deliveredUnitCharacters"], total);
+    assert_eq!(after["completedUnitCount"], 0);
+    assert_eq!(after["judgedChangeCount"], 0);
+    assert_eq!(after["cumulativeJudgmentRecorded"], false);
+}
+
+#[test]
 fn discussion_json_spans_preserve_whitespace_order_and_escapes() {
     let documents = [
         r#" { "reviews" : [ { "body" : "a\u0062", "id" : 7 } ], "pullRequest" : { "body" : "literal \"reviews\": [x]" }, "comments" : [], "hunks" : {"z":"\u0061"} } "#.to_owned(),
