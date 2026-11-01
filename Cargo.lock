@@ -1614,6 +1614,7 @@ dependencies = [
  "ohno",
  "serde_json",
  "ss-ai-review",
+ "ss-ai-runtime",
 ]
 
 [[package]]

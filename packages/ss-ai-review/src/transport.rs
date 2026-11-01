@@ -377,6 +377,34 @@ impl<'a> Transport<'a> {
         Ok(value)
     }
 
+    /// Performs a GraphQL mutation without treating transport failures as reads.
+    pub(crate) fn graphql_mutation(
+        &self,
+        query: &str,
+        variables: &Value,
+    ) -> Result<Value, AppError> {
+        let value = self
+            .github_optional(
+                "graphql",
+                "POST",
+                Some(&json!({ "query": query, "variables": variables })),
+                false,
+                true,
+                GithubResponseMode::Mutation,
+            )?
+            .ok_or_else(|| fail("ambiguousWrite", "Missing GraphQL mutation response"))?;
+        if value
+            .get("errors")
+            .is_some_and(|errors| errors.as_array().is_none_or(|errors| !errors.is_empty()))
+        {
+            return Err(fail(
+                "ambiguousWrite",
+                "GraphQL mutation returned incomplete evidence",
+            ));
+        }
+        Ok(value)
+    }
+
     /// Runs GitHub CLI requests with separate refusal and transient-read recovery.
     ///
     /// Included headers support classification for individual requests; slurped
@@ -425,7 +453,8 @@ impl<'a> Transport<'a> {
         if input.is_some() {
             arguments.extend(["--input".to_owned(), "-".to_owned()]);
         }
-        let read = method == "GET" || path == "graphql";
+        let read = method == "GET"
+            || (path == "graphql" && !matches!(response_mode, GithubResponseMode::Mutation));
         let mut transient_attempt = 0_u32;
         let mut rate_attempt = 0_u32;
         loop {
@@ -468,7 +497,15 @@ impl<'a> Transport<'a> {
             let error_text = format!("{stderr}\n{payload}");
             let status_text = format!("{headers}\n{stderr}");
             let json = serde_json::from_str::<Value>(payload);
-            let rate_limited = github_rate_limit(&status_text, &error_text, json.as_ref().ok());
+            // A mutation can only be replayed when the HTTP response itself
+            // establishes refusal; GraphQL error prose may accompany a write.
+            let rate_limited = if matches!(response_mode, GithubResponseMode::Mutation) {
+                !output.success
+                    && (response_status(headers) == Some(429)
+                        || (response_status(headers) == Some(403) && rate_message(&error_text)))
+            } else {
+                github_rate_limit(&status_text, &error_text, json.as_ref().ok())
+            };
             if rate_limited {
                 if !retry_refusals {
                     return Err(fail(
@@ -517,7 +554,13 @@ impl<'a> Transport<'a> {
                 transient_attempt = transient_attempt.saturating_add(1);
                 continue;
             }
-            let kind = if http_status(&status_text, 401) || error_text.contains("gh auth login") {
+            let kind = if matches!(response_mode, GithubResponseMode::Mutation) {
+                match response_status(headers) {
+                    Some(401) => "authentication",
+                    Some(403 | 422) => "permissionDenied",
+                    _ => "ambiguousWrite",
+                }
+            } else if http_status(&status_text, 401) || error_text.contains("gh auth login") {
                 "authentication"
             } else if http_status(&status_text, 403) || http_status(&status_text, 422) {
                 "permissionDenied"
@@ -837,6 +880,8 @@ impl<'a> Transport<'a> {
 enum GithubResponseMode {
     /// Preserve the ordinary request classification.
     Standard,
+    /// GraphQL mutations are writes even though their endpoint also serves reads.
+    Mutation,
     /// Recognize an explicit not-found response for optional reads.
     OptionalNotFound,
     /// Recognize an explicit rate refusal for a single-attempt write.
@@ -1428,5 +1473,63 @@ mod tests {
             .unwrap_err();
         assert_eq!(classification(&error), "rateLimited");
         assert_eq!(process.calls.get(), 5);
+    }
+
+    #[test]
+    fn graphql_mutations_retry_only_established_rate_refusals() {
+        struct GithubProcess {
+            replies: RefCell<VecDeque<ProcessOutput>>,
+            calls: Cell<usize>,
+        }
+
+        impl Process for GithubProcess {
+            fn execute(&self, _: &str, _: &[String], _: &[u8]) -> io::Result<ProcessOutput> {
+                self.calls.set(self.calls.get() + 1);
+                Ok(self
+                    .replies
+                    .borrow_mut()
+                    .pop_front()
+                    .expect("unexpected request"))
+            }
+        }
+
+        let process = GithubProcess {
+            replies: RefCell::new(VecDeque::from([
+                ProcessOutput::new(false, b"HTTP/2 503\n\n{}".to_vec(), vec![]),
+                ProcessOutput::new(true, b"HTTP/2 200\n\nnot-json".to_vec(), vec![]),
+                ProcessOutput::new(
+                    true,
+                    b"HTTP/2 200\n\n{\"errors\":[{\"type\":\"RATE_LIMITED\"}]}".to_vec(),
+                    vec![],
+                ),
+                ProcessOutput::new(false, vec![], b"HTTP 403 gh auth login".to_vec()),
+                ProcessOutput::new(false, b"HTTP/2 429\n\n{}".to_vec(), vec![]),
+                ProcessOutput::new(
+                    true,
+                    br#"HTTP/2 200
+
+{"data":{"ok":true}}"#
+                        .to_vec(),
+                    vec![],
+                ),
+            ])),
+            calls: Cell::new(0),
+        };
+        let fixture = Fixture::new(vec![]);
+        let target = Target::repository("https://github.com/org/repo").unwrap();
+        let transport = Transport::new(&target, None, &process, &fixture, &fixture);
+        for expected_calls in 1..=4 {
+            let error = transport
+                .graphql_mutation("mutation { test }", &json!({}))
+                .unwrap_err();
+            assert_eq!(classification(&error), "ambiguousWrite");
+            assert_eq!(process.calls.get(), expected_calls);
+        }
+        let response = transport
+            .graphql_mutation("mutation { test }", &json!({}))
+            .unwrap();
+        assert_eq!(response["data"]["ok"], true);
+        assert_eq!(process.calls.get(), 6);
+        assert_eq!(fixture.waits.get(), 1);
     }
 }

@@ -241,7 +241,7 @@ index 3333333..4444444 100644
             repositoryUrl        = 'https://github.com/octo/widget'
             pullRequestUrl       = 'https://github.com/octo/widget/pull/7'
             target               = $Target
-            authenticatedIdentity = [ordered]@{ uniqueName = 'runner' }
+            authenticatedIdentity = [ordered]@{ platform = $Platform; id = 'runner-id'; uniqueName = 'runner' }
             pullRequest          = [ordered]@{
                 title                   = 'Review fixture'
                 description             = $null
@@ -424,6 +424,9 @@ index 3333333..4444444 100644
         $startInfo.RedirectStandardInput = $true
         $startInfo.StandardOutputEncoding = [System.Text.UTF8Encoding]::new($false)
         $startInfo.StandardErrorEncoding = [System.Text.UTF8Encoding]::new($false)
+        # TestDrive may itself be inside a checkout; do not let Git discover that
+        # parent when a fixture deliberately names an ordinary directory.
+        $startInfo.Environment['GIT_CEILING_DIRECTORIES'] = Split-Path -Parent ([string] $Fixture['root'])
 
         $process = [System.Diagnostics.Process]::Start($startInfo)
         try {
@@ -1395,6 +1398,18 @@ Describe 'Verification' {
 }
 
 Describe 'Preflight performs no write' {
+    It 'refuses a capture without a usable authenticated identity and writes nothing' {
+        $context = New-TestContext
+        $context['authenticatedIdentity'] = [ordered]@{ platform = 'gitHub' }
+        $fixture = New-PublicationFixture -Context $context
+
+        $run = Invoke-PublishPullRequestReview -Fixture $fixture
+
+        $run['exitCode'] | Should -Not -Be 0
+        Get-SingleLineErrorText -Text $run['standardError'] | Should -BeLike '*invalid authenticated identity*'
+        Test-Path -LiteralPath $fixture['resultPath'] | Should -BeFalse
+    }
+
     It 'refuses an approved artifact of the wrong schema version and writes nothing' {
         $document = New-TestApproved
         $document['schemaVersion'] = 99

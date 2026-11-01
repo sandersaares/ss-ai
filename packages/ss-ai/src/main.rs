@@ -9,6 +9,7 @@ use ss_ai::{
     NativeHttp, NativeProcess, SystemClock, classification, run, run_cargo, run_context, run_git,
     run_workflow,
 };
+use ss_ai_runtime::fail;
 
 /// Gives the installed executable the same allocator policy on both platforms.
 ///
@@ -20,7 +21,7 @@ static ALLOCATOR: mimalloc::MiMalloc = mimalloc::MiMalloc;
 /// Converts the complete command outcome into the process-level CLI contract.
 fn main() -> ExitCode {
     match execute() {
-        Ok(()) => ExitCode::SUCCESS,
+        Ok(code) => code,
         Err(error) => {
             eprintln!("{}: {error}", classification(&error));
             ExitCode::FAILURE
@@ -29,7 +30,7 @@ fn main() -> ExitCode {
 }
 
 /// Keeps environment discovery and output handling outside the testable operations.
-fn execute() -> Result<(), AppError> {
+fn execute() -> Result<ExitCode, AppError> {
     let arguments = env::args_os().collect::<Vec<_>>();
     let output = if arguments.get(1).is_some_and(|argument| argument == "cargo") {
         let cargo_arguments = arguments
@@ -54,7 +55,8 @@ fn execute() -> Result<(), AppError> {
         {
             let process = NativeProcess::new(&env::current_dir()?);
             let http = NativeHttp::new()?;
-            return write_output(&run(&arguments, &process, &http, &SystemClock::default())?);
+            write_output(&run(&arguments, &process, &http, &SystemClock::default())?)?;
+            return Ok(ExitCode::SUCCESS);
         }
         let context_arguments = arguments
             .first()
@@ -76,7 +78,27 @@ fn execute() -> Result<(), AppError> {
         let http = NativeHttp::new()?;
         run(&arguments, &process, &http, &SystemClock::default())?
     };
-    write_output(&output)
+    write_output(&output)?;
+    // Publication outcomes must remain available on stdout even when the
+    // durable result requires intervention.
+    if arguments.get(1).is_some_and(|arg| arg == "review")
+        && arguments
+            .get(2)
+            .is_some_and(|arg| arg == "publish-final-review")
+        && !arguments
+            .iter()
+            .any(|arg| arg == "--help" || arg == "-h" || arg == "--version" || arg == "-V")
+    {
+        let value: serde_json::Value = serde_json::from_str(&output)?;
+        let status = value
+            .get("status")
+            .and_then(serde_json::Value::as_str)
+            .ok_or_else(|| fail("invalidState", "Publication outcome has no status"))?;
+        if status != "succeeded" {
+            return Ok(ExitCode::FAILURE);
+        }
+    }
+    Ok(ExitCode::SUCCESS)
 }
 
 /// Writes one complete response after command execution succeeds.

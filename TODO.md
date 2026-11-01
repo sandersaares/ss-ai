@@ -21,15 +21,12 @@ Improvement ideas to revisit when the repo matures.
 
 ## Skill design
 
-- **Migrate ss-review command families to Rust.** Replace the remaining complete
-  families in order: overview publication; final review
-  publication; and trackers. Provider capture, local context, finding, audit,
-  rendering, report tooling, coverage, worker-input, instruction preparation, and cache commands
-  use native operations through PowerShell adapters. Retire the adapters after
-  their callers migrate while preserving the hybrid workflow's records,
-  transaction boundaries and authority gates. Until retirement, consolidate
-  the capture and workflow process-launching logic while preserving their
-  distinct output contracts and instruction-cache dependencies.
+- **Migrate ss-review tracker publication to Rust.** Provider capture, local
+  context, finding, audit, rendering, report tooling, coverage, worker-input,
+  instruction preparation, cache, overview publication, and final review
+  publication use native operations through PowerShell adapters. Retire the
+  adapters after their callers migrate while preserving the hybrid workflow's
+  records, transaction boundaries and authority gates.
 - **Detect hard-linked capture lock files.** Reject aliased retained sibling
   locks before waiting when portable file identity can be checked without
   interfering with other lock holders. Until then, self-contention fails

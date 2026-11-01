@@ -27,8 +27,9 @@ installation-only optimization.
 ## Commands
 
 Every input is named. Commands emit one UTF-8 JSON object on stdout after
-success, except `--help` and `--version`. Failures return a nonzero exit status,
-write diagnostics to stderr, and emit no successful JSON result.
+success, except `--help` and `--version`. Failures return a nonzero exit status.
+Most write diagnostics to stderr without a JSON result. Final review publication
+instead emits its outcome when the review was published but a follow-up failed.
 
 ```powershell
 ss-ai review select --repository-url "{{REPOSITORY_URL}}" `
@@ -196,6 +197,65 @@ the reviewer's file-group journal. The review workflow separately checks
 manifest-based coverage. The [audit guide](../../skills/ss-review/data-guides/audit.md)
 describes decision and feedback records. Policy classification does not grant
 user or merge approval, and rendering does not publish or approve findings.
+
+## Final pull request review
+
+`ss-ai review publish-final-review` publishes the approved review through the
+native provider transaction. The existing
+[`Publish-PullRequestReview.ps1` recipe](../../skills/ss-review/pwsh-calls/publish-pull-request-review.md)
+retains its named PowerShell interface and delegates to this command. The
+recipe supplies the pull request URL, approved findings, checked capture,
+diagnostics, local repository and output directory; its optional merge-decision
+path carries the user's commit-bound decision. The corresponding native
+invocation is:
+
+```powershell
+#Requires -Version 7.6
+
+Set-StrictMode -Version Latest
+$ErrorActionPreference = 'Stop'
+$PSNativeCommandUseErrorActionPreference = $true
+
+ss-ai review publish-final-review --url "{{PR_URL}}" `
+  --approved-findings-path "{{APPROVED_FINDINGS_PATH}}" `
+  --context-path "{{CONTEXT_PATH}}" --diagnostics-path "{{DIAGNOSTICS_PATH}}" `
+  --repository-path "{{REPOSITORY_PATH}}" --output-directory "{{OUTPUT_DIRECTORY}}"
+```
+
+| Input | Meaning |
+| --- | --- |
+| `PR_URL` | Browser URL of the reviewed pull request. |
+| `APPROVED_FINDINGS_PATH` | Approved finding artifact bound to the reviewed evidence. |
+| `CONTEXT_PATH` | Latest checked capture bound to the approved findings. |
+| `DIAGNOSTICS_PATH` | Focus-area cache diagnostics for the summary. |
+| `REPOSITORY_PATH` | Local checkout containing the reviewed commits. |
+| `OUTPUT_DIRECTORY` | Session directory for `publication-result.json`. |
+
+Optional named arguments are `--merge-approval-path`, `--tenant`, `--now-utc`,
+`--discard-pending-review`, and `--publish-to-closed-pull-request`. The
+PowerShell entry point maps its corresponding named parameters to these
+arguments. Discard and closed-PR publication require the user's explicit
+decision; a merge-decision path is validated rather than converted to an
+approval switch by the caller.
+
+The command validates local records and anchors against the reviewed immutable
+diff, then checks live capture and evidence before writes. An explicitly
+authorized existing GitHub draft discard occurs before the journal. Otherwise,
+the retained publication lock and `publication-result.json` protect and record
+the transaction, including effect intent and outcomes. GitHub verifies and
+submits a draft; Azure DevOps publishes findings individually, records any
+authorized approval as a separate vote preserving `isRequired`, then posts the
+summary. Readback checks finding bodies and thread identities, and anchored
+comments against the planned file, diff side and line range. GitHub checks the
+draft and submitted review states; Azure DevOps checks an approval's reviewer
+identity, vote and required status against its receipt. Both read back the
+completed review before reopening follow-up threads. Azure DevOps journals
+finding writes and receipts sequentially; readback verifies each actual comment
+and relative order within a thread, not a global order across independent
+threads. An ambiguous write requires human reconciliation, not automatic retry.
+A follow-up failure emits `publishedWithFollowUpFailure` and exits nonzero; do
+not republish the review. Initial overview, tracker, and Markdown delivery
+retain their separate workflows and authority boundaries.
 
 ## Review report tools
 

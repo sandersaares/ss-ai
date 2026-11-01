@@ -16,6 +16,7 @@ pub mod markdown;
 pub mod overview_artifact;
 pub mod report_html;
 pub mod report_tools;
+pub mod review_publication_plan;
 pub mod review_work;
 pub mod worker_input;
 pub mod workflow_plan;

@@ -121,7 +121,11 @@ fn parse(bytes: &[u8]) -> Result<Value, AppError> {
 }
 
 /// Reads workflow JSON using the Unicode encodings accepted by the shared reader.
-pub(crate) fn parse_json(bytes: &[u8]) -> Result<Value, AppError> {
+///
+/// # Errors
+///
+/// Rejects malformed text and duplicate or ambiguous property names.
+pub fn parse_json(bytes: &[u8]) -> Result<Value, AppError> {
     let text = if let Some(bytes) = bytes.strip_prefix(&[0xef, 0xbb, 0xbf]) {
         decode_utf8(bytes)?
     } else if let Some(bytes) = bytes.strip_prefix(&[0xff, 0xfe, 0x00, 0x00]) {

@@ -1084,8 +1084,8 @@ Pull request comments, tracker items, audit views, and combined documents share
 the same substantive block builder. Destination renderers add only their
 required wrappers. This makes "approved prose equals published prose" an
 architectural property rather than a convention between separate formatters.
-The native workflow renderer supplies this shared prose to the remaining
-PowerShell publication commands through adapters.
+The native workflow renderer supplies this shared prose to final review
+publication and to tracker publication through its PowerShell adapter.
 
 Each prose section label is separated from its unchanged content by a blank line.
 This lets lists, code fences, and other Markdown blocks begin at the start of a
@@ -1099,28 +1099,39 @@ speaker marker so no adapter can omit or duplicate it.
 ## Publication
 
 Initial overview publication and final finding publication are independent
-operations. The following finding-publication journal does not gate or replay an
-overview attempt.
+operations. The final review's journal does not gate or replay an overview
+attempt. `Publish-PullRequestReview.ps1` retains the named PowerShell entry
+point while `ss-ai review publish-final-review` owns the native transaction.
+Command composition combines provider operations with validated workflow
+records, shared rendering, and the immutable local Git comparison.
 
 Remote publication is implemented as a guarded sequence:
 
-1. **Plan** resolves targets, approved artifacts, destinations, and rendered
-   bodies. Ordinary planning is read-only. Explicitly discarding a pre-existing
-   GitHub draft is the sole authorized remote mutation at this point and occurs
-   before the journal exists.
-2. **Preflight** checks every locally knowable invariant and asks the adapter
-   whether remote publication can begin.
-3. **Journal** persists the intended operations before the first non-idempotent
-   write.
+1. **Local preparation** validates the approved findings, checked capture,
+   diagnostics and any merge-decision record, resolves anchors against the
+   reviewed commit pair, and renders and validates the plan and summary. A
+   retained sibling lock covers the prior-result check and the publication
+   transaction.
+2. **Live preflight** checks provider state, file identities, authenticated
+   identity and freshly captured evidence before any remote write. Explicitly
+   authorized discard of a pre-existing GitHub draft follows these checks and
+   occurs before the journal exists. An attempted or uncertain discard needs
+   human reconciliation even when no result file exists.
+3. **Journal** persists the intended operations before the review transaction
+   starts, and records each effect's intent before dispatch and outcome after it
+   returns.
 4. **Execute** performs each operation without automatically retrying an
    ambiguous write.
 5. **Verify findings** reads back the finding state attributable to the run
-   before completion.
+   before completion. It checks each finding's body and thread, and checks the
+   file, diff side and line range of anchored comments against the plan.
 6. **Complete** publishes the summary and optional merge verdict only after
-   finding verification succeeds.
-7. **Verify completion** reads back the completed review, including its summary
-   body. The optional merge verdict is sent during completion but is not
-   separately read back.
+   finding verification succeeds. Azure DevOps records an approving vote as a
+   separate journaled effect before the summary.
+7. **Verify completion** reads back the completed review, its summary and
+   findings. GitHub verification checks the expected submitted review state.
+   For an Azure DevOps approval, readback checks the reviewer identity,
+   approving vote and required status against the recorded approval receipt.
 8. **Reopen follow-ups** returns replied-to threads that were not active in the
    original capture to an unresolved state.
 
@@ -1134,7 +1145,12 @@ no draft review, so findings become visible individually and the summary is the
 completion marker. These strategies differ at the adapter boundary while
 sharing the same plan, preflight, journal, and verification model.
 
-Before casting an Azure DevOps approval vote, the adapter reads the reviewer
+On Azure DevOps, the journal records finding writes and their receipts
+sequentially. Readback verifies each actual comment and the relative order of
+comments within the same thread. Independent threads do not provide a
+review-scoped global comment order, so readback does not establish one.
+
+Before casting an Azure DevOps approval vote, the provider operation reads the reviewer
 collection and locates the running account using the identity matching shared
 with registration. The single-reviewer `PUT` explicitly carries the entry's
 `isRequired` value alongside the vote, because omission makes the reviewer
@@ -1142,8 +1158,8 @@ optional. An absent entry uses the optional default.
 
 Thread reopening is follow-up state rather than proof that findings were
 published. A run whose findings verify but whose thread-state cleanup fails is
-reported as published with outstanding follow-up, preventing a retry from
-duplicating the review.
+reported as published with outstanding follow-up. The command emits its result
+and exits nonzero; the caller must not retry and duplicate the review.
 
 Markdown delivery terminates after deterministic rendering and local
 persistence. With no remote state to reconcile, it needs no publication journal,

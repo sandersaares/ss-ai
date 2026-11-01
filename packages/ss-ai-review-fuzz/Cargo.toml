@@ -22,6 +22,7 @@ libfuzzer-sys = { workspace = true, features = ["link_libfuzzer"] }
 ohno = { workspace = true }
 serde_json = { workspace = true }
 ss-ai-review = { workspace = true }
+ss-ai-runtime = { workspace = true }
 
 [[bin]]
 name = "provider_capture"
@@ -33,6 +34,13 @@ bench = false
 [[bin]]
 name = "overview_validator"
 path = "fuzz_targets/overview_validator.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "final_review"
+path = "fuzz_targets/final_review.rs"
 test = false
 doc = false
 bench = false

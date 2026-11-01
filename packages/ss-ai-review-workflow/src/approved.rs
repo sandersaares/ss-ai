@@ -216,32 +216,21 @@ pub fn check_approved_request_path(path: &Path, clock: &dyn Clock) -> Result<(),
 }
 
 /// Applies the same freshness rules to file reads and already-read snapshots.
-fn check_approved_value(document: &Value, context: Option<&Value>) -> Result<(), AppError> {
-    let object = document
-        .as_object()
-        .ok_or_else(|| invalid("Invalid approved set"))?;
-    let fields = [
-        "schemaVersion",
-        "target",
-        "reviewedSourceCommit",
-        "reviewedMergeBaseCommit",
-        "reviewedContextHash",
-        "findings",
-    ];
-    if object.len() != fields.len()
-        || fields.iter().any(|field| !object.contains_key(*field))
-        || document.get("schemaVersion").and_then(Value::as_u64) != Some(2)
-    {
-        return Err(invalid("Invalid approved set schema"));
-    }
-    validate_artifact(
-        &json!({"schemaVersion": 1, "kind": "consolidated", "findings": array(document, "findings")?}),
-    )?;
+pub(crate) fn check_approved_value(
+    document: &Value,
+    context: Option<&Value>,
+) -> Result<(), AppError> {
+    check_approved_schema(document)?;
     match context {
         None => {
-            if fields[1..5]
-                .iter()
-                .any(|field| !document.get(*field).is_some_and(Value::is_null))
+            if [
+                "target",
+                "reviewedSourceCommit",
+                "reviewedMergeBaseCommit",
+                "reviewedContextHash",
+            ]
+            .iter()
+            .any(|field| !document.get(*field).is_some_and(Value::is_null))
             {
                 return Err(invalid("Capture-bound approved set requires its capture"));
             }
@@ -269,8 +258,33 @@ fn check_approved_value(document: &Value, context: Option<&Value>) -> Result<(),
     Ok(())
 }
 
+/// Checks the approved artifact independently of its capture binding.
+pub(crate) fn check_approved_schema(document: &Value) -> Result<(), AppError> {
+    let object = document
+        .as_object()
+        .ok_or_else(|| invalid("Invalid approved set"))?;
+    let fields = [
+        "schemaVersion",
+        "target",
+        "reviewedSourceCommit",
+        "reviewedMergeBaseCommit",
+        "reviewedContextHash",
+        "findings",
+    ];
+    if object.len() != fields.len()
+        || fields.iter().any(|field| !object.contains_key(*field))
+        || document.get("schemaVersion").and_then(Value::as_u64) != Some(2)
+    {
+        return Err(invalid("Invalid approved set schema"));
+    }
+    validate_artifact(
+        &json!({"schemaVersion": 1, "kind": "consolidated", "findings": array(document, "findings")?}),
+    )?;
+    Ok(())
+}
+
 /// Confirms a follow-up addresses the opening comment of a reply-capable thread.
-fn check_follow_up(context: &Value, finding: &Value) -> Result<(), AppError> {
+pub(crate) fn check_follow_up(context: &Value, finding: &Value) -> Result<(), AppError> {
     let Some(follow_up) = finding.get("followUp").filter(|value| !value.is_null()) else {
         return Ok(());
     };
@@ -304,7 +318,7 @@ fn check_follow_up(context: &Value, finding: &Value) -> Result<(), AppError> {
 }
 
 /// Provider identifiers may be strings or integral Azure identifiers.
-fn identifier_matches(value: Option<&Value>, expected: &str) -> bool {
+pub(crate) fn identifier_matches(value: Option<&Value>, expected: &str) -> bool {
     match value {
         Some(Value::String(value)) => value == expected,
         Some(Value::Number(value)) if value.as_i64().is_some() || value.as_u64().is_some() => {
