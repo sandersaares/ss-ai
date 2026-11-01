@@ -137,6 +137,9 @@ Sharing excerpt text never merges its referencing threads.
 
 Workers record typed unit notes with observations, interfaces/invariants,
 interactions, concerns, and exact references. Notes are not approval judgments.
+Notes may cite binding metadata alongside exact evidence, but bindings cannot
+replace the exact unit or discussion text. Every cited binding requires a
+complete read and remains bound to the immutable snapshot.
 Each exact changed-path record still needs a single final judgment after its
 aggregator reads all unit notes and relevant exact source. The discussion
 aggregate covers every discussion note, including original bodies and unique

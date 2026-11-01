@@ -472,6 +472,10 @@ impl Assessment {
         if note.evidence.iter().any(|reference| {
             reference != "policy"
                 && !self.raw_reference(reference)
+                // Bindings supplement exact source without becoming raw evidence.
+                // The dependency reader validates their identity and complete delivery;
+                // the unit or discussion requirements below still demand exact text.
+                && !reference.starts_with("binding:")
                 && !(id == "discussion" && reference.starts_with("note:"))
         }) {
             return Err(error::MissingExactEvidence::classified());

@@ -67,6 +67,11 @@ context for policy, exact follow-up evidence, and reasoning.
 
 `checkpoint.rs` owns notes, fixed-level discussion aggregation, explicit concern
 and interaction records, evidence-backed dispositions, and dependency digests.
+Note validation permits binding references as supplemental citations because
+workers must read those records to interpret exact fragments. It keeps bindings
+out of raw-evidence classification so metadata alone cannot satisfy semantic
+completion. The shared dependency reader validates each cited binding's
+existence, complete delivery, and digest at both recording and reload boundaries.
 It does not own approval authority or provider effects. Replacements invalidate
 transitive aggregates instead of preserving conclusions derived from obsolete
 notes. The cumulative judgment binds all final change judgments, discussion
