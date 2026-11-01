@@ -1230,8 +1230,10 @@ acceptable. Those responsibilities remain in the shared model.
 
 ## Initial overview publication
 
-`Publish-ContentOverview.ps1` freezes the preparation overview in session state
-and uses platform adapters separate from review submission. `overview-snapshot.json`
+The native overview publication operation freezes the preparation overview in
+session state and uses platform adapters separate from review submission.
+`Publish-ContentOverview.ps1` supplies its inputs to that operation.
+`overview-snapshot.json`
 binds its immutable Markdown to the PR, inspected commits, run identifier, and
 content hash. A separately frozen HTML artifact and its ZIP container serve ADO. The mutable local
 overview and audit documents may subsequently describe newer content.
@@ -1241,11 +1243,13 @@ write and retains returned IDs before verification. Upload is verified before th
 linking comment is created. Known successful attempts are reused; an attempt
 that wrote or may have written remote state is not automatically replayed.
 The initial comment is not edited and later overview generation does not publish.
-`Publish-ContentOverview.ps1` passes its optional `-CommentPrefix` through the shared
-publication function to `New-OverviewComment`. The builder uses the verified artifact
-URL on either platform and prepends a nonempty prefix verbatim, separated from the
-linked sentence by a blank line. The default prefix is empty so callers explicitly
-select attribution according to their active instructions rather than a hard-coded policy.
+`Publish-ContentOverview.ps1` writes its optional `-CommentPrefix` to a private
+UTF-8 file and passes its path to the native operation. The native transaction
+uses the verified artifact URL on either platform and prepends a nonempty prefix
+verbatim, separated from the linked sentence by a blank line. The default prefix
+is empty so callers explicitly select attribution according to their active
+instructions rather than a hard-coded policy. A failure to remove the private
+file is reported separately without changing the publication outcome.
 Creation and verification use the same complete comment body. Resuming a successful
 publication reuses its receipt even if the caller supplies a different prefix.
 

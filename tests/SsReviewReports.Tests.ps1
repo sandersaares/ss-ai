@@ -1,3 +1,9 @@
+#Requires -Version 7.6
+
+Set-StrictMode -Version Latest
+$ErrorActionPreference = 'Stop'
+$PSNativeCommandUseErrorActionPreference = $true
+
 BeforeAll {
     $script:SkillRoot = Join-Path (Split-Path -Parent $PSScriptRoot) 'skills\ss-review'
     $lib = Join-Path $script:SkillRoot 'scripts\lib'
@@ -236,6 +242,7 @@ Describe 'Initial overview snapshots and best-effort publication' {
                     $script:CommentBody = $payload['body']
                     return @{ id = 'comment'; url = 'https://example.invalid/comment' }
                 }
+
                 'verifyComment' { $script:VerifiedCommentBody = $payload['body']; return }
             }
         }
@@ -517,6 +524,84 @@ Describe 'Initial overview snapshots and best-effort publication' {
         } finally { $zip.Dispose() }
     }
 
+    It 'reuses a <Layout> HTML manifest and verifies its recorded artifact paths' -ForEach @(
+        @{ Layout = 'legacy'; Generation = $false; Retry = $false }
+        @{ Layout = 'native generation'; Generation = $true; Retry = $false }
+        @{ Layout = 'native retry'; Generation = $true; Retry = $true }
+    ) {
+        $script:Context = New-TestOverviewContext -Platform azureDevOps
+        $snapshot = New-OverviewSnapshot -Context $script:Context -OverviewPath $script:Source `
+            -OutputDirectory $script:Root -SkillRoot $script:SkillRoot
+        $publication = Join-Path $script:Root 'overview-publication'
+        $directory = if ($Generation) { Join-Path $publication $snapshot.runId } else { $publication }
+        $artifactDirectory = if ($Retry) { Join-Path $directory '.overview-attempt-test' } else { $directory }
+        $htmlPath = Join-Path $artifactDirectory 'report.html'
+        $archivePath = Join-Path $artifactDirectory 'report.zip'
+        Write-PullRequestOutputFile -Path $htmlPath -Content '<html>Frozen</html>'
+        $archive = Write-OverviewArchive -HtmlPath $htmlPath -ArchivePath $archivePath
+        $manifest = @{
+            sourceHash = $snapshot.markdownHash
+            htmlPath = $htmlPath
+            htmlHash = Get-ReviewReportHash -Bytes (Read-PullRequestFileBytes -Path $htmlPath)
+            archiveHash = $archive.archiveHash
+        }
+        if ($Generation) { $manifest['archivePath'] = $archivePath }
+        Write-PullRequestOutputFileAtomically -Path (Join-Path $directory 'html.json') -Content (ConvertTo-JsonText -Value $manifest)
+        $result = Invoke-InitialOverviewPublication -Context $script:Context -OverviewPath $script:Source `
+            -OutputDirectory $script:Root -SkillRoot $script:SkillRoot -InvokeRemote $script:Remote `
+            -RenderHtml { throw 'Existing HTML must not be rendered again.' }
+        $result.status | Should -BeExactly 'succeeded'
+        $result.snapshot.htmlPath | Should -BeExactly $htmlPath
+        $result.snapshot.archivePath | Should -BeExactly $archivePath
+    }
+
+    It 'rejects <Problem> in a native HTML manifest before upload' -ForEach @(
+        @{ Problem = 'modified HTML'; Field = 'html'; Escape = $false }
+        @{ Problem = 'modified archive'; Field = 'archive'; Escape = $false }
+        @{ Problem = 'HTML outside the publication directory'; Field = 'html'; Escape = $true }
+        @{ Problem = 'archive outside the publication directory'; Field = 'archive'; Escape = $true }
+    ) {
+        $script:Context = New-TestOverviewContext -Platform azureDevOps
+        $snapshot = New-OverviewSnapshot -Context $script:Context -OverviewPath $script:Source `
+            -OutputDirectory $script:Root -SkillRoot $script:SkillRoot
+        $directory = Join-Path (Join-Path $script:Root 'overview-publication') $snapshot.runId
+        $htmlPath = Join-Path $directory 'report.html'
+        $archivePath = Join-Path $directory 'report.zip'
+        Write-PullRequestOutputFile -Path $htmlPath -Content '<html>Frozen</html>'
+        $archive = Write-OverviewArchive -HtmlPath $htmlPath -ArchivePath $archivePath
+        $manifest = @{
+            sourceHash = $snapshot.markdownHash; htmlPath = $htmlPath; archivePath = $archivePath
+            htmlHash = Get-ReviewReportHash -Bytes (Read-PullRequestFileBytes -Path $htmlPath)
+            archiveHash = $archive.archiveHash
+        }
+        if ($Escape) {
+            $manifest["${Field}Path"] = $script:Source
+        } elseif ($Field -eq 'html') {
+            Write-PullRequestOutputFile -Path $htmlPath -Content 'modified'
+        } else {
+            Write-PullRequestOutputFile -Path $archivePath -Content 'modified'
+        }
+        Write-PullRequestOutputFileAtomically -Path (Join-Path $directory 'html.json') -Content (ConvertTo-JsonText -Value $manifest)
+        $result = Invoke-InitialOverviewPublication -Context $script:Context -OverviewPath $script:Source `
+            -OutputDirectory $script:Root -SkillRoot $script:SkillRoot -InvokeRemote $script:Remote -RenderHtml $script:Render
+        $result.status | Should -BeExactly 'failed'
+        $script:Calls | Should -Not -Contain upload
+    }
+
+    It 'keeps a legacy manifest when rendering a different native snapshot' {
+        $script:Context = New-TestOverviewContext -Platform azureDevOps
+        $snapshot = New-OverviewSnapshot -Context $script:Context -OverviewPath $script:Source `
+            -OutputDirectory $script:Root -SkillRoot $script:SkillRoot
+        $publication = Join-Path $script:Root 'overview-publication'
+        $legacy = Join-Path $publication 'html.json'
+        Write-PullRequestOutputFileAtomically -Path $legacy -Content '{"sourceHash":"old"}'
+        $result = Invoke-InitialOverviewPublication -Context $script:Context -OverviewPath $script:Source `
+            -OutputDirectory $script:Root -SkillRoot $script:SkillRoot -InvokeRemote $script:Remote -RenderHtml $script:Render
+        $result.status | Should -BeExactly 'succeeded'
+        $result.snapshot.htmlPath | Should -BeExactly (Join-Path (Join-Path $publication $snapshot.runId) 'report.html')
+        (Read-PullRequestFileText -Path $legacy) | Should -BeExactly '{"sourceHash":"old"}'
+    }
+
     It 'skips a closed PR without uploading or asking for a decision' {
         $script:IsOpen = $false
         $r = Invoke-InitialOverviewPublication -Context $script:Context -OverviewPath $script:Source `
@@ -544,5 +629,88 @@ Describe 'Initial overview snapshots and best-effort publication' {
         $r.status | Should -Be journalFailure
         $r.error | Should -Match 'Journal disk failure'
         $script:Calls | Should -Not -Contain upload
+    }
+}
+
+Describe 'Overview manifest in-memory validation' {
+    BeforeEach {
+        $script:InMemoryHtml = [Text.Encoding]::UTF8.GetBytes('<html>Frozen</html>')
+        $script:InMemoryArchive = [Text.Encoding]::UTF8.GetBytes('archive bytes')
+        $script:InMemoryRoot = Join-Path $PSScriptRoot 'no-output-files'
+        $script:InMemoryContext = New-TestOverviewContext -Platform azureDevOps
+        $script:InMemorySnapshot = @{
+            runId = 'a' * 32; markdownHash = 'b' * 64
+            target = $script:InMemoryContext.target
+        }
+
+        $script:InMemoryManifest = @{
+            sourceHash = $script:InMemorySnapshot.markdownHash
+            htmlPath = Join-Path $script:InMemoryRoot 'overview-publication/a/.overview-attempt-1/report.html'
+            archivePath = Join-Path $script:InMemoryRoot 'overview-publication/a/.overview-attempt-1/report.zip'
+            htmlHash = Get-ReviewReportHash -Bytes $script:InMemoryHtml
+            archiveHash = Get-ReviewReportHash -Bytes $script:InMemoryArchive
+        }
+        $script:InMemoryCalls = [Collections.Generic.List[string]]::new()
+        Mock Open-PullRequestFileLock { [IO.MemoryStream]::new() }
+        Mock New-OverviewSnapshot { $script:InMemorySnapshot }
+        Mock Get-OverviewHtmlManifest { @{ path = 'manifest'; html = $script:InMemoryManifest } }
+        Mock Resolve-OverviewArtifactPath { param($Path, $PublicationDirectory) $Path }
+        Mock Write-PullRequestOutputFileAtomically {}
+        Mock Read-PullRequestFileBytes {
+            param($Path)
+            if ($Path -ceq $script:InMemoryManifest.htmlPath) { return ,$script:InMemoryHtml }
+            if ($Path -ceq $script:InMemoryManifest.archivePath) { return ,$script:InMemoryArchive }
+            throw 'Unexpected artifact read'
+        }
+        $script:InMemoryRemote = {
+            param($operation, $target, $snapshot, $payload)
+            $script:InMemoryCalls.Add($operation)
+            switch ($operation) {
+                'isOpen' { return $true }
+                'upload' { return @{ id = 'artifact'; url = 'https://example.invalid/report' } }
+                'verifyArtifact' { return $payload }
+                'comment' { return @{ id = 'comment' } }
+                'verifyComment' { return }
+            }
+        }
+    }
+
+    It 'uses the native retry paths and retains both hash checks' {
+        $result = Invoke-InitialOverviewPublication -Context $script:InMemoryContext -OverviewPath 'unused' `
+            -OutputDirectory $script:InMemoryRoot -SkillRoot $script:SkillRoot -InvokeRemote $script:InMemoryRemote `
+            -RenderHtml { throw 'Unexpected rendering' }
+        $result.status | Should -BeExactly 'succeeded'
+        $result.snapshot.htmlPath | Should -BeExactly $script:InMemoryManifest.htmlPath
+        $result.snapshot.archivePath | Should -BeExactly $script:InMemoryManifest.archivePath
+        $script:InMemoryManifest.htmlHash = '0' * 64
+        $script:InMemoryCalls.Clear()
+        $result = Invoke-InitialOverviewPublication -Context $script:InMemoryContext -OverviewPath 'unused' `
+            -OutputDirectory $script:InMemoryRoot -SkillRoot $script:SkillRoot -InvokeRemote $script:InMemoryRemote `
+            -RenderHtml { throw 'Unexpected rendering' }
+        $result.status | Should -BeExactly 'failed'
+        $script:InMemoryCalls | Should -Not -Contain upload
+        $script:InMemoryManifest.htmlHash = Get-ReviewReportHash -Bytes $script:InMemoryHtml
+        $script:InMemoryManifest.archiveHash = '0' * 64
+        $script:InMemoryCalls.Clear()
+        $result = Invoke-InitialOverviewPublication -Context $script:InMemoryContext -OverviewPath 'unused' `
+            -OutputDirectory $script:InMemoryRoot -SkillRoot $script:SkillRoot -InvokeRemote $script:InMemoryRemote `
+            -RenderHtml { throw 'Unexpected rendering' }
+        $result.status | Should -BeExactly 'failed'
+        $script:InMemoryCalls | Should -Not -Contain upload
+    }
+}
+
+Describe 'Overview artifact path validation' {
+    It 'accepts a path below the publication root and rejects a sibling or traversal' {
+        $inside = Join-Path $PSScriptRoot 'SsReviewReports.Tests.ps1'
+        Resolve-OverviewArtifactPath -Path $inside -PublicationDirectory $PSScriptRoot |
+            Should -BeExactly $inside
+        $newArchive = Join-Path $PSScriptRoot 'overview-artifact-not-created.zip'
+        Resolve-OverviewArtifactPath -Path $newArchive -PublicationDirectory $PSScriptRoot |
+            Should -BeExactly $newArchive
+        $outside = Join-Path (Split-Path -Parent $PSScriptRoot) 'DEVELOPMENT.md'
+        { Resolve-OverviewArtifactPath -Path $outside -PublicationDirectory $PSScriptRoot } | Should -Throw '*inside*'
+        $traversal = Join-Path $PSScriptRoot '../DEVELOPMENT.md'
+        { Resolve-OverviewArtifactPath -Path $traversal -PublicationDirectory $PSScriptRoot } | Should -Throw '*inside*'
     }
 }

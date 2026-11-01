@@ -20,7 +20,7 @@ use crate::json::{array, field};
 use crate::target::{Platform, Target, escape};
 use crate::{Clock, Process};
 
-/// Provides an injectable UTF-8 HTTP boundary for Azure DevOps.
+/// Provides an injectable HTTP boundary for Azure DevOps.
 ///
 /// Transport supplies the OAuth token and decides retry policy. Implementations
 /// execute a single request and retain status, headers, and bytes for that
@@ -37,6 +37,20 @@ pub trait Http {
         token: &str,
         body: Option<&[u8]>,
     ) -> Result<HttpResponse, AppError>;
+
+    /// Sends attachment bytes without interpreting them as JSON.
+    ///
+    /// Implementations that do not support binary requests refuse them rather
+    /// than accidentally labeling the payload as JSON.
+    fn send_binary(
+        &self,
+        _method: &str,
+        _url: &str,
+        _token: &str,
+        _body: Option<&[u8]>,
+    ) -> Result<HttpResponse, AppError> {
+        Err(fail("service", "Binary HTTP requests are not supported"))
+    }
 }
 
 /// Retains HTTP status and continuation evidence separately from response bytes.
@@ -89,28 +103,46 @@ impl NativeHttp {
                 .build()?,
         })
     }
-}
 
-impl Http for NativeHttp {
-    /// Sends JSON bytes directly so the Azure CLI cannot alter service Unicode.
-    fn send(
+    /// Builds both request forms through the same credential and client boundary.
+    fn request(
         &self,
         method: &str,
         url: &str,
         token: &str,
         body: Option<&[u8]>,
-    ) -> Result<HttpResponse, AppError> {
+        binary: bool,
+    ) -> Result<reqwest::blocking::Request, AppError> {
         let mut request = self
             .client
             .request(Method::from_bytes(method.as_bytes())?, url)
             .bearer_auth(token)
-            .header("Accept", "application/json");
+            .header(
+                "Accept",
+                if binary && method == "GET" {
+                    "application/octet-stream"
+                } else {
+                    "application/json"
+                },
+            );
         if let Some(body) = body {
             request = request
-                .header("Content-Type", "application/json; charset=utf-8")
+                .header(
+                    "Content-Type",
+                    if binary {
+                        "application/octet-stream"
+                    } else {
+                        "application/json; charset=utf-8"
+                    },
+                )
                 .body(body.to_owned());
         }
-        let response = request.send()?;
+        Ok(request.build()?)
+    }
+
+    /// Preserves status and headers before the transport classifies a reply.
+    fn execute(&self, request: reqwest::blocking::Request) -> Result<HttpResponse, AppError> {
+        let response = self.client.execute(request)?;
         let status = response.status().as_u16();
         let headers = response
             .headers()
@@ -122,6 +154,29 @@ impl Http for NativeHttp {
             headers,
             response.bytes()?.to_vec(),
         ))
+    }
+}
+
+impl Http for NativeHttp {
+    /// Sends JSON bytes directly so the Azure CLI cannot alter service Unicode.
+    fn send(
+        &self,
+        method: &str,
+        url: &str,
+        token: &str,
+        body: Option<&[u8]>,
+    ) -> Result<HttpResponse, AppError> {
+        self.execute(self.request(method, url, token, body, false)?)
+    }
+
+    fn send_binary(
+        &self,
+        method: &str,
+        url: &str,
+        token: &str,
+        body: Option<&[u8]>,
+    ) -> Result<HttpResponse, AppError> {
+        self.execute(self.request(method, url, token, body, true)?)
     }
 }
 
@@ -169,6 +224,16 @@ impl<'a> Transport<'a> {
         }
     }
 
+    /// Shares the invocation's injected process boundary with provider operations.
+    pub(crate) fn process(&self) -> &dyn Process {
+        self.process
+    }
+
+    /// Exposes the configured collection for provider route validation.
+    pub(crate) fn ado_collection(&self) -> Option<&str> {
+        self.collection.as_deref()
+    }
+
     /// Makes an ordinary resource request, refusing unexpected ADO truncation.
     pub(crate) fn request(
         &mut self,
@@ -202,12 +267,39 @@ impl<'a> Transport<'a> {
         if self.platform != Platform::GitHub {
             return Err(fail("invalidInput", "A GitHub transport is required"));
         }
-        self.github_optional(path, "GET", None, false, true, true)
+        self.github_optional(
+            path,
+            "GET",
+            None,
+            false,
+            true,
+            GithubResponseMode::OptionalNotFound,
+        )
     }
 
     /// Renewal writes cannot retry even an explicit rate refusal without a new freshness check.
     pub(crate) fn github_write_once(&self, path: &str, body: &Value) -> Result<Value, AppError> {
         self.github(path, "POST", Some(body), false, false)
+    }
+
+    /// Distinguishes an explicit HTTP 429 from other single-attempt failures.
+    ///
+    /// Only a failed command with an included HTTP status line establishes the
+    /// `explicitRateLimited` classification; diagnostic prose is not proof.
+    pub(crate) fn github_write_once_with_refusal_evidence(
+        &self,
+        path: &str,
+        body: &Value,
+    ) -> Result<Value, AppError> {
+        self.github_optional(
+            path,
+            "POST",
+            Some(body),
+            false,
+            false,
+            GithubResponseMode::ExplicitRefusal,
+        )?
+        .ok_or_else(|| fail("service", "Unexpected absent GitHub response"))
     }
 
     /// A renewal must recheck freshness rather than replay a refused ADO write.
@@ -297,8 +389,15 @@ impl<'a> Transport<'a> {
         paginated: bool,
         retry_refusals: bool,
     ) -> Result<Value, AppError> {
-        self.github_optional(path, method, body, paginated, retry_refusals, false)?
-            .ok_or_else(|| fail("service", "Unexpected absent GitHub response"))
+        self.github_optional(
+            path,
+            method,
+            body,
+            paginated,
+            retry_refusals,
+            GithubResponseMode::Standard,
+        )?
+        .ok_or_else(|| fail("service", "Unexpected absent GitHub response"))
     }
 
     /// Retains explicit HTTP absence separately from other request failures.
@@ -309,7 +408,7 @@ impl<'a> Transport<'a> {
         body: Option<&Value>,
         paginated: bool,
         retry_refusals: bool,
-        allow_not_found: bool,
+        response_mode: GithubResponseMode,
     ) -> Result<Option<Value>, AppError> {
         let mut arguments = vec![
             "api".to_owned(),
@@ -350,8 +449,20 @@ impl<'a> Transport<'a> {
             let (headers, payload) = split_headers(&stdout);
             // Only a failed request with an actual status line can establish
             // absence. Error prose and JSON bodies are not status evidence.
-            if allow_not_found && !output.success && response_status(headers) == Some(404) {
+            if matches!(response_mode, GithubResponseMode::OptionalNotFound)
+                && !output.success
+                && response_status(headers) == Some(404)
+            {
                 return Ok(None);
+            }
+            if matches!(response_mode, GithubResponseMode::ExplicitRefusal)
+                && !output.success
+                && response_status(headers) == Some(429)
+            {
+                return Err(fail(
+                    "explicitRateLimited",
+                    "GitHub refused the write for rate limiting; no write was retried",
+                ));
             }
             let stderr = String::from_utf8_lossy(&output.stderr);
             let error_text = format!("{stderr}\n{payload}");
@@ -508,6 +619,105 @@ impl<'a> Transport<'a> {
         version: &str,
         retry_refusals: bool,
     ) -> Result<Page, AppError> {
+        let body = body.map(serde_json::to_vec).transpose()?;
+        let response = self.ado_response(
+            path,
+            method,
+            body.as_deref(),
+            query,
+            version,
+            AdoRequestKind::Json { retry_refusals },
+        )?;
+        let read = method == "GET";
+        let text = String::from_utf8(response.body).map_err(|error| {
+            crate::error::caused_by(
+                if read { "service" } else { "ambiguousWrite" },
+                "Azure DevOps output is not UTF-8".to_owned(),
+                error,
+            )
+        })?;
+        if response
+            .headers
+            .get("content-type")
+            .is_some_and(|value| value.to_ascii_lowercase().contains("text/html"))
+            || text.trim_start().starts_with('<')
+        {
+            return Err(fail(
+                if read {
+                    "authentication"
+                } else {
+                    "ambiguousWrite"
+                },
+                "Azure DevOps returned a sign-in document; authenticate with the collection's tenant",
+            ));
+        }
+        let payload = if text.trim().is_empty() && method == "DELETE" {
+            Value::Null
+        } else {
+            serde_json::from_str(&text).map_err(|error| {
+                crate::error::caused_by(
+                    if read { "service" } else { "ambiguousWrite" },
+                    "Azure DevOps returned invalid JSON".to_owned(),
+                    error,
+                )
+            })?
+        };
+        let continuation = response
+            .headers
+            .get("x-ms-continuationtoken")
+            .filter(|value| !value.trim().is_empty())
+            .cloned();
+        Ok(Page {
+            payload,
+            continuation,
+        })
+    }
+
+    /// Uploads or reads attachment bytes while retaining response evidence.
+    ///
+    /// Paths are relative to the configured collection. The caller interprets
+    /// successful upload metadata and downloaded bytes as appropriate.
+    pub(crate) fn ado_binary(
+        &mut self,
+        path: &str,
+        method: &str,
+        body: Option<&[u8]>,
+        query: &[(&str, String)],
+        version: &str,
+    ) -> Result<HttpResponse, AppError> {
+        if self.platform != Platform::AzureDevOps
+            || !matches!((method, body), ("GET", None) | ("POST", Some(_)))
+        {
+            return Err(fail("invalidInput", "Invalid Azure attachment request"));
+        }
+        // Publication records intent before upload and never replays a write.
+        let response =
+            self.ado_response(path, method, body, query, version, AdoRequestKind::Binary)?;
+        // Attachment reads are verified by the caller's frozen content hash.
+        if method == "POST"
+            && response
+                .headers
+                .get("content-type")
+                .is_some_and(|value| value.to_ascii_lowercase().contains("text/html"))
+        {
+            return Err(fail(
+                "ambiguousWrite",
+                "Azure DevOps returned a sign-in document; authenticate with the collection's tenant",
+            ));
+        }
+        Ok(response)
+    }
+
+    /// Applies the same authentication and replay decisions to all ADO bytes.
+    fn ado_response(
+        &mut self,
+        path: &str,
+        method: &str,
+        body: Option<&[u8]>,
+        query: &[(&str, String)],
+        version: &str,
+        kind: AdoRequestKind,
+    ) -> Result<HttpResponse, AppError> {
         let collection = self
             .collection
             .as_deref()
@@ -525,14 +735,22 @@ impl<'a> Transport<'a> {
             path.trim_start_matches('/'),
             parts.join("&")
         );
-        let body = body.map(serde_json::to_vec).transpose()?;
         let read = method == "GET";
+        let binary = matches!(kind, AdoRequestKind::Binary);
+        let retry_refusals = match kind {
+            AdoRequestKind::Json { retry_refusals } => retry_refusals,
+            AdoRequestKind::Binary => read,
+        };
         let mut transient_attempt = 0_u32;
         let mut rate_attempt = 0_u32;
         let mut refreshed = false;
         loop {
             let token = self.access_token()?.to_owned();
-            let response = self.http.send(method, &url, &token, body.as_deref());
+            let response = if binary {
+                self.http.send_binary(method, &url, &token, body)
+            } else {
+                self.http.send(method, &url, &token, body)
+            };
             let response = match response {
                 Ok(response) => response,
                 Err(error) => {
@@ -582,14 +800,18 @@ impl<'a> Transport<'a> {
                 transient_attempt = transient_attempt.saturating_add(1);
                 continue;
             }
-            let text = String::from_utf8(response.body).map_err(|error| {
-                crate::error::caused_by(
-                    if read { "service" } else { "ambiguousWrite" },
-                    "Azure DevOps output is not UTF-8".to_owned(),
-                    error,
-                )
-            })?;
             if !(200..300).contains(&response.status) {
+                let text = if binary {
+                    String::from_utf8_lossy(&response.body).into_owned()
+                } else {
+                    String::from_utf8(response.body).map_err(|error| {
+                        crate::error::caused_by(
+                            if read { "service" } else { "ambiguousWrite" },
+                            "Azure DevOps output is not UTF-8".to_owned(),
+                            error,
+                        )
+                    })?
+                };
                 let kind = match response.status {
                     401 => "authentication",
                     400..500 => "permissionDenied",
@@ -605,43 +827,29 @@ impl<'a> Transport<'a> {
                     ),
                 ));
             }
-            if response
-                .headers
-                .get("content-type")
-                .is_some_and(|value| value.to_ascii_lowercase().contains("text/html"))
-                || text.trim_start().starts_with('<')
-            {
-                return Err(fail(
-                    if read {
-                        "authentication"
-                    } else {
-                        "ambiguousWrite"
-                    },
-                    "Azure DevOps returned a sign-in document; authenticate with the collection's tenant",
-                ));
-            }
-            let payload = if text.trim().is_empty() && method == "DELETE" {
-                Value::Null
-            } else {
-                serde_json::from_str(&text).map_err(|error| {
-                    crate::error::caused_by(
-                        if read { "service" } else { "ambiguousWrite" },
-                        "Azure DevOps returned invalid JSON".to_owned(),
-                        error,
-                    )
-                })?
-            };
-            let continuation = response
-                .headers
-                .get("x-ms-continuationtoken")
-                .filter(|value| !value.trim().is_empty())
-                .cloned();
-            return Ok(Page {
-                payload,
-                continuation,
-            });
+            return Ok(response);
         }
     }
+}
+
+/// Selects which additional response evidence a GitHub caller requires.
+#[derive(Clone, Copy)]
+enum GithubResponseMode {
+    /// Preserve the ordinary request classification.
+    Standard,
+    /// Recognize an explicit not-found response for optional reads.
+    OptionalNotFound,
+    /// Recognize an explicit rate refusal for a single-attempt write.
+    ExplicitRefusal,
+}
+
+/// Selects decoding and refusal replay without changing the existing JSON policy.
+#[derive(Clone, Copy)]
+enum AdoRequestKind {
+    /// JSON requests select whether a refusal may be replayed.
+    Json { retry_refusals: bool },
+    /// Attachment reads may retry; uploads are single-attempt writes.
+    Binary,
 }
 
 /// ADO paging callers explicitly consume continuation; others reject truncation.
@@ -868,4 +1076,357 @@ fn diagnostic(value: &str) -> String {
     }
     // Keep useful error context without echoing an arbitrarily large response.
     value.chars().take(2000).collect()
+}
+
+#[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
+mod tests {
+    #![allow(
+        clippy::indexing_slicing,
+        clippy::arithmetic_side_effects,
+        reason = "Tests use bounded fixtures with explicit expected shapes"
+    )]
+    use std::cell::{Cell, RefCell};
+    use std::collections::{BTreeMap, VecDeque};
+    use std::io;
+    use std::time::Duration;
+
+    use jiff::Timestamp;
+    use ohno::AppError;
+    use serde_json::json;
+
+    use super::{Http, HttpResponse, NativeHttp, Transport};
+    use crate::error::fail;
+    use crate::target::Target;
+    use crate::{Clock, Process, ProcessOutput, classification};
+
+    /// Supplies deterministic token acquisition and scripted HTTP responses.
+    struct Fixture {
+        replies: RefCell<VecDeque<Result<HttpResponse, AppError>>>,
+        calls: RefCell<Vec<(String, String, Vec<u8>)>>,
+        tokens: Cell<usize>,
+        waits: Cell<usize>,
+    }
+
+    impl Fixture {
+        fn new(replies: Vec<Result<HttpResponse, AppError>>) -> Self {
+            Self {
+                replies: RefCell::new(replies.into()),
+                calls: RefCell::new(Vec::new()),
+                tokens: Cell::new(0),
+                waits: Cell::new(0),
+            }
+        }
+    }
+
+    impl Process for Fixture {
+        fn execute(&self, program: &str, _: &[String], _: &[u8]) -> io::Result<ProcessOutput> {
+            assert_eq!(program, "az");
+            self.tokens.set(self.tokens.get() + 1);
+            Ok(ProcessOutput::new(true, b"fixture-token".to_vec(), vec![]))
+        }
+    }
+
+    impl Clock for Fixture {
+        fn now(&self) -> Timestamp {
+            Timestamp::UNIX_EPOCH
+        }
+
+        fn wait(&self, _: Duration) -> Result<(), AppError> {
+            // An unexpected replay must fail immediately rather than loop forever.
+            assert!(self.waits.get() < 5);
+            self.waits.set(self.waits.get() + 1);
+            Ok(())
+        }
+    }
+
+    impl Http for Fixture {
+        fn send(
+            &self,
+            method: &str,
+            url: &str,
+            token: &str,
+            body: Option<&[u8]>,
+        ) -> Result<HttpResponse, AppError> {
+            self.send_binary(method, url, token, body)
+        }
+
+        fn send_binary(
+            &self,
+            method: &str,
+            url: &str,
+            token: &str,
+            body: Option<&[u8]>,
+        ) -> Result<HttpResponse, AppError> {
+            assert_eq!(token, "fixture-token");
+            self.calls.borrow_mut().push((
+                method.to_owned(),
+                url.to_owned(),
+                body.unwrap_or_default().to_vec(),
+            ));
+            self.replies
+                .borrow_mut()
+                .pop_front()
+                .expect("unexpected request")
+        }
+    }
+
+    #[allow(
+        clippy::unnecessary_wraps,
+        reason = "Scripted replies contain both HTTP responses and transport errors"
+    )]
+    fn response(status: u16, body: &[u8]) -> Result<HttpResponse, AppError> {
+        Ok(HttpResponse::new(status, BTreeMap::new(), body.to_vec()))
+    }
+
+    fn target() -> Target {
+        Target::repository("https://dev.azure.com/org/project/_git/repo").unwrap()
+    }
+
+    #[test]
+    fn native_requests_preserve_binary_body_and_content_type() {
+        let http = NativeHttp::new().unwrap();
+        let bytes = b"\0\xff<\x80";
+        let request = http
+            .request(
+                "POST",
+                "https://example.test/attachment",
+                "token",
+                Some(bytes),
+                true,
+            )
+            .unwrap();
+        assert_eq!(
+            request.headers()["content-type"],
+            "application/octet-stream"
+        );
+        assert_eq!(request.headers()["accept"], "application/json");
+        assert_eq!(request.body().unwrap().as_bytes().unwrap(), bytes);
+        assert_eq!(request.headers()["authorization"], "Bearer token");
+
+        let json = http
+            .request("POST", "https://example.test/", "token", Some(b"{}"), false)
+            .unwrap();
+        assert_eq!(
+            json.headers()["content-type"],
+            "application/json; charset=utf-8"
+        );
+        assert_eq!(json.headers()["accept"], "application/json");
+        let download = http
+            .request("GET", "https://example.test/", "token", None, true)
+            .unwrap();
+        assert_eq!(download.headers()["accept"], "application/octet-stream");
+        assert!(!download.headers().contains_key("content-type"));
+    }
+
+    #[test]
+    fn binary_upload_and_download_keep_bytes_and_http_evidence() {
+        let bytes = b"<\0\xff\x80";
+        let fixture = Fixture::new(vec![
+            response(201, br#"{"id":"abc"}"#),
+            response(200, bytes),
+        ]);
+        let target = target();
+        let mut transport = Transport::new(&target, Some("tenant"), &fixture, &fixture, &fixture);
+        let upload = transport
+            .ado_binary(
+                "_apis/attachments",
+                "POST",
+                Some(bytes),
+                &[("fileName", "a b".into())],
+                "7.1",
+            )
+            .unwrap();
+        assert_eq!(upload.status, 201);
+        assert_eq!(upload.body, br#"{"id":"abc"}"#);
+        let download = transport
+            .ado_binary("_apis/attachments/abc", "GET", None, &[], "7.1")
+            .unwrap();
+        assert_eq!(download.body, bytes);
+        assert_eq!(fixture.tokens.get(), 1);
+        let calls = fixture.calls.borrow();
+        assert_eq!(calls[0].0, "POST");
+        assert_eq!(
+            calls[0].1,
+            "https://dev.azure.com/org/_apis/attachments?fileName=a%20b&api-version=7.1"
+        );
+        assert_eq!(calls[0].2, bytes);
+        assert_eq!(calls[1].0, "GET");
+        assert!(calls[1].2.is_empty());
+    }
+
+    #[test]
+    fn binary_reads_refresh_and_retry_but_writes_are_not_replayed_when_ambiguous() {
+        let fixture = Fixture::new(vec![
+            response(401, b"expired"),
+            response(429, b"limited"),
+            response(503, b"unavailable"),
+            response(200, b"\xff"),
+            response(503, b"\xff"),
+        ]);
+        let target = target();
+        let mut transport = Transport::new(&target, None, &fixture, &fixture, &fixture);
+        assert_eq!(
+            transport
+                .ado_binary("attachment", "GET", None, &[], "7.1")
+                .unwrap()
+                .body,
+            b"\xff"
+        );
+        assert_eq!(fixture.tokens.get(), 2);
+        assert_eq!(fixture.waits.get(), 2);
+        let error = transport
+            .ado_binary("attachment", "POST", Some(b"data"), &[], "7.1")
+            .unwrap_err();
+        assert_eq!(classification(&error), "ambiguousWrite");
+        assert_eq!(fixture.calls.borrow().len(), 5);
+    }
+
+    #[test]
+    fn binary_errors_and_json_validation_remain_distinct() {
+        let fixture = Fixture::new(vec![
+            response(403, b"\xff fixture-token"),
+            response(302, b"redirect"),
+            Err(fail("service", "connection failed")),
+            response(200, b"\xff"),
+            response(200, b"not-json"),
+        ]);
+        let target = target();
+        let mut transport = Transport::new(&target, None, &fixture, &fixture, &fixture);
+        let error = transport
+            .ado_binary("attachment", "GET", None, &[], "7.1")
+            .unwrap_err();
+        assert_eq!(classification(&error), "permissionDenied");
+        assert!(!error.to_string().contains("fixture-token"));
+        let error = transport
+            .ado_binary("attachment", "GET", None, &[], "7.1")
+            .unwrap_err();
+        assert_eq!(classification(&error), "service");
+        let error = transport
+            .ado_binary("attachment", "POST", Some(b"x"), &[], "7.1")
+            .unwrap_err();
+        assert_eq!(classification(&error), "ambiguousWrite");
+        assert_eq!(
+            classification(&transport.request("resource", "GET", None).unwrap_err()),
+            "service"
+        );
+        assert_eq!(
+            classification(&transport.request("resource", "POST", None).unwrap_err()),
+            "ambiguousWrite"
+        );
+        assert_eq!(fixture.calls.borrow().len(), 5);
+    }
+
+    #[test]
+    fn binary_upload_refusal_is_not_replayed_and_reads_do_not_sniff_html() {
+        let mut headers = BTreeMap::new();
+        headers.insert("content-type".to_owned(), "text/html".to_owned());
+        let fixture = Fixture::new(vec![
+            response(429, b"limited"),
+            Ok(HttpResponse::new(
+                200,
+                headers.clone(),
+                b"<content".to_vec(),
+            )),
+            Ok(HttpResponse::new(200, headers, b"<sign-in".to_vec())),
+        ]);
+        let target = target();
+        let mut transport = Transport::new(&target, None, &fixture, &fixture, &fixture);
+        let error = transport
+            .ado_binary("attachment", "POST", Some(b"data"), &[], "7.1")
+            .unwrap_err();
+        assert_eq!(classification(&error), "rateLimited");
+        assert_eq!(fixture.calls.borrow().len(), 1);
+        assert_eq!(fixture.waits.get(), 0);
+        assert_eq!(
+            transport
+                .ado_binary("attachment", "GET", None, &[], "7.1")
+                .unwrap()
+                .body,
+            b"<content"
+        );
+        let error = transport
+            .ado_binary("attachment", "POST", Some(b"data"), &[], "7.1")
+            .unwrap_err();
+        assert_eq!(classification(&error), "ambiguousWrite");
+    }
+
+    #[test]
+    fn existing_http_implementations_do_not_accidentally_send_binary_as_json() {
+        struct JsonOnly;
+        impl Http for JsonOnly {
+            fn send(
+                &self,
+                _: &str,
+                _: &str,
+                _: &str,
+                _: Option<&[u8]>,
+            ) -> Result<HttpResponse, AppError> {
+                panic!("binary requests must not use the JSON boundary")
+            }
+        }
+        JsonOnly
+            .send_binary("POST", "https://example.test/", "token", Some(b"\xff"))
+            .unwrap_err();
+    }
+
+    #[test]
+    fn github_explicit_refusal_requires_failed_command_and_http_status_line() {
+        struct GithubProcess {
+            replies: RefCell<VecDeque<ProcessOutput>>,
+            calls: Cell<usize>,
+        }
+
+        impl Process for GithubProcess {
+            fn execute(
+                &self,
+                program: &str,
+                arguments: &[String],
+                _: &[u8],
+            ) -> io::Result<ProcessOutput> {
+                assert_eq!(program, "gh");
+                assert!(arguments.iter().any(|argument| argument == "--include"));
+                self.calls.set(self.calls.get() + 1);
+                Ok(self
+                    .replies
+                    .borrow_mut()
+                    .pop_front()
+                    .expect("unexpected request"))
+            }
+        }
+
+        let process = GithubProcess {
+            replies: RefCell::new(VecDeque::from([
+                ProcessOutput::new(false, b"HTTP/2 429\n\n{}".to_vec(), vec![]),
+                ProcessOutput::new(false, b"{}".to_vec(), b"HTTP 429".to_vec()),
+                ProcessOutput::new(
+                    false,
+                    br#"{"errors":[{"message":"rate limit"}]}"#.to_vec(),
+                    vec![],
+                ),
+                ProcessOutput::new(true, b"HTTP/2 429\n\n{}".to_vec(), vec![]),
+                ProcessOutput::new(false, b"HTTP/2 429\n\n{}".to_vec(), vec![]),
+            ])),
+            calls: Cell::new(0),
+        };
+        let fixture = Fixture::new(vec![]);
+        let target = Target::repository("https://github.com/org/repo").unwrap();
+        let transport = Transport::new(&target, None, &process, &fixture, &fixture);
+        for expected in [
+            "explicitRateLimited",
+            "rateLimited",
+            "rateLimited",
+            "rateLimited",
+        ] {
+            let error = transport
+                .github_write_once_with_refusal_evidence("gists", &json!({}))
+                .unwrap_err();
+            assert_eq!(classification(&error), expected);
+        }
+        let error = transport
+            .github_write_once("gists", &json!({}))
+            .unwrap_err();
+        assert_eq!(classification(&error), "rateLimited");
+        assert_eq!(process.calls.get(), 5);
+    }
 }

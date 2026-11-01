@@ -35,6 +35,10 @@ consumers, so hybrid runs preserve accepted updates and artifact history.
 Report commands take the active skill root explicitly, keeping the locked
 dependencies and template tied to the skill that invokes them. PowerShell
 entry points retain compatibility while the native commands own report tooling.
+Initial overview publication keeps provider effects and the publication journal
+in `ss-ai-review`. The command composition supplies local report rendering from
+`ss-ai-review-workflow`, so provider transactions do not depend on presentation
+tools and the package dependencies remain one-way.
 Audit and projection operations share the captured-evidence serializer and
 exact Git comparison with other review commands. PowerShell adapters keep the
 remaining publication commands compatible without duplicating finding prose.
