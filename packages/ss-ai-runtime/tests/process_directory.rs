@@ -85,8 +85,8 @@ fn windows_name_lookup_uses_effective_child_path() {
         .unwrap();
     let inherited = workspace.path().join("inherited");
     let selected = workspace.path().join("selected");
-    fs::create_dir(&inherited).unwrap();
-    fs::create_dir(&selected).unwrap();
+    fs::create_dir_all(&inherited).unwrap();
+    fs::create_dir_all(&selected).unwrap();
     let executable = env::current_exe().unwrap();
     fs::copy(&executable, inherited.join("path-fixture.exe")).unwrap();
     fs::copy(&executable, selected.join("path-fixture.exe")).unwrap();
