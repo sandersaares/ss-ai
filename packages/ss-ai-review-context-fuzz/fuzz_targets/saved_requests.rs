@@ -69,7 +69,7 @@ fuzz_target!(|input: &[u8]| {
     let files = Files::new();
     let clock = SystemClock::default();
     let mut document: Value = serde_json::from_str(include_str!(
-        "../../../../tests/fixtures/ss-review-query-capture.json"
+        "../../../tests/fixtures/ss-review-query-capture.json"
     ))
     .unwrap();
     // Escaped text forces fragmentation even for an empty input; generated

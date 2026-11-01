@@ -30,12 +30,13 @@ function Invoke-NativeReviewWorkflow {
     } finally { $process.Dispose() }
 }
 
-# Keeps arrays intact when returning shared rendered prose to PowerShell publishers.
+# Keeps native rendered prose verbatim and arrays intact for PowerShell publishers.
+# Callers load JsonValue.ps1 before invoking this function.
 function Invoke-NativeReviewMarkdown {
     param([Parameter(Mandatory)][System.Collections.IDictionary] $Request)
 
     $output = Invoke-NativeReviewWorkflowWithJson -Arguments @('render') -PathOption 'request-path' -Value $Request
-    $result = ConvertFrom-Json -InputObject $output -AsHashtable -NoEnumerate
+    $result = ConvertFrom-JsonVerbatim -Text $output
     if ($result -is [array]) { , $result } else { $result }
 }
 
@@ -48,7 +49,8 @@ function Invoke-NativeReviewWorkflowWithJson {
     )
 
     $name = ".ss-ai-workflow-$([guid]::NewGuid().ToString('N')).json"
-    $path = Join-Path (Get-Location).ProviderPath $name
+    # The caller's working directory need not permit creating request files.
+    $path = Join-Path ([IO.Path]::GetTempPath()) $name
     $options = [IO.FileStreamOptions]::new()
     $options.Mode = [IO.FileMode]::CreateNew
     $options.Access = [IO.FileAccess]::Write

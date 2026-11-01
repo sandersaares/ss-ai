@@ -348,8 +348,8 @@ Describe 'Rust preparation boundary' {
             'packages/ss-ai/tests/support/provider.rs',
             'packages/ss-ai/src/commits.graphql',
             'packages/ss-ai/tests/fixtures/github-approval.json',
-            'packages/ss-ai-cargo/fuzz/seeds/dependencies.toml',
-            'packages/ss-ai-cargo/fuzz/seeds/malformed.toml',
+            'packages/ss-ai-cargo-fuzz/seeds/dependencies.toml',
+            'packages/ss-ai-cargo-fuzz/seeds/malformed.toml',
             'skills/ss-autoreapprove/significance.md',
             'Cargo.toml', 'Cargo.lock', 'rust-toolchain.toml', '.cargo/config.toml'
         )) {
@@ -384,8 +384,8 @@ Describe 'Rust preparation boundary' {
         # Cover each embedded input kind, including the policy outside the package tree.
         @{ Asset = 'packages/ss-ai/src/commits.graphql' }
         @{ Asset = 'packages/ss-ai/tests/fixtures/github-approval.json' }
-        @{ Asset = 'packages/ss-ai-cargo/fuzz/seeds/dependencies.toml' }
-        @{ Asset = 'packages/ss-ai-cargo/fuzz/seeds/malformed.toml' }
+        @{ Asset = 'packages/ss-ai-cargo-fuzz/seeds/dependencies.toml' }
+        @{ Asset = 'packages/ss-ai-cargo-fuzz/seeds/malformed.toml' }
         @{ Asset = 'skills/ss-autoreapprove/significance.md' }
     ) {
         $assetPath = Join-Path $fixture.root $Asset
@@ -412,8 +412,8 @@ Describe 'Rust preparation boundary' {
 
     It 'ignores unrelated TOML files and generated fuzz corpus inputs' {
         $paths = @(
-            'packages/ss-ai-cargo/fuzz/corpus/manifest/dependencies.toml',
-            'packages/ss-ai-cargo/fuzz/seeds/unrelated.toml',
+            'packages/ss-ai-cargo-fuzz/corpus/manifest/dependencies.toml',
+            'packages/ss-ai-cargo-fuzz/seeds/unrelated.toml',
             'packages/another/fuzz/seeds/malformed.toml'
         )
         foreach ($path in $paths) {

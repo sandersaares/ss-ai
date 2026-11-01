@@ -63,6 +63,9 @@ pub struct InstructionSourceSnapshot {
     pub source_directory: String,
     /// Configured roots in their first-occurrence order.
     pub roots: Vec<InstructionSourceRoot>,
+    /// Origin and snapshot namespace for selected repository instructions.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub repository_root: Option<InstructionSourceRoot>,
     /// Number of copied files from configured roots.
     pub external_file_count: usize,
     /// Opaque identity binding this mapping to the published source tree.
@@ -132,15 +135,20 @@ pub fn snapshot_instruction_sources(
     // Discovery finishes before staging so a root containing the session cannot ingest it.
     let mut discovered = Vec::new();
     for root in roots {
-        let files = discover(&root, &excluded)?;
-        discovered.push((root, files));
+        let resolved_root = resolve_allow_missing(&root)?;
+        let files = discover(&resolved_root, &excluded)?;
+        discovered.push(SourceFiles {
+            root,
+            resolved_root,
+            files,
+        });
     }
 
     let destination = session.join("instruction-set-source");
     let staging = create_staging(&session)?;
     let result = stage_and_publish(
         &discovered,
-        &repository_files,
+        repository_files.as_ref(),
         &skill,
         &staging,
         &destination,
@@ -168,8 +176,8 @@ pub fn snapshot_instruction_sources(
 
 /// Builds the complete tree before moving it into the protected publication slot.
 fn stage_and_publish(
-    discovered: &[(PathBuf, Vec<SourceFile>)],
-    repository_files: &[SourceFile],
+    discovered: &[SourceFiles],
+    repository_files: Option<&SourceFiles>,
     skill: &Path,
     staging: &Path,
     destination: &Path,
@@ -180,22 +188,30 @@ fn stage_and_publish(
         &staging.join("skill/focus-areas.md"),
         clock,
     )?;
-    for file in repository_files {
-        copy(
-            &file.path,
-            &staging.join("review-repository").join(&file.relative),
-            clock,
-        )?;
-    }
+    let repository_root = if let Some(repository) = repository_files {
+        let path = path_text(&repository.root)?;
+        let prefix = source_prefix("review-repository", repository)?;
+        for file in &repository.files {
+            copy(
+                &file.path,
+                &staging.join(&prefix).join(&file.relative),
+                clock,
+            )?;
+        }
+        Some(InstructionSourceRoot {
+            path: path.to_owned(),
+            prefix,
+            file_count: repository.files.len(),
+        })
+    } else {
+        None
+    };
     let mut roots = Vec::new();
     let mut count = 0_usize;
-    for (root, files) in discovered {
-        let path = path_text(root)?;
-        let prefix = format!(
-            "external/{}",
-            bytes_hash(path.as_bytes()).to_ascii_lowercase()
-        );
-        for file in files {
+    for source in discovered {
+        let path = path_text(&source.root)?;
+        let prefix = source_prefix("external", source)?;
+        for file in &source.files {
             copy(
                 &file.path,
                 &staging.join(&prefix).join(&file.relative),
@@ -203,12 +219,12 @@ fn stage_and_publish(
             )?;
         }
         count = count
-            .checked_add(files.len())
+            .checked_add(source.files.len())
             .ok_or_else(|| invalid("Instruction file count exceeds the supported range"))?;
         roots.push(InstructionSourceRoot {
             path: path.to_owned(),
             prefix,
-            file_count: files.len(),
+            file_count: source.files.len(),
         });
     }
     // Validate the record before replacing the previous snapshot.
@@ -216,6 +232,7 @@ fn stage_and_publish(
         schema_version: 1,
         source_directory: path_text(destination)?.to_owned(),
         roots,
+        repository_root,
         external_file_count: count,
         snapshot_identity: String::new(),
     };
@@ -319,15 +336,23 @@ fn rollback_publication(
 struct SourceFile {
     path: PathBuf,
     relative: PathBuf,
+    parent: PathBuf,
+}
+
+/// Preserves source spelling and resolved locations for snapshot provenance.
+struct SourceFiles {
+    root: PathBuf,
+    resolved_root: PathBuf,
+    files: Vec<SourceFile>,
 }
 
 /// Resolves only caller-selected repository files and rejects paths outside the root.
 fn repository_files(
     selection: Option<&RepositoryInstructionSources<'_>>,
     excluded: &Path,
-) -> Result<Vec<SourceFile>, AppError> {
+) -> Result<Option<SourceFiles>, AppError> {
     let Some(selection) = selection else {
-        return Ok(Vec::new());
+        return Ok(None);
     };
     if selection.paths.is_empty() {
         return Err(invalid(
@@ -335,9 +360,9 @@ fn repository_files(
         ));
     }
     let root = absolute_input(selection.root, "Repository root")?;
-    let root = fs::canonicalize(&root)
+    let resolved_root = fs::canonicalize(&root)
         .map_err(|error| io_error("Cannot resolve repository root", error))?;
-    if !fs::metadata(&root)
+    if !fs::metadata(&resolved_root)
         .map_err(|error| io_error("Cannot inspect repository root", error))?
         .is_dir()
     {
@@ -364,9 +389,16 @@ fn repository_files(
         if !seen.insert(relative.clone()) {
             return Err(invalid("Repository instruction path is duplicated"));
         }
-        let path = fs::canonicalize(root.join(relative))
+        let source = resolved_root.join(relative);
+        let parent = fs::canonicalize(
+            source
+                .parent()
+                .ok_or_else(|| invalid("Repository instruction has no parent"))?,
+        )
+        .map_err(|error| io_error("Cannot resolve repository instruction parent", error))?;
+        let path = fs::canonicalize(source)
             .map_err(|error| io_error("Cannot resolve repository instruction", error))?;
-        if !path.starts_with(&root) || path.starts_with(excluded) {
+        if !path.starts_with(&resolved_root) || path.starts_with(excluded) {
             return Err(invalid(
                 "Repository instruction resolves outside its permitted tree",
             ));
@@ -380,9 +412,14 @@ fn repository_files(
         files.push(SourceFile {
             path,
             relative: relative.clone(),
+            parent,
         });
     }
-    Ok(files)
+    Ok(Some(SourceFiles {
+        root,
+        resolved_root,
+        files,
+    }))
 }
 
 /// One traversal state; ancestry is local so distinct aliases can both contribute.
@@ -454,11 +491,44 @@ fn discover(root: &Path, excluded: &Path) -> Result<Vec<SourceFile>, AppError> {
                         path.display()
                     )));
                 }
-                files.push(SourceFile { path, relative });
+                let path = fs::canonicalize(path)
+                    .map_err(|error| io_error("Cannot resolve instruction source", error))?;
+                files.push(SourceFile {
+                    path,
+                    relative,
+                    parent: identity.clone(),
+                });
             }
         }
     }
     Ok(files)
+}
+
+/// Binds source origins without changing their relative snapshot paths.
+fn source_prefix(namespace: &str, source: &SourceFiles) -> Result<String, AppError> {
+    // Both the original spelling and resolved locations affect local references.
+    // Sort by relative path so caller selection order does not affect cache reuse.
+    let mut files = source
+        .files
+        .iter()
+        .map(|file| {
+            Ok((
+                path_text(&file.relative)?,
+                file.parent.as_os_str().as_encoded_bytes(),
+                file.path.as_os_str().as_encoded_bytes(),
+            ))
+        })
+        .collect::<Result<Vec<_>, AppError>>()?;
+    files.sort_unstable();
+    let origin = serde_json::to_vec(&(
+        path_text(&source.root)?,
+        source.resolved_root.as_os_str().as_encoded_bytes(),
+        files,
+    ))?;
+    Ok(format!(
+        "{namespace}/{}",
+        bytes_hash(&origin).to_ascii_lowercase()
+    ))
 }
 
 /// Selects only the instruction names used by the existing snapshot producer.

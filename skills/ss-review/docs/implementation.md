@@ -86,8 +86,10 @@ path identities ordinally, preserving distinct Unicode spellings without assumin
 filesystem case sensitivity from the operating system.
 
 The snapshot uses `skill/focus-areas.md` and `external/<root-identity>/<relative-path>`.
-Each root identity hashes its absolute configured path, keeping equally named files
-from distinct roots separate and binding cache provenance to the instruction owner.
+Each root identity hashes its absolute configured path, its resolved directory,
+and each selected file's relative path and resolved parent and file locations.
+This keeps equally named files from distinct origins separate and changes the
+identity when a link is retargeted to different guidance.
 The command returns the root-to-prefix mapping for reference expansion and learning.
 Directory links are traversed with ancestry-cycle detection, including installed
 `.github/instructions` links. Discovery excludes the current review's session-state
@@ -108,6 +110,9 @@ lock, so concurrent readers can proceed while snapshot and cache replacement wai
 Authorized repository sources are added separately before lookup. The generation recipe,
 discovery implementation, exact source paths, and source bytes participate in
 the cache key, so incompatible instruction provenance produces a miss.
+Selected repository sources use `review-repository/<root-identity>/<relative-path>`
+and the same origin identity. The returned mapping retains the selected spelling
+for reference expansion.
 Runtime scripts, report templates, and pinned npm manifests stay together in
 the skill tree so installed links and checkout-relative use share assets.
 

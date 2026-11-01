@@ -23,7 +23,7 @@ fuzz_target!(|input: &[u8]| {
         return;
     }
 
-    let fixture = include_str!("../../../../tests/fixtures/ss-review-query-capture.json");
+    let fixture = include_str!("../../../tests/fixtures/ss-review-query-capture.json");
     let mut document: Value = serde_json::from_str(fixture).unwrap();
     // Escaping and non-BMP characters make the byte and UTF-16 limits differ.
     let text: String = input

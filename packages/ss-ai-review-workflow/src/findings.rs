@@ -90,7 +90,14 @@ pub fn validate_artifacts(
             let entry_path = entry.path();
             let name = entry.file_name();
             let name = name.to_string_lossy();
-            if hidden_entry(&entry)? || name.ends_with(".json.lock") {
+            if hidden_entry(&entry)?
+                || (entry_path.is_file()
+                    && (name
+                        .get(name.len().saturating_sub(".json.lock".len())..)
+                        .is_some_and(|suffix| suffix.eq_ignore_ascii_case(".json.lock"))
+                        || powershell_staging_name(&name)
+                        || native_staging_name(&name)))
+            {
                 continue;
             }
             if !entry_path.is_file()
@@ -663,6 +670,40 @@ fn validate_index(index: &Value) -> Result<HashSet<String>, AppError> {
         }
     }
     Ok(ids)
+}
+
+/// Recognizes the sibling names used by the PowerShell atomic file writer.
+fn powershell_staging_name(name: &str) -> bool {
+    let Some((destination, suffix)) = name.rsplit_once('.') else {
+        return false;
+    };
+    if !suffix.eq_ignore_ascii_case("tmp") {
+        return false;
+    }
+    let Some((destination, guid)) = destination.rsplit_once('.') else {
+        return false;
+    };
+    let Some(destination) = destination.strip_prefix('.') else {
+        return false;
+    };
+    let Some((stem, extension)) = destination.rsplit_once('.') else {
+        return false;
+    };
+    !stem.is_empty()
+        && extension.eq_ignore_ascii_case("json")
+        && guid.len() == 32
+        && guid.bytes().all(|byte| byte.is_ascii_hexdigit())
+}
+
+/// Matches the exact staging convention of the native file transaction writer.
+fn native_staging_name(name: &str) -> bool {
+    let Some(random) = name
+        .strip_prefix(".ss-ai-transaction-")
+        .and_then(|name| name.strip_suffix(".tmp"))
+    else {
+        return false;
+    };
+    random.len() == 24 && random.bytes().all(|byte| byte.is_ascii_alphanumeric())
 }
 
 /// Matches the filesystem provider's hidden-file filtering for directory reads.
@@ -1469,7 +1510,7 @@ fn location(value: &Value, anchor: bool) -> Result<(), AppError> {
     } else {
         "location"
     };
-    if !matches!(kind, "line" | "file" | "location") {
+    if anchor && !matches!(kind, "line" | "file") {
         return Err(invalid("Invalid anchor kind"));
     }
     let start = fields
@@ -1605,4 +1646,48 @@ fn text<'a>(value: Option<&'a Value>, name: &str) -> Result<&'a str, AppError> {
 /// Classifies invalid input consistently with the runtime.
 fn invalid(message: &str) -> AppError {
     fail("invalidInput", message)
+}
+
+#[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
+mod staging_tests {
+    use super::{native_staging_name, powershell_staging_name};
+
+    #[test]
+    fn only_powershell_json_staging_names_match() {
+        assert!(powershell_staging_name(
+            ".reviewer.json.0123456789abcdef0123456789ABCDEF.tmp"
+        ));
+        assert!(powershell_staging_name(
+            ".reviewer.JSON.0123456789abcdef0123456789abcdef.TMP"
+        ));
+        for name in [
+            "reviewer.json.0123456789abcdef0123456789abcdef.tmp",
+            ".json.0123456789abcdef0123456789abcdef.tmp",
+            ".reviewer.txt.0123456789abcdef0123456789abcdef.tmp",
+            ".reviewer.json.0123456789abcdef0123456789abcdeg.tmp",
+            ".reviewer.json.0123456789abcdef0123456789abcde.tmp",
+            ".reviewer.json.0123456789abcdef0123456789abcdef.tmp.bak",
+            ".tmp123456",
+        ] {
+            assert!(!powershell_staging_name(name), "{name}");
+        }
+    }
+
+    #[test]
+    fn only_native_transaction_staging_names_match() {
+        assert!(native_staging_name(
+            ".ss-ai-transaction-aB1234567890abcdefgh1234.tmp"
+        ));
+        for name in [
+            ".ss-ai-transaction-aB1234567890abcdefgh123.tmp",
+            ".ss-ai-transaction-aB1234567890abcdefgh12345.tmp",
+            ".ss-ai-transaction-aB1234567890abcdefghi-34.tmp",
+            ".ss-ai-transaction-aB1234567890abcdefgh1234.tmp.bak",
+            ".ss-ai-transaction-aB1234567890abcdefgh1234.TMP",
+            ".tmp123456",
+        ] {
+            assert!(!native_staging_name(name), "{name}");
+        }
+    }
 }

@@ -42,6 +42,11 @@ function Start-Sleep {
     if ([Console]::ReadLine() -cne 'retry') { throw 'Expected retry signal.' }
 }
 
+if ($Mode -ceq 'read-text') {
+    ConvertTo-Json -InputObject (Read-PullRequestFileText -Path $Diff) -Compress
+    return
+}
+
 $artifactValue = Read-FindingArtifact -Path $Artifact
 $capture = Read-PullRequestContextDocument -Path $Context -WithoutAuthorship
 $diffValue = ConvertFrom-JsonVerbatim -Text (Read-PullRequestFileText -Path $Diff)

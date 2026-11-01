@@ -66,7 +66,8 @@ if ($PlanPath) {
     Invoke-NativeReviewWorkflow -Arguments ($arguments + "--plan-path=$plan")
 } else {
     if (-not $FindingId -or -not $Decision) { throw 'Supply a finding and decision, or a plan.' }
-    $entry = [ordered]@{ findingId = $FindingId; decision = $Decision }
+    # ValidateSet accepts mixed case; the decision journal uses canonical lowercase values.
+    $entry = [ordered]@{ findingId = $FindingId; decision = $Decision.ToLowerInvariant() }
     if (-not [string]::IsNullOrWhiteSpace($Reason)) { $entry.reason = $Reason }
     if (-not [string]::IsNullOrWhiteSpace($Feedback)) { $entry.feedback = $Feedback }
     Invoke-NativeReviewWorkflowWithJson -Arguments $arguments -PathOption 'plan-path' `
