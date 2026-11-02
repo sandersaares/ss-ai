@@ -8,8 +8,8 @@
 use std::num::NonZeroUsize;
 
 use ss_ai_assessment::{
-    Assessment, Change, Content, ContextRequest, Disposition, Inventory, Judgment, Note, Side,
-    SourceSide, change_id,
+    Assessment, Change, ConclusionGroup, Content, ContextRequest, Disposition, FinalSynthesis,
+    GroupedConclusions, Inventory, Judgment, Note, Side, SourceSide, change_id,
 };
 use ss_ai_git::validate_patch;
 
@@ -198,6 +198,46 @@ pub(crate) fn exercise(input: &[u8]) -> bool {
                     "",
                 );
                 let _read = assessment.read("discussion-note", 0, MAX_INPUT_BYTES, "", "");
+            }
+            11 => {
+                let token = assessment.read_token().unwrap();
+                let _delivery = assessment.read_next(&token, "", "");
+            }
+            12 => {
+                let _conclusions = assessment.conclude(
+                    GroupedConclusions {
+                        state_token: assessment.state_token().unwrap(),
+                        groups: vec![ConclusionGroup {
+                            changes: vec!["c1".into()],
+                            disposition: Disposition::Significant,
+                            rationale: "Synthetic group".into(),
+                            evidence: Vec::new(),
+                        }],
+                    },
+                    "",
+                    "",
+                );
+            }
+            13 => {
+                completed |= assessment
+                    .synthesize(
+                        FinalSynthesis {
+                            state_token: assessment.state_token().unwrap(),
+                            disposition: Disposition::Significant,
+                            rationale: "Synthetic combined effects".into(),
+                            discussion: "Synthetic material discussion".into(),
+                            unresolved_concerns: Vec::new(),
+                            evidence: Vec::new(),
+                        },
+                        "",
+                        "",
+                    )
+                    .is_ok();
+            }
+            14 => {
+                completed |= assessment
+                    .finish_partial("c1", "Synthetic refusal", "", "")
+                    .is_ok();
             }
             _ => {
                 let _read = assessment.read(&format!("{id}:patch"), index, 1, "", "");

@@ -297,9 +297,8 @@ indeterminate decisions; obtain fresh evidence in a new run.
 ## Source assessment and publication
 
 The installed `ss-autoreapprove` command recipes cover `prepare`, `start-worker`,
-`assessment`, `read`, `read-batch`, `source-context`, `source-context-batch`, `units`, `unit-read-plan`,
-`read-units`, `note`, `checks`,
-`resolve`, `checkpoint`, `judge`, `judge-batch`, `complete`, `publish`, and
+`assessment`, `read-next`, `read`, `read-batch`, `source-context`, `source-context-batch`, `units`, `unit-read-plan`,
+`read-units`, `checkpoint`, `conclude`, `synthesize`, `complete-partial`, `publish`, and
 `notify`. Each requires the absolute
 `--state-path`, positive `--pull-request-id`, and exact `--snapshot-digest`.
 Preparation uses isolated Git objects, never a checkout. It compares exact
@@ -338,7 +337,12 @@ snapshot digest, and both tokens. Obtain progress from `assessment` when needed.
 Concurrent independent reads can reuse the same read token;
 mutable-record continuations require their prior `contentDigest`. Registering
 context changes the read token. Delivery receipts do not change the semantic
-state token; judgment submission checks current delivery coverage. Ordinary `read` accepts only the first page of
+state token; judgment submission checks current delivery coverage.
+`read-next --read-token` derives the next bounded required-evidence batch and
+contiguous offsets, including policy, discussion, patches, and requested ranges.
+An empty `items` list reports that required delivery is complete, not that
+semantic conclusions are complete. A stale token leaves receipts unchanged.
+Ordinary `read` accepts only the first page of
 a mutable semantic record; use `read-batch` to continue it. `judge-batch --batch-json` accepts a state token and distinct changed-path
 items with `id`, a complete `judgment`, and nullable `previousDigest`. Both
 commands validate and commit atomically; stale tokens, malformed items, and
@@ -413,11 +417,29 @@ the same bounded evidence pages and receipts as `read-batch`. Windows may be
 read in any order. Continue partial unit text and missing binding metadata with
 their returned references. The unit ID is part of each unit page's `reference`.
 
+The worker-facing protocol uses `conclude --conclusions-json` with
+`{"stateToken":"TOKEN","groups":[{"changes":["c1","c2"],"disposition":"insignificant","rationale":"Shared substantive conclusion."}]}`.
+Inventory metadata exposes each native short `reference` alongside its exact ID.
+Short references are scoped to this snapshot and state; native code binds them
+to exact records, derives required evidence and conditional replacements, and
+validates every member before committing. Optional `evidence` cites additional
+delivered native evidence. The response returns a count, state token, and
+progress rather than per-member bookkeeping.
+
+`synthesize --synthesis-json` accepts
+`{"stateToken":"TOKEN","disposition":"insignificant","rationale":"Independent combined-change reasoning.","discussion":"Material discussion and its disposition."}`.
+Optional `unresolvedConcerns` and `evidence` retain substantive concerns and exact
+supporting context. Nonempty unresolved concerns prevent renewal. Native code
+records the final reasoning and completes atomically after validating all
+change conclusions, policy, discussion, patches, and requested context.
+There are no mandatory discussion notes, check enumeration, empty checks, or
+per-path essays. Missing evidence or member coverage leaves synthesis unrecorded.
+
+The low-level record operations remain available for focused tooling.
 `note` takes `--unit-id`, `--observations`, `--interfaces`, repeated `--evidence`,
 optional repeated `--concern` and `--interaction`, and optional
-`--previous-digest`. Notes have no disposition. Direct assessments require a
-single `--unit-id discussion` observation citing complete discussion and relevant
-exact evidence, not a note per transport unit.
+`--previous-digest`. Notes have no disposition. A discussion observation is
+optional and cites complete discussion and relevant exact evidence.
 Notes accept at most 8,192 serialized UTF-8 bytes before dependency bindings.
 New notes return `noteDigest`; replacements require the current digest.
 
@@ -448,11 +470,10 @@ Every change judgment must cite its patch reference and requires complete policy
 patch, and applicable requested-context reads. Cited optional evidence also
 requires complete delivery. A cumulative judgment binds all final change
 judgments, discussion observations, every check and disposition, and all
-requested-context reads. Its concern
-and interaction arrays are empty: new obligations are recorded on the discussion
-observation or a change judgment and resolved before cumulative completion.
-Completion requires every final change judgment, discussion observation,
-check disposition, and an independent cumulative judgment, plus complete policy,
+requested-context reads. Cumulative concerns retain unresolved substantive
+uncertainty and prevent renewal.
+Completion requires every final change judgment and an independent cumulative
+judgment, plus dispositions for any explicitly recorded checks and complete policy,
 discussion, every patch, and every requested range for every disposition.
 This includes an empty changed-path inventory. Replacing a note or judgment
 invalidates dependent aggregates and resolutions through exact input digests.
@@ -466,6 +487,12 @@ Completed judgments are immutable.
 `complete` returns `snapshotDigest`, `status`, `assessmentDigest`, and nullable
 `error`. An uncertain evaluation returns `failed` with a diagnostic and makes the
 run partial; only a resolved insignificant result permits publication.
+
+`complete-partial --change-id --rationale` completes only an examined significant
+refusal. It accepts a native short change reference and requires that significant
+change's evidence and every requested context range. It reports partial coverage,
+never full examination or approval. Missing evidence and uncertainty cannot
+substitute for a supported significant conclusion.
 
 `publish` also takes the run's `--repository-url`, nonempty `--attribution`,
 and the same optional Azure `--tenant` used for discovery.
@@ -502,7 +529,7 @@ These records are created and updated only through the native commands.
 
 | Record | Fields |
 | --- | --- |
-| Assessment | `protocol: directV1`; `snapshotDigest`, `policyDigest`, `discussionDigest`, `inventory`, `inventoryDigest`, `sourceEvidence` map of change ID to source document, `sourceEvidenceDigest`, `contexts` map of stable reference to range, `checkpoints`, exact `documents`, `reads` map of reference to contiguous character count, `decisions` map of change ID to judgment, nullable `cumulative`, Boolean `complete`, nullable `assessmentDigest`. |
+| Assessment | `protocol: directV1`; `snapshotDigest`, `policyDigest`, `discussionDigest`, `inventory`, `inventoryDigest`, `sourceEvidence` map of change ID to source document, `sourceEvidenceDigest`, `contexts` map of stable reference to range, `checkpoints`, exact `documents`, `reads` map of reference to contiguous character count, `decisions` map of change ID to judgment, nullable `cumulative`, nullable `partial`, Boolean `complete`, nullable `assessmentDigest`. |
 | Inventory | Full `oldCommit`, `newCommit`, `oldTree`, `newTree`; complete ordered `changes`; Boolean `complete`. Equal trees require empty changes. |
 | Change | SHA-256 `id` binding kind and both sides; `kind` (`A`, `D`, `M`, `T`, `R`); nullable `old`, `new`. |
 | Side | Exact UTF-8 Git `path`, full `object` ID, `mode`, and `content`. |
@@ -511,7 +538,8 @@ These records are created and updated only through the native commands.
 | Source binding | Exact `path`, `object`, `mode`, and `contentKind` matching the inventory. |
 | Context range | `request` (`changeId`, `side`, `startLine`, `lineCount`), `snapshotDigest`, `source` binding, zero-based half-open `startByte` / `endByte` and `startCharacter` / `endCharacter`, and exact UTF-8 `contentDigest`. Its reference is `CHANGE_ID:context:SHA256`, with the digest binding the complete range record. |
 | Judgment | `disposition` (`insignificant`, `significant`, `uncertain`); nonempty `rationale`; nonempty unique `evidence` references; `concerns` and `interactions` arrays of nonempty text. |
-| Checkpoints | Immutable `units`, `manifestDigest`; empty `notes` map; nullable bound `discussion`; `aggregates` map of judgment ID to dependency digests; `resolutions` map of check ID to bound judgment; unique `completedWork` identities; nonnegative `handoffs` and `checkpointProgress`. |
+| Checkpoints | Immutable `units`, `manifestDigest`; nullable bound `discussion`; `aggregates` map of judgment ID to dependency digests; `resolutions` map of check ID to bound judgment; unique `completedWork` identities; nonnegative `handoffs` and `checkpointProgress`. |
+| Partial conclusion | Exact `changeId`, significant `judgmentDigest`, and nonempty synthesis `rationale`; completion retains incomplete evidence and change coverage. |
 | Evidence unit | `id`, `snapshotDigest`, `parent`, original `reference`, ordered `ranges`, source/thread `bindings`, `totalCharacters`, `contentDigest`. Each range has `startCharacter`, exclusive `endCharacter`, and exact UTF-8 `contentDigest`. |
 | Note | Nonempty `observations` and `interfaces`; `concerns` and `interactions` arrays; nonempty unique `evidence` references. |
 | Bound record | Typed `value` and exact reference-to-content-digest `dependencies`. |

@@ -131,21 +131,27 @@ the assessor's context. The skill assigns each PR's semantic assessment to a fre
 GPT 6.1 Sol worker with medium reasoning and regular context. The orchestrator
 receives decisions rather than source or discussion evidence.
 Workers receive bounded batches of independently addressable evidence pages.
-Transport fragments do not require individual semantic notes. Each exact
-changed-path record needs a final judgment, and discussion needs an observation.
-A worker independently examines combined effects using relevant exact evidence.
-Every recorded concern or interaction needs an evidence-backed disposition.
+Transport fragments do not require semantic notes. Workers group changes with
+shared substantive conclusions using native-issued snapshot-bound short references.
+Native code derives exact per-change coverage, evidence bindings, and replacement
+bookkeeping. Workers provide one final synthesis of independently reasoned combined
+effects, material discussion and its disposition, and unresolved concerns.
+Native code validates and completes that synthesis atomically. Discussion notes,
+check enumeration, and per-path essays are not prerequisites.
+Any significant or uncertain change or unresolved concern prevents renewal.
 Digest-bound dependencies invalidate affected judgments when their inputs change.
 Serialized evidence and metadata pages have a byte budget as well as item and
 character limits.
-All dispositions require complete readable evidence. Delivery or context
+Full synthesis requires complete readable evidence. Delivery or context
 failures remain unfinished work and cannot authorize a needs-review notice;
 genuine uncertainty after examination still prevents approval.
 Complete delivery cannot prove comprehension. A cumulative set that exceeds
 regular-context examination remains explicitly incomplete. The retained per-PR
 budget bounds elapsed time, native commands, and worker reservations across
 interruptions and stale recovery, leaving time for freshness and publication.
-Incomplete work never becomes a significance judgment or approval.
+An examined significant change can complete a partial refusal with explicit
+partial coverage and all requested context delivered. Unexamined evidence
+cannot itself become significance, and partial completion never permits approval.
 Only complete insignificant work can become a live
 publication; dry runs end without remote writes. Unknown content and
 insufficient evidence cannot become success-shaped empty work. The policy permits

@@ -26,7 +26,10 @@ use crate::renewal::Anchor;
 use crate::review_notice::{self, Notice};
 use crate::target::{Platform, Target};
 use crate::{Clock, Process};
-use ss_ai_assessment::{BatchJudgmentRequest, BatchReadRequest, ContextRequest, Note};
+use ss_ai_assessment::{
+    BatchJudgmentRequest, BatchReadRequest, ContextRequest, FinalSynthesis, GroupedConclusions,
+    Note,
+};
 
 /// Provider-selected approval baselines require a fresh assessment contract.
 const RUN_SCHEMA: u32 = 15;
@@ -1392,6 +1395,15 @@ pub(crate) enum WorkAction {
     ReadBatch {
         request: BatchReadRequest,
     },
+    ReadNext {
+        read_token: String,
+    },
+    Conclude {
+        request: GroupedConclusions,
+    },
+    Synthesize {
+        synthesis: FinalSynthesis,
+    },
     JudgeBatch {
         request: BatchJudgmentRequest,
     },
@@ -1408,6 +1420,10 @@ pub(crate) enum WorkAction {
         previous_digest: Option<String>,
     },
     Complete,
+    CompletePartial {
+        change_id: String,
+        rationale: String,
+    },
 }
 
 /// Publication binds explicit caller scope to the same immutable run and assessment.
@@ -2110,14 +2126,17 @@ pub(crate) fn work(
         .ok_or_else(|| fail("invalidState", "Prepare the source inventory first"))?;
     let read_batch = matches!(
         action,
-        WorkAction::ReadBatch { .. } | WorkAction::ReadUnits { .. }
+        WorkAction::ReadBatch { .. } | WorkAction::ReadUnits { .. } | WorkAction::ReadNext { .. }
     );
     let evidence_read = read_batch
         || matches!(
             action,
             WorkAction::Read { .. } | WorkAction::SourceContext { .. }
         );
-    let judgment_batch = matches!(action, WorkAction::JudgeBatch { .. });
+    let judgment_batch = matches!(
+        action,
+        WorkAction::JudgeBatch { .. } | WorkAction::Conclude { .. }
+    );
     let result = match action {
         WorkAction::Prepare => assessment.summary(0, 10, &run.policy.content, &discussion)?,
         WorkAction::StartWorker => {
@@ -2230,6 +2249,29 @@ pub(crate) fn work(
         WorkAction::JudgeBatch { request } => {
             assessment.record_batch(request, &run.policy.content, &discussion)?
         }
+        WorkAction::ReadNext { read_token } => {
+            assessment.read_next(&read_token, &run.policy.content, &discussion)?
+        }
+        WorkAction::Conclude { request } => {
+            assessment.conclude(request, &run.policy.content, &discussion)?
+        }
+        WorkAction::Synthesize { synthesis } => {
+            assessment.synthesize(synthesis, &run.policy.content, &discussion)?;
+            if assessment.status(run.dry_run) == "failed" {
+                entry.execution_error = Some(Diagnostic {
+                    kind: "service".to_owned(),
+                    message: "Source-change evaluation has unresolved substantive uncertainty; obtain a separate review".to_owned(),
+                });
+            }
+            json!({
+                "snapshotDigest": snapshot,
+                "assessmentDigest": assessment.digest,
+                "status": assessment.status(run.dry_run),
+                "disposition": assessment.disposition(),
+                "progress": assessment.progress_with_evidence(&run.policy.content, &discussion)?,
+                "error": entry.execution_error,
+            })
+        }
         WorkAction::SourceContext { request, limit } => {
             match assessment.source_context(request, limit.get(), &run.policy.content, &discussion)
             {
@@ -2296,6 +2338,14 @@ pub(crate) fn work(
             }
             json!({"snapshotDigest": snapshot, "status": assessment.status(run.dry_run),
                 "assessmentDigest": assessment.digest, "error": entry.execution_error})
+        }
+        WorkAction::CompletePartial {
+            change_id,
+            rationale,
+        } => {
+            assessment.finish_partial(&change_id, &rationale, &run.policy.content, &discussion)?;
+            json!({"snapshotDigest": snapshot, "status": assessment.status(run.dry_run),
+                "assessmentDigest": assessment.digest, "partial": true})
         }
     };
     if let Some(budget) = entry.assessment_budget.as_mut() {

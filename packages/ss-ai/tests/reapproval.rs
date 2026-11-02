@@ -2174,9 +2174,15 @@ fn compact_metadata_commands_expose_the_same_evidence_references() {
     )
     .unwrap();
     assert_eq!(
-        compact["changes"][0]["requiredPatch"],
-        prepared["changes"][0]["requiredPatch"]
+        compact["changes"][0]["requiredPatch"]["reference"],
+        "c1:patch"
     );
+    for field in ["complete", "readOffset", "totalCharacters"] {
+        assert_eq!(
+            compact["changes"][0]["requiredPatch"][field],
+            prepared["changes"][0]["requiredPatch"][field]
+        );
+    }
     let full = work(
         &root,
         &provider,
@@ -2282,6 +2288,152 @@ fn compact_metadata_commands_expose_the_same_evidence_references() {
     .unwrap();
     assert_eq!(delivered["items"][0]["reference"], context);
     assert_eq!(delivered["items"][0]["complete"], true);
+}
+
+#[test]
+fn grouped_native_workflow_completes_without_notes_or_provider_effects() {
+    let _guard = PROCESS_TEST_LOCK
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner);
+    let repository = Sources::new();
+    for ado in [false, true] {
+        let scope = TempDir::new().unwrap();
+        let root = scope.path().join("grouped-workflow");
+        let provider = repository.provider(ado);
+        let (snapshot, prepared) = prepare(&root, &provider, true);
+        let service_calls = provider.service_calls.get();
+        let token = prepared["readToken"].as_str().unwrap();
+        let documents = prepared["progress"]["requiredDocumentCount"]
+            .as_u64()
+            .unwrap();
+        let characters = prepared["progress"]["preflightEstimate"]["transportFragmentCharacters"]
+            .as_u64()
+            .unwrap();
+        let mut delivered = false;
+        // The small fixture still requires deterministic progress under mutations.
+        for _ in 0..=documents + characters {
+            let batch = work(
+                &root,
+                &provider,
+                "read-next",
+                &snapshot,
+                &["--read-token".into(), token.into()],
+            )
+            .unwrap();
+            assert!(serde_json::to_vec_pretty(&batch).unwrap().len() < 16_384);
+            if batch["items"].as_array().unwrap().is_empty() {
+                delivered = true;
+                break;
+            }
+        }
+        assert!(delivered);
+        let changes = prepared["changes"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|change| change["reference"].clone())
+            .collect::<Vec<_>>();
+        let conclusions = json!({
+            "stateToken": prepared["stateToken"],
+            "groups": [{"changes": changes, "disposition": "insignificant", "rationale": "The fixture edits preserve the relevant behavior."}]
+        });
+        let recorded = work(
+            &root,
+            &provider,
+            "conclude",
+            &snapshot,
+            &["--conclusions-json".into(), conclusions.to_string()],
+        )
+        .unwrap();
+        let synthesis = json!({
+            "stateToken": recorded["stateToken"],
+            "disposition": "insignificant",
+            "rationale": "Combined fixture changes introduce no relevant regression.",
+            "discussion": "The complete fixture discussion has no material outstanding objection."
+        });
+        let completed = work(
+            &root,
+            &provider,
+            "synthesize",
+            &snapshot,
+            &["--synthesis-json".into(), synthesis.to_string()],
+        )
+        .unwrap();
+        assert_eq!(completed["status"], "wouldReapprove");
+        assert!(completed["assessmentDigest"].is_string());
+        let results = invoke(&root, &provider, "results", &[]).unwrap();
+        let budget = &results["items"][0]["assessmentBudget"];
+        assert!(budget["readBatches"].as_u64().unwrap() > 0);
+        assert_eq!(budget["judgmentBatches"], 1);
+        assert_eq!(provider.service_calls.get(), service_calls);
+        assert_eq!(provider.writes.get(), 0);
+    }
+}
+
+#[test]
+fn partial_significant_result_reaches_guarded_notification_without_approval() {
+    let _guard = PROCESS_TEST_LOCK
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner);
+    let repository = Sources::new();
+    for ado in [false, true] {
+        let scope = TempDir::new().unwrap();
+        let root = scope.path().join("partial-significant");
+        let provider = repository.provider(ado);
+        let (snapshot, prepared) = prepare(&root, &provider, false);
+        let change = &prepared["changes"][0];
+        let reference = change["reference"].as_str().unwrap();
+        let id = change["id"].as_str().unwrap();
+        read_evidence(&root, &provider, &snapshot, "policy", None, None);
+        read_evidence(
+            &root,
+            &provider,
+            &snapshot,
+            &format!("{id}:patch"),
+            None,
+            None,
+        );
+        let conclusions = json!({
+            "stateToken": prepared["stateToken"],
+            "groups": [{"changes": [reference], "disposition": "significant",
+                "rationale": "The captured change materially alters the fixture contract."}]
+        });
+        work(
+            &root,
+            &provider,
+            "conclude",
+            &snapshot,
+            &["--conclusions-json".into(), conclusions.to_string()],
+        )
+        .unwrap();
+        let completed = work(
+            &root,
+            &provider,
+            "complete-partial",
+            &snapshot,
+            &[
+                "--change-id".into(),
+                reference.into(),
+                "--rationale".into(),
+                "The examined change materially alters the fixture contract.".into(),
+            ],
+        )
+        .unwrap();
+        assert_eq!(completed["status"], "needsReview");
+        assert_eq!(completed["partial"], true);
+        let results = invoke(&root, &provider, "results", &[]).unwrap();
+        let progress = &results["items"][0]["assessmentProgress"];
+        assert_eq!(progress["partialSignificant"], true);
+        assert!(
+            progress["deliveredRequiredDocumentCount"].as_u64().unwrap()
+                < progress["requiredDocumentCount"].as_u64().unwrap()
+        );
+        publish(&root, &provider, &snapshot).unwrap_err();
+        assert_eq!(provider.writes.get(), 0);
+        let notice = notify(&root, &provider, &snapshot).unwrap();
+        assert_eq!(notice["items"][0]["status"], "needsReview");
+        assert_eq!(provider.writes.get(), 1);
+    }
 }
 
 #[test]

@@ -164,9 +164,12 @@ Fragments are not required semantic work. Compare these with available
 worker context and the remaining native budget. These counts are not
 model-token or model-request measurements.
 
-The worker batches independently addressable evidence pages and path judgments,
-then reasons independently about the cumulative change. Do not require unit
-notes, a separate source-aggregation pass, or a fixed fragment-count handoff.
+The worker receives native-sized evidence batches, records concise grouped
+conclusions using snapshot-bound short references, and submits one final
+synthesis covering combined effects, material discussion, and unresolved
+concerns. Native code derives coverage and exact bindings and validates
+completion. Do not require per-path essays, discussion notes, check enumeration,
+empty checks, a separate source-aggregation pass, or a fixed fragment-count handoff.
 Only one worker may be active for a PR. Use a planned `checkpoint` only for
 genuine context pressure, after new semantic work; a replacement must
 reacquire evidence needed for its own decisions. Permit at most three workers
@@ -185,7 +188,10 @@ stage 4. A previous-format assessment cannot continue; start a fresh assessment.
 
 The persisted per-PR budget includes inspection and assessment and reserves
 time for freshness and publication. A `budgetExceeded` result is incomplete,
-never a semantic refusal. Do not dispatch further work or start a new run to
+never a semantic refusal. An evidence-backed partial significant refusal
+retains its partial-coverage status and cannot authorize approval. It is not
+a substitute for unavailable evidence or substantive uncertainty.
+Do not dispatch further work or start a new run to
 reset the budget. The native utility counts commands and elapsed time, not
 model requests; enforce an upper target of 40 serial model requests when the
 host exposes that measurement. If it does not, report the count as unavailable.
@@ -287,8 +293,9 @@ notices or file findings automatically.
 For each assessed PR, report the final `assessmentProgress` even when work is
 unfinished: changed paths judged versus total, required documents and requested
 context ranges delivered versus total, unresolved checks, and planned handoffs.
-State whether the discussion observation, cumulative judgment, and assessment
-are complete. Transport fragments are not separate required judgments. Delivery does not prove
+State whether the final synthesis and assessment are complete, and whether a
+significant result covers only part of the comparison. Transport fragments are
+not separate required judgments. Delivery does not prove
 comprehension. Do not estimate command counts, model requests, elapsed phase
 times, repeated bytes, or budget usage from these figures. Report those metrics
 as unavailable when not measured.

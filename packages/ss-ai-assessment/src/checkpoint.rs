@@ -328,14 +328,16 @@ impl Assessment {
                     checks,
                 )?;
             }
-            self.bind_aggregate_reference(
-                id,
-                "discussion-note",
-                &mut dependencies,
-                policy,
-                discussion,
-                checks,
-            )?;
+            if self.checkpoints.discussion.is_some() {
+                self.bind_aggregate_reference(
+                    id,
+                    "discussion-note",
+                    &mut dependencies,
+                    policy,
+                    discussion,
+                    checks,
+                )?;
+            }
             for check in checks.values() {
                 self.bind_aggregate_reference(
                     id,

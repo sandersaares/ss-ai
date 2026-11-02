@@ -12,9 +12,9 @@ fn discussion_completion_seed_reaches_completion_with_lf_and_crlf() {
 }
 
 #[test]
-fn base_completion_seed_cannot_bypass_discussion_requirements() {
+fn base_completion_seed_needs_no_separate_discussion_observation() {
     let seed = include_str!("../fuzz/seeds/completion.txt").replace("\r\n", "\n");
     let crlf_seed = seed.replace('\n', "\r\n");
-    assert!(!source_driver::exercise(seed.as_bytes()));
-    assert!(!source_driver::exercise(crlf_seed.as_bytes()));
+    assert!(source_driver::exercise(seed.as_bytes()));
+    assert!(source_driver::exercise(crlf_seed.as_bytes()));
 }

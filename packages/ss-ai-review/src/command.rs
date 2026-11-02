@@ -24,7 +24,10 @@ use crate::selection::{self, State, valid_session};
 use crate::target::{Platform, Target, escape};
 use crate::transport::Transport;
 use crate::{Clock, Http, Process};
-use ss_ai_assessment::{BatchJudgmentRequest, BatchReadRequest, ContextRequest, Note, SourceSide};
+use ss_ai_assessment::{
+    BatchJudgmentRequest, BatchReadRequest, ContextRequest, FinalSynthesis, GroupedConclusions,
+    Note, SourceSide,
+};
 
 /// Named-input command hierarchy used by the installed skills.
 ///
@@ -210,6 +213,27 @@ enum Autoreapprove {
         #[arg(long)]
         batch_json: String,
     },
+    /// Deliver the next native-sized batch of required evidence.
+    ReadNext {
+        #[command(flatten)]
+        input: WorkInput,
+        #[arg(long)]
+        read_token: String,
+    },
+    /// Record concise grouped conclusions with native evidence bookkeeping.
+    Conclude {
+        #[command(flatten)]
+        input: WorkInput,
+        #[arg(long)]
+        conclusions_json: String,
+    },
+    /// Record the final synthesis and complete atomically after native validation.
+    Synthesize {
+        #[command(flatten)]
+        input: WorkInput,
+        #[arg(long)]
+        synthesis_json: String,
+    },
     /// Record multiple changed-path judgments in one conditional transaction.
     JudgeBatch {
         #[command(flatten)]
@@ -260,6 +284,15 @@ enum Autoreapprove {
     },
     /// Require exact coverage and freeze the assessment.
     Complete(WorkInput),
+    /// Complete a supported significant refusal without claiming full coverage.
+    CompletePartial {
+        #[command(flatten)]
+        input: WorkInput,
+        #[arg(long)]
+        change_id: String,
+        #[arg(long)]
+        rationale: String,
+    },
     /// Enumerate open PRs and persist the shared commit-recency result.
     Discover {
         #[arg(long)]
@@ -573,10 +606,14 @@ fn execute(
             | Autoreapprove::Read { .. }
             | Autoreapprove::ReadBatch { .. }
             | Autoreapprove::JudgeBatch { .. }
+            | Autoreapprove::ReadNext { .. }
+            | Autoreapprove::Conclude { .. }
+            | Autoreapprove::Synthesize { .. }
             | Autoreapprove::SourceContext { .. }
             | Autoreapprove::SourceContextBatch { .. }
             | Autoreapprove::Judge { .. }
-            | Autoreapprove::Complete(_)) => work(action, process, clock)?,
+            | Autoreapprove::Complete(_)
+            | Autoreapprove::CompletePartial { .. }) => work(action, process, clock)?,
             Autoreapprove::Discover {
                 repository_url,
                 state_path,
@@ -851,6 +888,27 @@ fn work(
                 )?,
             },
         ),
+        Autoreapprove::ReadNext { input, read_token } => {
+            (input, WorkAction::ReadNext { read_token })
+        }
+        Autoreapprove::Conclude {
+            input,
+            conclusions_json,
+        } => (
+            input,
+            WorkAction::Conclude {
+                request: serde_json::from_str::<GroupedConclusions>(&conclusions_json)?,
+            },
+        ),
+        Autoreapprove::Synthesize {
+            input,
+            synthesis_json,
+        } => (
+            input,
+            WorkAction::Synthesize {
+                synthesis: serde_json::from_str::<FinalSynthesis>(&synthesis_json)?,
+            },
+        ),
         Autoreapprove::JudgeBatch { input, batch_json } => (
             input,
             WorkAction::JudgeBatch {
@@ -922,6 +980,17 @@ fn work(
             },
         ),
         Autoreapprove::Complete(input) => (input, WorkAction::Complete),
+        Autoreapprove::CompletePartial {
+            input,
+            change_id,
+            rationale,
+        } => (
+            input,
+            WorkAction::CompletePartial {
+                change_id,
+                rationale,
+            },
+        ),
         _ => return Err(fail("invalidInput", "Not an assessment operation")),
     };
     discovery::work(

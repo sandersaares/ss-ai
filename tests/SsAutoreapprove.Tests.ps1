@@ -51,9 +51,9 @@ Describe 'Automatic reapproval repository scope instructions' {
         $script:Prompt | Should -Match 'Never assess source changes in the\s+orchestrator or silently substitute another model'
         $script:Prompt | Should -Match 'verify its completion and digest using native `results`'
         $assignment = Get-Content -LiteralPath (Join-Path $skill 'assessment.md') -Raw
-        $assignment | Should -Match 'Do not invoke any skill, delegate,\s+publish'
-        $assignment | Should -Match 'Follow every inventory page'
-        $assignment | Should -Match 'Do not return source text,\s+discussion transcripts'
+        $assignment | Should -Match 'Do not invoke skills, delegate, publish'
+        $assignment | Should -Match 'following `nextOffset` as needed'
+        $assignment | Should -Match 'Do not return\s+source text, discussion transcripts'
     }
 
     It 'provides a bounded worker-only command guide with complete context pages' {
@@ -62,11 +62,11 @@ Describe 'Automatic reapproval repository scope instructions' {
         $worker = Get-Content -LiteralPath $workerPath -Raw
         $assignment | Should -Match 'assessment-commands\.md'
         ([Text.Encoding]::UTF8.GetByteCount($worker)) | Should -BeLessThan 16384
-        $worker | Should -Match 'source-context[^\r\n]*--limit 16384'
+        $worker | Should -Match 'read-next[^\r\n]*--read-token'
         $worker | Should -Match 'source-context-batch'
-        $assignment | Should -Match 'Registering ranges does not deliver them'
-        $assignment | Should -Match 'identify the necessary ranges across the patches\s+already examined'
-        $assignment | Should -Match 'Do not open the run state file directly'
+        $assignment | Should -Match 'does not\s+deliver text'
+        $assignment | Should -Match 'identify specific\s+additional captured-side line ranges'
+        $assignment | Should -Match 'Do not open the retained run file directly'
         $script:Recipes | Should -Match 'source-context[^\r\n]*--limit 16384'
         $worker | Should -Not -Match 'autoreapprove (discover|inspect|publish|notify)'
         $script:Recipes | Should -Match 'Omit `--after` for the first page'
@@ -94,60 +94,56 @@ Describe 'Automatic reapproval repository scope instructions' {
 
     It 'requires coverage repair instead of treating completion as a probe' {
         $assignment = Get-Content -LiteralPath (Join-Path $skill 'assessment.md') -Raw
-        $assignment | Should -Match 'Record one final judgment per changed-path record, after reading its policy'
-        $assignment | Should -Match 'Complete only after every inventory page'
-        $assignment | Should -Match 'every path has a judgment'
-        $assignment | Should -Match 'Do not use `complete` as a probe'
-        $assignment | Should -Match 'If it rejects missing coverage, repair the\s+missing work within the remaining budget'
-        $assignment | Should -Match 'A delivered tool result is not\s+command success'
-        $assignment | Should -Match 'nonzero native exits'
+        $assignment | Should -Match 'After full coverage, use `synthesize` once'
+        $assignment | Should -Match 'following `nextOffset` as needed'
+        $assignment | Should -Match 'Native code binds all final\s+change conclusions and exact evidence'
+        $assignment | Should -Match 'Do not probe completion'
+        $assignment | Should -Match 'If native validation rejects coverage, repair it within\s+the remaining budget'
+        $worker = Get-Content -LiteralPath (Join-Path $skill 'assessment-commands.md') -Raw
+        $worker | Should -Match 'Handle nonzero command exits explicitly'
+        $worker | Should -Match 'a failed command supplies no evidence'
     }
 
     It 'uses direct batches and reserves handoffs for real context pressure' {
         $assignment = Get-Content -LiteralPath (Join-Path $skill 'assessment.md') -Raw
         $script:Prompt | Should -Match 'genuine context pressure'
-        $script:Prompt | Should -Match 'Do not require unit\s+notes'
-        $assignment | Should -Match 'Do not write a note per unit'
-        $assignment | Should -Match 'independently reason about the combined\s+change'
-        $assignment | Should -Match 'do not derive it mechanically from individual labels'
-        $assignment | Should -Match 'Judge coherent groups as their evidence becomes available'
-        $assignment | Should -Match 'Record the observation\s+when the complete discussion has been examined'
-        $assignment | Should -Match 'keeping the conclusion provisional until all paths\s+and discussion have been examined'
-        $assignment | Should -Match 'Record checks for concrete unresolved concerns or interactions'
-        $assignment | Should -Match 'Do not record a check for an interaction already\s+resolved'
-        $assignment | Should -Match 'its existence alone does not establish a regression'
-        $assignment | Should -Match 'independently addressable\s+unit references'
-        $assignment | Should -Match 'unit-read-plan --reference discussion'
-        $assignment | Should -Match 'Do not fetch the unit manifest again for each\s+window'
+        $script:Prompt | Should -Match 'Do not require per-path essays, discussion notes, check enumeration'
+        $assignment | Should -Match 'Do not create a separate discussion note'
+        $assignment | Should -Match 'independently consider cumulative effects'
+        $assignment | Should -Match 'As evidence becomes available, use `conclude` to group changes'
+        $assignment | Should -Match 'Keep combined reasoning provisional until all\s+changes, discussion, and necessary context have been examined'
+        $assignment | Should -Match 'There are no mandatory discussion notes, check enumeration, empty checks'
+        $assignment | Should -Match 'A pre-existing limitation alone\s+does not establish a regression'
+        $assignment | Should -Match '`unit-read-plan` to obtain bounded independent windows'
+        $assignment | Should -Match 'issue `read-units`\s+calls for those windows together'
         $script:Recipes | Should -Match 'including escaped text and metadata'
-        $assignment | Should -Match 'Issue independent batches together\s+as separate calls in one model turn'
-        $assignment | Should -Match 'Retain the returned change IDs and their evidence references'
-        $assignment | Should -Match 'Follow the returned `nextOffset` rather than advancing by a fixed page size'
-        $assignment | Should -Match 'Leave time within the assessment budget for this reasoning and completion'
-        $script:Recipes | Should -Match 'commits the entire batch atomically'
+        $assignment | Should -Match 'Retain the native short change `reference` values'
+        $assignment | Should -Match 'Native code selects required\s+documents, contiguous offsets, and batches'
+        $assignment | Should -Match 'Leave time for final reasoning and completion'
+        $script:Recipes | Should -Match 'validates coverage, and completes atomically'
     }
 
     It 'recovers local read-token changes without replacing the worker' {
         $assignment = Get-Content -LiteralPath (Join-Path $skill 'assessment.md') -Raw
-        $assignment | Should -Match 'Start with `assessment`\s+using `--compact --limit 100`'
-        $assignment | Should -Match 'new `readToken` returned by `source-context`'
+        $assignment | Should -Match 'Start with `assessment --compact --limit 100`'
+        $assignment | Should -Match 'Registration returns a new local read token, not a new snapshot'
         $assignment | Should -Match 'oldLineCount'
-        $assignment | Should -Match 'Do not\s+request lines outside the captured side'
-        $assignment | Should -Match 'obtain the new token from `assessment`\s+and retry the undelivered references at the same offsets in this worker'
-        $assignment | Should -Match 'Do not\s+restart the worker or refresh the snapshot'
+        $assignment | Should -Match 'bound them by inventory `oldLineCount` or `newLineCount`'
+        $assignment | Should -Match 'On a stale local token, obtain the\s+current token and retry undelivered evidence'
+        $assignment | Should -Match 'do not restart or refresh'
         $script:Recipes | Should -Match 'This is not snapshot staleness'
     }
 
     It 'keeps output and context limits separate from semantic uncertainty' {
         $assignment = Get-Content -LiteralPath (Join-Path $skill 'assessment.md') -Raw
-        $assignment | Should -Match 'retry a smaller batch from the same\s+offsets'
-        $assignment | Should -Match 'Keep separately bounded responses separate in the host tool output'
-        $assignment | Should -Match 'Never fabricate judgments for unexamined paths'
-        $assignment | Should -Match 'not semantic uncertainty or a reason\s+to notify'
+        $assignment | Should -Match 'replay any host-truncated page with a smaller bound'
+        $assignment | Should -Match 'Keep\s+separately bounded responses separate in host output'
+        $assignment | Should -Match 'do not fabricate conclusions for unexamined changes'
+        $assignment | Should -Match 'Missing or truncated evidence is incomplete work, not semantic uncertainty'
         $script:Recipes | Should -Match 'including the final newline'
         $script:Recipes | Should -Match 'JSON escaping and multibyte text can shorten'
-        $script:Recipes | Should -Match 'requires all readable evidence for every disposition'
-        $script:Recipes | Should -Match '`evidenceDelivery` diagnostic is a tooling failure'
+        $script:Recipes | Should -Match 'Full synthesis requires all mandatory patches and requested ranges'
+        $script:Recipes | Should -Match 'Delivery, context, and worker limits remain incomplete work'
     }
 
     It 'reacquires evidence required by replacement workers' {
@@ -162,18 +158,16 @@ Describe 'Automatic reapproval repository scope instructions' {
         $script:Recipes | Should -Match 'Discussion is a compact semantic document, not approval bookkeeping'
         $script:Recipes | Should -Match '`discussionDigest` binds the complete document'
         $script:Recipes | Should -Match 'Identical excerpt text does not merge comments'
-        $assignment | Should -Match 'Read all discussion bodies and shared historical excerpts'
+        $assignment | Should -Match 'For approval, read complete policy, patches, discussion bodies, and shared\s+historical excerpts'
         $assignment | Should -Match 'Resolved,\s+outdated, repeated, and agent-authored discussion is not automatically\s+irrelevant'
-        $assignment | Should -Match 'receipt\s+proves delivery, not comprehension'
+        $assignment | Should -Match 'receipts establish\s+delivery, not comprehension'
     }
 
     It 'requires exact patches and context without unit-note aggregation' {
         $assignment = Get-Content -LiteralPath (Join-Path $skill 'assessment.md') -Raw
-        $assignment | Should -Match '`:old`'
-        $assignment | Should -Match '`:new`'
-        $assignment | Should -Match 'Do not write a note per unit'
-        $assignment | Should -Match 'Every registered range is\s+required evidence'
-        $script:Recipes | Should -Match 'direct\s+assessments need no unit notes'
+        $assignment | Should -Match 'specific\s+additional captured-side line ranges'
+        $assignment | Should -Match 'Every registered range becomes required'
+        $script:Recipes | Should -Match 'assessments need no unit or discussion notes'
         $script:Recipes | Should -Match 'Replacements invalidate dependent records'
         $script:Recipes | Should -Match '`sourceEvidenceDigest`'
         $help = & ss-ai autoreapprove source-context --help | Out-String
@@ -192,7 +186,7 @@ Describe 'Automatic reapproval repository scope instructions' {
         $script:Prompt | Should -Match 'Approval already valid'
         $script:Prompt | Should -Match 'do not infer who or what submitted it'
         $script:Prompt | Should -Match 'required documents and requested\s+context ranges delivered versus total'
-        $script:Prompt | Should -Match 'Transport fragments are not separate required judgments'
+        $script:Prompt | Should -Match 'Transport fragments are\s+not separate required judgments'
     }
 
     It 'excludes draft PRs from work and reports' {
@@ -237,7 +231,7 @@ Describe 'Automatic reapproval provider fixtures' {
         $recipes = Get-Content -LiteralPath (Join-Path $skill 'commands.md') -Raw
         $help = & ss-ai autoreapprove --help | Out-String
         $LASTEXITCODE | Should -Be 0
-        foreach ($command in @('discover', 'results', 'inspect', 'refresh', 'prepare', 'start-worker', 'assessment', 'read', 'read-batch', 'source-context', 'units', 'note', 'checks', 'resolve', 'checkpoint', 'judge', 'judge-batch', 'complete', 'publish', 'notify')) {
+        foreach ($command in @('discover', 'results', 'inspect', 'refresh', 'prepare', 'start-worker', 'assessment', 'read-next', 'read', 'read-batch', 'source-context', 'units', 'checkpoint', 'conclude', 'synthesize', 'complete-partial', 'publish', 'notify')) {
             $recipes | Should -Match "(?m)(?:^|=\s)ss-ai autoreapprove $command "
             $help | Should -Match "(?m)^\s+$command\s"
         }

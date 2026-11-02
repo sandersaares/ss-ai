@@ -55,7 +55,7 @@ time boundary supports both claim decisions and transport recovery waits.
 
 ## Assessment checkpoints
 
-`ss-ai-assessment` owns the immutable unit manifest and typed observations.
+`ss-ai-assessment` owns the immutable unit manifest and exact conclusion coverage.
 `units.rs` groups complete source hunks and provider discussion records,
 including noncontiguous replies, then splits oversized text at exact scalar
 ranges. The manifest covers the original serialized documents rather than a
@@ -76,9 +76,21 @@ every window. Planning simulates delivery on a private copy and never records
 receipts. It reuses that copy across units rather than copying the full source
 capture for each planned page.
 
-`checkpoint.rs` owns discussion observations, explicit concern and interaction
-records, evidence-backed dispositions, and dependency digests. The direct protocol
-does not require a semantic note for every transport unit. Atomic batch requests
+`conclusions.rs` accepts grouped semantic conclusions and final synthesis.
+Short references select inventory positions only within the exact snapshot and
+state token. Native code expands groups into exact change judgments, binds policy,
+patches and requested context, and derives conditional replacement digests.
+This keeps evidence bookkeeping outside agent-authored prose without weakening
+per-change validation. `read-next` stages required-document delivery using actual
+serialized response sizes and current contiguous receipts; only the fitting batch
+commits. A changed local token fails without receipts and requires no new snapshot.
+
+`checkpoint.rs` owns immutable transport units and dependency digests.
+Discussion notes and explicit checks are optional low-level records, not worker
+workflow obligations. Final synthesis carries material discussion and remaining
+concerns directly; native code binds all final judgments and discussion and
+completes atomically. Unresolved concerns prevent renewal even with a favorable
+label. Atomic batch requests
 stage all reads or judgments against a state token before committing, reducing
 round trips without allowing partial results. Earlier run schemas require a
 fresh run and assessment; existing files are left untouched.
@@ -93,6 +105,6 @@ receipts under the same transaction that records the judgments.
 
 The shared dependency reader validates citations and bindings at recording and
 reload boundaries. Replacements invalidate transitive dependent records. The
-cumulative judgment binds final judgments, discussion, checks, and dispositions;
+cumulative judgment binds final judgments, discussion, and any recorded obligations;
 read receipts establish delivery only. The review run persists time, work, and
 worker reservations before work so recovery cannot renew those budgets.
