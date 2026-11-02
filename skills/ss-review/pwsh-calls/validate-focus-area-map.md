@@ -1,10 +1,4 @@
-```powershell
-#Requires -Version 7.6
-
-Set-StrictMode -Version Latest
-$ErrorActionPreference = 'Stop'
-$PSNativeCommandUseErrorActionPreference = $true
-
+```text
 ss-ai workflow validate-focus-area-map --session-state "{{PREPARATION_STATE}}" --map-path "{{MAP_PATH}}"
 ```
 

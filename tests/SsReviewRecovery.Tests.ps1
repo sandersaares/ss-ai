@@ -1,3 +1,9 @@
+#Requires -Version 7.6
+
+Set-StrictMode -Version Latest
+$ErrorActionPreference = 'Stop'
+$PSNativeCommandUseErrorActionPreference = $true
+
 BeforeAll {
     Set-StrictMode -Version Latest
     $ErrorActionPreference = 'Stop'
@@ -37,23 +43,24 @@ Describe 'Review workflow recovery instructions' {
     }
 
     It 'repairs the capture versus request path mistake without abandoning preparation' {
-        $script:Query | Should -Match '`-Path` must name the existing capture'
-        $script:Query | Should -Match '`-RequestPath` names the separate query request output'
-        $script:Query | Should -Match 'correct it to the assigned capture path'
-        $script:Query | Should -Match 'verify existence without reading the capture into context'
-        $script:Query | Should -Match 'rerun request creation with the intended request output path'
-        $script:Query | Should -Match 'Do not ask the user, rerun proactor selection, or cancel unrelated preparation workers'
+        $script:Query | Should -Match 'ss-ai context prepare --path "\{\{CONTEXT_PATH\}\}" --request-path "\{\{REQUEST_PATH\}\}"'
+        $script:Query | Should -Match '`CONTEXT_PATH` \| Absolute path to the initial or uniquely prefixed refreshed capture'
+        $script:Query | Should -Match '`REQUEST_PATH` \| New absolute JSON path private to this query'
+        $script:Query | Should -Match 'If `--path` accidentally names the new request rather than the existing capture, correct it'
+        $script:Query | Should -Match 'verify the capture exists without reading its contents into context'
+        $script:Query | Should -Match 'rerun preparation without restarting selection or unrelated workers'
+        $script:Recovery | Should -Match 'Do not ask the user to repair the agent''s invocation'
         $script:Recovery | Should -Match 'Keep unrelated preparation and\s+review workers running'
         $script:Recovery | Should -Match 'primary\s+orchestrator applies this same policy before escalating'
     }
 
     It 'keeps bounded evidence access and saved-query replay and restart rules intact' {
-        $script:Query | Should -Match 'Never open it with a file-view tool'
-        $script:Query | Should -Match 'Never bypass this recipe with an alternate provider fetch'
-        $script:Query | Should -Match 'Never fall back to a raw file read'
-        $script:Query | Should -Match 'Do not use `-Next` if uncertain whether the prior output was received: replay first'
-        $script:Query | Should -Match '`-Restart` to bind its current contents and read the first page'
-        $script:Query | Should -Match 'Different filters or a different capture path require a new request'
+        $script:Query | Should -Match 'Do not open, dump, parse, serialize, or embed it in model context'
+        $script:Query | Should -Match 'do not bypass this recipe with a provider fetch'
+        $script:Query | Should -Match 'Never fall back to a raw capture read'
+        $script:Query | Should -Match 'if receipt is uncertain, replay first'
+        $script:Query | Should -Match 'use `--restart` to bind its current contents'
+        $script:Query | Should -Match 'Use a new request path for different selectors'
     }
 
     It 'requires positive pre-write evidence and preserves reconciliation for ambiguous external writes' {

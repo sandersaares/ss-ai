@@ -1,12 +1,5 @@
-```powershell
-#Requires -Version 7.6
-
-Set-StrictMode -Version Latest
-$ErrorActionPreference = 'Stop'
-$PSNativeCommandUseErrorActionPreference = $true
-
-ss-ai workflow update-focus-area-expansion --session-state "{{PREPARATION_STATE}}" `
-  --operation "{{OPERATION}}" --input-path "{{INPUT_PATH}}" --reference-id "{{REFERENCE_ID}}"
+```text
+ss-ai workflow update-focus-area-expansion --session-state "{{PREPARATION_STATE}}" --operation "{{OPERATION}}" --input-path "{{INPUT_PATH}}" --reference-id "{{REFERENCE_ID}}"
 ```
 
 | Placeholder | Value |

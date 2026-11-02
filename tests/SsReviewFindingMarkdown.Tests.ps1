@@ -1,17 +1,16 @@
-BeforeAll {
-    $script:RepoRoot = Split-Path -Parent $PSScriptRoot
-    $script:ExecutableRoot = Join-Path $script:RepoRoot 'skills\ss-review\scripts'
-    $script:LibraryRoot = Join-Path $script:ExecutableRoot 'lib'
+#Requires -Version 7.6
 
-    # Libraries never dot-source one another, so every dependency is loaded here in dependency
-    # order, the same order the executables use.
-    . (Join-Path $script:LibraryRoot 'JsonValue.ps1')
-    . (Join-Path $script:LibraryRoot 'PullRequestModel.ps1')
-    . (Join-Path $script:LibraryRoot 'WorkflowData.ps1')
-    . (Join-Path $script:LibraryRoot 'FindingModel.ps1')
-    . (Join-Path $script:LibraryRoot 'NativeWorkflowBridge.ps1')
-    . (Join-Path $script:LibraryRoot 'FindingMarkdown.ps1')
-    . (Join-Path $script:LibraryRoot 'FocusAreaCacheDiagnostics.ps1')
+Set-StrictMode -Version Latest
+$ErrorActionPreference = 'Stop'
+$PSNativeCommandUseErrorActionPreference = $true
+
+BeforeAll {
+    $script:SkillRoot = Join-Path (Split-Path -Parent $PSScriptRoot) 'skills\ss-review'
+    $script:FindingMarkdownProseSection = @(
+        @{ field = 'reasoning'; label = 'Reproducible reasoning' }
+        @{ field = 'consequence'; label = 'Consequence' }
+        @{ field = 'recommendedAction'; label = 'Recommended action' }
+    )
 
     # The host running this suite stands in for the executables it launches. Naming the running
     # executable rather than the command 'pwsh' keeps the child on the same build as the parent and
@@ -51,26 +50,6 @@ BeforeAll {
         $record
     }
 
-    # Builds a finding as an author writes it, carrying no identifier and no provenance.
-    function New-TestFinding {
-        param(
-            [System.Collections.IDictionary] $Override = @{}
-        )
-
-        $finding = [ordered]@{
-            title             = 'Terminate the retry loop'
-            description       = 'The loop condition is never updated.'
-            reasoning         = 'The counter is incremented in a branch that cannot be reached.'
-            consequence       = 'A transient failure hangs the caller indefinitely.'
-            recommendedAction = 'Increment the counter outside the branch.'
-            anchor            = [ordered]@{ kind = 'line'; path = 'src/retry.rs'; startLine = 42 }
-        }
-
-        foreach ($key in $Override.Keys) { $finding[[string] $key] = $Override[$key] }
-
-        $finding
-    }
-
     function Write-TestJsonFile {
         param(
             [Parameter(Mandatory)]
@@ -80,62 +59,115 @@ BeforeAll {
             $Value
         )
 
-        Write-PullRequestOutputFile -Path $Path -Content (ConvertTo-JsonText -Value $Value)
+        [IO.File]::WriteAllText($Path, (ConvertTo-Json -InputObject $Value -Depth 100), [Text.UTF8Encoding]::new($false))
         $Path
     }
 
-    # Runs one of the skill's executables in a child process and reports its streams separately.
-    #
-    # Standard output is captured apart from standard error because the caller of these executables
-    # parses standard output as JSON, so a refusal that writes anything at all there is a defect the
-    # combined stream would hide.
-    function Invoke-SkillExecutable {
-        param(
-            [Parameter(Mandatory)]
-            [string] $Name,
+    # Keep stdout separate from errors because successful commands return JSON.
+    function Invoke-NativeWorkflow {
+        param([string[]] $ArgumentList)
 
-            [string[]] $ArgumentList = @()
-        )
-
-        $executablePath = Join-Path $script:ExecutableRoot $Name
-        if (-not (Test-Path -LiteralPath $executablePath -PathType Leaf)) {
-            throw "The executable under test is missing: $executablePath"
+        $native = (Get-Command ss-ai -CommandType Application -ErrorAction Stop | Select-Object -First 1).Source
+        $start = [Diagnostics.ProcessStartInfo]::new($native)
+        $start.UseShellExecute = $false
+        $start.RedirectStandardOutput = $true
+        $start.RedirectStandardError = $true
+        $start.StandardOutputEncoding = [Text.UTF8Encoding]::new($false, $true)
+        $start.StandardErrorEncoding = [Text.UTF8Encoding]::new($false, $true)
+        foreach ($argument in @('workflow') + $ArgumentList) {
+            $start.ArgumentList.Add($argument)
         }
-
-        $startInfo = [System.Diagnostics.ProcessStartInfo]::new()
-        $startInfo.FileName = $script:PowerShellPath
-        $arguments = @('-NoProfile', '-NonInteractive', '-File', $executablePath) + $ArgumentList
-        foreach ($argument in $arguments) {
-            $startInfo.ArgumentList.Add($argument)
-        }
-        $startInfo.UseShellExecute = $false
-        $startInfo.RedirectStandardOutput = $true
-        $startInfo.RedirectStandardError = $true
-        $startInfo.RedirectStandardInput = $true
-        $startInfo.StandardOutputEncoding = [System.Text.UTF8Encoding]::new($false)
-        $startInfo.StandardErrorEncoding = [System.Text.UTF8Encoding]::new($false)
-
-        $process = [System.Diagnostics.Process]::Start($startInfo)
+        $process = [Diagnostics.Process]::Start($start)
         try {
-            $process.StandardInput.Close()
-
-            # Both streams are drained concurrently, because a refusal writes a formatted error
-            # record and reading one stream to its end before starting on the other stalls as soon
-            # as either outgrows a pipe buffer.
-            $outputTask = $process.StandardOutput.ReadToEndAsync()
-            $errorTask = $process.StandardError.ReadToEndAsync()
-            $standardOutput = $outputTask.GetAwaiter().GetResult()
-            $standardErrorText = $errorTask.GetAwaiter().GetResult()
+            # Drain both pipes while the child runs so a full pipe cannot block its exit.
+            $output = $process.StandardOutput.ReadToEndAsync()
+            $errorOutput = $process.StandardError.ReadToEndAsync()
             $process.WaitForExit()
-
-            [ordered]@{
-                exitCode       = $process.ExitCode
-                standardOutput = $standardOutput
-                standardError  = $standardErrorText
+            @{
+                exitCode = $process.ExitCode
+                standardOutput = $output.GetAwaiter().GetResult()
+                standardError = $errorOutput.GetAwaiter().GetResult()
             }
+        } finally { $process.Dispose() }
+    }
+
+    function Invoke-MarkdownCommand {
+        param([string[]] $ArgumentList)
+        Invoke-NativeWorkflow -ArgumentList (@('prepare-markdown') + $ArgumentList)
+    }
+
+    # Exercise the native renderer with its documented file-based request.
+    function Invoke-TestRender {
+        param([System.Collections.IDictionary] $Request)
+        $path = Join-Path $TestDrive ("render-{0}.json" -f [guid]::NewGuid())
+        Write-TestJsonFile -Path $path -Value $Request | Out-Null
+        try {
+            $result = Invoke-NativeWorkflow -ArgumentList @('render', '--request-path', $path)
+            if ($result.exitCode -ne 0) { throw $result.standardError }
+            ConvertFrom-Json -InputObject $result.standardOutput -AsHashtable
         } finally {
-            $process.Dispose()
+            Remove-Item -LiteralPath $path -Force
         }
+    }
+
+    function ConvertTo-FindingMarkdownText {
+        param($Finding)
+        (Invoke-TestRender @{ operation = 'findingRender'; destination = 'pullRequest'; finding = $Finding }).published
+    }
+
+    function ConvertTo-FindingBodyMarkdown {
+        param($Finding)
+        (Invoke-TestRender @{ operation = 'findingRender'; destination = 'pullRequest'; finding = $Finding }).body
+    }
+
+    function ConvertTo-FindingTrackerItem {
+        param($Finding, $FollowUpUrl = $null, $PullRequestUrl = $null)
+        Invoke-TestRender @{ operation = 'trackerFields'; finding = $Finding; followUpUrl = $FollowUpUrl; pullRequestUrl = $PullRequestUrl }
+    }
+
+    function Get-FindingMarkdownBlock {
+        param($Finding, $Destination, $FollowUpUrl = $null, $PullRequestUrl = $null)
+        (Invoke-TestRender @{ operation = 'findingRender'; finding = $Finding; destination = $Destination; followUpUrl = $FollowUpUrl; pullRequestUrl = $PullRequestUrl }).blocks
+    }
+
+    function ConvertTo-FindingMarkdownDocument {
+        param([object[]] $Finding)
+        Invoke-TestRender @{ operation = 'document'; destination = 'pullRequest'; findings = @($Finding) }
+    }
+
+    function New-ReviewSummaryMarkdown {
+        param([object[]] $Finding = @(), [int] $FollowUpCount = 0, $Diagnostics = @{}, $Platform)
+        Invoke-TestRender @{ operation = 'summary'; findings = @($Finding); followUpCount = $FollowUpCount; diagnostics = $Diagnostics; platform = $Platform }
+    }
+
+    function ConvertFrom-JsonVerbatim {
+        param([string] $Text)
+        ConvertFrom-Json -InputObject $Text -AsHashtable
+    }
+
+    function Get-JsonArrayProperty {
+        param($Node, [string] $Name)
+        @($Node[$Name])
+    }
+
+    function Get-JsonProperty {
+        param($Node, [string] $Name)
+        $Node[$Name]
+    }
+
+    function Write-PullRequestOutputFile {
+        param([string] $Path, [string] $Content)
+        [IO.File]::WriteAllText($Path, $Content, [Text.UTF8Encoding]::new($false))
+    }
+
+    function Read-FindingArtifact {
+        param([string] $Path)
+        ConvertFrom-JsonVerbatim -Text ([IO.File]::ReadAllText($Path))
+    }
+
+    function Write-FindingArtifact {
+        param([string] $Path, $Document)
+        Write-TestJsonFile -Path $Path -Value $Document | Out-Null
     }
 
     # Renders a child process's error stream as a single line.
@@ -582,20 +614,6 @@ Describe 'Tracker item blocks' {
         @($blocks | Where-Object { $_.Contains('**Reviewed in**') }).Count | Should -Be 0
     }
 
-    # The separator is applied in one place, so a document collecting comment bodies and a document
-    # collecting tracker items divide their findings the same way.
-    It 'divides findings by a rule surrounded by blank lines' {
-        Join-FindingMarkdownDocument -Text @('first', 'second') |
-            Should -BeExactly ("first`n`n---`n`nsecond")
-    }
-
-    It 'renders a single finding as itself' {
-        Join-FindingMarkdownDocument -Text @('only') | Should -BeExactly 'only'
-    }
-
-    It 'renders an empty set as an empty document' {
-        Join-FindingMarkdownDocument -Text @() | Should -BeExactly ''
-    }
 }
 
 Describe 'Combined document' {
@@ -773,21 +791,36 @@ Describe 'Review summary' {
             $unstated | Should -Not -BeLike '*Instruction expansion*'
         }
 
-        It 'reads the record the cache commands write' {
+        It 'reads the record the native cache commands write' {
             $sessionState = Join-Path $TestDrive ([guid]::NewGuid())
-            Write-FocusAreaCacheDiagnostics -SessionStateDirectory $sessionState -Diagnostics @{
-                cache      = 'Hit'
-                reason     = 'Fresh'
-                inputState = 'Degraded'
-                store      = 'Bypassed'
+            New-Item -ItemType Directory -Path $sessionState | Out-Null
+            $skillRoot = $script:SkillRoot
+            $previous = $env:COPILOT_CUSTOM_INSTRUCTIONS_DIRS
+            try {
+                $env:COPILOT_CUSTOM_INSTRUCTIONS_DIRS = ''
+                $snapshot = Invoke-NativeWorkflow -ArgumentList @(
+                    'snapshot-instructions', '--session-state', $sessionState, '--skill-root', $skillRoot
+                )
+                $snapshot.exitCode | Should -Be 0 -Because $snapshot.standardError
+                $source = ConvertFrom-JsonVerbatim -Text $snapshot.standardOutput
+                $restore = Invoke-NativeWorkflow -ArgumentList @(
+                    'restore-focus-area-cache', '--session-state', $sessionState
+                    '--input-directory', $source.sourceDirectory, '--skill-root', $skillRoot
+                    '--recipe-path', (Join-Path $skillRoot 'prepare-focus-areas.md')
+                    '--cache-directory', (Join-Path $sessionState 'cache')
+                    '--generator-profile', 'test-model', '--freshness-days', '7'
+                    '--now-utc', '2024-05-06T09:10:11Z', '--snapshot-identity', $source.snapshotIdentity
+                )
+                $restore.exitCode | Should -Be 0 -Because $restore.standardError
+                $diagnostics = ConvertFrom-JsonVerbatim -Text ([IO.File]::ReadAllText(
+                    (Join-Path $sessionState 'focus-area-cache-diagnostics.json')
+                ))
+                $diagnostics.cache | Should -BeExactly 'Miss'
+                $summary = New-ReviewSummaryMarkdown -Diagnostics $diagnostics -Platform 'gitHub'
+                $summary | Should -BeLike '*| Cache | Miss |*'
+            } finally {
+                $env:COPILOT_CUSTOM_INSTRUCTIONS_DIRS = $previous
             }
-
-            $summary = New-ReviewSummaryMarkdown `
-                -Diagnostics (Get-FocusAreaCacheDiagnostics -SessionStateDirectory $sessionState) `
-                -Platform 'gitHub'
-
-            $summary | Should -BeLike '*| Cache | Hit |*'
-            $summary | Should -BeLike '*| Instruction expansion | Degraded |*'
         }
     }
 }
@@ -800,16 +833,21 @@ Describe 'Rendering executable' {
         $script:ArtifactPath = Join-Path $script:WorkRoot 'consolidated.json'
         $script:MarkdownRoot = Join-Path $script:WorkRoot 'markdown'
 
-        $document = New-FindingArtifactDocument -Kind 'consolidated'
-        Add-FindingToArtifact -Document $document -Finding (New-TestFinding -Override @{ title = 'Reviewer finding' }) -Origin 'reviewer' -SourceFindingId @('g1-1') | Out-Null
-        Add-FindingToArtifact -Document $document -Finding (New-TestFinding -Override @{ title = 'Synthesis finding' }) -Origin 'synthesis' -SourceFindingId @('g1-1', 'g2-1') | Out-Null
+        $document = [ordered]@{
+            schemaVersion = 1
+            kind = 'consolidated'
+            findings = @(
+                New-TestRecord -Override @{ id = 'F1'; title = 'Reviewer finding' }
+                New-TestRecord -Override @{ id = 'F2'; title = 'Synthesis finding'; origin = 'synthesis'; sourceFindingIds = @('g1-1', 'g2-1') }
+            )
+        }
         Write-FindingArtifact -Path $script:ArtifactPath -Document $document
     }
 
     # Exercise the documented file input rather than a serializer-generated substitute, so JSON
     # escapes and the exact prose survive the real add, rewrite, and document-rendering commands.
     It 'preserves the documented multiline finding through file-based commands' {
-        $reviewPath = Join-Path $script:ExecutableRoot '..\review.md'
+        $reviewPath = Join-Path $script:SkillRoot 'review.md'
         $examples = [regex]::Matches([IO.File]::ReadAllText($reviewPath), '(?ms)^```json\r?\n(?<json>.*?)^```')
         $examples.Count | Should -Be 1
         $json = $examples[0].Groups['json'].Value
@@ -817,17 +855,19 @@ Describe 'Rendering executable' {
         $findingPath = Join-Path $script:WorkRoot 'finding input.json'
         Write-PullRequestOutputFile -Path $findingPath -Content $json
 
-        $added = Invoke-SkillExecutable -Name 'Add-Finding.ps1' -ArgumentList @(
-            '-ArtifactPath', $script:ArtifactPath
-            '-FindingPath', $findingPath
+        $added = Invoke-NativeWorkflow -ArgumentList @(
+            'add-finding', '--artifact-path', $script:ArtifactPath
+            '--finding-path', $findingPath
+            '--origin', 'synthesis'
+            '--source-id', 'g1-1'
         )
         $added.exitCode | Should -Be 0 -Because $added.standardError
         $addedId = (ConvertFrom-JsonVerbatim -Text $added.standardOutput).findingId
 
-        $updated = Invoke-SkillExecutable -Name 'Update-Finding.ps1' -ArgumentList @(
-            '-ArtifactPath', $script:ArtifactPath
-            '-FindingId', 'F1'
-            '-FindingPath', $findingPath
+        $updated = Invoke-NativeWorkflow -ArgumentList @(
+            'update-finding', '--artifact-path', $script:ArtifactPath
+            '--finding-id', 'F1'
+            '--finding-path', $findingPath
         )
         $updated.exitCode | Should -Be 0 -Because $updated.standardError
 
@@ -843,11 +883,11 @@ Describe 'Rendering executable' {
 
         $combinedPath = Join-Path $script:WorkRoot 'findings.md'
         $auditPath = Join-Path $script:WorkRoot 'audit-findings.md'
-        $rendered = Invoke-SkillExecutable -Name 'ConvertTo-FindingMarkdown.ps1' -ArgumentList @(
-            '-Path', $script:ArtifactPath
-            '-OutputDirectory', $script:MarkdownRoot
-            '-CombinedPath', $combinedPath
-            '-AuditDocumentPath', $auditPath
+        $rendered = Invoke-MarkdownCommand -ArgumentList @(
+            '--path', $script:ArtifactPath
+            '--output-directory', $script:MarkdownRoot
+            '--combined-path', $combinedPath
+            '--audit-document-path', $auditPath
         )
         $rendered.exitCode | Should -Be 0 -Because $rendered.standardError
 
@@ -864,9 +904,9 @@ Describe 'Rendering executable' {
     }
 
     It 'writes one file per finding, named by identifier' {
-        $result = Invoke-SkillExecutable -Name 'ConvertTo-FindingMarkdown.ps1' -ArgumentList @(
-            '-Path', $script:ArtifactPath
-            '-OutputDirectory', $script:MarkdownRoot
+        $result = Invoke-MarkdownCommand -ArgumentList @(
+            '--path', $script:ArtifactPath
+            '--output-directory', $script:MarkdownRoot
         )
 
         $result['exitCode'] | Should -Be 0
@@ -889,10 +929,10 @@ Describe 'Rendering executable' {
     It 'writes the combined document when asked for one' {
         $combinedPath = Join-Path $script:WorkRoot 'findings.md'
 
-        $result = Invoke-SkillExecutable -Name 'ConvertTo-FindingMarkdown.ps1' -ArgumentList @(
-            '-Path', $script:ArtifactPath
-            '-OutputDirectory', $script:MarkdownRoot
-            '-CombinedPath', $combinedPath
+        $result = Invoke-MarkdownCommand -ArgumentList @(
+            '--path', $script:ArtifactPath
+            '--output-directory', $script:MarkdownRoot
+            '--combined-path', $combinedPath
         )
 
         $result['exitCode'] | Should -Be 0
@@ -909,18 +949,24 @@ Describe 'Rendering executable' {
         @{ Empty = $true }
     ) {
         if ($Empty) {
-            Write-FindingArtifact -Path $script:ArtifactPath -Document (New-FindingArtifactDocument -Kind 'consolidated')
+            Write-FindingArtifact -Path $script:ArtifactPath -Document ([ordered]@{
+                schemaVersion = 1; kind = 'consolidated'; findings = @()
+            })
         }
         Copy-Item -LiteralPath $script:ArtifactPath -Destination (Join-Path $script:WorkRoot 'findings.json')
 
-        $skillRoot = Split-Path -Parent $script:ExecutableRoot
+        $skillRoot = $script:SkillRoot
         $recipe = Get-Content -LiteralPath (Join-Path $skillRoot 'pwsh-calls/render-self-review.md') -Raw
-        $command = [regex]::Match($recipe, '(?s)```powershell\s*(.*?)```').Groups[1].Value
+        $command = [regex]::Match($recipe, '(?s)```text\s*(.*?)```').Groups[1].Value
+        $command | Should -Not -BeNullOrEmpty
         $command = $command.Replace('{{SKILL_ROOT}}', $skillRoot).Replace('{{SESSION_STATE}}', $script:WorkRoot)
-        $recipePath = Join-Path $script:WorkRoot 'render.ps1'
-        Write-PullRequestOutputFile -Path $recipePath -Content $command
-
-        $output = & $script:PowerShellPath -NoProfile -NonInteractive -File $recipePath
+        $initialization = @'
+if ($PSVersionTable.PSVersion -lt [version]'7.6') { throw 'PowerShell 7.6 required' }
+Set-StrictMode -Version Latest
+$ErrorActionPreference = 'Stop'
+$PSNativeCommandUseErrorActionPreference = $true
+'@
+        $output = & $script:PowerShellPath -NoProfile -NonInteractive -Command ($initialization + "`n" + $command)
         $LASTEXITCODE | Should -Be 0
         $result = ($output -join "`n") | ConvertFrom-Json
         $result.destination | Should -BeExactly 'tracker'
@@ -948,10 +994,10 @@ Describe 'Rendering executable' {
         $auditDirectory = Join-Path $script:WorkRoot 'audit files (local)'
         $auditPath = Join-Path $auditDirectory 'audit-findings.md'
 
-        $result = Invoke-SkillExecutable -Name 'ConvertTo-FindingMarkdown.ps1' -ArgumentList @(
-            '-Path', $script:ArtifactPath
-            '-OutputDirectory', $script:MarkdownRoot
-            '-AuditDocumentPath', $auditPath
+        $result = Invoke-MarkdownCommand -ArgumentList @(
+            '--path', $script:ArtifactPath
+            '--output-directory', $script:MarkdownRoot
+            '--audit-document-path', $auditPath
         )
 
         $result['exitCode'] | Should -Be 0 -Because $result['standardError']
@@ -974,11 +1020,11 @@ Describe 'Rendering executable' {
     It 'scopes the audit document to the findings it was told to render' {
         $auditPath = Join-Path $script:WorkRoot 'audit-findings.md'
 
-        $result = Invoke-SkillExecutable -Name 'ConvertTo-FindingMarkdown.ps1' -ArgumentList @(
-            '-Path', $script:ArtifactPath
-            '-OutputDirectory', $script:MarkdownRoot
-            '-AuditDocumentPath', $auditPath
-            '-FindingId', 'F1'
+        $result = Invoke-MarkdownCommand -ArgumentList @(
+            '--path', $script:ArtifactPath
+            '--output-directory', $script:MarkdownRoot
+            '--audit-document-path', $auditPath
+            '--finding-id', 'F1'
         )
 
         $result['exitCode'] | Should -Be 0 -Because $result['standardError']
@@ -994,22 +1040,22 @@ Describe 'Rendering executable' {
         @{ Destination = 'tracker' }
     ) {
         $auditPath = Join-Path $script:WorkRoot 'audit-findings.md'
-        $first = Invoke-SkillExecutable -Name 'ConvertTo-FindingMarkdown.ps1' -ArgumentList @(
-            '-Path', $script:ArtifactPath
-            '-OutputDirectory', $script:MarkdownRoot
-            '-Destination', $Destination
+        $first = Invoke-MarkdownCommand -ArgumentList @(
+            '--path', $script:ArtifactPath
+            '--output-directory', $script:MarkdownRoot
+            '--destination', $Destination
         )
         $first.exitCode | Should -Be 0 -Because $first.standardError
 
         $document = Read-FindingArtifact -Path $script:ArtifactPath
         $document.findings[0].description = "Clarified claim.`n`n- Supporting evidence`n- Further evidence"
         Write-FindingArtifact -Path $script:ArtifactPath -Document $document
-        $result = Invoke-SkillExecutable -Name 'ConvertTo-FindingMarkdown.ps1' -ArgumentList @(
-            '-Path', $script:ArtifactPath
-            '-OutputDirectory', $script:MarkdownRoot
-            '-AuditDocumentPath', $auditPath
-            '-FindingId', 'F1'
-            '-Destination', $Destination
+        $result = Invoke-MarkdownCommand -ArgumentList @(
+            '--path', $script:ArtifactPath
+            '--output-directory', $script:MarkdownRoot
+            '--audit-document-path', $auditPath
+            '--finding-id', 'F1'
+            '--destination', $Destination
         )
         $result.exitCode | Should -Be 0 -Because $result.standardError
 
@@ -1038,12 +1084,12 @@ Describe 'Rendering executable' {
         ) -join "`n"
         Write-PullRequestOutputFile -Path $overviewPath -Content $overview
 
-        $result = Invoke-SkillExecutable -Name 'ConvertTo-FindingMarkdown.ps1' -ArgumentList @(
-            '-Path', $script:ArtifactPath
-            '-OutputDirectory', $script:MarkdownRoot
-            '-CombinedPath', $combinedPath
-            '-AuditDocumentPath', $auditPath
-            '-OverviewPath', $overviewPath
+        $result = Invoke-MarkdownCommand -ArgumentList @(
+            '--path', $script:ArtifactPath
+            '--output-directory', $script:MarkdownRoot
+            '--combined-path', $combinedPath
+            '--audit-document-path', $auditPath
+            '--overview-path', $overviewPath
         )
 
         $result['exitCode'] | Should -Be 0 -Because $result['standardError']
@@ -1063,10 +1109,10 @@ Describe 'Rendering executable' {
         $overviewPath = Join-Path $script:WorkRoot 'content-overview.md'
         Write-PullRequestOutputFile -Path $overviewPath -Content '# Content overview'
 
-        $result = Invoke-SkillExecutable -Name 'ConvertTo-FindingMarkdown.ps1' -ArgumentList @(
-            '-Path', $script:ArtifactPath
-            '-OutputDirectory', $script:MarkdownRoot
-            '-OverviewPath', $overviewPath
+        $result = Invoke-MarkdownCommand -ArgumentList @(
+            '--path', $script:ArtifactPath
+            '--output-directory', $script:MarkdownRoot
+            '--overview-path', $overviewPath
         )
 
         $result['exitCode'] | Should -Not -Be 0
@@ -1079,17 +1125,17 @@ Describe 'Rendering executable' {
         $combinedPath = Join-Path $script:WorkRoot 'findings.md'
         $overviewPath = Join-Path $script:WorkRoot 'content-overview.md'
 
-        $result = Invoke-SkillExecutable -Name 'ConvertTo-FindingMarkdown.ps1' -ArgumentList @(
-            '-Path', $script:ArtifactPath
-            '-OutputDirectory', $script:MarkdownRoot
-            '-CombinedPath', $combinedPath
-            '-AuditDocumentPath', $auditPath
-            '-OverviewPath', $overviewPath
+        $result = Invoke-MarkdownCommand -ArgumentList @(
+            '--path', $script:ArtifactPath
+            '--output-directory', $script:MarkdownRoot
+            '--combined-path', $combinedPath
+            '--audit-document-path', $auditPath
+            '--overview-path', $overviewPath
         )
 
         $result['exitCode'] | Should -Not -Be 0
         $result['standardOutput'] | Should -BeNullOrEmpty
-        (Get-SingleLineErrorText -Text $result['standardError']) | Should -BeLike '*does not exist*'
+        (Get-SingleLineErrorText -Text $result['standardError']) | Should -BeLike '*missing*'
         Test-Path -LiteralPath (Join-Path $script:MarkdownRoot 'F1.md') | Should -BeFalse
         Test-Path -LiteralPath $combinedPath | Should -BeFalse
         Test-Path -LiteralPath $auditPath | Should -BeFalse
@@ -1101,12 +1147,12 @@ Describe 'Rendering executable' {
         $overviewPath = Join-Path $script:WorkRoot 'content-overview.md'
         Write-PullRequestOutputFile -Path $overviewPath -Content " `n`t "
 
-        $result = Invoke-SkillExecutable -Name 'ConvertTo-FindingMarkdown.ps1' -ArgumentList @(
-            '-Path', $script:ArtifactPath
-            '-OutputDirectory', $script:MarkdownRoot
-            '-CombinedPath', $combinedPath
-            '-AuditDocumentPath', $auditPath
-            '-OverviewPath', $overviewPath
+        $result = Invoke-MarkdownCommand -ArgumentList @(
+            '--path', $script:ArtifactPath
+            '--output-directory', $script:MarkdownRoot
+            '--combined-path', $combinedPath
+            '--audit-document-path', $auditPath
+            '--overview-path', $overviewPath
         )
 
         $result['exitCode'] | Should -Not -Be 0
@@ -1118,10 +1164,10 @@ Describe 'Rendering executable' {
     }
 
     It 'renders only the findings it was told to' {
-        $result = Invoke-SkillExecutable -Name 'ConvertTo-FindingMarkdown.ps1' -ArgumentList @(
-            '-Path', $script:ArtifactPath
-            '-OutputDirectory', $script:MarkdownRoot
-            '-FindingId', 'F2'
+        $result = Invoke-MarkdownCommand -ArgumentList @(
+            '--path', $script:ArtifactPath
+            '--output-directory', $script:MarkdownRoot
+            '--finding-id', 'F2'
         )
 
         $result['exitCode'] | Should -Be 0
@@ -1135,11 +1181,11 @@ Describe 'Rendering executable' {
     It 'keeps the combined document covering the whole artifact while rendering one finding' {
         $combinedPath = Join-Path $script:WorkRoot 'findings.md'
 
-        $result = Invoke-SkillExecutable -Name 'ConvertTo-FindingMarkdown.ps1' -ArgumentList @(
-            '-Path', $script:ArtifactPath
-            '-OutputDirectory', $script:MarkdownRoot
-            '-CombinedPath', $combinedPath
-            '-FindingId', 'F2'
+        $result = Invoke-MarkdownCommand -ArgumentList @(
+            '--path', $script:ArtifactPath
+            '--output-directory', $script:MarkdownRoot
+            '--combined-path', $combinedPath
+            '--finding-id', 'F2'
         )
 
         $result['exitCode'] | Should -Be 0
@@ -1151,10 +1197,10 @@ Describe 'Rendering executable' {
     }
 
     It 'renders several named findings supplied as one comma separated value' {
-        $result = Invoke-SkillExecutable -Name 'ConvertTo-FindingMarkdown.ps1' -ArgumentList @(
-            '-Path', $script:ArtifactPath
-            '-OutputDirectory', $script:MarkdownRoot
-            '-FindingId', 'F1,F2'
+        $result = Invoke-MarkdownCommand -ArgumentList @(
+            '--path', $script:ArtifactPath
+            '--output-directory', $script:MarkdownRoot
+            '--finding-id', 'F1,F2'
         )
 
         $result['exitCode'] | Should -Be 0
@@ -1162,11 +1208,24 @@ Describe 'Rendering executable' {
         (Get-JsonArrayProperty -Node $emitted -Name 'findings').Count | Should -Be 2
     }
 
+    It 'renders several named findings supplied with repeated options' {
+        $result = Invoke-MarkdownCommand -ArgumentList @(
+            '--path', $script:ArtifactPath
+            '--output-directory', $script:MarkdownRoot
+            '--finding-id', 'F1'
+            '--finding-id', 'F2'
+        )
+
+        $result.exitCode | Should -Be 0 -Because $result.standardError
+        $emitted = ConvertFrom-JsonVerbatim -Text $result.standardOutput
+        @($emitted.findings.findingId) | Should -Be @('F1', 'F2')
+    }
+
     It 'refuses a finding the artifact does not hold' {
-        $result = Invoke-SkillExecutable -Name 'ConvertTo-FindingMarkdown.ps1' -ArgumentList @(
-            '-Path', $script:ArtifactPath
-            '-OutputDirectory', $script:MarkdownRoot
-            '-FindingId', 'F9'
+        $result = Invoke-MarkdownCommand -ArgumentList @(
+            '--path', $script:ArtifactPath
+            '--output-directory', $script:MarkdownRoot
+            '--finding-id', 'F9'
         )
 
         $result['exitCode'] | Should -Not -Be 0
@@ -1179,15 +1238,6 @@ Describe 'Rendering executable' {
 # approved set and phase 9 renders that set into one document the user posts. The two commands are
 # joined only by the phase text, so the join is asserted here.
 Describe 'Approved set delivery' {
-    BeforeAll {
-        . (Join-Path $script:LibraryRoot 'PublicationFailure.ps1')
-        . (Join-Path $script:LibraryRoot 'ReviewPublication.ps1')
-        . (Join-Path $script:LibraryRoot 'PullRequestPublication.ps1')
-
-        # A fixed instant, so a recorded decision carries no dependency on the host clock.
-        $script:FixedNowUtc = [DateTimeOffset]::Parse('2024-05-06T09:10:11.0000000Z', [cultureinfo]::InvariantCulture)
-    }
-
     BeforeEach {
         $script:WorkRoot = Join-Path $TestDrive ([guid]::NewGuid())
         New-Item -ItemType Directory -Path $script:WorkRoot -Force | Out-Null
@@ -1198,31 +1248,40 @@ Describe 'Approved set delivery' {
         $script:MarkdownRoot = Join-Path $script:WorkRoot 'rendered'
         $script:CombinedPath = Join-Path $script:WorkRoot 'findings.md'
 
-        $document = New-FindingArtifactDocument -Kind 'consolidated'
-        Add-FindingToArtifact -Document $document -Finding (New-TestFinding -Override @{ title = 'Reviewer finding' }) -Origin 'reviewer' -SourceFindingId @('g1-1') | Out-Null
-        Add-FindingToArtifact -Document $document -Finding (New-TestFinding -Override @{ title = 'Synthesis finding' }) -Origin 'synthesis' -SourceFindingId @('g1-1', 'g2-1') | Out-Null
-        Add-FindingToArtifact -Document $document -Finding (New-TestFinding -Override @{ title = 'Rejected finding' }) -Origin 'reviewer' -SourceFindingId @('g2-1') | Out-Null
+        $document = [ordered]@{
+            schemaVersion = 1
+            kind = 'consolidated'
+            findings = @(
+                New-TestRecord -Override @{ id = 'F1'; title = 'Reviewer finding' }
+                New-TestRecord -Override @{ id = 'F2'; title = 'Synthesis finding'; origin = 'synthesis'; sourceFindingIds = @('g1-1', 'g2-1') }
+                New-TestRecord -Override @{ id = 'F3'; title = 'Rejected finding'; sourceFindingIds = @('g2-1') }
+            )
+        }
         Write-FindingArtifact -Path $script:ArtifactPath -Document $document
 
-        $decisions = New-FindingDecisionDocument
-        Add-FindingDecisionRecord -Document $decisions -FindingId 'F1' -Decision 'approved' -NowUtc $script:FixedNowUtc | Out-Null
-        Add-FindingDecisionRecord -Document $decisions -FindingId 'F2' -Decision 'approved' -NowUtc $script:FixedNowUtc | Out-Null
-        Add-FindingDecisionRecord -Document $decisions -FindingId 'F3' -Decision 'rejected' -NowUtc $script:FixedNowUtc | Out-Null
-        Write-FindingDecisionDocument -Path $script:DecisionsPath -Document $decisions
+        $decisions = [ordered]@{
+            schemaVersion = 1
+            decisions = @(
+                @{ findingId = 'F1'; decision = 'approved'; recordedUtc = '2024-05-06T09:10:11Z' }
+                @{ findingId = 'F2'; decision = 'approved'; recordedUtc = '2024-05-06T09:10:11Z' }
+                @{ findingId = 'F3'; decision = 'dropped'; recordedUtc = '2024-05-06T09:10:11Z' }
+            )
+        }
+        Write-TestJsonFile -Path $script:DecisionsPath -Value $decisions | Out-Null
 
-        $approval = Invoke-SkillExecutable -Name 'New-ApprovedFindings.ps1' -ArgumentList @(
-            '-Path', $script:ArtifactPath
-            '-DecisionsPath', $script:DecisionsPath
-            '-OutputPath', $script:ApprovedPath
+        $approval = Invoke-NativeWorkflow -ArgumentList @(
+            'approved', 'build', '--path', $script:ArtifactPath
+            '--decisions-path', $script:DecisionsPath
+            '--output-path', $script:ApprovedPath
         )
         $approval['exitCode'] | Should -Be 0 -Because $approval['standardError']
     }
 
     It 'renders the approved set the phase hands to the user' {
-        $result = Invoke-SkillExecutable -Name 'ConvertTo-FindingMarkdown.ps1' -ArgumentList @(
-            '-Path', $script:ApprovedPath
-            '-OutputDirectory', $script:MarkdownRoot
-            '-CombinedPath', $script:CombinedPath
+        $result = Invoke-MarkdownCommand -ArgumentList @(
+            '--path', $script:ApprovedPath
+            '--output-directory', $script:MarkdownRoot
+            '--combined-path', $script:CombinedPath
         )
 
         $result['exitCode'] | Should -Be 0 -Because $result['standardError']
@@ -1239,10 +1298,10 @@ Describe 'Approved set delivery' {
     # The user delivers the combined document as the review, so a finding the audit rejected
     # appearing in it publishes an observation the audit refused.
     It 'carries every approved finding into the combined document and nothing else' {
-        Invoke-SkillExecutable -Name 'ConvertTo-FindingMarkdown.ps1' -ArgumentList @(
-            '-Path', $script:ApprovedPath
-            '-OutputDirectory', $script:MarkdownRoot
-            '-CombinedPath', $script:CombinedPath
+        Invoke-MarkdownCommand -ArgumentList @(
+            '--path', $script:ApprovedPath
+            '--output-directory', $script:MarkdownRoot
+            '--combined-path', $script:CombinedPath
         ) | Out-Null
 
         $combined = [System.IO.File]::ReadAllText($script:CombinedPath)
@@ -1254,10 +1313,10 @@ Describe 'Approved set delivery' {
     # The per-finding files and the combined document are two renderings of one review, so a reader
     # of either meets the same findings saying the same thing, presented in the same order.
     It 'repeats each approved body verbatim in presentation order' {
-        Invoke-SkillExecutable -Name 'ConvertTo-FindingMarkdown.ps1' -ArgumentList @(
-            '-Path', $script:ApprovedPath
-            '-OutputDirectory', $script:MarkdownRoot
-            '-CombinedPath', $script:CombinedPath
+        Invoke-MarkdownCommand -ArgumentList @(
+            '--path', $script:ApprovedPath
+            '--output-directory', $script:MarkdownRoot
+            '--combined-path', $script:CombinedPath
         ) | Out-Null
 
         $combined = [System.IO.File]::ReadAllText($script:CombinedPath)
@@ -1275,7 +1334,8 @@ Describe 'Approved set delivery' {
     # Publication reads the same file this rendering reads, and refusing the working artifact there
     # is what keeps a review from publishing a finding the audit never approved.
     It 'leaves publication refusing a document that is not an approved set' {
-        { Read-ApprovedFindingArtifact -Path $script:ArtifactPath } |
-            Should -Throw "*reports kind 'consolidated'*"
+        $result = Invoke-NativeWorkflow -ArgumentList @('approved', 'check', '--path', $script:ArtifactPath)
+        $result.exitCode | Should -Not -Be 0
+        $result.standardOutput | Should -BeNullOrEmpty
     }
 }

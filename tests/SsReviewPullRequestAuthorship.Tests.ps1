@@ -1,136 +1,42 @@
+#Requires -Version 7.6
+
+Set-StrictMode -Version Latest
+$ErrorActionPreference = 'Stop'
+$PSNativeCommandUseErrorActionPreference = $true
+
 BeforeAll {
     $script:RepoRoot = Split-Path -Parent $PSScriptRoot
-    $script:ScriptRoot = Join-Path $script:RepoRoot 'skills\ss-review\scripts'
-    $script:LibraryRoot = Join-Path $script:ScriptRoot 'lib'
-    $script:AuthorshipScript = Join-Path $script:ScriptRoot 'Set-CommentAuthorship.ps1'
-
-    # The libraries are loaded here only to build the captures the executable is run against, which
-    # is the same composition the capture executable performs.
-    . (Join-Path $script:LibraryRoot 'JsonValue.ps1')
-    . (Join-Path $script:LibraryRoot 'PullRequestTarget.ps1')
-    . (Join-Path $script:LibraryRoot 'PullRequestIdentity.ps1')
-    . (Join-Path $script:LibraryRoot 'PullRequestModel.ps1')
-    . (Join-Path $script:LibraryRoot 'PullRequestContextQuery.ps1')
-
-    # Built from code points rather than written literally, so that a test file whose own encoding was
-    # damaged fails instead of comparing two identically damaged strings.
-    $script:Robot = [char]::ConvertFromUtf32(0x1F916)
-    $script:EmDash = [string][char]0x2014
-    $script:LeftQuote = [string][char]0x201C
-    $script:RightQuote = [string][char]0x201D
-    $script:NonAsciiBody = "Consider the $script:Robot path $script:EmDash see $script:LeftQuote Registered I/O $script:RightQuote below."
-
-    # The capture instant is fixed rather than read from the clock, so that two captures built from
-    # the same content are identical byte for byte and the tests never depend on real time.
-    $script:CaptureInstant = [DateTimeOffset]::new(2025, 11, 6, 12, 0, 0, [TimeSpan]::Zero)
-
-    function New-TestIdentity {
-        param(
-            [string] $Id = '1',
-            [string] $DisplayName = 'Test Person',
-            [string] $UniqueName = 'person@example.com',
-            [string] $Descriptor = 'aad.PERSON'
-        )
-
-        New-PullRequestIdentity -Platform 'azureDevOps' -Id $Id -DisplayName $DisplayName -UniqueName $UniqueName -Descriptor $Descriptor
-    }
-
-    function New-TestComment {
-        param(
-            [Parameter(Mandatory)] $Id,
-            [Parameter(Mandatory)] [System.Collections.IDictionary] $Author,
-            [AllowEmptyString()] [string] $Content = 'body',
-            [string] $PublishedUtc = '2025-11-05T10:00:00Z'
-        )
-
-        $authorship = Get-PullRequestAuthorship -Identity $Author -Content $Content
-        [ordered]@{
-            id                 = $Id
-            url                = "https://example.invalid/c/$Id"
-            parentId           = $null
-            author             = $Author
-            content            = $Content
-            publishedUtc       = (ConvertTo-CanonicalTimestamp -Value $PublishedUtc)
-            lastEditedUtc      = $null
-            isEdited           = $false
-            authorship         = $authorship['authorship']
-            authorshipEvidence = $authorship['evidence']
-        }
-    }
-
-    function New-TestThread {
-        param(
-            [Parameter(Mandatory)] $Id,
-            [Parameter(Mandatory)] [AllowEmptyCollection()] [object[]] $Comments,
-            [string] $EventUtc = '2025-11-05T10:00:00Z'
-        )
-
-        [ordered]@{
-            id               = $Id
-            url              = "https://example.invalid/t/$Id"
-            publishedUtc     = (ConvertTo-CanonicalTimestamp -Value $EventUtc)
-            lastUpdatedUtc   = $null
-            eventUtc         = (ConvertTo-CanonicalTimestamp -Value $EventUtc)
-            rawStatus        = 'active'
-            resolution       = 'active'
-            kind             = 'text'
-            isOutdated       = $false
-            context          = $null
-            anchorKey        = $null
-            properties       = [ordered]@{}
-            openingCommentId = $(if ($Comments.Count -gt 0) { $Comments[0]['id'] } else { $null })
-            decision         = $null
-            comments         = $Comments
-        }
-    }
-
-    # Two comments the capture left indeterminate and one it proved machine-authored, which is the
-    # state the classification pass is invoked against. Non-ASCII content must remain byte-faithful.
-    function New-CaptureDocument {
-        $person = New-TestIdentity -Id '1' -Descriptor 'aad.PERSON'
-        $agent = New-TestIdentity -Id '2' -DisplayName 'Review Bot' -UniqueName 'bot@example.com' -Descriptor 'aadsp.BOT'
-
-        $context = [ordered]@{
-            target                = (Resolve-PullRequestTarget -Url 'https://dev.azure.com/contoso/Core/_git/widgets/pullrequest/42')
-            authenticatedIdentity = $person
-            pullRequest           = [ordered]@{
-                id                      = 42
-                title                   = 'Test change'
-                description             = $null
-                reviewedSourceCommit    = 'aaa111'
-                reviewedMergeBaseCommit = 'bbb222'
-            }
-            reviewers             = @()
-            revisions             = @()
-            threads               = @(
-                New-TestThread -Id '1' -Comments @(
-                    (New-TestComment -Id '1' -Author $person -Content $script:NonAsciiBody)
-                    (New-TestComment -Id '2' -Author $agent -PublishedUtc '2025-11-05T11:00:00Z')
-                )
-                New-TestThread -Id '2' -EventUtc '2025-11-06T10:00:00Z' -Comments @(
-                    (New-TestComment -Id '3' -Author $person -PublishedUtc '2025-11-06T10:00:00Z')
-                )
-            )
-        }
-
-        New-PullRequestContextDocument -Context $context -NowUtc $script:CaptureInstant
-    }
+    $script:Native = (Get-Command ss-ai -CommandType Application -ErrorAction Stop | Select-Object -First 1).Source
+    $script:Fixture = Join-Path $PSScriptRoot 'fixtures/ss-review-native-capture/github-expected.json'
+    $script:Owned = [Collections.Generic.List[string]]::new()
+    $script:NonAsciiBody = "Consider the $([char]::ConvertFromUtf32(0x1F916)) path $([char]0x2014) see $([char]0x201C) Registered I/O $([char]0x201D) below."
 
     function New-CaptureFile {
-        param(
-            [Parameter(Mandatory)] [string] $Path,
+        param([Parameter(Mandatory)] [string] $Path, [AllowNull()] $SchemaVersion = $null)
 
-            # A capture the current helper does not read, written to prove the version is enforced
-            # rather than merely recorded. Left unset, the document carries the version this helper
-            # writes.
-            [AllowNull()] $SchemaVersion = $null
-        )
-
-        $document = New-CaptureDocument
-        if ($null -ne $SchemaVersion) {
-            Set-JsonProperty -Node $document -Name 'schemaVersion' -Value $SchemaVersion
+        $document = [IO.File]::ReadAllText($script:Fixture) | ConvertFrom-Json -AsHashtable -DateKind String
+        $thread = $document.threads[0]
+        $thread.id = '1'
+        $thread.openingCommentId = '1'
+        $first = $thread.comments[0]
+        $first.id = '1'
+        $first.content = $script:NonAsciiBody
+        $agent = ($first | ConvertTo-Json -Depth 100) | ConvertFrom-Json -AsHashtable -DateKind String
+        $agent.id = '2'
+        $agent.authorship = 'agent'
+        $agent.authorshipEvidence = @('identity:service')
+        $thread.comments = @($first, $agent)
+        $other = ($thread | ConvertTo-Json -Depth 100) | ConvertFrom-Json -AsHashtable -DateKind String
+        $other.id = '2'
+        $other.openingCommentId = '3'
+        $other.comments = @($other.comments[0])
+        $other.comments[0].id = '3'
+        $document.threads = @($thread, $other)
+        if ($null -ne $SchemaVersion) { $document.schemaVersion = $SchemaVersion }
+        [IO.File]::WriteAllText($Path, ($document | ConvertTo-Json -Depth 100 -Compress), [Text.UTF8Encoding]::new($false))
+        foreach ($suffix in @('', '.lock', '.authorship.json', '.authorship.json.lock')) {
+            $script:Owned.Add("$Path$suffix")
         }
-        Write-PullRequestOutputFile -Path $Path -Content (ConvertTo-JsonText -Value $document)
         $Path
     }
 
@@ -152,37 +58,26 @@ BeforeAll {
         [ordered]@{ threadId = $ThreadId; commentId = $CommentId; kind = $Kind }
     }
 
-    function Invoke-AuthorshipProcess {
+    function Invoke-Native {
         param(
             [Parameter(Mandatory)] [AllowEmptyCollection()] [string[]] $ArgumentList
         )
 
         $startInfo = [Diagnostics.ProcessStartInfo]::new()
-        $startInfo.FileName = (Get-Process -Id $PID).Path
+        $startInfo.FileName = $script:Native
         $startInfo.UseShellExecute = $false
         $startInfo.RedirectStandardOutput = $true
         $startInfo.RedirectStandardError = $true
-        # Both streams are decoded as UTF-8 rather than through the console code page the child would
-        # otherwise inherit, since an inherited code page is how non-ASCII gets destroyed.
         $startInfo.StandardOutputEncoding = [System.Text.UTF8Encoding]::new($false)
         $startInfo.StandardErrorEncoding = [System.Text.UTF8Encoding]::new($false)
 
-        # Non-interactive execution turns a missing mandatory parameter into an error rather than a
-        # prompt on the inherited console, which would otherwise stall the test run.
-        $capturePathIndex = [array]::IndexOf($ArgumentList, '-Path')
-        if ($capturePathIndex -ge 0 -and '-SnapshotId' -notin $ArgumentList) {
-            $raw = ConvertFrom-JsonVerbatim -Text ([IO.File]::ReadAllText($ArgumentList[$capturePathIndex + 1]))
-            $ArgumentList += @('-SnapshotId', (Get-PullRequestContextSnapshotId -Document $raw))
-        }
-        $invocation = @('-NoProfile', '-NonInteractive', '-File', $script:AuthorshipScript) + $ArgumentList
-        foreach ($argument in $invocation) {
+        foreach ($argument in $ArgumentList) {
             $startInfo.ArgumentList.Add($argument)
         }
 
         $process = [Diagnostics.Process]::Start($startInfo)
         try {
-            # Both streams are drained concurrently. Reading one to its end while the other fills its
-            # buffer deadlocks, and the deadlock would only appear once a message grew past the buffer.
+            # Draining both streams concurrently avoids a full stderr pipe blocking stdout.
             $standardOutput = $process.StandardOutput.ReadToEndAsync()
             $standardError = $process.StandardError.ReadToEndAsync()
             $process.WaitForExit()
@@ -192,11 +87,35 @@ BeforeAll {
                 StandardOutput = $standardOutput.GetAwaiter().GetResult()
                 StandardError  = $standardError.GetAwaiter().GetResult()
             }
-        } finally {
-            # A Process holds operating system handles until it is disposed, and this helper runs
-            # once per test, so leaving them to the finalizer would accumulate handles across the run.
-            $process.Dispose()
+        } finally { $process.Dispose() }
+    }
+
+    # Translate existing test inputs to the native authorship command and bind its capture snapshot.
+    function Invoke-AuthorshipProcess {
+        param(
+            [Parameter(Mandatory)] [AllowEmptyCollection()] [string[]] $ArgumentList,
+            [switch] $UnreadableCapture
+        )
+
+        $capturePathIndex = [array]::IndexOf($ArgumentList, '-Path')
+        $capturePath = $ArgumentList[$capturePathIndex + 1]
+        $page = Invoke-Native -ArgumentList @('context', 'read', '--path', $capturePath, '--query', 'metadata', '--field', 'title')
+        $snapshot = if ($page.ExitCode -eq 0) {
+            (Get-SingleJsonResult -StandardOutput $page.StandardOutput).snapshotId
+        } else {
+            if (-not $UnreadableCapture) { throw "Reading capture metadata failed: $($page.StandardError)" }
+            # The unreadable capture case must still exercise the consumer's rejection path.
+            'invalid-snapshot'
         }
+        $translated = foreach ($argument in $ArgumentList) {
+            switch -Exact ($argument) {
+                '-Path' { '--path' }
+                '-Classification' { '--classification' }
+                '-ClassificationPath' { '--classification-path' }
+                default { $argument }
+            }
+        }
+        Invoke-Native -ArgumentList (@('context', 'set-authorship', '--snapshot-id', $snapshot) + $translated)
     }
 
     # PowerShell colours a terminating error and wraps it into a gutter-decorated block when it
@@ -223,7 +142,7 @@ BeforeAll {
         if ($lines.Count -ne 1) {
             throw "Standard output carries $($lines.Count) lines rather than one compressed JSON object."
         }
-        ConvertFrom-JsonVerbatim -Text $lines[0]
+        $lines[0] | ConvertFrom-Json -AsHashtable -DateKind String
     }
 
     function Get-CaptureComment {
@@ -233,17 +152,12 @@ BeforeAll {
             [Parameter(Mandatory)] [string] $CommentId
         )
 
-        # Assigned before use: these accessors comma-wrap their result so a single-element list
-        # survives whole, and wrapping the call in @( ) would nest it one level deeper.
-        $threads = Get-JsonArrayProperty -Node $Document -Name 'threads'
-        foreach ($thread in $threads) {
-            if ([string] (Get-JsonProperty -Node $thread -Name 'id') -cne $ThreadId) { continue }
-            $comments = Get-JsonArrayProperty -Node $thread -Name 'comments'
-            foreach ($comment in $comments) {
-                if ([string] (Get-JsonProperty -Node $comment -Name 'id') -ceq $CommentId) { return $comment }
-            }
-        }
-        throw "The capture contains no comment '$CommentId' in thread '$ThreadId'."
+        $result = Invoke-Native -ArgumentList @('context', 'read', '--path', $Document.path,
+            '--query', 'comments', '--thread-id', $ThreadId, '--comment-id', $CommentId)
+        if ($result.ExitCode -ne 0) { throw $result.StandardError }
+        $page = Get-SingleJsonResult -StandardOutput $result.StandardOutput
+        if ($page.items.Count -ne 1) { throw "Expected one selected comment." }
+        $page.items[0]
     }
 
     # Consumers read the immutable capture with its separately validated semantic overlay.
@@ -252,7 +166,17 @@ BeforeAll {
             [Parameter(Mandatory)] [string] $Path
         )
 
-        Read-PullRequestContextDocument -Path $Path
+        @{ path = $Path }
+    }
+
+    function Get-JsonProperty {
+        param([System.Collections.IDictionary] $Node, [string] $Name)
+        $Node[$Name]
+    }
+
+    function Get-JsonArrayProperty {
+        param([System.Collections.IDictionary] $Node, [string] $Name)
+        return ,@($Node[$Name])
     }
 
     function Get-FileFingerprint {
@@ -264,222 +188,24 @@ BeforeAll {
     }
 }
 
-Describe 'Incremental semantic authorship' {
-    BeforeEach {
-        $caseId = [guid]::NewGuid().ToString('N')
-        $script:BaselinePath = Join-Path $TestDrive "$caseId-baseline.json"
-        $script:RefreshPath = Join-Path $TestDrive "$caseId-refresh.json"
-        $script:Baseline = New-CaptureDocument
-        Write-PullRequestCapture -Path $script:BaselinePath -Document $script:Baseline | Out-Null
-        Save-CommentAuthorship -Path $script:BaselinePath `
-            -SnapshotId (Get-PullRequestContextSnapshotId -Document $script:Baseline) `
-            -Classification @(
-                (New-Classification -ThreadId '1' -CommentId '1' -Kind 'human')
-                (New-Classification -ThreadId '2' -CommentId '3' -Kind 'agent')
-            ) | Out-Null
-        $script:Decisions = Read-CommentAuthorship -Path $script:BaselinePath -Document $script:Baseline
-        $script:Current = New-CaptureDocument
-    }
-
-    It 'reuses all unchanged decisions without another semantic reading pass' {
-        $script:Current['fetchedUtc'] = '2026-10-07T12:00:00Z'
-        $script:Current['pullRequest']['reviewedSourceCommit'] = 'force-pushed-source'
-        $before = Get-FileFingerprint -Path $script:BaselinePath
-        $reused = Write-PullRequestCapture -Path $script:RefreshPath -Document $script:Current -PreviousDecisions $script:Decisions
-        $reused | Should -Be 2
-        $effective = Read-PullRequestContextDocument -Path $script:RefreshPath
-        $summary = New-PullRequestCaptureResult -Document $effective -ContextPath $script:RefreshPath -ReusedClassificationCount $reused
-        $summary.indeterminateCommentCount | Should -Be 0
-        $summary.reusedClassificationCount | Should -Be 2
-        $options = New-PullRequestQueryOptions -Query comments -Authorship indeterminate
-        $page = Read-PullRequestContextQuery -Document $effective -Options $options | ConvertFrom-Json
-        $page.items.Count | Should -Be 0
-        $page.complete | Should -BeTrue
-        Get-FileFingerprint -Path $script:BaselinePath | Should -BeExactly $before
-        $raw = Read-PullRequestContextDocument -Path $script:RefreshPath -WithoutAuthorship
-        $raw.threads[0].comments[0].authorship | Should -BeExactly 'indeterminate'
-    }
-
-    It 'ignores fetch time and semantic progress when comparing reviewed evidence' {
-        $script:Current.fetchedUtc = '2026-10-07T12:00:00Z'
-        Write-PullRequestCapture -Path $script:RefreshPath -Document $script:Current -PreviousDecisions $script:Decisions | Out-Null
-        $effective = Read-PullRequestContextDocument -Path $script:RefreshPath
-        (Get-PullRequestContextDelta -Previous $script:Baseline -Current $effective).hasChanges | Should -BeFalse
-        Get-PullRequestEvidenceHash -Document $effective | Should -BeExactly (Get-PullRequestEvidenceHash -Document $script:Baseline)
-    }
-
-    It 'limits semantic reading to the added and edited comments in a large discussion' {
-        # Representative discussion size from issue 126; work counts, not wall-clock timing, prove reuse.
-        $baseline = New-CaptureDocument
-        $baseline.threads = @($baseline.threads[0])
-        $baseline.threads[0].comments = @(foreach ($id in 1..135) {
-            New-TestComment -Id ([string] $id) -Author (New-TestIdentity) -Content "Human comment $id"
-        })
-        $baselinePath = Join-Path $TestDrive 'large-baseline.json'
-        Write-PullRequestCapture -Path $baselinePath -Document $baseline | Out-Null
-        Save-CommentAuthorship -Path $baselinePath -SnapshotId (Get-PullRequestContextSnapshotId -Document $baseline) `
-            -Classification @(foreach ($comment in $baseline.threads[0].comments) {
-                New-Classification -ThreadId '1' -CommentId $comment.id -Kind 'human'
-            }) | Out-Null
-        $decisions = Read-CommentAuthorship -Path $baselinePath -Document $baseline
-        $current = ConvertFrom-JsonVerbatim -Text (ConvertTo-JsonText -Value $baseline)
-        $current.threads[0].comments = @($current.threads[0].comments | Where-Object { $_.id -cne '1' })
-        $current.threads[0].comments[0].content = 'Edited without changing the provider timestamp'
-        foreach ($id in 136..146) { $current.threads[0].comments += New-TestComment -Id ([string] $id) -Author (New-TestIdentity) }
-        $reused = Write-PullRequestCapture -Path $script:RefreshPath -Document $current -PreviousDecisions $decisions
-        $reused | Should -Be 133
-        $effective = Read-PullRequestContextDocument -Path $script:RefreshPath
-        $options = New-PullRequestQueryOptions -Query comments -Authorship indeterminate -PageSize 5
-        $cursor = ''; $ids = @()
-        # The expected pages bound the test deterministically; a broken cursor cannot hang the suite.
-        foreach ($pageNumber in 1..3) {
-            $json = Read-PullRequestContextQuery -Document $effective -Options $options -Cursor $cursor
-            [Text.Encoding]::UTF8.GetByteCount($json + "`n") | Should -BeLessOrEqual 16384
-            $page = $json | ConvertFrom-Json
-            $ids += $page.items.commentId
-            $cursor = $page.nextCursor
-            if ($pageNumber -lt 3) { $cursor | Should -Not -BeNullOrEmpty }
-        }
-        $page.complete | Should -BeTrue
-        $ids.Count | Should -Be 12
-        @($ids | Select-Object -Unique).Count | Should -Be 12
-        $ids | Should -Contain '2'
-        $ids | Should -Not -Contain '1'
-        $ids | Should -Not -Contain '3'
-        $delta = Get-PullRequestContextDelta -Previous $baseline -Current $effective
-        $delta.commentsAdded.Count | Should -Be 11
-        $delta.commentsEdited.Count | Should -Be 1
-        $delta.commentsRemoved.Count | Should -Be 1
-    }
-
-    It 'reconsiders changed <Case> rather than reusing a comment ID' -ForEach @(
-        @{ Case = 'body'; Change = { $script:Current.threads[0].comments[0].content += ' ' } }
-        @{ Case = 'author ID'; Change = { $script:Current.threads[0].comments[0].author.id = 'other-account' } }
-        @{ Case = 'display name'; Change = { $script:Current.threads[0].comments[0].author.displayName = 'Different attribution' } }
-        @{ Case = 'account type'; Change = { $script:Current.threads[0].comments[0].author.accountType = 'Mannequin' } }
-        @{ Case = 'self attribution'; Change = { $script:Current.threads[0].comments[0].isAuthoredBySelf = $false } }
-        @{ Case = 'provider evidence'; Change = { $script:Current.threads[0].comments[0].authorshipEvidence = @('changed-proof') } }
-    ) {
-        & $Change
-        Write-PullRequestCapture -Path $script:RefreshPath -Document $script:Current -PreviousDecisions $script:Decisions | Out-Null
-        $effective = Read-PullRequestContextDocument -Path $script:RefreshPath
-        $effective.threads[0].comments[0].authorship | Should -BeExactly 'indeterminate'
-        (Get-PullRequestContextDelta -Previous $script:Baseline -Current $effective).hasChanges | Should -BeTrue
-    }
-
-    It 'never transfers decisions across <Identity> collisions' -ForEach @(
-        @{ Identity = 'PR'; Field = 'pullRequestUrl'; Value = 'https://dev.azure.com/contoso/Core/_git/widgets/pullrequest/43' }
-        @{ Identity = 'repository'; Field = 'repositoryUrl'; Value = 'https://dev.azure.com/contoso/Core/_git/other' }
-        @{ Identity = 'provider'; Field = 'platform'; Value = 'gitHub' }
-    ) {
-        $script:Current[$Field] = $Value
-        Write-PullRequestCapture -Path $script:RefreshPath -Document $script:Current -PreviousDecisions $script:Decisions | Should -Be 0
-    }
-
-    It 'reconsiders every semantic decision when classification policy changes' {
-        $oldPolicy = $script:CommentAuthorshipPolicyVersion
-        try {
-            $script:CommentAuthorshipPolicyVersion = 'next-policy'
-            Write-PullRequestCapture -Path $script:RefreshPath -Document $script:Current -PreviousDecisions $script:Decisions | Should -Be 0
-            $effective = Read-PullRequestContextDocument -Path $script:BaselinePath
-            (New-PullRequestCaptureResult -Document $effective -ContextPath $script:BaselinePath).indeterminateCommentCount | Should -Be 2
-            Save-CommentAuthorship -Path $script:BaselinePath -SnapshotId (Get-PullRequestContextSnapshotId -Document $effective) `
-                -Classification @((New-Classification -ThreadId '1' -CommentId '1' -Kind 'agent')) | Out-Null
-            (Read-PullRequestContextDocument -Path $script:BaselinePath).threads[0].comments[0].authorship | Should -Be 'agent'
-        } finally { $script:CommentAuthorshipPolicyVersion = $oldPolicy }
-    }
-
-    It 'gives current deterministic proofs priority over prior semantic decisions' -ForEach @('marker', 'service') {
-        $comment = $script:Current.threads[0].comments[0]
-        if ($_ -ceq 'marker') { $comment.content = '[Copilot speaking] Updated.' }
-        else { $comment.author = New-TestIdentity -Descriptor 'aadsp.SERVICE' }
-        $proof = Get-PullRequestAuthorship -Identity $comment.author -Content $comment.content
-        $comment.authorship = $proof.authorship; $comment.authorshipEvidence = $proof.evidence
-        Write-PullRequestCapture -Path $script:RefreshPath -Document $script:Current -PreviousDecisions $script:Decisions | Should -Be 1
-        (Read-PullRequestContextDocument -Path $script:RefreshPath).threads[0].comments[0].authorship | Should -Be 'agent'
-    }
-
-    It 'classifies additions while retaining removed evidence only in the baseline' {
-        $script:Current.threads = @($script:Current.threads[0])
-        $script:Current.threads[0].comments += New-TestComment -Id 'added' -Author (New-TestIdentity)
-        Write-PullRequestCapture -Path $script:RefreshPath -Document $script:Current -PreviousDecisions $script:Decisions | Should -Be 1
-        $effective = Read-PullRequestContextDocument -Path $script:RefreshPath
-        $delta = Get-PullRequestContextDelta -Previous (Read-PullRequestContextDocument -Path $script:BaselinePath) -Current $effective
-        $delta.commentsAdded[0].commentId | Should -Be 'added'
-        $delta.commentsRemoved[0].commentId | Should -Be '3'
-        $summary = Save-CommentAuthorship -Path $script:RefreshPath -SnapshotId (Get-PullRequestContextSnapshotId -Document $effective) `
-            -Classification @((New-Classification -ThreadId '1' -CommentId 'added' -Kind 'human'))
-        $summary.applied | Should -Be 1
-        $summary.isComplete | Should -BeTrue
-        (Read-PullRequestContextDocument -Path $script:BaselinePath).threads[1].comments[0].authorship | Should -Be 'agent'
-        $raw = Read-PullRequestContextDocument -Path $script:RefreshPath -WithoutAuthorship
-        @((Read-CommentAuthorship -Path $script:RefreshPath -Document $raw).decisions.origin) | Should -Be @('reused', 'classified')
-    }
-
-    It 'invalidates old filtered cursors and stale decision batches after a write' {
-        Write-PullRequestCapture -Path $script:RefreshPath -Document $script:Current | Out-Null
-        $options = New-PullRequestQueryOptions -Query comments -Authorship indeterminate -PageSize 1
-        $page = Read-PullRequestContextQuery -Document $script:Current -Options $options | ConvertFrom-Json
-        $page.nextCursor | Should -Not -BeNullOrEmpty
-        Save-CommentAuthorship -Path $script:RefreshPath -SnapshotId $page.snapshotId `
-            -Classification @((New-Classification -ThreadId '1' -CommentId '1' -Kind 'human')) | Out-Null
-        $effective = Read-PullRequestContextDocument -Path $script:RefreshPath
-        { Read-PullRequestContextQuery -Document $effective -Options $options -Cursor $page.nextCursor } | Should -Throw '*Stale*'
-        { Save-CommentAuthorship -Path $script:RefreshPath -SnapshotId $page.snapshotId -Classification @() } | Should -Throw '*snapshot changed*'
-        $next = Read-PullRequestContextQuery -Document $effective -Options $options | ConvertFrom-Json
-        $next.items[0].commentId | Should -Be '3'
-        $next.complete | Should -BeTrue
-    }
-
-    It 'rejects malformed sidecars, unknown schemas and capture replacement explicitly' {
-        $sidecarPath = "$script:BaselinePath.authorship.json"
-        $script:Decisions.schemaVersion = 99
-        Write-PullRequestOutputFile -Path $sidecarPath -Content (ConvertTo-JsonText -Value $script:Decisions)
-        { Read-PullRequestContextDocument -Path $script:BaselinePath } | Should -Throw
-        $script:Decisions.schemaVersion = 1
-        $script:Decisions.decisions[0].extra = 'not permitted'
-        { Assert-CommentAuthorship -Decisions $script:Decisions } | Should -Throw
-        $script:Decisions.decisions[0].Remove('extra')
-        Write-PullRequestOutputFile -Path $sidecarPath -Content (ConvertTo-JsonText -Value $script:Decisions)
-        { Write-PullRequestCapture -Path $script:BaselinePath -Document $script:Current } | Should -Throw '*already exists*'
-        $script:Current.threads[0].comments[0].content = 'replaced snapshot'
-        Write-PullRequestOutputFile -Path $script:BaselinePath -Content (ConvertTo-JsonText -Value $script:Current)
-        { Read-PullRequestContextDocument -Path $script:BaselinePath } | Should -Throw '*do not belong*'
-    }
-
-    It 'rejects malformed decision drafts without changing stored decisions' -ForEach @(
-        @{ Entry = @{ threadId = '1'; commentId = '1' } }
-        @{ Entry = @{ threadId = '1'; commentId = '1'; kind = 'human'; unexpected = $true } }
-        @{ Entry = @{ threadId = @('1'); commentId = '1'; kind = 'human' } }
-        @{ Entry = @{ threadId = '1'; commentId = ''; kind = 'human' } }
-    ) {
-        $snapshot = Get-PullRequestContextSnapshotId -Document (Read-PullRequestContextDocument -Path $script:BaselinePath)
-        $before = Get-FileFingerprint -Path "$script:BaselinePath.authorship.json"
-        { Save-CommentAuthorship -Path $script:BaselinePath -SnapshotId $snapshot -Classification @($Entry) } | Should -Throw
-        Get-FileFingerprint -Path "$script:BaselinePath.authorship.json" | Should -BeExactly $before
-    }
-}
-
 Describe 'Set-CommentAuthorship' {
     BeforeAll {
-        [System.IO.File]::Exists($script:AuthorshipScript) |
-            Should -BeTrue -Because "the classification executable is expected at $script:AuthorshipScript"
-
-        $script:WorkRoot = Join-Path ([System.IO.Path]::GetTempPath()) "ss-review-authorship-$([guid]::NewGuid())"
-        New-Item -ItemType Directory -Path $script:WorkRoot | Out-Null
+        $script:WorkRoot = Join-Path $script:RepoRoot 'target'
+        [void] [IO.Directory]::CreateDirectory($script:WorkRoot)
+        $script:Prefix = 'authorship-cli-' + [guid]::NewGuid().ToString('N')
         $script:CaptureIndex = 0
     }
 
     AfterAll {
-        if (Test-Path -LiteralPath $script:WorkRoot) {
-            Remove-Item -LiteralPath $script:WorkRoot -Recurse -Force
+        foreach ($path in $script:Owned) {
+            if ([IO.File]::Exists($path)) { [IO.File]::Delete($path) }
         }
     }
 
     BeforeEach {
         # Every test owns its capture and semantic decisions.
         $script:CaptureIndex++
-        $script:CapturePath = Join-Path $script:WorkRoot "capture-$script:CaptureIndex.json"
+        $script:CapturePath = Join-Path $script:WorkRoot "$($script:Prefix)-capture-$script:CaptureIndex.json"
     }
 
     It 'records classification separately and exposes it through the capture reader' {
@@ -581,7 +307,7 @@ Describe 'Set-CommentAuthorship' {
         # A capture with many comments produces a batch that exceeds what a command line accepts, so
         # the file form has to reach the same result as the inline form.
         $inlinePath = $script:CapturePath
-        $filePath = Join-Path $script:WorkRoot "capture-$script:CaptureIndex-file.json"
+        $filePath = Join-Path $script:WorkRoot "$($script:Prefix)-capture-$script:CaptureIndex-file.json"
         New-CaptureFile -Path $inlinePath | Out-Null
         New-CaptureFile -Path $filePath | Out-Null
 
@@ -590,7 +316,8 @@ Describe 'Set-CommentAuthorship' {
             (New-Classification -ThreadId '2' -CommentId '3' -Kind 'agent')
         )
         $classification = ConvertTo-ClassificationText -Entry $entries
-        $classificationPath = Join-Path $script:WorkRoot "classification-$script:CaptureIndex.json"
+        $classificationPath = Join-Path $script:WorkRoot "$($script:Prefix)-classification-$script:CaptureIndex.json"
+        $script:Owned.Add($classificationPath)
         [System.IO.File]::WriteAllText($classificationPath, $classification, [System.Text.UTF8Encoding]::new($false))
 
         $inlineResult = Invoke-AuthorshipProcess -ArgumentList @('-Path', $inlinePath, '-Classification', $classification)
@@ -622,7 +349,8 @@ Describe 'Set-CommentAuthorship' {
     It 'refuses both classification forms at once' {
         New-CaptureFile -Path $script:CapturePath | Out-Null
         $classification = ConvertTo-ClassificationText -Entry @((New-Classification -ThreadId '1' -CommentId '1' -Kind 'human'))
-        $classificationPath = Join-Path $script:WorkRoot "classification-both-$script:CaptureIndex.json"
+        $classificationPath = Join-Path $script:WorkRoot "$($script:Prefix)-classification-both-$script:CaptureIndex.json"
+        $script:Owned.Add($classificationPath)
         [System.IO.File]::WriteAllText($classificationPath, $classification, [System.Text.UTF8Encoding]::new($false))
 
         $result = Invoke-AuthorshipProcess -ArgumentList @(
@@ -632,7 +360,9 @@ Describe 'Set-CommentAuthorship' {
         )
 
         $result.ExitCode | Should -Not -Be 0
-        (Get-ErrorText -Text $result.StandardError).Contains('not both', [StringComparison]::Ordinal) | Should -BeTrue
+        $message = Get-ErrorText -Text $result.StandardError
+        $message | Should -Match 'cannot be used with'
+        $message | Should -Match '--classification-path'
     }
 
     It 'refuses to run without any classification' {
@@ -642,7 +372,7 @@ Describe 'Set-CommentAuthorship' {
         $result = Invoke-AuthorshipProcess -ArgumentList @('-Path', $script:CapturePath)
 
         $result.ExitCode | Should -Not -Be 0
-        (Get-ErrorText -Text $result.StandardError).Contains('-ClassificationPath', [StringComparison]::Ordinal) | Should -BeTrue
+        (Get-ErrorText -Text $result.StandardError) | Should -Match '--classification-path'
         Get-FileFingerprint -Path $script:CapturePath | Should -BeExactly $before
     }
 
@@ -731,7 +461,7 @@ Describe 'Set-CommentAuthorship' {
         $before = Get-FileFingerprint -Path $script:CapturePath
         $classification = ConvertTo-ClassificationText -Entry @((New-Classification -ThreadId '1' -CommentId '1' -Kind 'human'))
 
-        $result = Invoke-AuthorshipProcess -ArgumentList @('-Path', $script:CapturePath, '-Classification', $classification)
+        $result = Invoke-AuthorshipProcess -ArgumentList @('-Path', $script:CapturePath, '-Classification', $classification) -UnreadableCapture
 
         $result.ExitCode | Should -Not -Be 0
         $message = Get-ErrorText -Text $result.StandardError

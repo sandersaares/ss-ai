@@ -212,7 +212,7 @@ pub fn render_files_json(bytes: &[u8], clock: &dyn Clock) -> Result<Value, AppEr
 }
 
 /// Validates and prepares every rendering before publishing any file.
-fn render_files(request: &Value, clock: &dyn Clock) -> Result<Value, AppError> {
+pub(crate) fn render_files(request: &Value, clock: &dyn Clock) -> Result<Value, AppError> {
     let prepare = || -> Result<_, String> {
         let fields = object(request, "request")?;
         let allowed = [

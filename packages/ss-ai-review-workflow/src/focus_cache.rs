@@ -30,34 +30,19 @@ const ARTIFACTS: [&str; 3] = [
 ];
 /// Explicit installed inputs follow the generation contract, not reviewed content.
 const GENERATION_FILES: &[&str] = &[
-    "scripts/Copy-ReviewInstructionSources.ps1",
-    "scripts/lib/InstructionSources.ps1",
     "pwsh-calls/copy-instruction-sources.md",
     "focus-area-format.md",
     "schemas/focus-area-map.schema.json",
-    "scripts/lib/FocusAreaPreparation.ps1",
-    "scripts/lib/JsonValue.ps1",
-    "scripts/lib/PullRequestModel.ps1",
-    "scripts/Test-FocusAreaMap.ps1",
-    "scripts/New-FocusAreaArtifacts.ps1",
     "pwsh-calls/validate-focus-area-map.md",
     "pwsh-calls/assemble-focus-areas.md",
     "workflow-data.md",
     "data-guides/focus-areas.md",
     "schemas/workflow-data.schema.json",
-    "scripts/lib/WorkflowData.ps1",
-    "scripts/New-ReviewWorkerAssignment.ps1",
-    "scripts/Read-ReviewWorkerDocument.ps1",
-    "scripts/lib/NativeWorkflowBridge.ps1",
     "pwsh-calls/prepare-worker-assignment.md",
-    "scripts/lib/FocusAreaExpansion.ps1",
-    "scripts/Update-FocusAreaExpansion.ps1",
-    "scripts/Update-FocusAreaMap.ps1",
     "pwsh-calls/begin-focus-area-generation.md",
     "pwsh-calls/publish-focus-area-generation.md",
     "pwsh-calls/update-focus-area-expansion.md",
     "pwsh-calls/update-focus-area-map.md",
-    "scripts/Save-FocusAreaCache.ps1",
 ];
 
 /// Inputs that define a reusable generation, without review or session identity.

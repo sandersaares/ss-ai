@@ -192,12 +192,16 @@ consolidation plans without contacting a provider. Artifact completion remains
 explicit, including for a review with no findings. Identifiers remain stable
 through updates and are not reused after removal. The review workflow keeps
 coverage validation and audit decisions separate from these local operations.
+Finding prose diagnostics identify the field, control character, or title
+limit that needs correction.
 
 Local audit commands maintain append-only finding decisions and verbatim
 feedback, and bind merge decisions to the reviewed pull request and source.
 Approved projections require settled decisions and retain the evidence binding
 needed for freshness checks. Shared Markdown rendering supplies the same finding
 prose to audit and publication without granting approval or contacting a provider.
+Individual decision input accepts mixed case and surrounding whitespace while
+stored decisions use the canonical vocabulary.
 
 ## Review reports
 

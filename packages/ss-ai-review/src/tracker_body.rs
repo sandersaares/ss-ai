@@ -78,8 +78,8 @@ pub(crate) fn compare_ado_body(
     }
 
     let deviation = measure_deviation(&approved_normalized, &stored_decoded);
-    // The threshold rejects clear divergence; it never grants approval.
-    // Ref: skills/ss-review/scripts/lib/TrackerPublication.ps1.
+    // The boundary separates plausible Markdown normalization from unrelated
+    // text; similarity never grants approval, only human adjudication.
     if deviation
         .similarity
         .is_some_and(|similarity| similarity < 0.90)
@@ -200,8 +200,6 @@ fn measure_deviation(sent: &str, stored: &str) -> BodyDeviation {
     let max = sent.len().max(stored.len());
     // Equal ends do not contribute to Levenshtein distance, so only the
     // differing spans need the quadratic calculation.
-    // Ref: skills/ss-review/scripts/lib/TrackerPublication.ps1,
-    // Measure-TrackerBodyDeviation.
     let prefix = sent.iter().zip(&stored).take_while(|(a, b)| a == b).count();
     let suffix = sent[prefix..]
         .iter()
@@ -227,8 +225,9 @@ fn measure_deviation(sent: &str, stored: &str) -> BodyDeviation {
             first_difference: prefix,
         };
     }
-    // Limit quadratic work; an unmeasured rewrite requires a human decision.
-    // Ref: skills/ss-review/scripts/lib/TrackerPublication.ps1.
+    // Normal Markdown rewrites are localized, leaving short spans after the
+    // shared prefix and suffix are removed. Cap quadratic work for larger
+    // differences and leave unmeasured rewrites to human adjudication.
     if left
         .len()
         .saturating_add(1)
@@ -248,9 +247,6 @@ fn measure_deviation(sent: &str, stored: &str) -> BodyDeviation {
 }
 
 /// Computes Levenshtein distance of the differing UTF-16 spans.
-///
-/// Ref: skills/ss-review/scripts/lib/TrackerPublication.ps1,
-/// Get-TrackerLevenshteinDistance.
 #[expect(
     clippy::arithmetic_side_effects,
     clippy::indexing_slicing,

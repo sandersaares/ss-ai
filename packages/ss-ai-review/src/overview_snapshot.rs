@@ -5,10 +5,11 @@ use std::error::Error as StdError;
 use std::fs;
 use std::path::{Path, PathBuf};
 
+use ohno::AppError;
 use regex::Regex;
 use serde_json::{Value, from_str, from_value, json, to_vec_pretty};
 use sha2::{Digest, Sha256};
-use ss_ai_runtime::{Clock, FileTransaction, read_bytes};
+use ss_ai_runtime::{Clock, FileTransaction, fail, read_bytes};
 use uuid::Uuid;
 
 use crate::target::Target;
@@ -272,6 +273,43 @@ fn validate_snapshot(
 
 /// Applies the same ordered heading, placeholder, and private-path gate as PowerShell.
 fn validate_overview(text: &str, output: &Path, skill: &Path) -> Result<(), SnapshotError> {
+    validate_overview_structure(text).map_err(|error| {
+        SnapshotError::invalid_input_caused_by("Invalid overview structure", error.into_std_error())
+    })?;
+    // PowerShell's `-match` is case-insensitive by default.
+    let placeholder =
+        Regex::new(r"\{\{[A-Za-z_][A-Za-z_0-9]*\}\}").expect("Fixed placeholder expression");
+    let mut paths = vec![
+        output.to_string_lossy().into_owned(),
+        skill.to_string_lossy().into_owned(),
+    ];
+    if let Some(home) = env::var_os("HOME").or_else(|| env::var_os("USERPROFILE")) {
+        paths.push(home.to_string_lossy().into_owned());
+    }
+    let folded = text.to_lowercase();
+    if paths.iter().filter(|path| !path.is_empty()).any(|path| {
+        folded.contains(&path.to_lowercase())
+            || folded.contains(&path.replace('\\', "/").to_lowercase())
+    }) {
+        return Err(SnapshotError::invalid_input(
+            "Overview contains a private path",
+        ));
+    }
+    if placeholder.is_match(text) {
+        return Err(SnapshotError::invalid_input(
+            "Overview contains a workflow placeholder",
+        ));
+    }
+    Ok(())
+}
+
+/// Checks the section structure shared by preparation and publication.
+///
+/// # Errors
+///
+/// Rejects missing, duplicate, empty, or unordered required sections.
+#[doc(hidden)]
+pub fn validate_overview_structure(text: &str) -> Result<(), AppError> {
     let required = [
         "Mission",
         "Substance",
@@ -283,9 +321,6 @@ fn validate_overview(text: &str, output: &Path, skill: &Path) -> Result<(), Snap
         "Related history",
         "Related work",
     ];
-    // PowerShell's `-match` is case-insensitive by default.
-    let placeholder =
-        Regex::new(r"\{\{[A-Za-z_][A-Za-z_0-9]*\}\}").expect("Fixed placeholder expression");
     let mut sections: Vec<(String, String)> = Vec::new();
     let mut open: Option<String> = None;
     for line in text.split(['\r', '\n']) {
@@ -319,37 +354,18 @@ fn validate_overview(text: &str, output: &Path, skill: &Path) -> Result<(), Snap
             .filter(|(_, section)| section.0 == name)
             .collect();
         let [(position, (_, body))] = matches.as_slice() else {
-            return Err(SnapshotError::invalid_input(format!(
-                "Missing, empty, or unordered {name} section"
-            )));
+            return Err(fail(
+                "invalidInput",
+                format!("Missing, empty, or unordered {name} section"),
+            ));
         };
         if previous.is_some_and(|index| *position <= index) || body.trim().is_empty() {
-            return Err(SnapshotError::invalid_input(format!(
-                "Missing, empty, or unordered {name} section"
-            )));
+            return Err(fail(
+                "invalidInput",
+                format!("Missing, empty, or unordered {name} section"),
+            ));
         }
         previous = Some(*position);
-    }
-    let mut paths = vec![
-        output.to_string_lossy().into_owned(),
-        skill.to_string_lossy().into_owned(),
-    ];
-    if let Some(home) = env::var_os("HOME").or_else(|| env::var_os("USERPROFILE")) {
-        paths.push(home.to_string_lossy().into_owned());
-    }
-    let folded = text.to_lowercase();
-    if paths.iter().filter(|path| !path.is_empty()).any(|path| {
-        folded.contains(&path.to_lowercase())
-            || folded.contains(&path.replace('\\', "/").to_lowercase())
-    }) {
-        return Err(SnapshotError::invalid_input(
-            "Overview contains a private path",
-        ));
-    }
-    if placeholder.is_match(text) {
-        return Err(SnapshotError::invalid_input(
-            "Overview contains a workflow placeholder",
-        ));
     }
     Ok(())
 }
@@ -659,6 +675,17 @@ mod tests {
         assert_eq!(
             error.find_source::<Error>().unwrap().kind(),
             ErrorKind::PermissionDenied
+        );
+
+        let error: AppError = validate_overview("", Path::new("output"), Path::new("skill"))
+            .unwrap_err()
+            .into();
+        assert!(error.find_source::<InvalidInput>().is_some());
+        assert_eq!(ss_ai_runtime::classification(&error), "invalidInput");
+        assert!(
+            error
+                .to_string()
+                .contains("Missing, empty, or unordered Mission section")
         );
     }
 

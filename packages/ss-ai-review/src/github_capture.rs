@@ -242,7 +242,7 @@ fn merge_base(
     head: &str,
     head_repo: &Value,
     fork: bool,
-) -> Result<String, AppError> {
+) -> Result<Option<String>, AppError> {
     let compare = format!("{}/compare/", target.repository_api());
     // Fork-qualified commit comparisons use GitHub's cross-repository syntax.
     // Only a proven 404 justifies trying the shared commit network instead.
@@ -258,15 +258,18 @@ fn merge_base(
         None
     };
     let comparison = if let Some(comparison) = qualified {
-        comparison
+        Some(comparison)
     } else {
-        transport
-            .github_get_if_found(&format!("{compare}{}...{}", escape(base), escape(head)))?
-            .ok_or_else(|| fail("service", "GitHub could not resolve the merge base"))?
+        transport.github_get_if_found(&format!("{compare}{}...{}", escape(base), escape(head)))?
+    };
+    // An explicit absence leaves discussion available; review publication
+    // separately requires the inspected commit pair.
+    let Some(comparison) = comparison else {
+        return Ok(None);
     };
     let sha = text(field(field(&comparison, "merge_base_commit")?, "sha")?)?;
     commit(sha)?;
-    Ok(sha.to_owned())
+    Ok(Some(sha.to_owned()))
 }
 
 /// Walks one connection independently, rejecting missing or repeated cursors.
@@ -1414,7 +1417,7 @@ mod tests {
             let transport = Transport::new(&target, None, &script, &script, &FixedClock);
             assert_eq!(
                 merge_base(&transport, &target, base, head, &repo, true).unwrap(),
-                result
+                Some(result.to_owned())
             );
             assert!(script.replies.borrow().is_empty());
         }
@@ -1439,7 +1442,7 @@ mod tests {
             assert!(script.replies.borrow().is_empty());
         }
 
-        // Even a proven absence on both routes cannot become a successful capture.
+        // Only proven absence can leave the merge base unspecified.
         let script = Recording {
             replies: RefCell::new(VecDeque::from(vec![
                 (qualified, json!({"__status":404})),
@@ -1447,7 +1450,10 @@ mod tests {
             ])),
         };
         let transport = Transport::new(&target, None, &script, &script, &FixedClock);
-        merge_base(&transport, &target, base, head, &repo, true).unwrap_err();
+        assert_eq!(
+            merge_base(&transport, &target, base, head, &repo, true).unwrap(),
+            None
+        );
         assert!(script.replies.borrow().is_empty());
 
         let script = Recording {

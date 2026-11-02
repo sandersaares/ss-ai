@@ -1,7 +1,5 @@
-```powershell
-pwsh -NoProfile -NonInteractive -File "{{SKILL_ROOT}}\scripts\Complete-ReviewFileGroup.ps1" `
-  -QueuePath "{{FILE_GROUP_QUEUE}}" `
-  -GroupId "{{GROUP_ID}}"
+```text
+ss-ai workflow complete-review-group --queue-path "{{FILE_GROUP_QUEUE}}" --group-id "{{GROUP_ID}}"
 ```
 
 Placeholders to replace:

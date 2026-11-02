@@ -1,7 +1,5 @@
-```powershell
-pwsh -NoProfile -NonInteractive -File "{{SKILL_ROOT}}/scripts/Complete-FindingArtifact.ps1" `
-  -ArtifactPath "{{SESSION_STATE}}/findings/{{REVIEWER_ID}}.json" `
-  -FileGroupQueuePath "{{FILE_GROUP_QUEUE}}"
+```text
+ss-ai workflow complete-finding --artifact-path "{{SESSION_STATE}}/findings/{{REVIEWER_ID}}.json" --queue-path "{{FILE_GROUP_QUEUE}}"
 ```
 
 Placeholders to replace:

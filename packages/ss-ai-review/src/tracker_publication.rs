@@ -267,7 +267,6 @@ impl Effects for ProviderEffects<'_> {
 
     fn wait_between_creates(&mut self) -> Result<(), AppError> {
         // GitHub asks clients to pace mutations to avoid secondary rate limits.
-        // Ref: skills/ss-review/scripts/lib/TrackerPublication.ps1.
         self.clock.wait(Duration::from_secs(1))
     }
 }

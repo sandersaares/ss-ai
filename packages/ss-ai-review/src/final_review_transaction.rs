@@ -924,9 +924,17 @@ fn execute_inner(
 #[cfg(test)]
 #[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
+    use std::cell::Cell;
+    use std::io;
+    use std::time::Duration;
+
     use super::{Effects, Journal, check_prior_inner, execute_inner};
     use crate::classification;
     use crate::error::fail;
+    use crate::target::Target;
+    use crate::transport::Transport;
+    use crate::{Clock, Http, HttpResponse, Process, ProcessOutput};
+    use jiff::Timestamp;
     use ohno::AppError;
     use serde_json::{Value, json, to_string, to_vec};
 
@@ -979,6 +987,7 @@ mod tests {
     struct Provider {
         calls: Vec<String>,
         failure: Option<(&'static str, &'static str)>,
+        completion_error: Option<AppError>,
         bad_pre: bool,
         bad_post: bool,
         bad_pre_state: bool,
@@ -1069,6 +1078,9 @@ mod tests {
         }
         fn complete(&mut self, _: &str, approve: bool) -> Result<Value, AppError> {
             self.call("complete")?;
+            if let Some(error) = self.completion_error.take() {
+                return Err(error);
+            }
             self.approved = approve;
             Ok(json!({"reviewId": "review", "url": "url"}))
         }
@@ -1163,6 +1175,90 @@ mod tests {
                 "{stage}"
             );
             _ = check_prior_inner(&mut journal, &target("gitHub")).unwrap_err();
+        }
+    }
+
+    #[test]
+    fn partial_graphql_submission_preserves_journal_and_blocks_replay() {
+        /// Models possible mutation success despite CLI failure; neither
+        /// network fallback nor a retry wait may hide the uncertain outcome.
+        struct PartialResponse {
+            calls: Cell<usize>,
+            response: &'static [u8],
+        }
+
+        impl Process for PartialResponse {
+            fn execute(&self, _: &str, _: &[String], _: &[u8]) -> io::Result<ProcessOutput> {
+                assert_eq!(self.calls.get(), 0, "unexpected replay");
+                self.calls.set(1);
+                Ok(ProcessOutput::new(
+                    false,
+                    self.response.to_vec(),
+                    b"rate limit".to_vec(),
+                ))
+            }
+        }
+
+        impl Http for PartialResponse {
+            fn send(
+                &self,
+                _: &str,
+                _: &str,
+                _: &str,
+                _: Option<&[u8]>,
+            ) -> Result<HttpResponse, AppError> {
+                panic!("GitHub uses gh")
+            }
+        }
+
+        impl Clock for PartialResponse {
+            fn now(&self) -> Timestamp {
+                Timestamp::UNIX_EPOCH
+            }
+
+            fn wait(&self, _: Duration) -> Result<(), AppError> {
+                panic!("partial evidence must not authorize a retry")
+            }
+        }
+
+        for response in [
+            br#"HTTP/2 403
+
+{"data":{"submitPullRequestReview":{"id":"review"}},"errors":[{"type":"RATE_LIMITED","message":"rate limit"}]}"#.as_slice(),
+            br#"HTTP/2 429
+
+{"data":{"submitPullRequestReview":{"id":"review"}"#.as_slice(),
+        ] {
+            let process = PartialResponse { calls: Cell::new(0), response };
+            let github = Target::repository("https://github.com/org/repo").unwrap();
+            let transport = Transport::new(&github, None, &process, &process, &process);
+            let error = transport
+                .graphql_mutation("mutation { test }", &json!({}))
+                .unwrap_err();
+            assert_eq!(classification(&error), "ambiguousWrite");
+            let mut provider = Provider {
+                completion_error: Some(error),
+                ..Provider::default()
+            };
+            let mut journal = Memory::default();
+            _ = run(&mut journal, &mut provider, "gitHub", false).unwrap_err();
+            let record = journal.record.as_ref().unwrap();
+            assert_eq!(record["reviewId"], "review");
+            assert!(
+                record["operations"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .any(|operation| {
+                        operation["operation"] == "completeReview"
+                            && operation["outcome"] == "ambiguous"
+                    })
+            );
+            assert!(!provider.calls.iter().any(|call| call == "discard"));
+            let calls = provider.calls.len();
+            _ = check_prior_inner(&mut journal, &target("gitHub")).unwrap_err();
+            assert_eq!(provider.calls.len(), calls);
+            assert_eq!(process.calls.get(), 1);
         }
     }
 

@@ -3,7 +3,7 @@
 Paths in this guide are relative to the skill root. Plan envelopes use
 `schemaVersion: 1`.
 
-`Get-FindingIndex.ps1` produces the `findingIndex` schema: `schemaVersion: 1` and
+`ss-ai workflow finding-index` produces the `findingIndex` schema: `schemaVersion: 1` and
 a required `findings` array of `findingIndexEntry` records. Every entry has a
 unique `id`, `reviewerId`, `focusArea`, `title`, `description`, `recommendedAction`,
 `anchorPath`, and `impactedPaths` array. Only `followUpThreadId` is optional.
@@ -32,6 +32,6 @@ Writers wait through temporary sibling-lock contention and publish complete
 records atomically. Exact append retries do not
 duplicate records; conflicting repeated finding IDs are rejected. A plan is
 owned by one orchestrator; workers submit typed item drafts, not edits to the
-shared file. Correct accepted items with the writer's explicit `-ReplaceIndex`;
+shared file. Correct accepted items with the writer's explicit `--replace-index`;
 it preserves array order and validates the whole resulting document. Finding
 content itself follows `review.md` and is persisted by the existing finding commands.

@@ -266,7 +266,7 @@ pub(crate) fn parse_json(bytes: &[u8]) -> Result<Value, AppError> {
 }
 
 /// Enforces the same schema for every input and output boundary.
-fn parse_item(kind: PlanKind, value: Value) -> Result<PlanItem, AppError> {
+pub(crate) fn parse_item(kind: PlanKind, value: Value) -> Result<PlanItem, AppError> {
     let invalid = |error| caused_by("invalidInput", "Invalid workflow item", error);
     let item = match kind {
         PlanKind::MergeCandidates => {

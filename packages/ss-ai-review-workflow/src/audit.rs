@@ -50,6 +50,74 @@ pub fn add_decisions(
         };
         requests.push(serde_json::to_value(decision)?);
     }
+    append_decisions(
+        path,
+        requests,
+        audit_feedback_path,
+        policy_classification,
+        recorded_utc,
+        clock,
+    )
+}
+
+/// Records one authored decision without relaxing persisted plan schemas.
+///
+/// # Errors
+///
+/// Rejects invalid input, unauthorized policy decisions, malformed journals, and file failures.
+pub fn add_decision(
+    path: &Path,
+    item_path: &Path,
+    audit_feedback_path: Option<&Path>,
+    policy_classification: bool,
+    recorded_utc: &str,
+    clock: &dyn Clock,
+) -> Result<Value, AppError> {
+    reject_same_file(path, item_path)?;
+    if let Some(feedback_path) = audit_feedback_path {
+        reject_same_file(path, feedback_path)?;
+    }
+    let bytes =
+        read_bytes(item_path, clock)?.ok_or_else(|| invalid("Decision input is missing"))?;
+    let mut value = parse_json(&bytes)?;
+    // The authored boundary accepts case and surrounding whitespace; plan and
+    // journal readers retain their strict canonical vocabulary.
+    if let Some(text) = value.get("decision").and_then(Value::as_str) {
+        let canonical = text.trim().to_lowercase();
+        if serde_json::from_value::<DecisionValue>(json!(canonical)).is_err()
+            && let Some(id) = value.get("findingId").and_then(Value::as_str)
+        {
+            return Err(invalid(format!(
+                "Unknown decision '{text}' for finding '{id}'"
+            )));
+        }
+        if let Some(decision) = value.get_mut("decision") {
+            *decision = json!(canonical);
+        }
+    }
+    let PlanItem::Decision(decision) = workflow_plan::parse_item(PlanKind::Decisions, value)?
+    else {
+        return Err(invalid("Expected a decision"));
+    };
+    append_decisions(
+        path,
+        vec![serde_json::to_value(decision)?],
+        audit_feedback_path,
+        policy_classification,
+        recorded_utc,
+        clock,
+    )
+}
+
+/// Commits a fully validated decision request through the common authority gate.
+fn append_decisions(
+    path: &Path,
+    mut requests: Vec<Value>,
+    audit_feedback_path: Option<&Path>,
+    policy_classification: bool,
+    recorded_utc: &str,
+    clock: &dyn Clock,
+) -> Result<Value, AppError> {
     if let Some(feedback_path) = audit_feedback_path {
         let [request] = requests.as_mut_slice() else {
             return Err(invalid(

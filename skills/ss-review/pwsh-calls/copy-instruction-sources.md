@@ -1,13 +1,5 @@
-```powershell
-#Requires -Version 7.6
-
-Set-StrictMode -Version Latest
-$ErrorActionPreference = 'Stop'
-$PSNativeCommandUseErrorActionPreference = $true
-
-ss-ai workflow snapshot-instructions --session-state "{{SESSION_STATE}}" `
-  --skill-root "{{SKILL_ROOT}}" --repository-root "{{REPOSITORY_ROOT}}" `
-  --repository-instruction "{{REPOSITORY_INSTRUCTION}}"
+```text
+ss-ai workflow snapshot-instructions --session-state "{{SESSION_STATE}}" --skill-root "{{SKILL_ROOT}}" --repository-root "{{REPOSITORY_ROOT}}" --repository-instruction "{{REPOSITORY_INSTRUCTION}}"
 ```
 
 | Placeholder | Description |

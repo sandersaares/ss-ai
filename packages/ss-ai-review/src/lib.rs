@@ -51,7 +51,7 @@ pub use command::{run, run_in};
 pub use final_review::{FinalReviewInput, final_review_check_prior, publish_final_review};
 pub use overview::{OverviewInput, OverviewRender, publish_overview};
 #[doc(hidden)]
-pub use overview_snapshot::overview_text_is_publishable;
+pub use overview_snapshot::{overview_text_is_publishable, validate_overview_structure};
 pub use ss_ai_runtime::{
     Clock, NativeProcess, Process, ProcessOutput, SystemClock, classification,
 };
@@ -68,3 +68,7 @@ pub use transport::{Http, HttpResponse, NativeHttp};
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
+mod transport_migration_tests;

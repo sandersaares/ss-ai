@@ -1,6 +1,5 @@
-```powershell
-pwsh -NoProfile -NonInteractive -File "{{SKILL_ROOT}}\scripts\Get-NextReviewItem.ps1" `
-  -QueuePath "{{FILE_GROUP_QUEUE}}"
+```text
+ss-ai workflow next-review-item --queue-path "{{FILE_GROUP_QUEUE}}"
 ```
 
 Placeholders to replace:

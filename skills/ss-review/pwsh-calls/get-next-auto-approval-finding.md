@@ -1,7 +1,5 @@
-```powershell
-pwsh -NoProfile -NonInteractive -File "{{SKILL_ROOT}}\scripts\Get-NextAutoApprovalFinding.ps1" `
-  -Path "{{SESSION_STATE}}\findings.json" `
-  -DecisionsPath "{{SESSION_STATE}}\audit-decisions.json"
+```text
+ss-ai workflow audit-poll-classification --artifact-path "{{SESSION_STATE}}/findings.json" --decisions-path "{{SESSION_STATE}}/audit-decisions.json"
 ```
 
 Placeholders to replace:

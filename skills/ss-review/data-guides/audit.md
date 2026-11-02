@@ -8,13 +8,13 @@ Preserve each verbatim feedback fragment in a text file, then use
 containing `responseId`, `findingId`, and `text`. Reuse a response ID only when
 retrying the same human response; a new response needs a new ID. The pair of
 response and finding IDs is unique. Unknown finding IDs are rejected.
-The decision command loads feedback with `-AuditFeedbackPath`, preserving arrival
+The decision command loads feedback with `--audit-feedback-path`, preserving arrival
 order without inline shell interpolation. Clarification feedback is not a verdict.
 
 Use `pwsh-calls/record-merge-approval.md` for a user's merge decision. The
 `mergeApproval` record contains `pullRequestUrl`, boolean `approveMerge`, and
 `approvedSourceCommit`, selected directly from the supplied capture. Publication
-takes `-MergeApprovalPath`, validates the record and its PR/commit binding, and
+takes `--merge-approval-path`, validates the record and its PR/commit binding, and
 derives the approval flag itself. Omit the path only when there is no applicable
 merge decision; do not use omission to recover from a malformed or stale approval.
 A false decision continues to mean no approval when commits move; only true

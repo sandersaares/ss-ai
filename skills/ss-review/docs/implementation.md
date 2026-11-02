@@ -61,7 +61,7 @@ assigned artifact, and reports unresolved
 questions to the primary session. It cannot advance the review globally or
 publish state remotely.
 
-Scripts enforce mechanical invariants that should not depend on language-model
+Native commands enforce mechanical invariants that should not depend on language-model
 judgment: schema validation, state transitions, deterministic rendering,
 comparison, target resolution, and publication. This allocation keeps judgment
 where context is available and keeps safety properties in executable code.
@@ -70,7 +70,7 @@ where context is available and keeps safety properties in executable code.
 
 The orchestrator records explicit self-review selection in its checkpoint and gates side effects before preparation starts. It skips reviewer registration, report-tool setup, and overview publication while retaining inventory and local overview preparation. Analysis and policy classification use the ordinary workers and artifacts. PR scopes retain the pre-audit evidence refresh; local scopes check for content movement before classification.
 
-After classification, `self-review.md` replaces audit and all later phases. It uses `ConvertTo-FindingMarkdown.ps1` directly on the consolidated artifact, not the approved set, because undecided findings are part of this local deliverable. The renderer's existing all-findings path supplies per-finding absolute paths and a combined report without publication anchor checks. Its `tracker` format preserves primary source locations because standalone documents are not attached to a diff; selecting this format performs no tracker publication. `auditFindingIds` partitions the emitted paths for session presentation without mutating decision records or introducing another persisted schema.
+After classification, `self-review.md` replaces audit and all later phases. It uses `ss-ai workflow prepare-markdown` directly on the consolidated artifact, not the approved set, because undecided findings are part of this local deliverable. The renderer's all-findings path supplies per-finding absolute paths and a combined report without publication anchor checks. Its `tracker` format preserves primary source locations because standalone documents are not attached to a diff; selecting this format performs no tracker publication. `auditFindingIds` partitions the emitted paths for session presentation without mutating decision records or introducing another persisted schema.
 
 The mode never creates synthetic human verdicts or merge decisions. It stops on unresolved questions instead of invoking interactive recovery. Learning is outside this route because it has no human audit feedback and must not create remote side effects.
 
@@ -113,10 +113,11 @@ the cache key, so incompatible instruction provenance produces a miss.
 Selected repository sources use `review-repository/<root-identity>/<relative-path>`
 and the same origin identity. The returned mapping retains the selected spelling
 for reference expansion.
-Runtime scripts, report templates, and pinned npm manifests stay together in
-the skill tree so installed links and checkout-relative use share assets.
+The shared native executable is discovered through `PATH`. Report templates
+and pinned npm manifests stay in the skill tree, selected through the active
+skill root for both installed links and checkout-relative use.
 
-`New-ReviewWorkerAssignment.ps1` invokes the native builder for bounded preparation
+`ss-ai workflow worker-assignment` builds bounded preparation
 and focus-area reviewer tasks using the active skill's assets. It renders phase instructions, states the
 delegation authorization without granting orchestration or user authority, and
 selects reviewer paths directly from the immutable work manifest. Prepared
@@ -175,7 +176,7 @@ diagnostics or establish live-review performance from synthetic tests.
 
 Session state is shared unless a file is explicitly handed to one subagent.
 Logical workflow ownership does not imply that commands run one at a time.
-The common file helpers in `PullRequestModel.ps1` provide atomic publication,
+The native runtime file helpers provide atomic publication,
 replacement-compatible reads, and retained sibling locks. Readers keep the
 complete version they opened and permit replacement of its path. Writers stage
 complete content beside the destination, using replacement for existing files
@@ -304,7 +305,7 @@ empty finding artifact. Its manifest assignment remains present with
 
 Workers assess the remaining files against every section. Exclusions require
 concrete scope evidence; the orchestrator checks these reasons as well as the
-completion journal. Scripts validate structure and recorded coverage, not the
+completion journal. Commands validate structure and recorded coverage, not the
 truth of a semantic analysis declaration.
 
 The review prompt starts change analysis from the diff and permits targeted
@@ -377,7 +378,7 @@ journal avoids a crash window between queue removal and recording ownership.
 Completion is declared only after assessing every file, analyzing the requested
 scope of non-excluded files with enough context, and persisting every finding and
 scope-exclusion reason. Diffs, targeted reads, and structured-data queries can
-satisfy this declaration without whole-file reads. The scripts check bookkeeping,
+satisfy this declaration without whole-file reads. The commands check bookkeeping,
 not the truth of that declaration.
 
 Workers keep a prose checkpoint with assignment rules,
@@ -461,10 +462,8 @@ unknown fields and absent required arrays. Prepared commands own atomic writes
 and lock read-modify-write operations; workers submit typed item drafts.
 Prose remains Markdown where no mechanical consumer requires fields.
 
-Validation uses PowerShell's bundled JSON Schema engine with flat diagnostic
-output. This preserves invalid-field paths below schema references;
-`Test-Json` in PowerShell 7.6 does not traverse every level of its hierarchical
-error output. Schema parsing and evaluation failures remain terminating errors.
+Native validation reports schema and record failures without silently coercing
+malformed input. Parsing and evaluation failures remain terminating errors.
 
 Expansion records connect each target to every referring context by parent ID
 and immutable source spans. Resolving parent chains on demand incorporates late
@@ -577,7 +576,7 @@ identifiers needing human audit; it does not consume work or rewrite files.
 The existing append-only log journals both outcomes: `auto-approved` is a final
 policy verdict, while `needs-audit` is a completed classification with no final
 approval or rejection. Polling skips both, as well as existing user verdicts.
-The worker's recording command uses `-PolicyClassification` to reject other
+The worker's recording command uses `--policy-classification` to reject other
 verdicts and user feedback before writing the log.
 
 Recording the outcome is the only progress operation. Decision-log writes stage
@@ -588,8 +587,8 @@ Replacements start only after their predecessor stops, with the same
 artifact and log paths. Work allocation remains with the designated classification
 worker; shared decision-log updates are serialized independently. The orchestrator verifies exhaustion through
 the polling command rather than trusting the worker's completion report.
-The native workflow operation owns each complete decision-log transaction;
-PowerShell command adapters preserve the existing file-based interfaces.
+The native workflow operation owns each complete decision-log transaction and
+accepts validated file-based plans.
 
 Approved-set construction and audit diagnostics treat `needs-audit` as
 undecided. The human audit uses the polling result's pending identifiers without
@@ -655,7 +654,7 @@ content as it stands do not manufacture a before state.
 For pull request reviews, the orchestrator supplies the current capture and
 the shared `pwsh-calls/query-pr-context.md` recipe. The overview selects URL and
 commit metadata as needed; the orchestrator verifies its link beneath the title
-with the recipe's `metadata -Field pullRequestUrl` query. Neither reads the
+with the recipe's `--query metadata --field pullRequestUrl` query. Neither reads the
 canonical capture directly.
 
 The overview distinguishes observed incompleteness from uncertainty and turns
@@ -754,8 +753,7 @@ through a mistaken option.
 
 Capture, authorship enrichment, local queries, and reviewer registration run
 through the shared `ss-ai` executable on `PATH`. Its native transport and
-identity operations also serve proactor selection and confirmation. PowerShell
-adapters preserve the skill's existing command interfaces, and publication
+identity operations also serve proactor selection and confirmation. Publication
 remains separate. See the utility's [implementation guide](../../../packages/ss-ai/docs/implementation.md)
 for its transaction and provider boundaries.
 
@@ -838,7 +836,7 @@ audited capture remains the evidence to which the user's answer refers.
 
 Freshness runs after synthesis before policy classification, then again after
 audit immediately before publication. Semantic revalidation remains orchestration:
-scripts prove identity and changed evidence, not whether a claim still stands.
+commands prove identity and changed evidence, not whether a claim still stands.
 Pre-audit retirement uses the ordinary removal plan; post-audit retirement uses
 append-only dropped decisions. Approved schema version 2 adds a required
 `reviewedContextHash` (null without PR context) for the checked source, merge
@@ -857,23 +855,16 @@ the publication decision.
 ## Bounded local query boundary
 
 The native `ss-ai context` commands read canonical captures and return bounded
-projections without contacting a provider or modifying evidence. The
-`Read-PullRequestContext.ps1` and `New-PullRequestQueryRequest.ps1` entry points
-adapt typed PowerShell arguments to these operations and propagate failures.
+projections without contacting a provider or modifying evidence.
 Publication and validation keep their full-document readers and path-based
 inputs; query projections are not replacement canonical artifacts.
 
-Workers create requests with typed arguments to `New-PullRequestQueryRequest.ps1`.
+Workers create requests with `ss-ai context prepare`.
 The native operation writes normalized selectors together with both capture
 identities and their paths. Saved requests use the same reading-snapshot identity
 as direct queries, including the authorship policy and applied semantic decisions.
-Literal search text may come from a UTF-8 file;
-typed file arrays bind inside a noninteractive PowerShell program rather than
-JSON inside a shell string. The query recipe distinguishes PowerShell callers
-from Bash callers. Bash-backed tools save the canonical PowerShell example to a
-private script with a file-writing tool and invoke it through `pwsh -NonInteractive -File`.
-This keeps query instructions in one program and prevents Bash from interpreting
-PowerShell syntax. Scalar `-File` invocations can run directly.
+Literal search text may come from a UTF-8 file; file selectors use repeated
+native arguments quoted for the executing shell.
 Creation validates the selected query against its
 capture before publishing the request.
 
@@ -895,11 +886,11 @@ The projection layer exposes these operations:
 
 | Query | Projection |
 | --- | --- |
-| `metadata` | One required allowlisted `-Field`. `reviewers` and `revisions` enumerate individual projected records; other fields expose only the selected value. |
+| `metadata` | One required allowlisted `--field`. `reviewers` and `revisions` enumerate individual projected records; other fields expose only the selected value. |
 | `threads` | Descriptors with IDs, including `openingCommentId`, URLs, canonical kind and resolution, outdated status, anchor, decision, opening-comment excerpt, and comment count; no full bodies. |
-| `comments` | Chronological comments for a selected thread, an exact thread/comment pair, an authorship class, or an explicit file/global selection. Verbatim content and attribution support semantic interpretation. `-IndexOnly` omits bodies and excerpts for allocation and discovery. |
-| `search` | Case-insensitive literal `-Text` matches against complete comment bodies and the description when scope permits; one bounded match excerpt per matching comment. |
-| `changes` | Delta entries comparing required `-ComparePath` with `-Path`, with baseline/current/both references for targeted evidence retrieval. |
+| `comments` | Chronological comments for a selected thread, an exact thread/comment pair, an authorship class, or an explicit file/global selection. Verbatim content and attribution support semantic interpretation. `--index-only` omits bodies and excerpts for allocation and discovery. |
+| `search` | Case-insensitive literal `--text` matches against complete comment bodies and the description when scope permits; one bounded match excerpt per matching comment. Saved requests also accept `--text-path` for text read from a file. |
+| `changes` | Delta entries comparing required `--compare-path` with `--path`, with baseline/current/both references for targeted evidence retrieval. |
 
 Search uses Unicode simple case folding without normalization or
 multi-character expansion. Match offsets refer to the original text in UTF-16
@@ -914,10 +905,10 @@ String-valued fields use `content` slices; non-string and null fields use
 `value`, as does each enumerated reviewer or revision.
 
 Thread, comment, and search selection share file, scope, canonical-kind, and
-resolution filters. Saved requests use a nonempty typed `-Files` array of
-repository-relative paths. The direct query interface also accepts mutually
-exclusive `-FilesJson` and `-FilesPath`. File selection implies file
-filtering; `-Scope global` cannot be combined with it. Scope defaults to
+resolution filters. Saved requests use repeated `--file` arguments for a nonempty
+selection of repository-relative paths. The direct `ss-ai context read` interface
+instead accepts mutually exclusive `--files-json` and `--files-path` inputs.
+File selection implies file filtering; `--scope global` cannot be combined with it. Scope defaults to
 `all`; file and global scopes select anchored and unanchored discussion
 respectively. Path matching normalizes the leading provider slash and slash
 separator, then uses ordinal case-sensitive comparison. Known prior names
@@ -925,7 +916,7 @@ must be supplied explicitly; the query infers no rename history.
 
 All resolution states and outdated threads are included by default. Comments
 require an explicit thread ID, authorship, file, or global selection;
-`-CommentId` also requires `-ThreadId`. Kind or resolution alone cannot enable
+`--comment-id` also requires `--thread-id`. Kind or resolution alone cannot enable
 bulk comment reading. These are selection safeguards, not semantic judgments
 about which discussion a finding must account for.
 
@@ -979,9 +970,9 @@ without comparison; otherwise it contains `threadsAddedCount`,
 `evidenceChanged`, source/merge-base movement flags, and the compared commits. Detailed changes
 are available through the paged `changes` query, not summary arrays.
 
-`Set-CommentAuthorship.ps1` emits only `contextPath`, `applied`, `unchanged`,
+`ss-ai context set-authorship` emits only `contextPath`, `applied`, `unchanged`,
 `indeterminate`, and `isComplete`. Its caller discovers unresolved records with
-`comments -Authorship indeterminate`, not a printed ID list. These summaries
+`--query comments --authorship indeterminate`, not a printed ID list. These summaries
 keep orchestration diagnostics independent of discussion volume.
 
 ## Verbatim fidelity
@@ -1050,7 +1041,7 @@ include the effective overlay and policy, so a completed batch invalidates old
 filtered cursors.
 
 The orchestrator can allocate classification batches from a body-free
-`comments -Authorship indeterminate -IndexOnly` query. Classifiers retrieve
+`--query comments --authorship indeterminate --index-only` query. Classifiers retrieve
 the selected comments by their exact thread/comment ID pairs; index metadata
 alone is never classification evidence.
 
@@ -1072,7 +1063,6 @@ Service-specific change identities remain adapter data where a platform needs
 them to place comments. The installed `ss-ai git diff` operation owns
 exact Git comparison and path/hunk parsing. Final review publication uses the
 native comparison directly to resolve finding anchors and hunk membership.
-Retained PowerShell consumers map the result into their reviewed-commit model.
 Parser fixtures invoke the same native parser; isolated Rust integration tests
 exercise the real Git process boundary.
 
@@ -1101,8 +1091,7 @@ speaker marker so no adapter can omit or duplicate it.
 
 Initial overview publication and final finding publication are independent
 operations. The final review's journal does not gate or replay an overview
-attempt. `Publish-PullRequestReview.ps1` retains the named PowerShell entry
-point while `ss-ai review publish-final-review` owns the native transaction.
+attempt. `ss-ai review publish-final-review` owns the native transaction.
 Command composition combines provider operations with validated workflow
 records, shared rendering, and the immutable local Git comparison.
 
@@ -1182,7 +1171,6 @@ Tracker publication uses the same approved findings and deterministic rendering
 but a different transaction model. A tracker item is visible immediately and
 cannot participate in a review-level draft.
 
-`Publish-ReviewTrackerItems.ps1` preserves the named skill interface while
 `ss-ai review publish-tracker-items` owns local preparation, provider preflight,
 and the retained journal transaction.
 
@@ -1253,7 +1241,7 @@ acceptable. Those responsibilities remain in the shared model.
 
 The native overview publication operation freezes the preparation overview in
 session state and uses platform adapters separate from review submission.
-`Publish-ContentOverview.ps1` supplies its inputs to that operation.
+The recipe supplies its inputs directly to that operation.
 `overview-snapshot.json`
 binds its immutable Markdown to the PR, inspected commits, run identifier, and
 content hash. A separately frozen HTML artifact and its ZIP container serve ADO. The mutable local
@@ -1264,13 +1252,11 @@ write and retains returned IDs before verification. Upload is verified before th
 linking comment is created. Known successful attempts are reused; an attempt
 that wrote or may have written remote state is not automatically replayed.
 The initial comment is not edited and later overview generation does not publish.
-`Publish-ContentOverview.ps1` writes its optional `-CommentPrefix` to a private
-UTF-8 file and passes its path to the native operation. The native transaction
+The caller supplies attribution in a UTF-8 file and passes its path to the native operation. The native transaction
 uses the verified artifact URL on either platform and prepends a nonempty prefix
 verbatim, separated from the linked sentence by a blank line. The default prefix
 is empty so callers explicitly select attribution according to their active
-instructions rather than a hard-coded policy. A failure to remove the private
-file is reported separately without changing the publication outcome.
+instructions rather than a hard-coded policy.
 Creation and verification use the same complete comment body. Resuming a successful
 publication reuses its receipt even if the caller supplies a different prefix.
 
@@ -1344,7 +1330,7 @@ exclusive installation lock throughout the render. Temporary probe files are
 removed on both success and failure.
 
 The primary session obtains installation consent;
-noninteractive scripts never ask, install implicitly, or launch an authentication
+noninteractive commands never ask, install implicitly, or launch an authentication
 prompt. An explicit installer uses a pinned npm lockfile and the browser installer
 from that dependency set. npm engine checking is strict so an unsupported Node.js
 runtime fails installation instead of merely warning. On Windows x64, the installer
@@ -1357,8 +1343,8 @@ request. Browser-install failures also point to the guide's targeted incomplete-
 procedure. Cache deletion remains a separately approved user action with exclusive
 cache access; the installer never infers deletion targets from error text.
 
-On Ubuntu, the adapter's `-InstallBrowserDependencies` switch passes
-`--install-browser-dependencies` to the native installer to explicitly opt into system package
+On Ubuntu, the caller passes `--install-browser-dependencies` to the native
+installer to explicitly opt into system package
 installation. Under the same tools lock, the installer reads `deb.deps` beside
 the resolved Chrome executable and passes its dependency relations to
 `apt-get satisfy`, following Puppeteer's dependency-installation mechanism.
@@ -1388,10 +1374,8 @@ user's decision is retained for the run to prevent repeated installation prompts
 
 ## HTML report rendering
 
-The `ConvertTo-ReviewHtml.ps1` adapter supplies the active skill root and shared tools directory
-to `ss-ai workflow render-review-html`. It resolves the output path against the caller's
-location, creates its parent directory if necessary, writes the title to a UTF-8 file beside
-the output, passes its path as `--title-path`, and removes the file afterward. The output
+The caller supplies the active skill root, shared tools directory and a UTF-8 title file
+to `ss-ai workflow render-review-html`. The output
 directory must be writable; the native process keeps the caller's working directory.
 The native renderer reads canonical Markdown and uses Pandoc's GFM syntax
 tree. Source raw nodes become visible text/code, while

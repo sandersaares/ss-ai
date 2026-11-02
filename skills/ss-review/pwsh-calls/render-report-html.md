@@ -1,14 +1,5 @@
-```powershell
-#Requires -Version 7.6
-
-Set-StrictMode -Version Latest
-$ErrorActionPreference = 'Stop'
-$PSNativeCommandUseErrorActionPreference = $true
-
-& (Join-Path "{{SKILL_ROOT}}" 'scripts/ConvertTo-ReviewHtml.ps1') `
-  -Path "{{MARKDOWN_PATH}}" `
-  -OutputPath "{{HTML_PATH}}" `
-  -Title "{{TITLE}}"
+```text
+ss-ai workflow render-review-html --path "{{MARKDOWN_PATH}}" --output-path "{{HTML_PATH}}" --skill-root "{{SKILL_ROOT}}" --tools-directory "{{TOOLS_DIRECTORY}}" --title-path "{{TITLE_PATH}}"
 ```
 
 | Placeholder | Description |
@@ -16,12 +7,11 @@ $PSNativeCommandUseErrorActionPreference = $true
 | `SKILL_ROOT` | Absolute directory containing the active `SKILL.md`. |
 | `MARKDOWN_PATH` | Absolute path of the canonical Markdown document. For audit, use the emitted `auditDocumentPath`. |
 | `HTML_PATH` | Absolute sibling HTML path, such as the session's `audit-findings.html`. |
-| `TITLE` | Reader-facing document title, such as `Review audit`. Omit `-Title` to use `Review report`. |
+| `TOOLS_DIRECTORY` | Absolute shared user-local tools directory from `check-report-tools.md`. |
+| `TITLE_PATH` | Absolute path to a UTF-8 file containing the reader-facing title, such as `Review audit`. |
 
-The adapter selects the shared user-local tools directory, writes the title as a UTF-8 file
-beside the resolved HTML output for `ss-ai workflow render-review-html`, and removes that file
-afterward. The output directory must be writable. The native process keeps the caller's working
-directory.
+Write the title file in session state. The output directory must be writable. The native process
+keeps the caller's working directory.
 
 The command emits JSON containing `sourcePath`, `sourceHash`, `htmlPath`, `htmlUri`, `htmlHash`,
 and `diagramCount`. Present `htmlUri` as a named Markdown hyperlink where the client supports

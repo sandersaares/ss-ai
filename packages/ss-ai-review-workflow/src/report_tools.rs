@@ -449,16 +449,7 @@ fn install_mermaid(
                 |error| caused_by("io", "Cannot copy report dependency manifest", error),
             )?;
         }
-        let copied = fs::read(directory.join("package-lock.json"))
-            .map_err(|error| caused_by("io", "Cannot read staged dependency lockfile", error))?;
-        if destination.file_name()
-            != Some(OsString::from(format!("mermaid-{:x}", Sha256::digest(copied))).as_os_str())
-        {
-            return Err(fail(
-                "invalidInput",
-                "The skill dependency lockfile changed during setup",
-            ));
-        }
+        validate_staged_lockfile(&destination, fs::read(directory.join("package-lock.json")))?;
         // npm is paired with the selected runtime when available; the child gets
         // an isolated PATH and working directory rather than changing the process.
         let npm_name = if cfg!(windows) { "npm.cmd" } else { "npm" };
@@ -513,6 +504,24 @@ fn install_mermaid(
     }
     if let Some(staging) = staging {
         publish_directory(staging.path(), &destination, tools_dir)?;
+    }
+    Ok(())
+}
+
+/// Confirms the staged dependencies still match the selected installation.
+fn validate_staged_lockfile(
+    destination: &Path,
+    copied: io::Result<Vec<u8>>,
+) -> Result<(), AppError> {
+    let copied =
+        copied.map_err(|error| caused_by("io", "Cannot read staged dependency lockfile", error))?;
+    if destination.file_name()
+        != Some(OsString::from(format!("mermaid-{:x}", Sha256::digest(copied))).as_os_str())
+    {
+        return Err(fail(
+            "invalidInput",
+            "The skill dependency lockfile changed during setup",
+        ));
     }
     Ok(())
 }
@@ -718,4 +727,40 @@ fn install_pandoc(tools_dir: &Path, process: &dyn Process) -> Result<(), AppErro
         &tools_dir.join(format!("pandoc-{PANDOC_VERSION}")),
         tools_dir,
     )
+}
+
+#[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
+mod tests {
+    use super::*;
+
+    /// The copied lockfile must match the identity selected before staging.
+    #[test]
+    fn staged_lockfile_must_match_selected_identity() {
+        let selected = b"original lockfile";
+        let destination = PathBuf::from(format!("mermaid-{:x}", Sha256::digest(selected)));
+        validate_staged_lockfile(&destination, Ok(selected.to_vec())).unwrap();
+        let error =
+            validate_staged_lockfile(&destination, Ok(b"changed lockfile".to_vec())).unwrap_err();
+        assert!(error.to_string().contains("lockfile changed during setup"));
+    }
+
+    /// A failed staged read cannot be mistaken for a changed lockfile.
+    #[test]
+    fn staged_lockfile_read_failure_is_reported() {
+        let error = validate_staged_lockfile(
+            Path::new("mermaid-selected"),
+            Err(io::Error::new(io::ErrorKind::PermissionDenied, "denied")),
+        )
+        .unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("Cannot read staged dependency lockfile")
+        );
+        assert_eq!(
+            error.find_source::<io::Error>().unwrap().kind(),
+            io::ErrorKind::PermissionDenied
+        );
+    }
 }

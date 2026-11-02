@@ -7,16 +7,16 @@
 )]
 
 use std::fs;
-use std::io::Write;
 use std::path::PathBuf;
-use std::process::{Command, Stdio};
 use std::time::Duration;
 
 use jiff::Timestamp;
 use ohno::AppError;
 use serde_json::{Value, json};
 use ss_ai_review_workflow::markdown::{render, render_files_json, render_json};
+use ss_ai_review_workflow::markdown_preparation::{Options, prepare};
 use ss_ai_runtime::{Clock, fail};
+use url::Url;
 
 /// Avoids real waits while exercising atomic file publication.
 struct TestClock;
@@ -95,6 +95,47 @@ fn file_output_uses_selected_audit_and_complete_combined_document() {
 }
 
 #[test]
+fn prepared_audit_uri_identifies_file_and_preserves_prose() {
+    let directory = TestDirectory::new("uri");
+    let artifact = directory.0.join("artifact.json");
+    let output = directory.0.join("findings");
+    let audit = directory.0.join("audit files (local)/audit-findings.md");
+    let mut record = finding("F1", "reviewer");
+    record["schemaVersion"] = json!(1);
+    record["sourceFindingIds"] = json!([]);
+    record["description"] = json!("Résumé $HOME $(not a shell command)");
+    fs::write(
+        &artifact,
+        serde_json::to_vec(&json!({
+            "schemaVersion":1,"kind":"consolidated","findings":[record]
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+    let result = prepare(
+        &Options {
+            path: &artifact,
+            output_directory: &output,
+            combined_path: None,
+            audit_document_path: Some(&audit),
+            finding_ids: &[],
+            destination: "pullRequest",
+            context_path: None,
+            overview_path: None,
+        },
+        &TestClock,
+    )
+    .unwrap();
+    let uri = result["auditDocumentUri"].as_str().unwrap();
+    assert_eq!(Url::parse(uri).unwrap().to_file_path().unwrap(), audit);
+    assert!(
+        fs::read_to_string(audit)
+            .unwrap()
+            .contains("Résumé $HOME $(not a shell command)")
+    );
+}
+
+#[test]
 fn file_output_rejects_bad_selection_before_writing() {
     let directory = TestDirectory::new("invalid");
     let output = directory.0.join("findings");
@@ -139,25 +180,6 @@ fn complete_rendering_exposes_parts_without_reparsing_markdown() {
         );
         assert!(joined.contains("One paragraph\n\nAnother paragraph"));
     }
-}
-
-#[test]
-#[cfg_attr(miri, ignore = "The PowerShell adapter runs in a separate process")]
-fn compatibility_adapters_use_whole_rendering_requests() {
-    let package = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-    let root = package.parent().unwrap().parent().unwrap();
-    let output = Command::new("pwsh")
-        .args(["-NoProfile", "-NonInteractive", "-File"])
-        .arg(package.join("tests/markdown_boundary.ps1"))
-        .arg("-RepositoryRoot")
-        .arg(root)
-        .output()
-        .unwrap();
-    assert!(
-        output.status.success(),
-        "{}",
-        String::from_utf8_lossy(&output.stderr)
-    );
 }
 
 #[test]
@@ -699,59 +721,14 @@ fn captured_singleton_collections_preserve_fallback_and_validation() {
 }
 
 #[test]
-#[cfg_attr(miri, ignore = "The PowerShell adapter runs in a separate process")]
-fn powershell_tracker_adapter_preserves_singleton_capture_for_native_documents() {
-    let package = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-    let root = package.parent().unwrap().parent().unwrap();
-    let script = "
-#Requires -Version 7.6
-Set-StrictMode -Version Latest
-$ErrorActionPreference = 'Stop'
-$PSNativeCommandUseErrorActionPreference = $true
-. ./skills/ss-review/scripts/lib/JsonValue.ps1
-. ./skills/ss-review/scripts/lib/TrackerItem.ps1
-function Invoke-NativeReviewMarkdown {
-    param([Parameter(Mandatory)][System.Collections.IDictionary] $Request)
-    return $Request
-}
-$inputData = ConvertFrom-Json -InputObject ([Console]::In.ReadToEnd()) -AsHashtable
-$provenance = Get-TrackerItemProvenance -Finding $inputData.finding -Context $inputData.context
-if ($provenance.followUpUrl -cne 'comment') { throw 'PowerShell provenance did not find the comment.' }
-$requests = @(
-    ConvertTo-FindingDestinationDocument -Finding @($inputData.finding) -Destination tracker -Context $inputData.context
-    ConvertTo-FindingAuditDocument -Finding @($inputData.finding) -Destination tracker -Context $inputData.context
-)
-ConvertTo-Json -InputObject $requests -Depth 100 -Compress
-";
+fn singleton_capture_preserves_provenance_for_native_documents() {
     let mut follow = finding("F1", "reviewer");
     follow["followUp"] = json!({"threadId":"42","commentId":"7"});
     let input = json!({"finding":follow,"context":{"pullRequestUrl":"pr",
         "threads":{"id":42,"comments":{"id":7,"url":"comment"}}}});
-    let mut process = Command::new("pwsh")
-        .args(["-NoProfile", "-NonInteractive", "-Command", script])
-        .current_dir(root)
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .unwrap();
-    process
-        .stdin
-        .take()
-        .unwrap()
-        .write_all(&serde_json::to_vec(&input).unwrap())
-        .unwrap();
-    let output = process.wait_with_output().unwrap();
-    assert!(
-        output.status.success(),
-        "{}",
-        String::from_utf8_lossy(&output.stderr)
-    );
-    let requests: Vec<Value> = serde_json::from_slice(&output.stdout).unwrap();
-    assert_eq!(requests.len(), 2);
-    for request in requests {
-        assert!(request["context"]["threads"].is_object());
-        assert!(request["context"]["threads"]["comments"].is_object());
+    for operation in ["document", "auditDocument"] {
+        let request = json!({"operation":operation,"destination":"tracker",
+            "findings":[input["finding"]],"context":input["context"]});
         assert!(
             render(&request)
                 .unwrap()

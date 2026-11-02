@@ -1,21 +1,20 @@
-```powershell
-pwsh -NoProfile -NonInteractive -File "{{SKILL_ROOT}}/scripts/Publish-ContentOverview.ps1" `
-  -ContextPath "{{SESSION_STATE}}/pr-context.json" `
-  -OverviewPath "{{SESSION_STATE}}/content-overview.md" `
-  -OutputDirectory "{{SESSION_STATE}}" `
-  -CommentPrefix "{{COMMENT_PREFIX}}"
+Write the required attribution to a UTF-8 file in session state, including an
+empty file when no prefix is required. Then run:
+
+```text
+ss-ai review publish-overview --context-path "{{SESSION_STATE}}/pr-context.json" --overview-path "{{SESSION_STATE}}/content-overview.md" --output-directory "{{SESSION_STATE}}" --skill-root "{{SKILL_ROOT}}" --comment-prefix-path "{{COMMENT_PREFIX_PATH}}"
 ```
 
 | Placeholder | Description |
 | --- | --- |
 | `SKILL_ROOT` | Directory containing the active `SKILL.md`. |
 | `SESSION_STATE` | Session state directory for this review. |
-| `COMMENT_PREFIX` | Attribution text required by active repository or account instructions, for example `[Copilot speaking]`. Use an empty string or omit `-CommentPrefix` when no prefix is required. |
+| `COMMENT_PREFIX_PATH` | Absolute path to the file containing attribution text required by active repository or account instructions, for example `[Copilot speaking]`. |
 | `TENANT` | Optional Azure tenant from the invocation or proactor handoff. |
 
-For Azure DevOps, append `-Tenant "{{TENANT}}"` when a tenant was supplied.
+For Azure DevOps, append `--tenant "{{TENANT}}"` when a tenant was supplied.
 
-The script consumes the full initial capture programmatically. Any agent lookup of its URL or commit metadata must use `query-pr-context.md`; do not open the capture or replace this input with a projection.
+The command consumes the full initial capture programmatically. Any agent lookup of its URL or commit metadata must use `query-pr-context.md`; do not open the capture or replace this input with a projection.
 
 Run this once immediately after initial overview generation and validation, before review workers.
 It freezes the overview and inspected commits, creates an unlisted Markdown Gist on GitHub or an

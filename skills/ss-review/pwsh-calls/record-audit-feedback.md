@@ -1,10 +1,8 @@
 Use the common rules in `workflow-data.md` and the feedback contract in
 `data-guides/audit.md`.
 
-```powershell
-pwsh -NoProfile -NonInteractive -File "{{SKILL_ROOT}}\scripts\Add-ReviewAuditFeedback.ps1" `
-  -OutputDirectory "{{SESSION_STATE}}" -FindingsPath "{{SESSION_STATE}}\findings.json" `
-  -ResponseId "{{RESPONSE_ID}}" -FindingId "{{FINDING_ID}}" -TextPath "{{TEXT_PATH}}"
+```text
+ss-ai workflow audit-add-feedback --path "{{SESSION_STATE}}/audit-feedback.json" --findings-path "{{SESSION_STATE}}/findings.json" --response-id "{{RESPONSE_ID}}" --finding-id "{{FINDING_ID}}" --text-path "{{TEXT_PATH}}"
 ```
 
 | Placeholder | Value |

@@ -1,7 +1,5 @@
-```powershell
-pwsh -NoProfile -NonInteractive -File "{{SKILL_ROOT}}\scripts\Set-ReviewFileAssessment.ps1" `
-  -QueuePath "{{FILE_GROUP_QUEUE}}" -InventoryPath "{{FILE_INVENTORY}}" `
-  -FileGroupsPath "{{FILE_GROUPS}}" -AssessmentPath "{{ASSESSMENT_PATH}}"
+```text
+ss-ai workflow set-review-assessment --queue-path "{{FILE_GROUP_QUEUE}}" --inventory-path "{{FILE_INVENTORY}}" --file-groups-path "{{FILE_GROUPS}}" --assessment-path "{{ASSESSMENT_PATH}}"
 ```
 
 | Placeholder | Value |

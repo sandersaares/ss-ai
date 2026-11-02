@@ -43,148 +43,168 @@ if ($Suite -in @('All', 'Pester')) {
         'Generate-Inventory.Tests.ps1', 'Graders.Tests.ps1',
         'SsAutoreapprove.Tests.ps1',
         'SsReviewCoverageBatch.Tests.ps1', 'SsReviewFocusAreaCache.Tests.ps1', 'SsReviewFocusAreaPreparation.Tests.ps1',
-        'SsReviewInstructionSources.Tests.ps1', 'SsReviewFindingConsolidation.Tests.ps1',
+        'SsReviewInstructionSources.Tests.ps1',
         'SsReviewFindingDecisions.Tests.ps1',
         'SsReviewFindingMarkdown.Tests.ps1', 'SsReviewFindingModel.Tests.ps1',
-        'SsReviewGitDiff.Tests.ps1', 'SsReviewPublicationAzureDevOps.Tests.ps1',
-        'SsReviewPublicationGitHub.Tests.ps1', 'SsReviewPublicationPlan.Tests.ps1',
+        'SsReviewGitDiff.Tests.ps1', 'SsReviewPublicationGitHub.Tests.ps1',
+        'SsReviewPublicationPlan.Tests.ps1',
         'SsReviewPullRequestAnchor.Tests.ps1', 'SsReviewTrackerPublication.Tests.ps1',
         'SsReviewTrackerGitHub.Tests.ps1', 'SsReviewTrackerAzureDevOps.Tests.ps1',
-        'SsReviewPullRequestAuthorship.Tests.ps1', 'SsReviewPullRequestExecutables.Tests.ps1',
-        'SsReviewNativeCaptureParity.Tests.ps1', 'SsReviewNativeTrackerIntegration.Tests.ps1', 'SsReviewPullRequestQuery.Tests.ps1',
-        'SsReviewReports.Tests.ps1', 'SsReviewReportTools.Tests.ps1', 'SsReviewOverviewApi.Tests.ps1',
+        'SsReviewPullRequestAuthorship.Tests.ps1', 'SsReviewPullRequestContext.Tests.ps1',
+        'SsReviewPullRequestExecutables.Tests.ps1', 'SsReviewPullRequestShape.Tests.ps1',
+        'SsReviewNativeCaptureParity.Tests.ps1', 'SsReviewNativePublicationPreflight.Tests.ps1',
+        'SsReviewNativeTrackerIntegration.Tests.ps1',
+        'SsReviewPullRequestQueryExamples.Tests.ps1',
+        'SsReviewReports.Tests.ps1', 'SsReviewReportTools.Tests.ps1',
         'SsReviewPublishOverviewCaller.Tests.ps1', 'SsReviewSelfReview.Tests.ps1',
-        'SsReviewSharedFiles.Tests.ps1', 'SsReviewWorkflowData.Tests.ps1',
+        'SsReviewSharedFiles.Tests.ps1',
         'SsReviewWork.Tests.ps1', 'SsReviewWorkerInput.Tests.ps1'
     )
     $selected = @(Get-ChildItem -LiteralPath $Path -Recurse -File | Where-Object Name -In $nativeConsumers)
     $blockedPesterPaths = @()
     $nativeReady = $false
     $sharedTestExecutables = @{}
+    $nativeTargetDirectory = $null
+    $nativeExecutableDirectory = $null
 
-    if ($selected.Count -gt 0) {
-        Push-Location -LiteralPath (Split-Path -Parent $PSScriptRoot)
-        try {
-            & cargo build --package ss-ai --locked --quiet
-            if ($LASTEXITCODE -ne 0) {
-                throw 'Building the native review test prerequisite failed.'
-            }
-
-            $metadataJson = & cargo metadata --no-deps --format-version 1 --locked
-            if ($LASTEXITCODE -ne 0) {
-                throw 'Locating the native review test executable failed.'
-            }
-            $metadata = $metadataJson | ConvertFrom-Json
-            $nativeReady = $true
-        } catch {
-            # Only native-consuming Pester files depend on this build; unrelated checks still run.
-            Write-Host "Pester prerequisite failed: $_"
-            $blockedPesterPaths = @($selected.FullName)
-            $failed = $true
-        } finally {
-            Pop-Location
-        }
-    }
-
-    $sharedFileTests = @($selected | Where-Object Name -EQ 'SsReviewSharedFiles.Tests.ps1')
-    $workerInputTests = @($selected | Where-Object Name -EQ 'SsReviewWorkerInput.Tests.ps1')
-    $concurrencyTargets = @()
-    if ($sharedFileTests.Count -gt 0) { $concurrencyTargets += @('finding_plans', 'audit', 'review_work') }
-    if ($workerInputTests.Count -gt 0) { $concurrencyTargets += 'worker_input' }
-    if ($nativeReady -and $concurrencyTargets.Count -gt 0) {
-        Push-Location -LiteralPath (Split-Path -Parent $PSScriptRoot)
-        try {
-            # Prepare the process helper before tests acquire any shared locks.
-            $targetArguments = @($concurrencyTargets | ForEach-Object { '--test'; $_ })
-            $messages = @(& cargo test --package ss-ai-review-workflow @targetArguments --no-run --locked --message-format json)
-            if ($LASTEXITCODE -ne 0) {
-                throw 'Building the concurrency test prerequisites failed.'
-            }
-            foreach ($target in $concurrencyTargets) {
+    try {
+        if ($selected.Count -gt 0) {
+            Push-Location -LiteralPath (Split-Path -Parent $PSScriptRoot)
+            try {
+                # Cargo owns this target for the entire Pester run, so another build
+                # cannot replace an executable between discovery and process launch.
+                $nativeTargetDirectory = Join-Path (Get-Location).Path ('target/ss-ai-pester-' + [guid]::NewGuid().ToString('N'))
+                $messages = @(& cargo build --package ss-ai --locked --quiet --message-format json --target-dir $nativeTargetDirectory)
+                if ($LASTEXITCODE -ne 0) {
+                    throw 'Building the native review test prerequisite failed.'
+                }
                 $executables = @($messages | ForEach-Object {
                     $message = $_ | ConvertFrom-Json
-                    if ($message.reason -eq 'compiler-artifact' -and $message.target.name -eq $target -and $message.executable) {
+                    if ($message.reason -eq 'compiler-artifact' -and $message.target.name -eq 'ss-ai' -and
+                        $message.target.kind -contains 'bin' -and $message.executable) {
                         $message.executable
                     }
                 })
                 if ($executables.Count -ne 1 -or -not (Test-Path -LiteralPath $executables[0] -PathType Leaf)) {
-                    throw "Could not identify the $target concurrency test executable."
+                    throw 'Could not identify the native review test executable.'
                 }
-                $sharedTestExecutables[$target] = $executables[0]
+                $nativeExecutableDirectory = Split-Path -Parent $executables[0]
+                $nativeReady = $true
+            } catch {
+                # Only native-consuming Pester files depend on this build; unrelated checks still run.
+                Write-Host "Pester prerequisite failed: $_"
+                $blockedPesterPaths = @($selected.FullName)
+                $failed = $true
+            } finally {
+                Pop-Location
             }
-        } catch {
-            Write-Host "Pester prerequisite failed: $_"
-            $blockedPesterPaths += @($sharedFileTests | ForEach-Object FullName) +
-                @($workerInputTests | ForEach-Object FullName)
-            $failed = $true
+        }
+
+        $sharedFileTests = @($selected | Where-Object Name -EQ 'SsReviewSharedFiles.Tests.ps1')
+        $workerInputTests = @($selected | Where-Object Name -EQ 'SsReviewWorkerInput.Tests.ps1')
+        $concurrencyTargets = @()
+        if ($sharedFileTests.Count -gt 0) { $concurrencyTargets += @('finding_plans', 'audit', 'review_work') }
+        if ($workerInputTests.Count -gt 0) { $concurrencyTargets += 'worker_input' }
+        if ($nativeReady -and $concurrencyTargets.Count -gt 0) {
+            Push-Location -LiteralPath (Split-Path -Parent $PSScriptRoot)
+            try {
+                # Prepare the process helper before tests acquire any shared locks.
+                $targetArguments = @($concurrencyTargets | ForEach-Object { '--test'; $_ })
+                $messages = @(& cargo test --package ss-ai-review-workflow @targetArguments --no-run --locked --message-format json --target-dir $nativeTargetDirectory)
+                if ($LASTEXITCODE -ne 0) {
+                    throw 'Building the concurrency test prerequisites failed.'
+                }
+                foreach ($target in $concurrencyTargets) {
+                    $executables = @($messages | ForEach-Object {
+                        $message = $_ | ConvertFrom-Json
+                        if ($message.reason -eq 'compiler-artifact' -and $message.target.name -eq $target -and $message.executable) {
+                            $message.executable
+                        }
+                    })
+                    if ($executables.Count -ne 1 -or -not (Test-Path -LiteralPath $executables[0] -PathType Leaf)) {
+                        throw "Could not identify the $target concurrency test executable."
+                    }
+                    $sharedTestExecutables[$target] = $executables[0]
+                }
+            } catch {
+                Write-Host "Pester prerequisite failed: $_"
+                $sharedTestExecutables.Clear()
+                $blockedPesterPaths += @($sharedFileTests | ForEach-Object FullName) +
+                    @($workerInputTests | ForEach-Object FullName)
+                $failed = $true
+            } finally {
+                Pop-Location
+            }
+        }
+
+        $pester = Get-Module -ListAvailable Pester |
+            Where-Object { $_.Version.Major -eq 5 } |
+            Sort-Object Version -Descending |
+            Select-Object -First 1
+        if (-not $pester) {
+            throw 'Pester 5 is required. Install it for the current user before running this offline test suite.'
+        }
+
+        Import-Module $pester.Path -Force
+        $configuration = [PesterConfiguration]::Default
+        $configuration.Run.Path = $Path
+        $configuration.Run.ExcludePath = $blockedPesterPaths
+        if ($FullNameFilter) {
+            $configuration.Filter.FullName = $FullNameFilter
+        }
+
+        # Pester must return control so a failing suite does not suppress Rust checks.
+        $configuration.Run.Exit = $false
+        $configuration.Run.PassThru = $true
+        $configuration.Output.Verbosity = 'Detailed'
+
+        $originalPath = $env:PATH
+        $originalFindingTestExecutable = $env:SS_AI_FINDING_TEST_EXECUTABLE
+        $originalAuditTestExecutable = $env:SS_AI_AUDIT_TEST_EXECUTABLE
+        $originalReviewWorkTestExecutable = $env:SS_AI_REVIEW_WORK_TEST_EXECUTABLE
+        $originalWorkerInputTestExecutable = $env:SS_AI_WORKER_INPUT_TEST_EXECUTABLE
+        $sharedTestCopies = @{}
+        try {
+            if ($nativeReady) {
+                $env:PATH = $nativeExecutableDirectory + [IO.Path]::PathSeparator + $env:PATH
+            }
+            foreach ($target in $sharedTestExecutables.Keys) {
+                # Each invocation retains its own immutable helper while Cargo may rebuild its output.
+                $executable = $sharedTestExecutables[$target]
+                $extension = [IO.Path]::GetExtension($executable)
+                $copy = Join-Path $nativeTargetDirectory "ss-ai-$target-test-$([guid]::NewGuid().ToString('N'))$extension"
+                [IO.File]::Copy($executable, $copy)
+                $sharedTestCopies[$target] = $copy
+                if (-not $IsWindows) {
+                    [IO.File]::SetUnixFileMode($copy, [IO.File]::GetUnixFileMode($executable))
+                }
+            }
+            if ($sharedTestCopies.ContainsKey('finding_plans')) {
+                $env:SS_AI_FINDING_TEST_EXECUTABLE = $sharedTestCopies['finding_plans']
+                $env:SS_AI_AUDIT_TEST_EXECUTABLE = $sharedTestCopies['audit']
+                $env:SS_AI_REVIEW_WORK_TEST_EXECUTABLE = $sharedTestCopies['review_work']
+            }
+            if ($sharedTestCopies.ContainsKey('worker_input')) {
+                $env:SS_AI_WORKER_INPUT_TEST_EXECUTABLE = $sharedTestCopies['worker_input']
+            }
+
+            $result = Invoke-Pester -Configuration $configuration
         } finally {
-            Pop-Location
-        }
-    }
-
-    $pester = Get-Module -ListAvailable Pester |
-        Where-Object { $_.Version.Major -eq 5 } |
-        Sort-Object Version -Descending |
-        Select-Object -First 1
-    if (-not $pester) {
-        throw 'Pester 5 is required. Install it for the current user before running this offline test suite.'
-    }
-
-    Import-Module $pester.Path -Force
-    $configuration = [PesterConfiguration]::Default
-    $configuration.Run.Path = $Path
-    $configuration.Run.ExcludePath = $blockedPesterPaths
-    if ($FullNameFilter) {
-        $configuration.Filter.FullName = $FullNameFilter
-    }
-
-    # Pester must return control so a failing suite does not suppress Rust checks.
-    $configuration.Run.Exit = $false
-    $configuration.Run.PassThru = $true
-    $configuration.Output.Verbosity = 'Detailed'
-
-    $originalPath = $env:PATH
-    $originalFindingTestExecutable = $env:SS_AI_FINDING_TEST_EXECUTABLE
-    $originalAuditTestExecutable = $env:SS_AI_AUDIT_TEST_EXECUTABLE
-    $originalReviewWorkTestExecutable = $env:SS_AI_REVIEW_WORK_TEST_EXECUTABLE
-    $originalWorkerInputTestExecutable = $env:SS_AI_WORKER_INPUT_TEST_EXECUTABLE
-    $sharedTestCopies = @{}
-    try {
-        if ($nativeReady) {
-            $env:PATH = (Join-Path $metadata.target_directory 'debug') + [IO.Path]::PathSeparator + $env:PATH
-        }
-        foreach ($target in $sharedTestExecutables.Keys) {
-            # Each invocation retains its own immutable helper while Cargo may rebuild its output.
-            $executable = $sharedTestExecutables[$target]
-            $extension = [IO.Path]::GetExtension($executable)
-            $copy = Join-Path ([IO.Path]::GetTempPath()) "ss-ai-$target-test-$([guid]::NewGuid().ToString('N'))$extension"
-            [IO.File]::Copy($executable, $copy)
-            $sharedTestCopies[$target] = $copy
-            if (-not $IsWindows) {
-                [IO.File]::SetUnixFileMode($copy, [IO.File]::GetUnixFileMode($executable))
+            $env:PATH = $originalPath
+            $env:SS_AI_FINDING_TEST_EXECUTABLE = $originalFindingTestExecutable
+            $env:SS_AI_AUDIT_TEST_EXECUTABLE = $originalAuditTestExecutable
+            $env:SS_AI_REVIEW_WORK_TEST_EXECUTABLE = $originalReviewWorkTestExecutable
+            $env:SS_AI_WORKER_INPUT_TEST_EXECUTABLE = $originalWorkerInputTestExecutable
+            foreach ($copy in $sharedTestCopies.Values) {
+                if ([IO.File]::Exists($copy)) { [IO.File]::Delete($copy) }
             }
         }
-        if ($sharedTestCopies.ContainsKey('finding_plans')) {
-            $env:SS_AI_FINDING_TEST_EXECUTABLE = $sharedTestCopies['finding_plans']
-            $env:SS_AI_AUDIT_TEST_EXECUTABLE = $sharedTestCopies['audit']
-            $env:SS_AI_REVIEW_WORK_TEST_EXECUTABLE = $sharedTestCopies['review_work']
-        }
-        if ($sharedTestCopies.ContainsKey('worker_input')) {
-            $env:SS_AI_WORKER_INPUT_TEST_EXECUTABLE = $sharedTestCopies['worker_input']
-        }
-
-        $result = Invoke-Pester -Configuration $configuration
+        $failed = $failed -or $result.Result -ne 'Passed'
     } finally {
-        $env:PATH = $originalPath
-        $env:SS_AI_FINDING_TEST_EXECUTABLE = $originalFindingTestExecutable
-        $env:SS_AI_AUDIT_TEST_EXECUTABLE = $originalAuditTestExecutable
-        $env:SS_AI_REVIEW_WORK_TEST_EXECUTABLE = $originalReviewWorkTestExecutable
-        $env:SS_AI_WORKER_INPUT_TEST_EXECUTABLE = $originalWorkerInputTestExecutable
-        foreach ($copy in $sharedTestCopies.Values) {
-            if ([IO.File]::Exists($copy)) { [IO.File]::Delete($copy) }
+        if ($nativeTargetDirectory -and (Test-Path -LiteralPath $nativeTargetDirectory)) {
+            Remove-Item -LiteralPath $nativeTargetDirectory -Recurse -Force
         }
     }
-    $failed = $failed -or $result.Result -ne 'Passed'
 }
 
 if ($Suite -in @('All', 'Rust')) {

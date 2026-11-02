@@ -30,11 +30,13 @@ producer. The producer retains the destination lock across collection and
 publishes the sidecar before the immutable capture, so readers never observe
 a capture without its initial decisions. Semantic decisions use the same
 sidecar lock and remain separate from provider evidence.
-Local finding operations use the same runtime transactions as PowerShell
-consumers, so hybrid runs preserve accepted updates and artifact history.
+Local finding operations use the shared runtime transactions to preserve
+accepted updates and artifact history.
+Individual audit decision input is normalized before the shared policy and
+journal checks. Persisted plans and journals retain strict canonical values,
+so normalization does not change the stored schema or approval authority.
 Report commands take the active skill root explicitly, keeping the locked
-dependencies and template tied to the skill that invokes them. PowerShell
-entry points retain compatibility while the native commands own report tooling.
+dependencies and template tied to the skill that invokes them.
 Initial overview publication keeps provider effects and the publication journal
 in `ss-ai-review`. The command composition supplies local report rendering from
 `ss-ai-review-workflow`, so provider transactions do not depend on presentation
@@ -42,10 +44,9 @@ tools and the package dependencies remain one-way.
 Audit and projection operations share the captured-evidence serializer and
 exact Git comparison with other review commands. Final review publication
 combines these local operations with provider effects and a retained journal
-lock in `ss-ai-review`; its PowerShell entry point preserves the named interface.
+lock in `ss-ai-review`.
 Tracker publication combines the native renderer with provider-specific
-preflight and per-item journaled creation and verification. Its PowerShell
-entry point retains the named skill interface.
+preflight and per-item journaled creation and verification.
 The Cargo inventory has no provider or
 network dependency. The focused packages support targeted test builds and
 incremental reuse; a cold build of the complete executable still builds its

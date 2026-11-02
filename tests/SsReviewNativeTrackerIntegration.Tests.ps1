@@ -5,7 +5,6 @@ $ErrorActionPreference = 'Stop'
 $PSNativeCommandUseErrorActionPreference = $true
 
 BeforeAll {
-    $script:Publisher = [IO.Path]::GetFullPath((Join-Path $PSScriptRoot '../skills/ss-review/scripts/Publish-ReviewTrackerItems.ps1'))
     $script:PowerShell = (Get-Process -Id $PID).Path
     $script:Native = (Get-Command ss-ai -CommandType Application -ErrorAction Stop | Select-Object -First 1).Source
     $script:Root = Join-Path $PSScriptRoot ('.native-tracker-' + [guid]::NewGuid().ToString('N'))
@@ -48,8 +47,8 @@ if ($query.Contains('createIssue(')) {
         [IO.File]::SetUnixFileMode($az, [IO.UnixFileMode]::UserRead -bor [IO.UnixFileMode]::UserWrite -bor [IO.UnixFileMode]::UserExecute)
     }
 
-    # A child process exercises adapter discovery, streams, exit status, and cwd.
-    function Invoke-TrackerAdapter {
+    # A child process exercises the public CLI, its streams, exit status, and cwd.
+    function Invoke-TrackerCommand {
         param([string] $Directory, [switch] $Mismatch, [switch] $Malformed)
 
         [void] [IO.Directory]::CreateDirectory($Directory)
@@ -61,7 +60,7 @@ if ($query.Contains('createIssue(')) {
         $approvedPath = Join-Path $Directory 'approved 雪.json'
         [IO.File]::WriteAllText($approvedPath, $(if ($Malformed) { '{' } else { ConvertTo-Json -InputObject $approved -Depth 20 -Compress }), [Text.UTF8Encoding]::new($false))
         [IO.File]::WriteAllText((Join-Path $Directory 'diagnostics 雪.json'), '{}', [Text.UTF8Encoding]::new($false))
-        $start = [Diagnostics.ProcessStartInfo]::new($script:PowerShell)
+        $start = [Diagnostics.ProcessStartInfo]::new($script:Native)
         $start.WorkingDirectory = $Directory
         $start.UseShellExecute = $false
         $start.RedirectStandardOutput = $true
@@ -73,9 +72,9 @@ if ($query.Contains('createIssue(')) {
         $start.Environment['TRACKER_PROVIDER_MARKER'] = Join-Path $Directory 'provider-called'
         $start.Environment['TRACKER_JOURNAL'] = Join-Path $Directory 'output 雪/tracker-publication-result.json'
         $start.Environment['TRACKER_MISMATCH'] = if ($Mismatch) { '1' } else { '0' }
-        foreach ($arg in @('-NoProfile', '-NonInteractive', '-File', $script:Publisher,
-            '-Url', 'https://github.com/acme/tracker', '-ApprovedFindingsPath', 'approved 雪.json',
-            '-DiagnosticsPath', 'diagnostics 雪.json', '-OutputDirectory', 'output 雪')) {
+        foreach ($arg in @('review', 'publish-tracker-items',
+            '--url', 'https://github.com/acme/tracker', '--approved-findings-path', 'approved 雪.json',
+            '--diagnostics-path', 'diagnostics 雪.json', '--output-directory', 'output 雪')) {
             $start.ArgumentList.Add($arg)
         }
         $process = [Diagnostics.Process]::Start($start)
@@ -93,10 +92,10 @@ AfterAll {
 }
 
 # Windows cannot execute the script-based fake gh directly as a native executable.
-Describe 'Real native tracker publication adapter' -Skip:$IsWindows {
+Describe 'Native tracker publication command' -Skip:$IsWindows {
     It 'publishes and reads back UTF-8 through the actual native transaction' {
         $work = Join-Path $script:Root 'success 雪'
-        $result = Invoke-TrackerAdapter -Directory $work
+        $result = Invoke-TrackerCommand -Directory $work
         $result.exitCode | Should -Be 0 -Because $result.error
         $outcome = ConvertFrom-Json -InputObject $result.output -AsHashtable
         $outcome.status | Should -BeExactly 'succeeded'
@@ -111,9 +110,8 @@ Describe 'Real native tracker publication adapter' -Skip:$IsWindows {
 
     It 'emits a failed outcome with durable creation evidence before exiting nonzero' {
         $work = Join-Path $script:Root 'failure 雪'
-        $result = Invoke-TrackerAdapter -Directory $work -Mismatch
+        $result = Invoke-TrackerCommand -Directory $work -Mismatch
         $result.exitCode | Should -Not -Be 0
-        $result.error | Should -Match 'exit code'
         $outcome = ConvertFrom-Json -InputObject $result.output -AsHashtable
         $outcome.status | Should -BeExactly 'failed'
         $outcome.publishedItemCount | Should -Be 1
@@ -125,7 +123,7 @@ Describe 'Real native tracker publication adapter' -Skip:$IsWindows {
 
     It 'rejects malformed local input before contacting a provider' {
         $work = Join-Path $script:Root 'invalid 雪'
-        $result = Invoke-TrackerAdapter -Directory $work -Malformed
+        $result = Invoke-TrackerCommand -Directory $work -Malformed
         $result.exitCode | Should -Not -Be 0
         $result.output | Should -BeNullOrEmpty
         [IO.File]::Exists((Join-Path $work 'provider-called')) | Should -BeFalse

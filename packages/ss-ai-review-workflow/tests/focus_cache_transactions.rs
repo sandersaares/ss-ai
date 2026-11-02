@@ -814,6 +814,42 @@ fn identity_changes_with_sources_generation_profile_and_freshness() {
 }
 
 #[test]
+fn identity_uses_active_generation_assets_without_power_shell_scripts() {
+    let fixture = Fixture::new("active-assets");
+    let options = fixture.options();
+    let clock = TestClock(1_800_000_000);
+    let initial = restore(&options, true, &clock).unwrap().key.unwrap();
+
+    let scripts = options.skill_root.join("scripts");
+    fs::create_dir_all(&scripts).unwrap();
+    fs::write(scripts.join("irrelevant.ps1"), "irrelevant").unwrap();
+    assert_eq!(
+        restore(&options, true, &clock).unwrap().key.unwrap(),
+        initial
+    );
+    fs::remove_dir_all(scripts).unwrap();
+    assert_eq!(
+        restore(&options, true, &clock).unwrap().key.unwrap(),
+        initial
+    );
+
+    let recipe = options
+        .skill_root
+        .join("pwsh-calls/update-focus-area-map.md");
+    fs::write(recipe, "changed native recipe").unwrap();
+    let changed = restore(&options, true, &clock).unwrap().key.unwrap();
+    assert_ne!(changed, initial);
+
+    fs::remove_file(
+        options
+            .skill_root
+            .join("schemas/focus-area-map.schema.json"),
+    )
+    .unwrap();
+    assert!(restore(&options, true, &clock).is_err());
+}
+
+#[test]
 fn counts_only_files_under_external_including_nested_files() {
     let fixture = Fixture::new("external-count");
     let options = fixture.options();

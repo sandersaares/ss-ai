@@ -756,8 +756,7 @@ fn verify(
 
 /// Provides bounded context using the same UTF-16 offset as body comparison.
 ///
-/// The radius matches TrackerPublication.ps1, balancing readable context
-/// against journal size.
+/// The radius balances readable context against journal size.
 fn excerpt(text: &str, at: usize) -> String {
     let units: Vec<u16> = text.encode_utf16().collect();
     let start = at.saturating_sub(48).min(units.len());

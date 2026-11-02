@@ -930,6 +930,8 @@ mod tests {
         assert_eq!(state["sourceCommit"], "head");
         assert_eq!(state["mergeBaseCommit"], "base");
         assert_eq!(state["identity"], "user@example.test");
+        assert_eq!(state["isActive"], true);
+        assert!(state["pendingReviewId"].is_null());
         let ids = file_identity(
             &mut transport,
             &target,
@@ -940,6 +942,34 @@ mod tests {
         assert_eq!(ids, json!({"src/a.rs":42,"src/b.rs":43}));
         let handle = start(&mut transport, &target, &state).unwrap();
         assert_eq!(handle["reviewId"], "iteration/3");
+        fixture.done();
+    }
+
+    #[test]
+    fn completed_pull_request_is_not_active() {
+        let pr = "proj/_apis/git/repositories/repo/pullRequests/7";
+        let fixture = Fixture::new(vec![
+            (
+                "GET",
+                url(pr, ""),
+                None,
+                json!({"pullRequestId":7,"status":"completed"}),
+            ),
+            (
+                "GET",
+                url(&format!("{pr}/iterations"), ""),
+                None,
+                list(
+                    json!([{"id":3,"sourceRefCommit":{"commitId":"head"},"commonRefCommit":{"commitId":"base"}}]),
+                ),
+            ),
+            ("GET", connection_url(), None, connection()),
+        ]);
+        let target = target();
+        let mut transport = Transport::new(&target, None, &fixture, &fixture, &fixture);
+        let state = state(&mut transport, &target).unwrap();
+        assert_eq!(state["status"], "completed");
+        assert_eq!(state["isActive"], false);
         fixture.done();
     }
 
@@ -1009,12 +1039,75 @@ mod tests {
         assert!(findings["comments"][0]["startLine"].is_null());
         assert_eq!(findings["comments"][1]["subjectType"], "PULL_REQUEST");
         // The approval argument never initiates a vote: it is a separate effect.
-        complete(&mut transport, &target, &mut review, "summary", true).unwrap();
+        let completed = complete(&mut transport, &target, &mut review, "summary", true).unwrap();
+        assert_eq!(
+            completed["url"],
+            "https://dev.azure.com/org/proj/_git/repo/pullrequest/7?discussionId=10"
+        );
         let checked = verify(&mut transport, &target, &review).unwrap();
         assert!(checked["isPublished"].as_bool().unwrap());
         assert_eq!(checked["body"], "summary");
         assert_eq!(checked["comments"].as_array().unwrap().len(), 2);
         assert!(discard(&mut transport, &target, &review).is_err());
+        fixture.done();
+    }
+
+    #[test]
+    fn right_side_line_threads_preserve_iteration_range_and_utf8() {
+        let threads = "proj/_apis/git/repositories/repo/pullRequests/7/threads";
+        for (start, end) in [(7, 7), (7, 11)] {
+            let body = json!({"comments":[{"parentCommentId":0,"content":"finding — 🤖","commentType":"text"}],"status":"active",
+                "threadContext":{"filePath":"/src/a.rs","rightFileStart":{"line":start,"offset":1},"rightFileEnd":{"line":end,"offset":2}},
+                "pullRequestThreadContext":{"changeTrackingId":42,"iterationContext":{"firstComparingIteration":3,"secondComparingIteration":3}}});
+            let fixture = Fixture::new(vec![(
+                "POST",
+                url(threads, ""),
+                Some(body),
+                json!({"id":8,"comments":[{"id":1}]}),
+            )]);
+            let target = target();
+            let mut transport = Transport::new(&target, None, &fixture, &fixture, &fixture);
+            let receipt = add(&mut transport, &target, &mut review(), &json!({
+                "operation":"newLineThread","body":"finding — 🤖",
+                "anchor":{"kind":"line","path":"src/a.rs","side":"right","startLine":start,"endLine":end},
+                "changeTrackingId":42
+            })).unwrap();
+            assert_eq!(receipt, json!({"threadId":"8","commentId":"1"}));
+            fixture.done();
+        }
+    }
+
+    #[test]
+    fn empty_anchor_set_needs_no_provider_read() {
+        let fixture = Fixture::new(vec![]);
+        let target = target();
+        let mut transport = Transport::new(&target, None, &fixture, &fixture, &fixture);
+        assert_eq!(
+            file_identity(&mut transport, &target, &json!({}), &[]).unwrap(),
+            json!({})
+        );
+        fixture.done();
+    }
+
+    #[test]
+    fn missing_changed_files_are_reported_together() {
+        let changes = "proj/_apis/git/repositories/repo/pullRequests/7/iterations/3/changes";
+        let fixture = Fixture::new(vec![(
+            "GET",
+            url(changes, "%24top=1000&"),
+            None,
+            json!({"changeEntries":[]}),
+        )]);
+        let target = target();
+        let mut transport = Transport::new(&target, None, &fixture, &fixture, &fixture);
+        let error = file_identity(
+            &mut transport,
+            &target,
+            &json!({"iterationId":3}),
+            &["src/a.rs".into(), "src/b.rs".into()],
+        )
+        .unwrap_err();
+        assert!(error.to_string().contains("src/a.rs, src/b.rs"));
         fixture.done();
     }
 
@@ -1045,6 +1138,214 @@ mod tests {
             true
         );
         fixture.done();
+    }
+
+    #[test]
+    fn approval_preserves_reviewer_status_across_shared_identity_fields() {
+        let reviewers = "proj/_apis/git/repositories/repo/pullRequests/7/reviewers";
+        for (reviewer, required) in [
+            (json!({"id":"account","isRequired":true}), true),
+            (json!({"id":"account","isRequired":false}), false),
+            (json!({"id":"account"}), false),
+            (
+                json!({"id":"other","descriptor":"aad.account","isRequired":true}),
+                true,
+            ),
+            (
+                json!({"id":"other","uniqueName":"user@example.test","isRequired":true}),
+                true,
+            ),
+        ] {
+            let body = json!({"id":"account","vote":10,"isRequired":required});
+            let fixture = Fixture::new(vec![
+                ("GET", connection_url(), None, connection()),
+                ("GET", url(reviewers, ""), None, list(json!([reviewer]))),
+                (
+                    "PUT",
+                    url(&format!("{reviewers}/account"), ""),
+                    Some(body.clone()),
+                    body,
+                ),
+            ]);
+            let target = target();
+            let mut transport = Transport::new(&target, None, &fixture, &fixture, &fixture);
+            assert_eq!(
+                approve(&mut transport, &target).unwrap()["isRequired"],
+                required
+            );
+            fixture.done();
+        }
+    }
+
+    /// Refuses reviewer reads without allowing the test to reach a provider write.
+    struct ReviewerReadFailure {
+        status: u16,
+        reads: Cell<usize>,
+        waits: Cell<usize>,
+    }
+
+    impl Process for ReviewerReadFailure {
+        fn execute(&self, _: &str, _: &[String], _: &[u8]) -> io::Result<ProcessOutput> {
+            Ok(ProcessOutput::new(true, b"token".to_vec(), vec![]))
+        }
+    }
+
+    impl Clock for ReviewerReadFailure {
+        fn now(&self) -> Timestamp {
+            Timestamp::UNIX_EPOCH
+        }
+
+        fn wait(&self, _: Duration) -> Result<(), AppError> {
+            let waits = self.waits.get().checked_add(1).expect("fixture waits fit");
+            // The bound exceeds the configured retry budget and catches loss of progress.
+            assert!(waits <= 32, "reviewer-read retries did not terminate");
+            self.waits.set(waits);
+            Ok(())
+        }
+    }
+
+    impl Http for ReviewerReadFailure {
+        fn send(
+            &self,
+            method: &str,
+            url: &str,
+            _: &str,
+            body: Option<&[u8]>,
+        ) -> Result<HttpResponse, AppError> {
+            assert_eq!(method, "GET");
+            assert!(body.is_none());
+            if url == connection_url() {
+                return Ok(HttpResponse::new(
+                    200,
+                    BTreeMap::new(),
+                    to_vec(&connection()).unwrap(),
+                ));
+            }
+            assert_eq!(
+                url,
+                self::url(
+                    "proj/_apis/git/repositories/repo/pullRequests/7/reviewers",
+                    ""
+                )
+            );
+            self.reads
+                .set(self.reads.get().checked_add(1).expect("fixture reads fit"));
+            Ok(HttpResponse::new(
+                self.status,
+                BTreeMap::new(),
+                b"refused".to_vec(),
+            ))
+        }
+    }
+
+    #[test]
+    fn approval_never_writes_when_reviewer_lookup_fails() {
+        for status in [403, 404, 500] {
+            let fixture = ReviewerReadFailure {
+                status,
+                reads: Cell::new(0),
+                waits: Cell::new(0),
+            };
+            let target = target();
+            let mut transport = Transport::new(&target, None, &fixture, &fixture, &fixture);
+            let error = approve(&mut transport, &target).unwrap_err();
+            assert!(error.to_string().contains(&status.to_string()));
+            assert!(fixture.reads.get() > 0);
+        }
+    }
+
+    /// Simulates a write response without access to a network provider.
+    struct WriteFailure {
+        status: Option<u16>,
+        calls: Cell<usize>,
+    }
+
+    impl Process for WriteFailure {
+        fn execute(&self, _: &str, _: &[String], _: &[u8]) -> io::Result<ProcessOutput> {
+            Ok(ProcessOutput::new(true, b"token".to_vec(), vec![]))
+        }
+    }
+
+    impl Clock for WriteFailure {
+        fn now(&self) -> Timestamp {
+            Timestamp::UNIX_EPOCH
+        }
+
+        fn wait(&self, _: Duration) -> Result<(), AppError> {
+            panic!("a failed write must not be replayed")
+        }
+    }
+
+    impl Http for WriteFailure {
+        fn send(
+            &self,
+            method: &str,
+            _: &str,
+            _: &str,
+            body: Option<&[u8]>,
+        ) -> Result<HttpResponse, AppError> {
+            assert!(matches!(method, "POST" | "PATCH"));
+            assert!(body.is_some());
+            self.calls
+                .set(self.calls.get().checked_add(1).expect("fixture calls fit"));
+            match self.status {
+                Some(status) => Ok(HttpResponse::new(
+                    status,
+                    BTreeMap::new(),
+                    b"refused".to_vec(),
+                )),
+                None => Err(crate::error::fail("service", "connection lost")),
+            }
+        }
+    }
+
+    #[test]
+    fn failed_publication_writes_are_not_replayed_and_preserve_ambiguity() {
+        for operation in ["thread", "reply", "summary", "reopen"] {
+            for (status, expected) in [
+                (Some(400), "permissionDenied"),
+                (Some(401), "authentication"),
+                (Some(500), "ambiguousWrite"),
+                (None, "ambiguousWrite"),
+            ] {
+                let fixture = WriteFailure {
+                    status,
+                    calls: Cell::new(0),
+                };
+                let target = target();
+                let mut transport = Transport::new(&target, None, &fixture, &fixture, &fixture);
+                let mut review = review();
+                let result = match operation {
+                    "thread" => add(
+                        &mut transport,
+                        &target,
+                        &mut review,
+                        &json!({
+                            "operation":"newLineThread","body":"finding",
+                            "anchor":{"kind":"line","path":"src/a.rs","side":"right","startLine":2,"endLine":4},
+                            "changeTrackingId":42
+                        }),
+                    ),
+                    "reply" => add(
+                        &mut transport,
+                        &target,
+                        &mut review,
+                        &json!({
+                            "operation":"reply","body":"answer","threadId":"9","commentId":"5"
+                        }),
+                    ),
+                    "summary" => complete(&mut transport, &target, &mut review, "summary", false),
+                    "reopen" => reopen(&mut transport, &target, "9").map(|()| Value::Null),
+                    _ => unreachable!(),
+                };
+                assert_eq!(
+                    classification(&result.unwrap_err()),
+                    expected,
+                    "{operation}"
+                );
+                assert_eq!(fixture.calls.get(), 1, "{operation}");
+            }
+        }
     }
 
     #[test]

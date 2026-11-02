@@ -1,5 +1,9 @@
 #Requires -Version 7.6
 
+Set-StrictMode -Version Latest
+$ErrorActionPreference = 'Stop'
+$PSNativeCommandUseErrorActionPreference = $true
+
 BeforeAll {
     Set-StrictMode -Version Latest
     $ErrorActionPreference = 'Stop'
@@ -54,12 +58,28 @@ BeforeAll {
     # Exercise the actual cache consumer with an isolated cache and fixed freshness bucket.
     function Get-TestCacheResult {
         param([Parameter(Mandatory)] $Snapshot)
-        $json = & "$script:Skill\scripts\Restore-FocusAreaCache.ps1" `
-            -SessionStateDirectory $script:Session -InputDirectory $Snapshot.sourceDirectory `
-            -SnapshotIdentity $Snapshot.snapshotIdentity `
-            -CacheDirectory (Join-Path $TestDrive 'cache') -GeneratorProfile 'test' `
-            -FreshnessDays 7 -NowUtc ([DateTimeOffset]'2026-10-29T00:00:00Z')
-        $json | ConvertFrom-Json
+        $start = [Diagnostics.ProcessStartInfo]::new($script:Native)
+        $start.WorkingDirectory = $script:Base
+        $start.UseShellExecute = $false
+        $start.RedirectStandardOutput = $true
+        $start.RedirectStandardError = $true
+        foreach ($argument in @(
+            'workflow', 'restore-focus-area-cache', "--session-state=$script:Session",
+            "--input-directory=$($Snapshot.sourceDirectory)", "--snapshot-identity=$($Snapshot.snapshotIdentity)",
+            "--skill-root=$script:Skill", "--recipe-path=$(Join-Path $script:Skill 'prepare-focus-areas.md')",
+            "--cache-directory=$(Join-Path $TestDrive 'cache')", '--generator-profile=test',
+            '--freshness-days=7', '--now-utc=2026-10-29T00:00:00Z'
+        )) { $start.ArgumentList.Add($argument) }
+        $process = [Diagnostics.Process]::Start($start)
+        try {
+            $stdout = $process.StandardOutput.ReadToEndAsync()
+            $stderr = $process.StandardError.ReadToEndAsync()
+            $process.WaitForExit()
+            $output = $stdout.GetAwaiter().GetResult()
+            $errorText = $stderr.GetAwaiter().GetResult()
+            if ($process.ExitCode -ne 0) { throw "Cache restore failed: $errorText" }
+            $output | ConvertFrom-Json
+        } finally { $process.Dispose() }
     }
 
     # Captures the complete corpus so failed refreshes cannot discard or rewrite prior guidance.
@@ -434,7 +454,7 @@ Describe 'ss-review configured instruction discovery' {
         @{ Count = 1 }
     ) {
         New-InstructionFixture -Root $script:Base -Relative 'own.instructions.md' | Out-Null
-        $start = [Diagnostics.ProcessStartInfo]::new((Get-Process -Id $PID).Path)
+        $start = [Diagnostics.ProcessStartInfo]::new($script:Native)
         $start.UseShellExecute = $false
         $start.WorkingDirectory = $script:Base
         $start.RedirectStandardOutput = $true
@@ -442,12 +462,12 @@ Describe 'ss-review configured instruction discovery' {
         $start.Environment['COPILOT_CUSTOM_INSTRUCTIONS_DIRS'] = if ($Count -eq 0) { '' } else { '.' }
         $repository = Join-Path $TestDrive 'wrapper repository'
         New-InstructionFixture -Root $repository -Relative 'chosen\AGENTS.md' | Out-Null
-        foreach ($argument in @('-NoProfile', '-NonInteractive', '-File',
-            "$script:Skill\scripts\Copy-ReviewInstructionSources.ps1", '-SessionStateDirectory', $script:Session)) {
+        foreach ($argument in @('workflow', 'snapshot-instructions',
+            "--session-state=$script:Session", "--skill-root=$script:Skill")) {
             $start.ArgumentList.Add($argument)
         }
         if ($Count -gt 0) {
-            foreach ($argument in @('-RepositoryRoot', $repository, '-RepositoryInstruction', 'chosen/AGENTS.md')) {
+            foreach ($argument in @("--repository-root=$repository", '--repository-instruction=chosen/AGENTS.md')) {
                 $start.ArgumentList.Add($argument)
             }
         }

@@ -10,7 +10,7 @@ use std::fs;
 use std::io::{self, Write};
 use std::panic::{RefUnwindSafe, UnwindSafe};
 use std::path::{Path, PathBuf};
-use std::process::{Command, Output};
+use std::process::Command;
 use std::sync::mpsc::{self, Receiver, Sender};
 use std::time::Duration;
 
@@ -18,7 +18,7 @@ use jiff::Timestamp;
 use ohno::AppError;
 use serde_json::{Value, json};
 use ss_ai_review_workflow::{
-    findings, focus_area_expansion, focus_area_generation, worker_input, workflow_plan,
+    findings, focus_area_expansion, focus_area_generation, review_work, worker_input, workflow_plan,
 };
 use ss_ai_runtime::{Clock, FileTransaction, SystemClock, fail};
 
@@ -284,6 +284,122 @@ fn plan_schemas_reject_malformed_records_and_conflicts() {
         )
         .is_ok()
     );
+}
+
+/// An empty candidate plan cannot hide damaged index evidence.
+#[test]
+fn empty_candidate_plans_validate_the_complete_index() {
+    let directory = TestDirectory::new("candidate-index");
+    let clock = FixedClock;
+    let candidates = directory.path("candidates.json");
+    let index = directory.path("index.json");
+    fs::write(&candidates, br#"{"schemaVersion":1,"clusters":[]}"#).unwrap();
+    let entry = json!({"id":"g1-1","reviewerId":"g1","focusArea":"correctness",
+        "title":"Problem","description":"What fails","recommendedAction":"Fix",
+        "anchorPath":"src/a.rs","impactedPaths":[]});
+    let valid = json!({"schemaVersion":1,"findings":[entry]});
+    fs::write(&index, serde_json::to_vec(&valid).unwrap()).unwrap();
+    assert_eq!(
+        findings::validate_candidates(&candidates, &index, &clock).unwrap(),
+        0
+    );
+    fs::write(&index, br#"{"schemaVersion":1,"findings":[]}"#).unwrap();
+    assert_eq!(
+        findings::validate_candidates(&candidates, &index, &clock).unwrap(),
+        0
+    );
+    let mut missing_version = valid.clone();
+    missing_version
+        .as_object_mut()
+        .unwrap()
+        .remove("schemaVersion");
+    let mut incomplete = valid.clone();
+    incomplete["findings"][0]
+        .as_object_mut()
+        .unwrap()
+        .remove("reviewerId");
+    let mut malformed_paths = valid.clone();
+    malformed_paths["findings"][0]["impactedPaths"] = json!("src/a.rs");
+    let mut unknown_field = valid;
+    unknown_field["findings"][0]["priority"] = json!("high");
+    for invalid in [
+        json!({}),
+        missing_version,
+        json!({"schemaVersion":2,"findings":[]}),
+        json!({"schemaVersion":1}),
+        json!({"schemaVersion":1,"findings":null}),
+        json!({"schemaVersion":1,"findings":entry}),
+        incomplete,
+        malformed_paths,
+        unknown_field,
+        json!({"schemaVersion":1,"findings":[entry,entry]}),
+    ] {
+        fs::write(&index, serde_json::to_vec(&invalid).unwrap()).unwrap();
+        assert!(
+            findings::validate_candidates(&candidates, &index, &clock).is_err(),
+            "{invalid}"
+        );
+    }
+}
+
+/// Batch validation rejects incomplete or unrelated evidence before committing the claim.
+#[test]
+fn coverage_batch_rejects_each_inconsistent_draft_without_mutation() {
+    let directory = TestDirectory::new("batch-invalid-drafts");
+    let clock = FixedClock;
+    let inventory = directory.path("inventory.json");
+    let groups = directory.path("groups.json");
+    let queue = directory.path("queue.json");
+    let artifact = directory.path("artifact.json");
+    let files = json!([
+        {"path":directory.path("old"),"sizeBytes":0,"change":"deleted"},
+        {"path":directory.path("new"),"sizeBytes":17,"change":"new"}
+    ]);
+    let group = json!([{"groupId":"group-1","files":files}]);
+    fs::write(&inventory, serde_json::to_vec(&files).unwrap()).unwrap();
+    fs::write(&groups, serde_json::to_vec(&group).unwrap()).unwrap();
+    findings::initialize(&artifact, "g1", "correctness", false, &clock).unwrap();
+    let state = review_work::initialize_queue(&inventory, &groups, &queue, false, &clock).unwrap();
+    review_work::next(&queue, &clock).unwrap();
+    let batch = json!({"schemaVersion":1,"snapshot":state["snapshot"],"groupId":"group-1",
+        "assessments":[
+            {"groupId":"group-1","path":files[0]["path"],"disposition":"reviewed","scope":"","reason":""},
+            {"groupId":"group-1","path":files[1]["path"],"disposition":"reviewed","scope":"","reason":""}
+        ],"findingIds":[]});
+    let before = fs::read(&queue).unwrap();
+    let findings_before = fs::read(&artifact).unwrap();
+    let mut partial = batch.clone();
+    partial["assessments"].as_array_mut().unwrap().pop();
+    let mut duplicate = batch.clone();
+    duplicate["assessments"][1] = duplicate["assessments"][0].clone();
+    let mut foreign = batch.clone();
+    foreign["assessments"][0]["path"] = json!(directory.path("foreign"));
+    let mut wrong_group = batch.clone();
+    wrong_group["assessments"][0]["groupId"] = json!("other");
+    let mut stale = batch.clone();
+    stale["snapshot"]["inventorySha256"] = json!("0".repeat(64));
+    let mut missing_finding = batch.clone();
+    missing_finding["findingIds"] = json!(["g1-1"]);
+    let mut unclaimed = batch;
+    unclaimed["groupId"] = json!("other");
+    unclaimed["assessments"] = json!([]);
+    for (name, invalid) in [
+        ("partial", partial),
+        ("duplicate", duplicate),
+        ("foreign", foreign),
+        ("wrong group", wrong_group),
+        ("stale", stale),
+        ("missing finding", missing_finding),
+        ("unclaimed", unclaimed),
+    ] {
+        assert!(
+            review_work::complete_batch(&queue, &inventory, &groups, &artifact, &invalid, &clock)
+                .is_err(),
+            "{name}"
+        );
+        assert_eq!(fs::read(&queue).unwrap(), before, "{name}");
+        assert_eq!(fs::read(&artifact).unwrap(), findings_before, "{name}");
+    }
 }
 
 #[test]
@@ -703,6 +819,49 @@ fn synchronized_writers(
     results.into_iter().map(|(_, result)| result).collect()
 }
 
+/// Concurrent focus-area consumers each receive a distinct item or exhaustion.
+#[test]
+#[cfg_attr(miri, ignore = "requires an isolated native subprocess")]
+fn concurrent_focus_area_claims_are_unique_and_exhaustive() {
+    if !isolated_writer_test("concurrent_focus_area_claims_are_unique_and_exhaustive") {
+        return;
+    }
+    let directory = TestDirectory::new("focus-claims");
+    let queue = directory.path("focus.json");
+    fs::write(
+        &queue,
+        serde_json::to_vec(&json!({"schemaVersion":1,"kind":"focusAreas",
+        "items":[{"reviewerId":"a"},{"reviewerId":"b"},{"reviewerId":"c"}]}))
+        .unwrap(),
+    )
+    .unwrap();
+    let mut ids = Vec::new();
+    let mut exhausted = 0;
+    for _ in 0..2 {
+        let results = synchronized_writers(&queue, {
+            let queue = queue.clone();
+            move |_, clock| {
+                review_work::next(&queue, clock)
+                    .map(|value| value.to_string())
+                    .map_err(|error| error.to_string())
+            }
+        });
+        for result in results {
+            let page: Value = serde_json::from_str(&result.unwrap()).unwrap();
+            if page["exhausted"] == true {
+                exhausted += 1;
+            } else {
+                ids.push(page["item"]["reviewerId"].as_str().unwrap().to_owned());
+            }
+        }
+    }
+    ids.sort();
+    assert_eq!(ids, ["a", "b", "c"]);
+    assert_eq!(exhausted, 1);
+    let final_queue: Value = serde_json::from_slice(&fs::read(queue).unwrap()).unwrap();
+    assert_eq!(final_queue["items"], json!([]));
+}
+
 /// Concurrent plan writers must use the last committed state for idempotency,
 /// conflicts, and replacement as well as ordinary appends.
 #[test]
@@ -937,36 +1096,10 @@ fn isolated_writer_test(name: &str) -> bool {
     false
 }
 
-/// Runs the predecessor model so both implementations consume actual records.
-fn powershell(script: &str, arguments: &[&str], work_dir: &Path) {
-    let output = powershell_output(script, arguments, work_dir);
-    assert!(
-        output.status.success(),
-        "{script}: {}",
-        String::from_utf8_lossy(&output.stderr)
-    );
-}
-
-/// Returns predecessor-model diagnostics for acceptance and rejection comparisons.
-fn powershell_output(script: &str, arguments: &[&str], work_dir: &Path) -> Output {
-    let script_path = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/finding_predecessor.ps1");
-    Command::new("pwsh")
-        .args(["-NoProfile", "-NonInteractive", "-File"])
-        .arg(script_path)
-        .arg("-CommandName")
-        .arg(script)
-        .args(arguments)
-        .env("TMPDIR", work_dir)
-        .output()
-        .unwrap()
-}
-
-/// Alternating native and PowerShell writers must retain compatible lifecycle
-/// records through completion, indexing, and consolidation in either reader.
+/// Finding records retain their content and provenance throughout the lifecycle.
 #[test]
-#[cfg_attr(miri, ignore = "The predecessor model runs in a separate process")]
-fn powershell_and_rust_share_lifecycle_index_and_consolidation_records() {
-    let directory = TestDirectory::new("powershell-roundtrip");
+fn lifecycle_preserves_records_through_index_and_consolidation() {
+    let directory = TestDirectory::new("lifecycle-roundtrip");
     let clock = SystemClock::default();
     let root = directory.path("reviewers");
     #[expect(
@@ -994,27 +1127,8 @@ fn powershell_and_rust_share_lifecycle_index_and_consolidation_records() {
     let mut rewritten = original.clone();
     rewritten["title"] = json!("Rewrite without changing provenance");
     fs::write(&revised, serde_json::to_vec(&rewritten).unwrap()).unwrap();
-    let root_text = root.to_str().unwrap();
-    let alpha_text = alpha.to_str().unwrap();
-    let content_text = content.to_str().unwrap();
-    let revised_text = revised.to_str().unwrap();
-    powershell(
-        "New-FindingArtifact.ps1",
-        &[
-            "-OutputDirectory",
-            root_text,
-            "-ReviewerId",
-            "alpha",
-            "-FocusArea",
-            "correctness",
-        ],
-        &directory.0,
-    );
-    powershell(
-        "Add-Finding.ps1",
-        &["-ArtifactPath", alpha_text, "-FindingPath", content_text],
-        &directory.0,
-    );
+    findings::initialize(&alpha, "alpha", "correctness", false, &clock).unwrap();
+    findings::add(&alpha, &content, "reviewer", &[], &clock).unwrap();
     let artifact = findings::read_artifact(&alpha, &clock).unwrap();
     assert_eq!(artifact["findings"][0]["id"], "alpha-1");
     assert_eq!(
@@ -1026,18 +1140,7 @@ fn powershell_and_rust_share_lifecycle_index_and_consolidation_records() {
         findings::add(&alpha, &content, "synthesis", &["source-1".into()], &clock).unwrap(),
         "alpha-2"
     );
-    powershell(
-        "Update-Finding.ps1",
-        &[
-            "-ArtifactPath",
-            alpha_text,
-            "-FindingId",
-            "alpha-2",
-            "-FindingPath",
-            revised_text,
-        ],
-        &directory.0,
-    );
+    findings::update(&alpha, &[("alpha-2".into(), revised)], &clock).unwrap();
     let artifact = findings::read_artifact(&alpha, &clock).unwrap();
     assert_eq!(artifact["findings"][1]["origin"], "synthesis");
     assert_eq!(
@@ -1051,71 +1154,71 @@ fn powershell_and_rust_share_lifecycle_index_and_consolidation_records() {
         &clock,
     )
     .unwrap();
-    powershell(
-        "Add-Finding.ps1",
-        &["-ArtifactPath", alpha_text, "-FindingPath", content_text],
-        &directory.0,
-    );
+    findings::add(&alpha, &content, "reviewer", &[], &clock).unwrap();
     let artifact = findings::read_artifact(&alpha, &clock).unwrap();
     assert_eq!(artifact["removed"][0]["finding"]["id"], "alpha-1");
     assert_eq!(artifact["removed"][0]["reason"], "Covered elsewhere");
     assert_eq!(artifact["findings"][1]["id"], "alpha-3");
 
     fs::write(&queue, r#"{"schemaVersion":3,"kind":"fileGroups","items":[],"inProgress":null,"completedGroupIds":[],"assessments":[]}"#).unwrap();
-    powershell(
-        "Complete-FindingArtifact.ps1",
-        &[
-            "-ArtifactPath",
-            alpha_text,
-            "-FileGroupQueuePath",
-            queue.to_str().unwrap(),
-        ],
-        &directory.0,
-    );
+    findings::complete(&alpha, &queue, &clock).unwrap();
     findings::initialize(&beta, "beta", "security", false, &clock).unwrap();
     findings::complete(&beta, &queue, &clock).unwrap();
-    powershell(
-        "Test-FindingArtifact.ps1",
-        &["-Path", root_text, "-ExpectedReviewerId", "alpha,beta"],
-        &directory.0,
-    );
-    let index_ps = directory.path("index-ps.json");
+    let validation =
+        findings::validate_artifacts(&root, &["alpha".into(), "beta".into()], &clock).unwrap();
+    assert_eq!(validation["isValid"], true, "{validation}");
     let index_rs = directory.path("index-rs.json");
-    powershell(
-        "Get-FindingIndex.ps1",
-        &[
-            "-ReviewerArtifactDirectory",
-            root_text,
-            "-OutputPath",
-            index_ps.to_str().unwrap(),
-        ],
-        &directory.0,
-    );
     let rust_index = findings::build_index(&root, &index_rs, &clock).unwrap();
-    let ps_index: Value = serde_json::from_slice(&fs::read(index_ps).unwrap()).unwrap();
-    assert_eq!(rust_index, ps_index);
-    let ps_output = directory.path("consolidated-ps.json");
-    let rs_output = directory.path("consolidated-rs.json");
-    powershell(
-        "New-ConsolidatedFindings.ps1",
-        &[
-            "-ReviewerArtifactDirectory",
-            root_text,
-            "-OutputPath",
-            ps_output.to_str().unwrap(),
-        ],
-        &directory.0,
+    assert_eq!(
+        rust_index,
+        json!({"schemaVersion":1,"findings":[
+            {"id":"alpha-2","reviewerId":"alpha","focusArea":"correctness",
+             "title":"Rewrite without changing provenance",
+             "description":original["description"],"recommendedAction":original["recommendedAction"],
+             "anchorPath":"src/retry.rs","impactedPaths":["src/backoff.rs"],
+             "followUpThreadId":"RT_kw1"},
+            {"id":"alpha-3","reviewerId":"alpha","focusArea":"correctness",
+             "title":"The retry loop never terminates",
+             "description":original["description"],"recommendedAction":original["recommendedAction"],
+             "anchorPath":"src/retry.rs","impactedPaths":["src/backoff.rs"],
+             "followUpThreadId":"RT_kw1"}
+        ]})
     );
+    assert_eq!(
+        serde_json::from_slice::<Value>(&fs::read(index_rs).unwrap()).unwrap(),
+        rust_index
+    );
+    let rs_output = directory.path("consolidated-rs.json");
     let rust_output = findings::consolidate(&root, None, &rs_output, &clock).unwrap();
-    let ps_output: Value = serde_json::from_slice(&fs::read(ps_output).unwrap()).unwrap();
-    assert_eq!(rust_output, ps_output);
+    let mut expected = original.clone();
+    expected["anchor"] =
+        json!({"kind":"line","path":"src/retry.rs","startLine":42,"endLine":42,"side":"right"});
+    expected["impactedLocations"] =
+        json!([{"path":"src/backoff.rs","startLine":8,"endLine":8,"side":"right"}]);
+    expected["schemaVersion"] = json!(1);
+    expected["id"] = json!("F1");
+    expected["origin"] = json!("synthesis");
+    expected["sourceFindingIds"] = json!(["alpha-2"]);
+    expected["title"] = rewritten["title"].clone();
+    let mut second = expected.clone();
+    second["id"] = json!("F2");
+    second["origin"] = json!("reviewer");
+    second["sourceFindingIds"] = json!(["alpha-3"]);
+    second["title"] = original["title"].clone();
+    assert_eq!(
+        rust_output,
+        json!({"schemaVersion":1,"kind":"consolidated",
+        "findings":[expected,second],"removed":[]})
+    );
+    assert_eq!(
+        serde_json::from_slice::<Value>(&fs::read(rs_output).unwrap()).unwrap(),
+        rust_output
+    );
 }
 
-/// Shared authored content must receive the same acceptance decisions in
-/// native and predecessor validators, including boundary values.
+/// Authored content must meet the validation contract, including boundary values.
 #[test]
-#[cfg_attr(miri, ignore = "The predecessor model runs in a separate process")]
-fn finding_content_cases_match_the_predecessor_corpus() {
+fn finding_content_cases_cover_validation_boundaries() {
     let directory = TestDirectory::new("content-corpus");
     let clock = SystemClock::default();
     let artifact = directory.path("reviewer.json");
@@ -1157,22 +1260,120 @@ fn finding_content_cases_match_the_predecessor_corpus() {
     }
     for (name, finding, valid) in cases {
         fs::write(&content, serde_json::to_vec(&finding).unwrap()).unwrap();
-        let result = powershell_output(
-            "ValidateFinding",
-            &["-FindingPath", content.to_str().unwrap()],
-            &directory.0,
-        );
-        assert_eq!(result.status.success(), valid, "PowerShell case {name}");
         let result = findings::add(&artifact, &content, "reviewer", &[], &clock);
         assert_eq!(result.is_ok(), valid, "Rust case {name}: {result:?}");
     }
 }
 
-/// Both implementations must reject lossy or conflicting merges and retain
-/// equivalent records when the replacement covers the source evidence.
+/// Stored records and authored input share the prose and structured-field contract.
 #[test]
-#[cfg_attr(miri, ignore = "The predecessor model runs in a separate process")]
-fn consolidation_merge_cases_match_the_predecessor_corpus() {
+fn finding_validation_covers_prose_controls_and_structured_fields() {
+    let baseline = json!({
+        "schemaVersion":1,"id":"g1-1","sourceFindingIds":[],"origin":"reviewer",
+        "title":"Problem","description":"What fails","reasoning":"Why",
+        "consequence":"Impact","recommendedAction":"Fix",
+        "anchor":{"kind":"line","path":"src/retry.rs","startLine":42}
+    });
+    let valid = |record: &Value| {
+        findings::validate_artifact(&json!({
+            "schemaVersion":1,"kind":"reviewer","reviewerId":"g1",
+            "focusArea":"correctness","status":"open","findings":[record]
+        }))
+    };
+    for field in [
+        "title",
+        "description",
+        "reasoning",
+        "consequence",
+        "recommendedAction",
+    ] {
+        let mut missing = baseline.clone();
+        missing.as_object_mut().unwrap().remove(field);
+        assert!(valid(&missing).is_err(), "missing {field}");
+        for value in [json!(""), json!("  "), json!(7)] {
+            let mut invalid = baseline.clone();
+            invalid[field] = value;
+            assert!(valid(&invalid).is_err(), "invalid {field}");
+        }
+        for code in 0..32_u32 {
+            let mut record = baseline.clone();
+            record[field] = json!(format!("before{}after", char::from_u32(code).unwrap()));
+            let allowed = field != "title" && matches!(code, 9 | 10);
+            let result = valid(&record);
+            assert_eq!(result.is_ok(), allowed, "{field} U+{code:04X}");
+            if let Err(error) = result {
+                let message = error.to_string();
+                assert!(message.contains(&format!("'{field}'")), "{message}");
+                assert!(message.contains(&format!("U+{code:04X}")), "{message}");
+            }
+        }
+    }
+
+    for (title, accepted) in [
+        ("—".repeat(255), true),
+        ("—".repeat(256), false),
+        ("🤖".repeat(127), true),
+        ("🤖".repeat(128), false),
+    ] {
+        let mut record = baseline.clone();
+        record["title"] = json!(title);
+        let result = valid(&record);
+        assert_eq!(result.is_ok(), accepted, "UTF-16 title bound");
+        if let Err(error) = result {
+            let message = error.to_string();
+            assert!(message.contains("256 UTF-16 code units"), "{message}");
+            assert!(
+                message.contains("at most 255 UTF-16 code units"),
+                "{message}"
+            );
+        }
+    }
+
+    for (field, value) in [
+        ("references", json!([{"url":"https://example.invalid"}])),
+        ("references", json!([{"text":"reference","extra":true}])),
+        ("impactedLocations", json!([{"startLine":3}])),
+        (
+            "impactedLocations",
+            json!([{"path":"src/a.rs","endLine":3}]),
+        ),
+        (
+            "impactedLocations",
+            json!([{"path":"src/a.rs","side":"left"}]),
+        ),
+        ("impactedLocations", json!([{"path":"src\\a.rs"}])),
+        ("followUp", json!({"threadId":"T"})),
+        ("followUp", json!({"commentId":"C"})),
+        (
+            "followUp",
+            json!({"threadId":"T","commentId":"C","extra":true}),
+        ),
+        (
+            "anchor",
+            json!({"kind":"line","path":"/src/a.rs","startLine":1}),
+        ),
+        (
+            "anchor",
+            json!({"kind":"line","path":"src/a.rs","startLine":"42"}),
+        ),
+        (
+            "anchor",
+            json!({"kind":"line","path":"src/a.rs","startLine":1,"extra":true}),
+        ),
+    ] {
+        let mut record = baseline.clone();
+        record[field] = value;
+        assert!(valid(&record).is_err(), "{field}: {}", record[field]);
+    }
+    let mut record = baseline;
+    record["references"] = json!([]);
+    record["impactedLocations"] = json!([]);
+    assert!(valid(&record).is_ok());
+}
+
+/// Merges reject lost evidence and preserve source identifiers.
+#[test]
+fn consolidation_merge_cases_preserve_evidence() {
     let directory = TestDirectory::new("merge-corpus");
     let clock = SystemClock::default();
     let reviewers = directory.path("reviewers");
@@ -1186,7 +1387,6 @@ fn consolidation_merge_cases_match_the_predecessor_corpus() {
     let content = directory.path("content.json");
     let merged = directory.path("merged.json");
     let plan = directory.path("plan.json");
-    let legacy_output = directory.path("legacy.json");
     let native_output = directory.path("native.json");
     let finding = |path, line| {
         json!({
@@ -1222,30 +1422,36 @@ fn consolidation_merge_cases_match_the_predecessor_corpus() {
     fs::write(&plan, serde_json::to_vec(&json!({
             "schemaVersion":1, "groups":[{"sourceFindingIds":["g1-1","g2-1"],"findingPath":"merged.json"}]
         })).unwrap()).unwrap();
-    let args = [
-        "-ReviewerArtifactDirectory",
-        reviewers.to_str().unwrap(),
-        "-MergePlanPath",
-        plan.to_str().unwrap(),
-        "-OutputPath",
-        legacy_output.to_str().unwrap(),
-    ];
-    let legacy = powershell_output("New-ConsolidatedFindings.ps1", &args, &directory.0);
-    assert!(
-        !legacy.status.success(),
-        "Predecessor must reject dropped locations"
-    );
     assert!(findings::consolidate(&reviewers, Some(&plan), &native_output, &clock).is_err());
-    assert!(!legacy_output.exists() && !native_output.exists());
+    assert!(!native_output.exists());
 
     let mut covering = finding("src/retry.rs", 40);
     covering["anchor"]["endLine"] = json!(45);
     covering["impactedLocations"] = json!([{"path":"src/backoff.rs","startLine":5,"endLine":10}]);
     fs::write(&merged, serde_json::to_vec(&covering).unwrap()).unwrap();
-    powershell("New-ConsolidatedFindings.ps1", &args, &directory.0);
     let native = findings::consolidate(&reviewers, Some(&plan), &native_output, &clock).unwrap();
-    let legacy: Value = serde_json::from_slice(&fs::read(&legacy_output).unwrap()).unwrap();
-    assert_eq!(native, legacy);
+    let mut merged_expected = covering.clone();
+    merged_expected["anchor"]["side"] = json!("right");
+    merged_expected["impactedLocations"][0]["side"] = json!("right");
+    merged_expected["references"] = json!([]);
+    merged_expected["schemaVersion"] = json!(1);
+    merged_expected["id"] = json!("F1");
+    merged_expected["origin"] = json!("synthesis");
+    merged_expected["sourceFindingIds"] = json!(["g1-1", "g2-1"]);
+    let mut untouched = finding("src/retry.rs", 42);
+    untouched["anchor"]["endLine"] = json!(42);
+    untouched["anchor"]["side"] = json!("right");
+    untouched["references"] = json!([]);
+    untouched["impactedLocations"] = json!([]);
+    untouched["schemaVersion"] = json!(1);
+    untouched["id"] = json!("F2");
+    untouched["origin"] = json!("reviewer");
+    untouched["sourceFindingIds"] = json!(["g1-2"]);
+    assert_eq!(
+        native,
+        json!({"schemaVersion":1,"kind":"consolidated",
+        "findings":[merged_expected,untouched],"removed":[]})
+    );
     assert_eq!(native["findings"][0]["origin"], "synthesis");
     assert_eq!(
         native["findings"][0]["sourceFindingIds"],
@@ -1276,22 +1482,14 @@ fn consolidation_merge_cases_match_the_predecessor_corpus() {
     different["followUp"]["threadId"] = json!("another-thread");
     fs::write(&content, serde_json::to_vec(&different).unwrap()).unwrap();
     findings::update(&second, &[("g2-1".into(), content)], &clock).unwrap();
-    let legacy_before = fs::read(&legacy_output).unwrap();
     let native_before = fs::read(&native_output).unwrap();
-    assert!(
-        !powershell_output("New-ConsolidatedFindings.ps1", &args, &directory.0)
-            .status
-            .success()
-    );
     assert!(findings::consolidate(&reviewers, Some(&plan), &native_output, &clock).is_err());
-    assert_eq!(fs::read(&legacy_output).unwrap(), legacy_before);
     assert_eq!(fs::read(&native_output).unwrap(), native_before);
 }
 
-/// Both validators must agree about anchor shapes and path normalization.
+/// Anchor validation checks shape and path normalization.
 #[test]
-#[cfg_attr(miri, ignore = "The predecessor model runs in a separate process")]
-fn finding_anchor_cases_match_the_predecessor_corpus() {
+fn finding_anchor_cases_cover_validation_boundaries() {
     let directory = TestDirectory::new("anchor-corpus");
     let clock = SystemClock::default();
     let artifact = directory.path("reviewer.json");
@@ -1369,12 +1567,6 @@ fn finding_anchor_cases_match_the_predecessor_corpus() {
     }
     for (name, finding, valid) in cases {
         fs::write(&content, serde_json::to_vec(&finding).unwrap()).unwrap();
-        let result = powershell_output(
-            "ValidateFinding",
-            &["-FindingPath", content.to_str().unwrap()],
-            &directory.0,
-        );
-        assert_eq!(result.status.success(), valid, "PowerShell case {name}");
         let result = findings::add(&artifact, &content, "reviewer", &[], &clock);
         assert_eq!(result.is_ok(), valid, "Rust case {name}: {result:?}");
     }
@@ -1385,15 +1577,6 @@ fn finding_anchor_cases_match_the_predecessor_corpus() {
         {"path":"src/retry.rs","startLine":8,"endLine":10,"side":"left"}
     ]);
     fs::write(&content, serde_json::to_vec(&finding).unwrap()).unwrap();
-    assert!(
-        powershell_output(
-            "ValidateFinding",
-            &["-FindingPath", content.to_str().unwrap()],
-            &directory.0,
-        )
-        .status
-        .success()
-    );
     findings::add(&artifact, &content, "reviewer", &[], &clock).unwrap();
     let mut stored = findings::read_artifact(&artifact, &clock).unwrap();
     stored["findings"][0]["anchor"]["kind"] = json!("location");
@@ -1405,7 +1588,6 @@ fn finding_anchor_cases_match_the_predecessor_corpus() {
 
 /// UTF-8 BOMs are accepted at each file boundary without relaxing JSON checks.
 #[test]
-#[cfg_attr(miri, ignore = "The predecessor model runs in a separate process")]
 fn bom_prefixed_finding_artifact_and_plan_inputs_interoperate() {
     let directory = TestDirectory::new("bom-inputs");
     let clock = SystemClock::default();
@@ -1416,15 +1598,6 @@ fn bom_prefixed_finding_artifact_and_plan_inputs_interoperate() {
     let bom = |text: &[u8]| [b"\xef\xbb\xbf".as_slice(), text].concat();
     let finding = br#"{"title":"Problem","description":"What fails","reasoning":"Why","consequence":"Impact","recommendedAction":"Fix","anchor":{"kind":"file","path":"src/lib.rs"}}"#;
     fs::write(&content, bom(finding)).unwrap();
-    assert!(
-        powershell_output(
-            "ValidateFinding",
-            &["-FindingPath", content.to_str().unwrap()],
-            &directory.0
-        )
-        .status
-        .success()
-    );
     findings::initialize(&artifact, "g1", "correctness", false, &clock).unwrap();
     findings::add(&artifact, &content, "reviewer", &[], &clock).unwrap();
     fs::write(&artifact, bom(&fs::read(&artifact).unwrap())).unwrap();
@@ -1435,20 +1608,7 @@ fn bom_prefixed_finding_artifact_and_plan_inputs_interoperate() {
             .len(),
         1
     );
-    assert!(
-        powershell_output(
-            "Add-Finding.ps1",
-            &[
-                "-ArtifactPath",
-                artifact.to_str().unwrap(),
-                "-FindingPath",
-                content.to_str().unwrap()
-            ],
-            &directory.0
-        )
-        .status
-        .success()
-    );
+    findings::add(&artifact, &content, "reviewer", &[], &clock).unwrap();
 
     fs::write(&plan, bom(br#"{"schemaVersion":1,"updates":[]}"#)).unwrap();
     fs::write(
@@ -1533,15 +1693,13 @@ fn validation_excludes_only_recognized_staging_files() {
     assert!(!errors.contains(native_staging), "{errors}");
 }
 
-/// Damaged reviewer evidence remains visible in equivalent validation reports.
+/// Damaged reviewer evidence remains visible in validation reports.
 #[test]
-#[cfg_attr(miri, ignore = "The predecessor model runs in a separate process")]
 fn standalone_validation_reports_all_damaged_reviewer_evidence() {
     let directory = TestDirectory::new("validation-corpus");
     let clock = SystemClock::default();
     let artifact = directory.path("g1.json");
     let content = directory.path("finding.json");
-    let legacy = directory.path("legacy-validation.json");
     fs::write(&content, r#"{"title":"The retry loop never terminates","description":"The loop condition is never updated.","reasoning":"Why","consequence":"Impact","recommendedAction":"Fix","anchor":{"kind":"line","path":"src/retry.rs","startLine":42}}"#).unwrap();
     findings::initialize(&artifact, "g1", "correctness", false, &clock).unwrap();
     findings::add(&artifact, &content, "reviewer", &[], &clock).unwrap();
@@ -1554,33 +1712,15 @@ fn standalone_validation_reports_all_damaged_reviewer_evidence() {
     damaged["findings"][0]["severity"] = json!("high");
     fs::write(&artifact, serde_json::to_vec(&damaged).unwrap()).unwrap();
 
-    powershell(
-        "GetArtifactValidation",
-        &[
-            "-Path",
-            artifact.to_str().unwrap(),
-            "-ExpectedReviewerId",
-            "g1",
-            "-OutputPath",
-            legacy.to_str().unwrap(),
-        ],
-        &directory.0,
-    );
-    let legacy: Value = serde_json::from_slice(&fs::read(&legacy).unwrap()).unwrap();
     let native = findings::validate_artifacts(&artifact, &["g1".into()], &clock).unwrap();
-    for field in [
-        "isValid",
-        "findingCount",
-        "artifacts",
-        "missingReviewers",
-        "incompleteReviewers",
-        "unexpectedReviewers",
-    ] {
-        assert_eq!(
-            native[field], legacy[field],
-            "Mismatched report field {field}"
-        );
-    }
+    assert_eq!(native["isValid"], false);
+    assert_eq!(native["findingCount"], 1);
+    assert_eq!(native["incompleteReviewers"], json!(["g1"]));
+    assert_eq!(native["missingReviewers"], json!([]));
+    assert_eq!(native["unexpectedReviewers"], json!([]));
+    assert_eq!(native["artifacts"][0]["reviewerId"], "g1");
+    assert_eq!(native["artifacts"][0]["status"], "partial");
+    assert_eq!(native["artifacts"][0]["findingCount"], 1);
 
     let errors = native["errors"]
         .as_array()
@@ -1604,7 +1744,7 @@ fn errors_identify_duplicate_and_invalid_finding_inputs() {
     let duplicate = findings::initialize(&artifact, "reviewer", "correctness", false, &clock)
         .unwrap_err()
         .to_string();
-    assert!(duplicate.contains("-Force"), "{duplicate}");
+    assert!(duplicate.contains("--force"), "{duplicate}");
     fs::write(&content, r#"{"priority":"high"}"#).unwrap();
     let invalid = findings::add(&artifact, &content, "reviewer", &[], &clock)
         .unwrap_err()

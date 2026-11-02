@@ -1,3 +1,9 @@
+#Requires -Version 7.6
+
+Set-StrictMode -Version Latest
+$ErrorActionPreference = 'Stop'
+$PSNativeCommandUseErrorActionPreference = $true
+
 BeforeAll {
     $script:RepoRoot = Split-Path -Parent $PSScriptRoot
     $script:Scripts = Join-Path $script:RepoRoot 'scripts'
@@ -49,6 +55,36 @@ BeforeAll {
 }
 
 Describe 'PowerShell library layout' {
+    It 'keeps review-family runtime scripts retired for <Skill>' -ForEach @(
+        @{ Skill = 'ss-review' }
+        @{ Skill = 'ss-review-deep' }
+        @{ Skill = 'ss-review-proactor' }
+        @{ Skill = 'ss-autoreapprove' }
+    ) {
+        $runtimePath = Join-Path $script:RepoRoot "skills/$Skill/scripts"
+        $scripts = if (Test-Path -LiteralPath $runtimePath -PathType Container) {
+            @(Get-ChildItem -LiteralPath $runtimePath -Recurse -File -Force |
+                Where-Object { $_.Extension -in @('.ps1', '.psm1', '.psd1') })
+        } else {
+            @()
+        }
+        $scripts | Should -BeNullOrEmpty
+    }
+
+    It 'routes active review recipes through native commands' -ForEach @(
+        @{ Recipe = 'query-pr-context.md'; Command = 'ss-ai context prepare' }
+        @{ Recipe = 'check-report-tools.md'; Command = 'ss-ai workflow test-review-report-tools' }
+        @{ Recipe = 'render-self-review.md'; Command = 'ss-ai workflow prepare-markdown' }
+        @{ Recipe = 'publish-content-overview.md'; Command = 'ss-ai review publish-overview' }
+        @{ Recipe = 'publish-pull-request-review.md'; Command = 'ss-ai review publish-final-review' }
+        @{ Recipe = 'file-tracker-items.md'; Command = 'ss-ai review publish-tracker-items' }
+    ) {
+        $recipePath = Join-Path $script:RepoRoot "skills/ss-review/pwsh-calls/$Recipe"
+        $content = Get-Content -LiteralPath $recipePath -Raw
+        $content | Should -Match ([regex]::Escape($Command))
+        $content | Should -Not -Match '(?im)^\s*pwsh\b[^\r\n]*\s-File\b'
+    }
+
     It 'keeps shared selection and registration outside the skill directories' {
         $skills = Join-Path $script:RepoRoot 'skills'
         Test-Path (Join-Path $skills 'ss-review-proactor\scripts\Select-ReviewPullRequest.ps1') | Should -BeFalse

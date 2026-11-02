@@ -1,12 +1,5 @@
-```powershell
-#Requires -Version 7.6
-
-Set-StrictMode -Version Latest
-$ErrorActionPreference = 'Stop'
-$PSNativeCommandUseErrorActionPreference = $true
-
-ss-ai workflow publish-focus-area-generation --session-state "{{SESSION_STATE}}" `
-  --generation-id "{{GENERATION_ID}}"
+```text
+ss-ai workflow publish-focus-area-generation --session-state "{{SESSION_STATE}}" --generation-id "{{GENERATION_ID}}"
 ```
 
 | Placeholder | Value |
