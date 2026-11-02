@@ -28,7 +28,13 @@ command finish rather than starting a duplicate.
 | `RATIONALE` | Concise semantic judgment grounded in the returned evidence. |
 | `PREVIOUS` | Current `decisionDigest` or `cumulativeDigest` when deliberately replacing a judgment; omit the argument for a new judgment. |
 | `ATTRIBUTION` | The user's required agent attribution, such as `[Copilot speaking]`. |
-| `BATCH_JSON` | Compact JSON request described below, quoted as one argument. |
+| `BATCH_JSON` | Compact JSON request described below, quoted as one argument. For the PowerShell single-quoted recipes, double each apostrophe in the JSON when inserting it into the command. |
+
+PowerShell turns each doubled apostrophe in a single-quoted argument back into
+one apostrophe before passing the JSON to the executable. For example, the
+JSON value `{"rationale":"user's change"}` becomes the PowerShell argument
+`'{"rationale":"user''s change"}'`. Apply this rule to both batch commands;
+do not alter the JSON content itself.
 
 # Stage 1: discovery and history
 
