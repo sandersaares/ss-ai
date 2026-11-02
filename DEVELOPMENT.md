@@ -79,6 +79,8 @@ the user's installed utility as the test prerequisite. It propagates
 failure status; `All` retains Rust failures after Pester completes.
 
 Rust checks report separate Clippy, preparation, and execution elapsed times.
+During execution, Cargo test output streams line by line and diagnostics stream
+as they arrive.
 Preparation compiles the shared provider once and discovers selected test
 executables from Cargo artifact JSON. Every run owns its build directory; no
 mutable fixture state or final binaries are shared between invocations.

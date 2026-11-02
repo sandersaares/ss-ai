@@ -365,7 +365,7 @@ fn incompatible_assessment_schemas_and_malformed_recovery_budgets_preserve_recor
     )
     .unwrap();
     let current = record(root.path());
-    assert_eq!(current["schemaVersion"], 14);
+    assert_eq!(current["schemaVersion"], 15);
     let path = root.path().join("run.json");
     for version in [7, 8, 9, 10, 11, 12, 13] {
         let mut legacy = current.clone();
@@ -2146,41 +2146,44 @@ fn github_retained_approval_uses_effective_rulesets_and_classic_last_push_requir
 }
 
 #[test]
-fn unknown_renewal_is_a_counted_failure_not_completed_indeterminate_work() {
-    let root = fixture();
-    let mut provider = GitHubApproval::new();
-    provider.evidence["reviews"][1]["body"] = json!("<!-- ss-autoreapprove malformed -->");
-    run(
-        &arguments(root.path(), "https://github.com/example/widgets"),
-        &provider,
-        &NoHttp,
-        &FixedClock,
-    )
-    .unwrap();
-    let result: Value = serde_json::from_str(
-        &run(
-            &github_inspect_arguments(root.path(), 1),
+fn github_approval_body_does_not_determine_provider_authority() {
+    let mut anchors = Vec::new();
+    for body in [
+        "Synthetic approving review.",
+        "<!-- ss-autoreapprove malformed -->",
+    ] {
+        let root = fixture();
+        let mut provider = GitHubApproval::new();
+        provider.evidence["reviews"][1]["body"] = json!(body);
+        run(
+            &arguments(root.path(), "https://github.com/example/widgets"),
             &provider,
             &NoHttp,
             &FixedClock,
         )
-        .unwrap(),
-    )
-    .unwrap();
-    assert_eq!(result["state"], "partial");
-    assert_eq!(result["counts"]["failed"], 1);
-    assert_eq!(result["counts"]["indeterminate"], 0);
-    assert_eq!(result["items"][0]["status"], "failed");
-    assert!(
-        result["items"][0]["error"]["message"]
-            .as_str()
-            .unwrap()
-            .contains("unreconciledRenewalEvidence")
-    );
-    let saved = record(root.path());
-    assert!(saved["inventory"][0]["inspection"]["evidence"].is_null());
-    assert!(saved["inventory"][0]["inspection"]["decision"].is_null());
-    assert!(saved["inventory"][0]["inspection"]["snapshotDigest"].is_null());
+        .unwrap();
+        let result: Value = serde_json::from_str(
+            &run(
+                &github_inspect_arguments(root.path(), 1),
+                &provider,
+                &NoHttp,
+                &FixedClock,
+            )
+            .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(result["counts"]["failed"], 0);
+        assert_eq!(result["items"][0]["status"], "assessmentRequired");
+        let saved = record(root.path());
+        let inspection = &saved["inventory"][0]["inspection"];
+        assert_eq!(
+            inspection["evidence"]["observation"]["reviews"][1]["body"],
+            body
+        );
+        assert!(!inspection["snapshotDigest"].is_null());
+        anchors.push(inspection["decision"]["anchor"].clone());
+    }
+    assert_eq!(anchors[0], anchors[1]);
 }
 
 #[test]

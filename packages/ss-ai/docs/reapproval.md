@@ -10,38 +10,14 @@ regressions, or likely correctness regressions. Insufficient evidence is uncerta
 not permission. Native operations validate evidence and publication; the agent
 supplies the semantic judgments.
 
-## External approval and renewal recognition
+## Approval recognition
 
-An **external approval** is an approval by the authenticated account that this
-skill did not issue. It can come from the UI or another review tool and can
-predate installation. Its service approval-event identity and approved source
-commit form the **anchor**. GitHub recognizes external approvals by the absence
-of the reserved `<!-- ss-autoreapprove` marker in the review body. ADO joins
-structured vote events to separate authenticated audit threads, as described below.
-
-A **renewal** is an approval with exactly one complete, valid schema-1
-`<!-- ss-autoreapprove {JSON} -->` audit marker. The marker carries the operation
-UUID, repository/account/PR identities, original anchor review and source,
-assessed source, policy and assessment digests, and `state: submitted`.
-Recognition joins the REST review's stable node ID to the GraphQL review and
-checks the service author, scope and review `commit_id` against the marker.
-`submitted` describes creation of the review, not successful postflight verification.
-
-The marker is attribution data on a service-authenticated review, not a signature
-or independent grant of authority. Recognition does not trust prose, a display
-name, another account's marker, or a marker pasted into discussion. A missing
-marker identifies an external approval; a present but malformed, duplicate,
-unsupported, or mismatched marker is unresolved renewal evidence, never a fresh
-external approval.
-
-The interpreter processes complete history chronologically. A renewal is valid
-only when its marker names exactly the existing external anchor and either the
-standing approval has a service-proven change-caused dismissal or an effective
-last-push approval requirement calls for assessment of a different source
-revision. It changes the standing
-review but does not move that anchor. A later external approval establishes a new
-anchor. A renewal cannot restore authority after a negative decision, reviewer
-removal, or dismissal with an unknown cause. A pending owned review blocks
+The provider's applicable account-owned approval event and its approved source
+commit form the **anchor** for the current assessment. The same rule applies
+regardless of how the approval was submitted. Complete provider history
+establishes standing and chronology; discussion comments do not establish
+approval authority. Negative decisions, reviewer removal, and dismissals with
+an unknown cause cannot authorize renewal. A pending owned review blocks
 publication. Ambiguous ordering is an explicit service-evidence failure.
 
 GitHub's `ReviewDismissedEvent.pullRequestCommit` supplies the dismissal cause;
@@ -49,7 +25,7 @@ it is distinct from the approved review's `commit_id`. A null value produces
 `ineligible` with reason `approvalDismissed`: the dismissal removes approval
 authority, and only proven source-change invalidation qualifies for renewal.
 This does not establish that a human dismissed the review. New commits alone do
-not prove invalidation. Source comparisons always use the original anchor source and
+not prove invalidation. Source comparisons use the applicable approval source and
 current source, including removals after force-pushes. Historical target tips,
 merge bases, instrumented approvals, and warm-up observations are not prerequisites.
 
@@ -69,7 +45,7 @@ See [GitHub's review requirement semantics](https://docs.github.com/en/repositor
 
 Last-push requirements cannot restore a dismissed approval with an unknown cause,
 an initial approval, a withdrawal, a negative decision, or pending human review.
-Policy changes participate in freshness checks before and after publication.
+Policy changes participate in freshness checks before publication.
 Approval snapshots require complete policy evidence.
 
 ## Evidence and publication
@@ -100,17 +76,18 @@ readable sides remain available for deliberate context reads. Assessors request
 exact line ranges when hunks do not establish enclosing logic, interfaces,
 invariants, interactions, or an objection's relevance. Requested ranges become
 mandatory evidence. A newly registered range invalidates the affected change's
-unit notes and judgment, their dependents, the discussion aggregate, all check
-dispositions, and the cumulative judgment. Repeating an existing request leaves
+judgment, its dependents, the discussion observation, all check dispositions,
+and the cumulative judgment. Repeating an existing request leaves
 records intact. Native coverage cannot prove
 that the assessor chose enough context; needed evidence outside the captured
 sides remains explicitly missing.
 There is no filename, size, or edit-category exemption.
 
-The orchestrator dispatches a fresh GPT 6.1 Sol assessment worker per eligible PR
-with explicit medium reasoning and regular context. That worker owns preparation,
-bounded evidence reads, judgments, and completion. It returns scalar results and
-a concise reason, not source or discussion text, and cannot publish.
+The orchestrator prepares the comparison and reserves a GPT 6.1 Sol assessment
+worker per eligible PR with explicit medium reasoning and regular context.
+The worker owns bounded evidence reads, judgments, and completion. It returns
+scalar results and a concise reason, not source or discussion text, and cannot
+publish.
 
 Evidence and metadata responses have a serialized UTF-8 byte budget, including
 JSON escaping and pretty formatting, so a character-count bound cannot hide
@@ -128,47 +105,24 @@ An immutable evidence-unit manifest partitions every required patch and the
 complete discussion into bounded exact ranges. It prefers complete hunks,
 threads, and review bodies, groups interleaved replies by their retained parent,
 and splits oversized records or single lines without omission. Each unit retains
-its original reference, scalar ranges, content digests, and a reference to
-source/thread binding references. Bindings use bounded record and thread digests;
-the original unit text retains exact identities, locations, and links. Workers
-read the bindings before recording a unit note and reacquire related original
-units as needed to interpret fragments.
-Sharing excerpt text never merges its referencing threads.
+its original reference, scalar ranges, content digests, and source/thread
+bindings. Sharing excerpt text never merges its referencing threads. The direct
+protocol delivers independently addressable pages in bounded atomic batches;
+transport fragments do not need individual semantic notes. A discussion
+observation retains material objections, and each changed-path record receives
+one final judgment. Atomic judgment batches bind each judgment to exact evidence.
 
-Workers record typed unit notes with observations, interfaces/invariants,
-interactions, concerns, and exact references. Notes are not approval judgments.
-Notes may cite binding metadata alongside exact evidence, but bindings cannot
-replace the exact unit or discussion text. Every cited binding requires a
-complete read and remains bound to the immutable snapshot.
-Each exact changed-path record still needs a single final judgment after its
-aggregator reads all unit notes and relevant exact source. The discussion
-aggregate covers every discussion note, including original bodies and unique
-historical excerpts. It can bind relevant source notes without replacing the
-required discussion notes.
+The worker independently examines combined effects and relevant exact evidence.
+Every recorded concern or interaction requires a rationale and exact supporting
+evidence. Significant or uncertain members and check dispositions prevent a
+favorable cumulative judgment from authorizing renewal. Replacements invalidate
+dependent records through their bound digests.
 
-Native checkpoints require newly completed immutable work: a unit note or final
-change judgment. Replays and replacement records earn no new progress.
-The immutable unit and changed-path counts bound planned handoffs; the separate
-replacement and stale-recovery budgets still apply. Workers do not overlap and
-do not increase model context. Scalar progress keeps semantic evidence out of
-the orchestrator.
-
-The fresh cumulative worker reads every final change judgment, discussion
-observation, and explicit concern/interaction disposition. It independently
-examines combined effects and reacquires relevant exact evidence. Every recorded
-concern or interaction requires a rationale and exact supporting evidence.
-Significant or uncertain members and check dispositions prevent a favorable
-aggregate from authorizing renewal. Replacing a note invalidates dependent
-aggregates through their bound digests; unrelated notes remain available.
-
-Completion requires all raw unit ranges, requested context, unit notes, final
-change judgments, discussion aggregation, check dispositions, and the independent
-cumulative judgment, including with an empty source inventory. Native receipts
-prove delivery, not comprehension. Notes can omit an implication even when
-coverage is complete; synthetic adversarial evaluation reduces that risk but
-does not prove semantic equivalence. There is no recursive summary hierarchy
-or guarantee that an arbitrary PR fits: a cumulative set that cannot be examined
-with its necessary exact evidence remains explicitly incomplete.
+Completion requires all required raw evidence and requested context, final
+change judgments, the discussion observation, check dispositions, and an
+independent cumulative judgment, including for an empty source inventory.
+Native receipts prove delivery, not comprehension. A cumulative set that cannot
+be examined with its necessary evidence remains explicitly incomplete.
 
 Tool-output, context, and worker limits are incomplete evidence, not substantive
 uncertainty. They neither freeze a semantic refusal nor authorize a notice.
@@ -176,17 +130,14 @@ Judgment recording rejects unread readable source for every disposition, and
 completion independently checks the same boundary. Actual semantic uncertainty
 and intrinsically opaque source remain fail-closed review outcomes.
 
-A returned synchronous worker cannot receive a continuation message. After
-native results confirm an unfinished assessment, the skill permits one fresh
-replacement per PR and snapshot, with no overlapping workers. The replacement
-uses the original run and snapshot, reads native inventory and judgment progress,
-and acquires its own evidence rather than inheriting the earlier worker's
-conclusions. Repeating preparation preserves progress; evidence reads permit
-replay from zero and judgments use conditional digests for deliberate replacement.
-This bounds recovery from a premature return without weakening native coverage
-or treating it as staleness. A second incomplete worker leaves explicit
-unfinished work. Stale evidence retains its separate refresh budget, and
-unrelated tooling failures remain failures.
+A replacement worker uses the original run and snapshot and acquires the
+evidence needed for its own decisions. Repeating preparation preserves progress;
+judgments use conditional digests for deliberate replacement. A persistent
+per-PR budget reserves time for publication and bounds native work commands and
+worker dispatch reservations across interruption and stale recovery. Exhaustion
+leaves explicit unfinished work. Legacy assessments cannot continue; a fresh
+assessment is required. Earlier run schemas require a fresh run and assessment;
+existing files are left untouched.
 
 ## Material evidence
 
@@ -210,18 +161,17 @@ applicability, not policy names, creator profiles, revision counters, or evaluat
 attempt identifiers in freshness comparisons. Unknown policy types, settings, and
 history semantics remain explicit failures. Pure routine system notifications
 are redundant with current source, PR state, and policy reads; they do not enter
-new evidence. Threads containing human replies, pending review, deleted history,
-or audit markers remain guarded.
+new evidence. Threads containing human replies, pending review, or deleted history
+remain guarded.
 Structured event properties establish vote and reviewer authority; generated
 system-comment prose and its edit clock do not enter retained evidence.
 
 ADO's content-specific comment update time governs edit detection. The general
 update time serves as a fallback only when the content-specific field is absent.
-Metadata updates such as likes cannot invalidate an unchanged audit or notice.
+Metadata updates such as likes cannot invalidate an unchanged notice.
 
 Comparisons project richer retained snapshots in memory. Stored snapshots,
-digests, assessment bindings, and recovery-journal integrity checks remain exact
-and unchanged.
+digests and assessment bindings remain exact and unchanged.
 
 ## Bounded stale-evidence recovery
 
@@ -236,39 +186,21 @@ Each PR has a persisted budget of two recovery attempts after the initial
 attempt. Refresh consumes an attempt before capturing current evidence. A failed
 stale capture can consume the next attempt; another stale refresh request at the
 limit records `retryExhausted` and leaves explicit partial work. An interrupted
-capture resumes through `inspect`. Independent PRs keep their own budgets and
-publication identities.
+capture resumes through `inspect`. Independent PRs keep their own budgets.
+Refresh applies to staleness before a remote approval request; an approval request
+error is reported without automatic resend in that attempt.
 
-Refresh takes the provider publication lock, notice lock, and run lock in that
-order. It permits replacement only for stale evidence without an attempted remote
-effect. Host journals, not a null receipt or review identifier, establish that
-boundary. Accepted-but-stale and unknown writes retain the original snapshot
-and use only original-command reconciliation. Refresh never rolls back, repeats,
-or forgets such effects.
-An existing publication receipt also requires retained host evidence of a
-preflight-only operation; missing host history is not proof that no write occurred.
-
-`discovery.rs` owns the schema-14 run, recovery record, and result metadata.
-Incompatible run schemas require a fresh run; retained effects require
-reconciliation with their original utility version.
-Discovery discards draft PRs before recency checks. Valid older records drop
-draft entries when loaded, and inspection, refresh, or publication preflight removes
-a PR found to have become a draft without consuming the stale-recovery budget.
-An attempted remote effect still requires original-command
-reconciliation so that a potentially accepted write is not repeated.
-Each fresh attempt adds a UUID used as that PR's host-journal run identity;
-the enclosing run ID stays fixed. The snapshot digest also binds this UUID,
-so equal evidence and timestamps cannot reuse an earlier snapshot. This preserves
-canceled preflight records and prevents a new assessment from colliding with an
-old immutable journal operation.
-Notification staleness is recorded separately from an uncertain assessment's
-diagnostic, so neither condition conceals the other.
+`discovery.rs` owns the schema-15 run, recovery record, and result metadata.
+Earlier run schemas require a fresh run and assessment. Discovery discards draft PRs
+before recency checks, and inspection, refresh, or publication preflight removes
+a PR found to have become a draft. Notification staleness is recorded separately
+from an uncertain assessment's diagnostic.
 
 ## Persistent needs-review decisions
 
 A completed significant or uncertain assessment produces a standalone attributed comment
 through native `notify`. Its `<!-- ss-autoreapprove-needs-review {JSON} -->`
-marker binds the account, repository, PR, original anchor, assessed source,
+marker binds the account, repository, PR, approval anchor, assessed source,
 policy, and assessment. The comment states that a separate new review is required.
 It does not cast a negative vote or modify existing discussion. Uncertainty keeps
 its explicit diagnostic and partial run status even after the notice is posted.
@@ -276,19 +208,17 @@ its explicit diagnostic and partial run status even after the notice is posted.
 Inspection recognizes only service-authenticated comments by the account and
 uses their service creation times. An active notice returns `needsReview`
 without preparing source or repeating semantic assessment. A strictly later
-external approval by the account expires every older notice. Renewals and other
-accounts' approvals cannot expire notices. A notice posted after a new external
-approval still applies. Edited, malformed, duplicate, or scope-mismatched owned
+approval by the account expires every older notice; another account's approval
+does not. A notice posted after a newer approval still applies. Edited,
+malformed, duplicate, or scope-mismatched owned
 markers fail explicitly.
 
 Deleted ADO threads and comments cannot supply notice evidence, and their
 removed payloads are not required.
 
-Notice publication holds the provider's retained publication lock before the
-notice journal and run locks. It refreshes source and decision evidence before
+Notice publication uses its own journal and run locks. It refreshes source and decision evidence before
 persisting intent and posting once. Readback identifies a unique owned effect;
-recovery never repeats an uncertain POST. Unresolved notices block later approval
-publication, and unresolved approval effects block new notices. Dry runs have
+recovery never repeats an uncertain POST. Dry runs have
 no remote effects. Tooling failures before a completed assessment and missing approval authority do not produce
 semantic refusal markers.
 
@@ -297,25 +227,22 @@ of current approval eligibility, including after closure or draft conversion.
 It captures PR identity and complete discussion without requiring source refs
 or approval history. It ignores unrelated expired notices but
 retains the intended comment's scope, timestamp, exact-body, and uniqueness
-checks. A run-wide publication failure records its originating PR; reconciling
-another PR cannot clear that failure.
+checks. A previous schema-14 run supports this readback without resuming its
+assessment or changing the run file.
 
 The final summary lists each in-range candidate as a linked PR number and title.
-It identifies current and retained needs-review decisions and distinguishes
-valid automatic approval standing from external approvals. Automatic metadata
-uses the review submission time on GitHub and structured vote time on ADO,
-including when a previous invocation created the automatic approval.
+It identifies current and retained needs-review decisions.
 
 ## Approval publication
 
-Publication refreshes identity, authority, source, and discussion. GitHub submits
-the assessed source SHA explicitly; ADO binds the source through its structured
-iteration history and separate audit. A retained same-host lock encloses intent,
-acknowledgement, verification, and atomic run updates. Recovery reconciles only a
-unique owned effect and never blindly repeats a write. Dry runs have no remote
-effects. Accepted-but-stale and unknown outcomes remain explicit, without rollback.
-Postflight checks do not prevent an existing auto-merge race; local locks do not
-provide distributed exactly-once guarantees.
+Publication refreshes identity, authority, source, and discussion before the
+write. GitHub submits the assessed source SHA explicitly; ADO submits the
+retained-strength positive vote. The single provider approval request is the
+final remote action. A successful response finishes the operation; an error is
+reported without automatically resending the request in that attempt. Dry runs
+have no remote effects. There is no approval ledger, post-approval readback,
+reconciliation, or exactly-once guarantee. ADO's vote API has no source
+precondition, so a concurrent source change can race with submission.
 
 ## Azure DevOps evidence and policy interpretation
 
@@ -332,7 +259,7 @@ count, `CodeReviewReviewersUpdatedChangedIdentity` identity mapping, and
 `CodeReviewReviewersUpdatedChangedDecline` string state. Inspection retains
 these fields and replays the events in service-time order alongside votes.
 A decline invalidates preceding approval authority and reports `ineligible`
-with reason `pendingHumanReview` until superseded. Undoing a decline neither
+with reason `pendingHumanReview` until a later approval. Undoing a decline neither
 grants approval authority nor erases withdrawals and negative votes.
 A later direct account-owned positive vote establishes a new approval event
 and source anchor; a proxy vote does not clear a decline.
@@ -345,17 +272,10 @@ renewal authority. Their payloads may be absent; complete observations still ret
 the returned tombstones and fence changes to them. A current positive vote alone
 cannot replace a deleted approving event or identify its source. With no surviving
 applicable approval, inspection reports `noPriorApproval`. A deletion-related
-current-vote mismatch or a renewal without its preceding external authority is
-`ineligible` with reason `approvalEvidenceDeleted`, not permission to renew.
+current-vote mismatch is `ineligible` with reason `approvalEvidenceDeleted`,
+not permission to renew.
 Surviving withdrawals, negative decisions, removals, and pending reviews remain
 authoritative.
-
-Retained account-owned renewal markers in deleted records conservatively make the
-inspection `ineligible` with reason `approvalEvidenceDeleted`. Their bytes can veto
-authority but cannot establish an anchor or turn a surviving automatic vote into
-an external approval. A surviving audit for an explicitly deleted vote supplies no
-vote authority. Malformed surviving evidence and genuine service, authentication,
-or transport failures remain explicit failures.
 
 Minimum-reviewer evaluations identify applicable policy configurations. Their
 settings must agree with the captured configurations. Inspection combines
@@ -363,7 +283,7 @@ settings must agree with the captured configurations. Inspection combines
 policies. A retained positive approval on an older source iteration requires
 assessment under either rule, even if another reviewer supplies a fresh vote.
 The account's approval and satisfaction of the aggregate merge policy are
-different facts. The original approving thread and its source iteration bind
+different facts. The applicable approving event and its source iteration bind
 the comparison; an approval on the current iteration is already valid.
 
 Inspection uses the [evaluation endpoint's complete-list request](https://learn.microsoft.com/en-us/rest/api/azure/devops/policy/evaluations/list?view=azure-devops-rest-7.1)
@@ -381,19 +301,14 @@ failures naming the missing interpretation, not completed unresolved results.
 The [provider's branch-policy documentation](https://learn.microsoft.com/en-us/azure/devops/repos/git/branch-policies)
 defines reviewer reset and iteration settings.
 
-Explicit withdrawals, negative decisions, and reviewer removals supersede old
+Explicit withdrawals, negative decisions, and reviewer removals invalidate old
 approvals. A current zero vote that contradicts a historical approval requires
 authoritative reset-cause evidence. Current `resetOnSourcePush` and
 `resetRejectionsOnSourcePush` settings alone do not establish historical
 causality; missing evidence is an actionable failure. Neither generated English
 nor `isReapprove` proves automatic invalidation.
 
-The [controlled-experiment fixture](../../ss-ai-review/tests/fixtures/ado-no-approval-policy.json)
-establishes retained approval and reviewer removal without approval policies.
-Synthetic regression cases cover policy combinations and iteration freshness
-without claiming a live reset experiment.
-
-### ADO publication and recovery
+### ADO publication
 
 ADO renewals preserve the existing positive vote strength. The native transaction
 uses the documented [reviewer vote API](https://learn.microsoft.com/en-us/rest/api/azure/devops/git/pull-request-reviewers/create-pull-request-reviewer?view=azure-devops-rest-7.1)
@@ -405,65 +320,10 @@ pending thread returned by the server blocks publication. The utility checks
 returned threads containing the account's comment; it does not claim comprehensive
 draft detection or establish whether unpublished server-saved drafts appear.
 
-The reviewer API accepts neither a source SHA precondition nor an operation ID.
-The host journal therefore captures complete authority and source evidence before
-the single vote request. Readback must identify exactly one new positive
-`VoteUpdate` by the account and its own initiator. A retained reviewer value,
-an acknowledgement alone, or absence of an event cannot establish completion.
-Missing or competing events leave the write unknown and block later host runs.
-The service cannot distinguish an identical concurrent human vote by the same
-account; schedules for the same scope must use one publishing host, and the
-workflow does not promise distributed ownership or an atomic human-decision fence.
-
-After identifying the vote, the transaction creates a standalone closed
-[audit thread](https://learn.microsoft.com/en-us/rest/api/azure/devops/git/pull-request-threads/create?view=azure-devops-rest-7.1).
-It changes no existing discussion. Its `<!-- ss-autoreapprove-ado {JSON} -->`
-marker contains `audit` (the shared schema-1 scope, operation, policy, assessment,
-source and original anchor), `voteEventId`, and positive `iterationId`.
-The marker joins the service-authenticated comment author to the structured vote
-actor, initiator and source iteration. Duplicate, edited, mismatched,
-or malformed owned markers fail explicitly. Recognition processes the joined
-vote chronologically and preserves the existing external anchor; later human
-approvals establish new anchors, while withdrawals, negatives and removals
-still supersede automatic renewals.
-
-Each remote effect has its own persisted intent and readback. Recovery never
-repeats an uncertain vote or thread creation. It may finish an unattempted audit,
-or retry a definitively refused audit only after identifying the same vote in
-fresh complete evidence. A vote without a verified audit remains unresolved and
-blocks other host publications. An inspection during that interval is not a
-new publishing authority: later publication must acquire the host lock and pass
-fresh evidence checks.
-
-Postflight strips only the unique owned vote and audit, then compares all
-remaining evidence with the original snapshot. It also requires current valid
-approval standing on the assessed source. A source, policy, discussion or human
-decision race produces an explicit accepted-but-stale result, never a successful
-renewal. The audit retains the assessed source even for stale effects. ADO's
-mutable vote can affect a newer source or auto-merge before postflight; these
-checks detect that race rather than prevent it.
-
-Freshness comparisons ignore evaluation progress and context, which can change
-as the renewed vote satisfies aggregate policy. They compare effective reviewer
-configuration and applicability under the shared material-evidence rules above.
-The complete reviewer endpoint owns reviewer evidence rather than the PR's
-duplicated reviewer summary; the request-only `isReapprove` flag does not
-represent standing authority. Source, discussion, attention and decision
-evidence remain fenced.
-
-The maintained tooling under `dev/ss-autoreapprove` captures authorized experiments
-and exports sanitized fixtures. Live writes require explicit authorization in
-addition to the tool's write flag. Initialization pins identity, branches, source
-and target commits, empty reviewer state and disabled auto-complete. Each effect
-has a persisted intent and verified readback; uncertain writes stop without replay.
-Cleanup refuses intervening source, reviewer or policy changes.
-
-Exports accept only completed verified experiments, replace private identities
-consistently, shift timestamps together, omit private prose/content, and reject
-unfamiliar properties. Raw captures remain outside the repository. The
-[GitHub contract fixture](../../ss-ai-review/tests/fixtures/github-approval.json) records verified
-read-only provider shapes; null-cause dismissal cases are conservative synthetic
-counterexamples, not claims of a live manual-dismissal experiment.
+The reviewer API accepts no source SHA precondition. Preflight checks current
+authority and source, but a concurrent push can race with the vote. The response
+finishes the operation without reading back the vote or creating an audit comment.
+The request-only `isReapprove` flag does not itself establish standing authority.
 
 ## Implementation responsibilities
 
@@ -506,7 +366,7 @@ object and content digest, without copying the range's body into state.
 `assessment.rs` owns
 context selection, bounded contiguous reads, conditional judgment replacement,
 coverage, and completion digests. `units.rs` supplies exact source/discussion
-partitions; `checkpoint.rs` binds typed notes, fixed-level aggregates, explicit
+partitions; `checkpoint.rs` binds discussion observations, judgments, explicit
 check dispositions, and monotonic handoff progress. Producers and consumers use the same validation,
 so missing data cannot become an empty successful result. Timestamps use the shared
 Jiff parser and injectable clock; the reapproval workflow has no independent
@@ -514,11 +374,12 @@ clock or retry timer.
 
 The required patch manifest has its own digest; completion also binds all
 requested ranges. Every command validates these against retained source.
-New context removes the affected change's unit notes and judgment, their
-dependents, the discussion aggregate, check dispositions, and the cumulative
-judgment. Unrelated change judgments remain intact. Failed context acquisition stays
+New context removes the affected change's judgment, its dependents, the discussion
+observation, check dispositions, and the cumulative judgment. Unrelated change
+judgments remain intact. Failed context acquisition stays
 in the run as incomplete evidence, with no approval or notice authority.
-Incompatible run contracts require a new run rather than migrated read receipts.
+Earlier run schemas require a fresh assessment rather than migrating receipts
+or judgments; existing files are left untouched.
 
 `discussion.rs` projects captured history into compact, provider-tagged semantic
 documents. It does not participate in authority or freshness comparisons.
@@ -538,31 +399,15 @@ exhaustion remains incomplete work. Checkpointed source/discussion summaries
 are a separate design decision tracked in the repository [TODO](../../../TODO.md);
 read receipts alone cannot establish that a summary preserves every objection.
 
-`publication.rs` dispatches the provider transaction and acquires the stable
-account/repository/PR lock before the run lock. `ado_publication.rs` owns ADO's
-separate vote and audit effects; `ado_approval.rs` joins their remote provenance.
-`renewal.rs` defines the shared audit data. The write transport never retries
-publication, including rate-limit refusals. Recovery matches account, source,
-body, and a unique review; verification removes only that owned effect before
-comparing the remaining evidence. Receipts retain the absolute host-journal path.
-ADO synthetic provider fixtures exercise publication, refusal, uncertainty,
-source and human-decision races, and cumulative anchor preservation without
-writing to live pull requests. They use the documented write contracts and
-sanitized service history shapes, not a claim of a live renewal experiment.
-Every attempt to write, including resumed preparation, checks for other runs'
-unresolved effects under the host lock. The host record is saved before the run
-record. If execution stops between those saves, recovery copies the validated
-terminal receipt into its original run without another service request; the
-original immutable assessment and scope must still match.
-Replaying a successfully persisted publication reuses its receipt and reporting
-metadata without refreshing service standing. A new run captures later approval
-or withdrawal events.
+Approval publication performs provider preflight followed by one approval
+request. The write transport does not retry that request, including rate-limit
+refusals. The provider response determines the reported result; the attempt
+does not issue subsequent remote reads or writes.
 
 `review_notice.rs` owns the distinct refusal marker, authenticated creation-time
-expiry, automatic-approval summary metadata, and schema-1 notice-intent journal.
-The shared approval evidence boundary applies notices only after provider
-authority interpretation. Notice parsing remains separate from renewal audits;
-a discussion marker never becomes approval authority.
+expiry, and schema-1 notice-intent journal. The shared approval evidence
+boundary applies notices only after provider authority interpretation. A
+discussion marker never becomes approval authority.
 
 Shared `git.rs` and `git_diff.rs` operations also serve full-review consumers.
 They compare exact immutable endpoints, decode quoted paths, and reject truncated
@@ -572,8 +417,8 @@ maintain another parser or change full-review publication decisions.
 
 ## Integration coverage and resource ownership
 
-`tests/reapproval.rs` exercises command dispatch, durable journals, assessment
-authority, publication, and recovery without contacting live review services.
+`tests/reapproval.rs` exercises command dispatch, assessment authority,
+publication, and notice recovery without contacting live review services.
 Common assessment setup uses the command's default read size and follows exact
 continuation offsets. It derives page-count bounds from captured content, so a
 nonterminating or truncated response fails deterministically. Shared paging checks
@@ -590,16 +435,15 @@ The bounded `ss-ai-assessment/fuzz` target exercises exact patch parsing and
 read/context/judgment operation ordering without contacting a provider.
 
 Publication-only matrices share an immutable editorial source repository and
-its captured commit IDs. Their journals, host stores, and provider state remain
+its captured commit IDs. Their run and provider state remain
 private. Preparation records successful real Git responses separately for GitHub
 and ADO; publication matrices replay only those exact ordered commands. Unknown
 commands or changed source IDs fail explicitly without falling back to native
 Git. These responses replace repeated source transport, not assessment reads,
-judgments, authority checks, or journal persistence.
+judgments, authority checks, or run persistence.
 
-Complete representative GitHub and ADO publication/recovery lifecycles retain
-real Git. ADO cumulative-anchor scenarios also retain the real failed fetch of a
-later unavailable source. Notice-expiry scenarios that reverse source endpoints,
+Complete representative GitHub and ADO publication scenarios retain
+real Git. Notice-expiry scenarios that reverse source endpoints,
 force-push/path/mode/opaque-content cases, equal-tree cases, and Unicode paging
 use real Git. Scenarios that mutate repositories own independent temporary
 repositories. The suite checks the shared source's status and tip after use;

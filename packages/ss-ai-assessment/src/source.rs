@@ -173,6 +173,13 @@ impl SourceContext {
         text.get(self.start_byte..self.end_byte)
             .ok_or_else(error::InvalidContextRange::classified)
     }
+
+    /// Validated scalar bounds let progress count a range without copying it.
+    pub(crate) fn character_count(&self) -> Result<usize, AssessmentError> {
+        self.end_character
+            .checked_sub(self.start_character)
+            .ok_or_else(error::InvalidContextRange::classified)
+    }
 }
 
 /// A named line range registers additional mandatory evidence.

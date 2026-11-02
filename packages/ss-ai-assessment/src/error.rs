@@ -59,9 +59,9 @@ classified_error!(
 );
 classified_error!(UnknownUnit, "invalidInput", "Unknown evidence unit");
 classified_error!(
-    IncompleteUnits,
+    MissingDiscussionObservation,
     "invalidState",
-    "Complete and read every required unit note before aggregation"
+    "Record the discussion observation before cumulative assessment"
 );
 classified_error!(
     InvalidCheckpointNote,
@@ -96,7 +96,7 @@ classified_error!(
 classified_error!(
     InvalidAggregateDependency,
     "invalidInput",
-    "Source aggregation requires unit notes and exact evidence, not dependent judgments or checks"
+    "Judgment contains a prohibited semantic dependency"
 );
 
 /// Reconstruction failures keep their parser diagnostic without becoming opaque evidence.
@@ -138,9 +138,59 @@ classified_error!(
     "Completed assessments are immutable"
 );
 classified_error!(
+    OnlyDiscussionObservation,
+    "invalidInput",
+    "Direct assessments accept only the discussion observation, not transport-unit notes"
+);
+classified_error!(
     StaleJudgment,
     "invalidState",
     "Judgment changed; refresh its previous digest before replacing it"
+);
+classified_error!(
+    StaleAssessment,
+    "invalidState",
+    "Assessment changed; refresh its state token before submitting the batch"
+);
+classified_error!(
+    StaleReadToken,
+    "invalidState",
+    "Required evidence changed; refresh the read token"
+);
+classified_error!(
+    StaleReadContent,
+    "invalidState",
+    "Evidence content changed; restart the read from its first page"
+);
+classified_error!(
+    MissingReadContentDigest,
+    "invalidInput",
+    "Continuing a mutable evidence record requires its content digest"
+);
+classified_error!(
+    MutableReadRequiresBatch,
+    "invalidInput",
+    "Continue mutable evidence through a batch with its content digest"
+);
+classified_error!(
+    DuplicateBatchItem,
+    "invalidInput",
+    "Batch references and change identifiers must be distinct"
+);
+classified_error!(
+    EmptyBatch,
+    "invalidInput",
+    "Batch must contain at least one item"
+);
+classified_error!(
+    ZeroReadLimit,
+    "invalidInput",
+    "Evidence reads require a positive character limit"
+);
+classified_error!(
+    InvalidBatchJudgment,
+    "invalidInput",
+    "A judgment batch cannot contain a cumulative judgment"
 );
 classified_error!(
     IncompleteEvidenceReads,
@@ -291,7 +341,7 @@ mod tests {
     #[test]
     fn assessment_failures_keep_distinct_types_and_categories() {
         let mut assessment =
-            Assessment::new(inventory(), &[], "snapshot", "policy", "discussion").unwrap();
+            Assessment::new_direct(inventory(), &[], "snapshot", "policy", "discussion").unwrap();
         assert_failure::<IncompleteCoverage>(
             assessment.finish("policy", "discussion").unwrap_err(),
             "invalidState",

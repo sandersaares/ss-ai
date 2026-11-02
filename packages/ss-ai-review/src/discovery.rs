@@ -13,6 +13,7 @@ use crate::ado_approval::Evidence as AdoEvidence;
 use crate::api::Api;
 use crate::approval::{Decision, Evidence};
 use crate::assessment::{Assessment, Judgment};
+use crate::assessment_budget::{AssessmentBudget, BudgetStatus};
 use crate::clock::{is_recent, timestamp};
 use crate::discussion;
 use crate::error::{classification, fail};
@@ -21,13 +22,14 @@ use crate::journal::{FileJournal, read_bytes};
 use crate::json::{boolean, field, identifier, required_optional, text};
 use crate::objects;
 use crate::publication::{self, Outcome, Receipt, Scope};
-use crate::review_notice::{self, AutomaticApproval, Notice};
+use crate::renewal::Anchor;
+use crate::review_notice::{self, Notice};
 use crate::target::{Platform, Target};
 use crate::{Clock, Process};
-use ss_ai_assessment::{ContextRequest, Note};
+use ss_ai_assessment::{BatchJudgmentRequest, BatchReadRequest, ContextRequest, Note};
 
-/// Checkpoint notes and dependency-bound aggregates require a fresh assessment contract.
-const RUN_SCHEMA: u32 = 14;
+/// Provider-selected approval baselines require a fresh assessment contract.
+const RUN_SCHEMA: u32 = 15;
 
 /// Durable metadata-only stage; recent candidates still require approval assessment.
 #[derive(Debug, Deserialize, Serialize)]
@@ -44,6 +46,8 @@ struct DiscoveryRecord {
     tenant: Option<String>,
     policy: Policy,
     dry_run: bool,
+    #[serde(default, skip_serializing_if = "is_false")]
+    assessment_budget_enabled: bool,
     enumeration_complete: bool,
     state: RunState,
     inventory: Vec<Entry>,
@@ -76,18 +80,18 @@ struct Entry {
     inspection: Option<Inspection>,
     #[serde(deserialize_with = "required_optional")]
     assessment: Option<Assessment>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    assessment_budget: Option<AssessmentBudget>,
     #[serde(deserialize_with = "required_optional")]
     execution_error: Option<Diagnostic>,
     #[serde(deserialize_with = "required_optional")]
     publication: Option<Receipt>,
     #[serde(deserialize_with = "required_optional")]
     review_notice: Option<Notice>,
-    #[serde(deserialize_with = "required_optional")]
-    automatic_approval: Option<AutomaticApproval>,
     recovery: Recovery,
 }
 
-/// Fresh attempts have distinct host-journal identities; old effects remain reconcilable.
+/// Stale recaptures retain distinct identities for subsequent notice attempts.
 #[derive(Debug, Default, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct Recovery {
@@ -149,6 +153,15 @@ enum RunState {
     Failed,
 }
 
+/// Omit the new flag when retaining a run created before budget enforcement.
+#[expect(
+    clippy::trivially_copy_pass_by_ref,
+    reason = "Serde calls serialization predicates with a shared reference"
+)]
+fn is_false(value: &bool) -> bool {
+    !value
+}
+
 /// Recency never turns malformed timestamp evidence into an old-PR exclusion.
 #[derive(Debug, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
@@ -202,6 +215,17 @@ impl DiscoveryRecord {
         let mut previous = None;
         for entry in &self.inventory {
             entry.recovery.validate(&self.run_id)?;
+            if entry
+                .assessment_budget
+                .as_ref()
+                .is_some_and(|budget| !budget.valid())
+                || !self.assessment_budget_enabled && entry.assessment_budget.is_some()
+                || self.assessment_budget_enabled
+                    && entry.assessment.is_some()
+                    && entry.assessment_budget.is_none()
+            {
+                return Err(fail("invalidState", "Invalid assessment budget record"));
+            }
             // Numeric pagination requires a strictly ordered, duplicate-free inventory.
             if previous.is_some_and(|id| id >= entry.pull_request_id)
                 || entry.url != target.candidate(entry.pull_request_id).web_url
@@ -249,7 +273,7 @@ impl DiscoveryRecord {
                     error.validate()?;
                 }
                 if let Some(receipt) = &entry.publication {
-                    receipt.validate()?;
+                    receipt.validate(self.platform)?;
                     if self.dry_run
                         || receipt.run_id != entry.operation_run_id(&self.run_id)
                         || receipt.scope != self.publication_scope(entry.pull_request_id)
@@ -286,18 +310,6 @@ impl DiscoveryRecord {
                         ));
                     }
                 }
-                if let Some(approval) = &entry.automatic_approval {
-                    timestamp(&approval.approved_at)?;
-                    if approval.approval_event_id.trim().is_empty()
-                        || entry.status(self.dry_run) != "alreadyValid"
-                            && entry.status(self.dry_run) != "reapproved"
-                    {
-                        return Err(fail(
-                            "invalidState",
-                            "Automatic approval metadata requires valid standing",
-                        ));
-                    }
-                }
                 inspection.validate(
                     self.platform,
                     &self.account_id,
@@ -305,31 +317,10 @@ impl DiscoveryRecord {
                     entry.pull_request_id.get(),
                     entry.recovery.attempt_ids.last().map(String::as_str),
                 )?;
-                if entry.publication.is_none()
-                    && entry.automatic_approval
-                        != inspection
-                            .evidence
-                            .as_ref()
-                            .map(|evidence| {
-                                review_notice::automatic_approval(
-                                    evidence,
-                                    &self.publication_scope(entry.pull_request_id),
-                                    timestamp(&inspection.captured_at)?,
-                                )
-                            })
-                            .transpose()?
-                            .flatten()
-                {
-                    return Err(fail(
-                        "invalidState",
-                        "Automatic approval summary disagrees with inspection",
-                    ));
-                }
             } else if entry.assessment.is_some()
                 || entry.execution_error.is_some()
                 || entry.publication.is_some()
                 || entry.review_notice.is_some()
-                || entry.automatic_approval.is_some()
             {
                 return Err(fail(
                     "invalidState",
@@ -410,7 +401,7 @@ impl DiscoveryRecord {
         self.inventory.remove(index);
         finish_state(self);
         self.save(journal)?;
-        let mut summary = self.summary(0, NonZeroUsize::MIN);
+        let mut summary = self.summary(0, NonZeroUsize::MIN)?;
         *summary
             .get_mut("items")
             .ok_or_else(|| fail("invalidState", "Summary lacks items"))? = json!([]);
@@ -435,7 +426,7 @@ impl DiscoveryRecord {
         if document.get("schemaVersion") != Some(&json!(RUN_SCHEMA)) {
             return Err(fail(
                 "invalidState",
-                "Unsupported discovery schema; use the original utility for retained effects or start a fresh run",
+                "Unsupported discovery schema; start a fresh assessment",
             ));
         }
         let mut run: Self = serde_json::from_value(document).map_err(|error| {
@@ -469,7 +460,7 @@ impl DiscoveryRecord {
     }
 
     /// Bounded summaries never expand older PRs into per-PR agent work.
-    fn summary(&self, after: u32, limit: NonZeroUsize) -> Value {
+    fn summary(&self, after: u32, limit: NonZeroUsize) -> Result<Value, AppError> {
         let included = self
             .inventory
             .iter()
@@ -485,7 +476,16 @@ impl DiscoveryRecord {
             .take(limit.get())
             .map(|entry| {
                 let decision = entry.decision();
-                json!({
+                let progress = entry
+                    .assessment
+                    .as_ref()
+                    .map(|assessment| {
+                        let (_, evidence) = entry.assessment_inputs()?;
+                        let discussion = discussion::render(evidence)?;
+                        Ok::<_, AppError>(assessment.progress_with_evidence(&self.policy.content, &discussion)?)
+                    })
+                    .transpose()?;
+                Ok::<_, AppError>(json!({
                     "pullRequestId": entry.pull_request_id, "url": entry.url,
                     "title": entry.title,
                     "status": entry.status(self.dry_run),
@@ -495,22 +495,22 @@ impl DiscoveryRecord {
                     "capturedAt": entry.inspection.as_ref().map(|inspection| &inspection.captured_at),
                     "snapshotDigest": entry.inspection.as_ref().and_then(|inspection| inspection.snapshot_digest.as_ref()),
                     "assessmentDigest": entry.assessment.as_ref().and_then(|assessment| assessment.digest.as_ref()),
-                    "assessmentProgress": entry.assessment.as_ref().map(Assessment::progress),
+                    "assessmentProgress": progress,
+                    "assessmentBudget": entry.assessment_budget.as_ref().map(AssessmentBudget::diagnostics),
                     "publication": entry.publication,
                     "reviewNotice": entry.review_notice.as_ref().or(match decision {
                         Some(Decision::NeedsReview { notice }) => Some(notice),
                         _ => None,
                     }),
-                    "automaticApproval": entry.automatic_approval,
                     "staleRecovery": {
                         "attempts": entry.recovery.attempt_ids.len(),
                         "limit": STALE_RECOVERY_LIMIT,
                         "exhausted": entry.recovery.error.is_some()
                     },
                     "error": entry.recovery.error.as_ref().or(entry.recovery.stale.as_ref()).or(entry.execution_error.as_ref()).or_else(|| entry.inspection.as_ref()?.error.as_ref()).or(entry.recency.error.as_ref())
-                })
+                }))
             })
-            .collect::<Vec<_>>();
+            .collect::<Result<Vec<_>, _>>()?;
         let next = if included.len() > limit.get() {
             included
                 .get(limit.get().saturating_sub(1))
@@ -518,7 +518,7 @@ impl DiscoveryRecord {
         } else {
             None
         };
-        json!({
+        Ok(json!({
             "schemaVersion": self.schema_version, "runId": self.run_id,
             "repositoryUrl": self.repository_url, "state": self.state,
             "enumerationComplete": self.enumeration_complete, "dryRun": self.dry_run,
@@ -540,12 +540,12 @@ impl DiscoveryRecord {
                 "indeterminate": self.inventory.iter().filter(|entry| entry.status(self.dry_run) == "indeterminate").count()
             },
             "items": page, "nextAfter": next, "error": self.error
-        })
+        }))
     }
 }
 
 impl Entry {
-    /// The initial attempt keeps its existing journal identity for schema-7 recovery.
+    /// The latest recapture identifies its notice attempt independently of the run.
     fn operation_run_id<'a>(&'a self, run_id: &'a str) -> &'a str {
         self.recovery
             .attempt_ids
@@ -581,6 +581,13 @@ impl Entry {
         }
         if let Some(receipt) = &self.publication {
             return receipt.outcome.as_str();
+        }
+        if self
+            .assessment_budget
+            .as_ref()
+            .is_some_and(AssessmentBudget::exhausted)
+        {
+            return "failed";
         }
         if self.stale() {
             "staleDuringExecution"
@@ -623,7 +630,10 @@ impl Entry {
     fn source_endpoints(&self) -> Result<(&str, &str), AppError> {
         let (_, evidence) = self.assessment_inputs()?;
         let Some(Decision::AssessmentRequired { anchor, .. }) = self.decision() else {
-            return Err(fail("invalidState", "Missing original approval anchor"));
+            return Err(fail(
+                "invalidState",
+                "Missing provider-selected approval baseline",
+            ));
         };
         let source = match evidence {
             Evidence::GitHub(GitHubEvidence::History { pull_request, .. }) => {
@@ -651,6 +661,10 @@ impl Entry {
                 Outcome::Failed | Outcome::StaleDuringExecution
             )
         }) || self.recovery.error.is_some()
+            || self
+                .assessment_budget
+                .as_ref()
+                .is_some_and(AssessmentBudget::exhausted)
             || self.recovery.stale.is_some()
             || self.execution_error.is_some()
             || self.recency.state == RecencyState::Failed
@@ -661,7 +675,12 @@ impl Entry {
     }
 
     fn stale(&self) -> bool {
-        if self.recovery.error.is_some() {
+        if self.recovery.error.is_some()
+            || self
+                .assessment_budget
+                .as_ref()
+                .is_some_and(AssessmentBudget::exhausted)
+        {
             return false;
         }
         if self.recovery.stale.is_some() {
@@ -728,10 +747,8 @@ impl Inspection {
         ) {
             (Some(evidence), Some(decision), Some(hash), None) => {
                 let current = snapshot_digest(evidence, &self.captured_at, attempt_id)?;
-                // Existing schema-8 assessments can retain their pre-attempt digest.
-                let legacy = snapshot_digest(evidence, &self.captured_at, None)?;
                 if evidence.decide(platform, account, repository, number, observed)? != *decision
-                    || *hash != current && *hash != legacy
+                    || *hash != current
                 {
                     return Err(fail(
                         "invalidState",
@@ -916,6 +933,7 @@ pub(crate) fn discover(
                 content: policy,
             },
             dry_run: input.dry_run,
+            assessment_budget_enabled: true,
             enumeration_complete: false,
             state: RunState::Enumerating,
             inventory: Vec::new(),
@@ -991,10 +1009,10 @@ pub(crate) fn discover(
         finish_state(&mut run);
         run.save(&journal)?;
     }
-    Ok(run.summary(0, input.limit))
+    run.summary(0, input.limit)
 }
 
-/// Captures candidates, or refreshes clean stale attempts under the publication locks.
+/// Captures candidates, or refreshes clean stale assessment attempts.
 pub(crate) fn inspect(
     api: &mut Api<'_>,
     clock: &dyn Clock,
@@ -1010,7 +1028,7 @@ pub(crate) fn inspect(
             "Inspection requires an absolute state path",
         ));
     }
-    // Publication always locks host before run; refreshing must use the same order.
+    // Review notice recovery locks its record before the run.
     let scope = if recovery_directory.is_some() {
         let journal = FileJournal::open(path, clock)?;
         let run = DiscoveryRecord::load(&journal)?
@@ -1019,15 +1037,12 @@ pub(crate) fn inspect(
     } else {
         None
     };
-    let stores = recovery_directory
+    let notices = recovery_directory
         .zip(scope.as_ref())
         .map(|(directory, scope)| {
-            let publication =
-                publication::ProviderStore::open(repository.platform, directory, scope, clock)?;
             let notices = review_notice::Store::open(repository.platform, directory, scope, clock)?;
-            publication.ensure_resolved()?;
             notices.ensure_resolved()?;
-            Ok::<_, AppError>((publication, notices))
+            Ok::<_, AppError>(notices)
         })
         .transpose()?;
     let journal = FileJournal::open(path, clock)?;
@@ -1071,6 +1086,19 @@ pub(crate) fn inspect(
             "Significance policy changed; start a fresh run",
         ));
     }
+    if entry.inspection.is_none() || recovery_directory.is_some() {
+        assessment_budget_step(
+            &mut run,
+            index,
+            clock,
+            &journal,
+            BudgetPhase::StartInspection,
+        )?;
+    }
+    let entry = run
+        .inventory
+        .get(index)
+        .ok_or_else(|| fail("invalidState", "Inventory changed"))?;
     let identity = api.identity()?;
     let current_repository = api
         .transport
@@ -1083,19 +1111,20 @@ pub(crate) fn inspect(
             "Inspection identity or repository changed",
         ));
     }
-    if let Some((publication, notices)) = &stores {
+    if let Some(notices) = &notices {
         if scope.as_ref() != Some(&run.publication_scope(number)) {
             return Err(fail("invalidState", "Refresh scope changed"));
         }
         let operation_run_id = entry.operation_run_id(&run.run_id);
-        // Even accepted-but-stale effects keep their original assessment and journal.
-        if publication.has_effect(operation_run_id)
-            || notices.has_attempt(operation_run_id)
-            || entry.publication.is_some() && !publication.preflight_only(operation_run_id)
+        if notices.has_attempt(operation_run_id)
+            || entry
+                .publication
+                .as_ref()
+                .is_some_and(|receipt| receipt.outcome != Outcome::StaleDuringExecution)
         {
             return Err(fail(
-                "ambiguousWrite",
-                "An attempted remote effect cannot refresh evidence; reconcile the original publication or notify command",
+                "invalidState",
+                "A completed publication cannot refresh its assessment; start a fresh run",
             ));
         }
         if !entry.stale() && entry.recovery.error.is_none() {
@@ -1124,7 +1153,6 @@ pub(crate) fn inspect(
         entry.execution_error = None;
         entry.publication = None;
         entry.review_notice = None;
-        entry.automatic_approval = None;
         // Persist the consumed budget before reacquisition, including interrupted captures.
         finish_state(&mut run);
         run.save(&journal)?;
@@ -1164,24 +1192,13 @@ pub(crate) fn inspect(
         }
         let mut scope_error = None;
         let inspection = match observation {
-            Ok((evidence, decision, snapshot_digest)) => {
-                let automatic = review_notice::automatic_approval(
-                    &evidence,
-                    &run.publication_scope(number),
-                    timestamp(&captured_at)?,
-                )?;
-                run.inventory
-                    .get_mut(index)
-                    .ok_or_else(|| fail("invalidState", "Inventory changed"))?
-                    .automatic_approval = automatic;
-                Inspection {
-                    captured_at,
-                    evidence: Some(evidence),
-                    decision: Some(decision),
-                    snapshot_digest: Some(snapshot_digest),
-                    error: None,
-                }
-            }
+            Ok((evidence, decision, snapshot_digest)) => Inspection {
+                captured_at,
+                evidence: Some(evidence),
+                decision: Some(decision),
+                snapshot_digest: Some(snapshot_digest),
+                error: None,
+            },
             Err(error) => {
                 let diagnostic = Diagnostic::from_error(&error);
                 if matches!(
@@ -1205,6 +1222,12 @@ pub(crate) fn inspect(
             .get_mut(index)
             .ok_or_else(|| fail("invalidState", "Inventory changed"))?
             .inspection = Some(inspection);
+        if matches!(
+            run.inventory.get(index).and_then(Entry::decision),
+            Some(Decision::AssessmentRequired { .. })
+        ) {
+            assessment_budget_step(&mut run, index, clock, &journal, BudgetPhase::FinishWork)?;
+        }
         if run.state != RunState::Failed {
             finish_state(&mut run);
         }
@@ -1213,7 +1236,7 @@ pub(crate) fn inspect(
             return Err(error);
         }
     }
-    Ok(run.summary(number.get().saturating_sub(1), NonZeroUsize::MIN))
+    run.summary(number.get().saturating_sub(1), NonZeroUsize::MIN)
 }
 
 /// Attempt identity separates recaptures even when evidence and timestamps match.
@@ -1240,7 +1263,7 @@ pub(crate) fn results(
     let journal = FileJournal::open(path, clock)?;
     let run = DiscoveryRecord::load(&journal)?
         .ok_or_else(|| fail("invalidState", "Discovery record is missing"))?;
-    Ok(run.summary(after, limit))
+    run.summary(after, limit)
 }
 
 /// Classification follows the complete inventory, not whether the current page is empty.
@@ -1264,9 +1287,66 @@ fn finish_state(run: &mut DiscoveryRecord) {
     };
 }
 
+/// Persist consumption before work so interruption cannot renew its limits.
+fn assessment_budget_step(
+    run: &mut DiscoveryRecord,
+    index: usize,
+    clock: &dyn Clock,
+    journal: &FileJournal<'_>,
+    phase: BudgetPhase,
+) -> Result<(), AppError> {
+    if !run.assessment_budget_enabled {
+        return Ok(());
+    }
+    let entry = run
+        .inventory
+        .get_mut(index)
+        .ok_or_else(|| fail("invalidState", "Missing assessment budget owner"))?;
+    let now = clock.now().as_millisecond();
+    if matches!(phase, BudgetPhase::StartInspection) && entry.assessment_budget.is_none() {
+        entry.assessment_budget = Some(AssessmentBudget::new(now));
+    }
+    let budget = entry
+        .assessment_budget
+        .as_mut()
+        .ok_or_else(|| fail("invalidState", "Missing assessment budget"))?;
+    let status = match phase {
+        BudgetPhase::StartInspection | BudgetPhase::BeginWork => budget.begin_work(now),
+        BudgetPhase::FinishWork => budget.finish_work(now),
+        BudgetPhase::Publish => budget.before_publication(now),
+    };
+    if run.state != RunState::Failed {
+        finish_state(run);
+    }
+    if !matches!(phase, BudgetPhase::FinishWork) || status != BudgetStatus::Available {
+        run.save(journal)?;
+    }
+    match status {
+        BudgetStatus::Available => Ok(()),
+        BudgetStatus::Exhausted => Err(fail(
+            "budgetExceeded",
+            "Assessment budget exhausted; retain incomplete work without approval or notice",
+        )),
+        BudgetStatus::ClockMovedBackwards => Err(fail(
+            "budgetExceeded",
+            "Clock moved backwards during assessment; elapsed time cannot be established",
+        )),
+    }
+}
+
+/// Reconciliation of an attempted effect never uses the new-publication phase.
+#[derive(Clone, Copy)]
+enum BudgetPhase {
+    StartInspection,
+    BeginWork,
+    FinishWork,
+    Publish,
+}
+
 /// Every mutation is a whole journal transaction; agents never assemble records.
 pub(crate) enum WorkAction {
     Prepare,
+    StartWorker,
     View {
         after: usize,
         limit: NonZeroUsize,
@@ -1296,6 +1376,12 @@ pub(crate) enum WorkAction {
         offset: usize,
         limit: NonZeroUsize,
     },
+    ReadBatch {
+        request: BatchReadRequest,
+    },
+    JudgeBatch {
+        request: BatchJudgmentRequest,
+    },
     SourceContext {
         request: ContextRequest,
         limit: NonZeroUsize,
@@ -1319,7 +1405,147 @@ pub(crate) struct PublishInput<'a> {
     pub(crate) tenant: Option<&'a str>,
 }
 
-/// Acquires the host transaction before the run transaction and never repeats uncertain effects.
+/// Identity needed to read back a notice from a previous-format run.
+struct PreviousNotice {
+    run_id: String,
+    operation_run_id: String,
+    scope: Scope,
+    snapshot: String,
+    assessment_digest: String,
+    policy_digest: String,
+    anchor: Anchor,
+    source_commit: String,
+    url: String,
+    title: String,
+}
+
+/// Checks only the stored bindings needed for notice recovery, not old judgments.
+fn previous_notice(document: &Value, input: &PublishInput<'_>) -> Result<PreviousNotice, AppError> {
+    let invalid = || {
+        fail(
+            "invalidState",
+            "Previous notice recovery binding is invalid",
+        )
+    };
+    let tenant = document.get("tenant").ok_or_else(invalid)?;
+    if field(document, "schemaVersion")? != &json!(14)
+        || boolean(field(document, "dryRun")?)?
+        || text(field(document, "repositoryUrl")?)? != input.repository.web_url
+        || field(document, "platform")? != &serde_json::to_value(input.repository.platform)?
+        || tenant.as_str() != input.tenant
+        || !tenant.is_null() && tenant.as_str().is_none()
+    {
+        return Err(invalid());
+    }
+    let run_id = text(field(document, "runId")?)?;
+    if Uuid::parse_str(run_id).is_err() {
+        return Err(invalid());
+    }
+    let scope = Scope {
+        repository_id: text(field(document, "repositoryId")?)?.to_owned(),
+        account_id: text(field(document, "accountId")?)?.to_owned(),
+        pull_request_id: input.number.get(),
+    };
+    if scope.repository_id.trim().is_empty() || scope.account_id.trim().is_empty() {
+        return Err(invalid());
+    }
+    let entries = field(document, "inventory")?
+        .as_array()
+        .ok_or_else(invalid)?;
+    let mut ids = HashSet::new();
+    let mut entry = None;
+    for candidate in entries {
+        let id = field(candidate, "pullRequestId")?
+            .as_u64()
+            .and_then(|id| u32::try_from(id).ok())
+            .and_then(NonZeroU32::new)
+            .ok_or_else(invalid)?;
+        if !ids.insert(id) {
+            return Err(invalid());
+        }
+        if id == input.number {
+            entry = Some(candidate);
+        }
+    }
+    let entry = entry.ok_or_else(invalid)?;
+    let url = text(field(entry, "url")?)?;
+    let title = text(field(entry, "title")?)?;
+    if url != input.repository.candidate(input.number).web_url
+        || title.trim().is_empty()
+        || boolean(field(entry, "draft")?)?
+    {
+        return Err(invalid());
+    }
+    let recovery: Recovery = serde_json::from_value(field(entry, "recovery")?.clone())?;
+    recovery.validate(run_id)?;
+    let operation_run_id = recovery.attempt_ids.last().map_or(run_id, String::as_str);
+    let inspection = field(entry, "inspection")?;
+    let captured_at = text(field(inspection, "capturedAt")?)?;
+    timestamp(captured_at)?;
+    let snapshot = text(field(inspection, "snapshotDigest")?)?;
+    let evidence = field(inspection, "evidence")?;
+    let digest_input = if recovery.attempt_ids.is_empty() {
+        json!({"capturedAt": captured_at, "evidence": evidence})
+    } else {
+        json!({"capturedAt": captured_at, "evidence": evidence, "attemptId": operation_run_id})
+    };
+    if snapshot != input.snapshot || digest(&serde_json::to_vec(&digest_input)?) != snapshot {
+        return Err(invalid());
+    }
+    let evidence: Evidence = serde_json::from_value(evidence.clone())?;
+    evidence.validate_scope(&scope.repository_id, scope.pull_request_id)?;
+    if !matches!(
+        (&evidence, input.repository.platform),
+        (Evidence::GitHub(_), Platform::GitHub) | (Evidence::AzureDevOps(_), Platform::AzureDevOps)
+    ) {
+        return Err(invalid());
+    }
+    let decision = field(inspection, "decision")?;
+    if text(field(decision, "status")?)? != "assessmentRequired" {
+        return Err(invalid());
+    }
+    let anchor: Anchor = serde_json::from_value(field(decision, "anchor")?.clone())?;
+    let assessment = field(entry, "assessment")?;
+    let policy = field(document, "policy")?;
+    let policy_digest = text(field(policy, "sha256")?)?;
+    let inventory = field(assessment, "inventory")?;
+    let source_commit = text(field(inventory, "newCommit")?)?;
+    let assessment_digest = text(field(assessment, "assessmentDigest")?)?;
+    let observed_source = match &evidence {
+        Evidence::GitHub(GitHubEvidence::History { pull_request, .. }) => {
+            text(field(field(pull_request, "head")?, "sha")?)?
+        }
+        Evidence::AzureDevOps(AdoEvidence::History { source_commit, .. }) => source_commit,
+        _ => return Err(invalid()),
+    };
+    if !boolean(field(assessment, "complete")?)?
+        || text(field(assessment, "snapshotDigest")?)? != snapshot
+        || text(field(assessment, "policyDigest")?)? != policy_digest
+        || text(field(inventory, "oldCommit")?)? != anchor.source_commit
+        || source_commit != observed_source
+        || digest(text(field(policy, "content")?)?.as_bytes()) != policy_digest
+        || assessment_digest.len() != 64
+        || !assessment_digest
+            .bytes()
+            .all(|byte| byte.is_ascii_hexdigit())
+    {
+        return Err(invalid());
+    }
+    Ok(PreviousNotice {
+        run_id: run_id.to_owned(),
+        operation_run_id: operation_run_id.to_owned(),
+        scope,
+        snapshot: snapshot.to_owned(),
+        assessment_digest: assessment_digest.to_owned(),
+        policy_digest: policy_digest.to_owned(),
+        anchor,
+        source_commit: source_commit.to_owned(),
+        url: url.to_owned(),
+        title: title.to_owned(),
+    })
+}
+
+/// Publishes once after validating the completed assessment and current evidence.
 pub(crate) fn publish(
     api: &mut Api<'_>,
     clock: &dyn Clock,
@@ -1328,64 +1554,54 @@ pub(crate) fn publish(
     if input.attribution.trim().is_empty() {
         return Err(fail("invalidInput", "Publication requires attribution"));
     }
-    let (scope, run_id) = {
-        let journal = FileJournal::open(input.path, clock)?;
-        let run =
-            DiscoveryRecord::load(&journal)?.ok_or_else(|| fail("invalidState", "Missing run"))?;
-        if run.dry_run {
-            return Err(fail(
-                "invalidInput",
-                "Dry runs cannot publish remote effects",
-            ));
-        }
-        (run.publication_scope(input.number), run.run_id)
-    };
-    let mut store = publication::ProviderStore::open(
-        input.repository.platform,
-        input.directory,
-        &scope,
-        clock,
-    )?;
-    let notices =
-        review_notice::Store::open(input.repository.platform, input.directory, &scope, clock)?;
-    notices.ensure_resolved()?;
     let journal = FileJournal::open(input.path, clock)?;
     let mut run =
         DiscoveryRecord::load(&journal)?.ok_or_else(|| fail("invalidState", "Missing run"))?;
+    let scope = run.publication_scope(input.number);
     let operation_run_id = run.operation_run_id(input.number)?.to_owned();
-    if run.run_id != run_id
-        || run.publication_scope(input.number) != scope
-        || run.repository_url != input.repository.web_url
+    if run.repository_url != input.repository.web_url
         || run.tenant.as_deref() != input.tenant
         || run.dry_run
-        || (run.state == RunState::Failed
-            && (run.error_pull_request_id != Some(input.number)
-                || run
-                    .error
-                    .as_ref()
-                    .is_none_or(|error| error.kind != "ambiguousWrite")
-                || !store.has_effect(&operation_run_id)))
+        || run.state == RunState::Failed
     {
         return Err(fail(
             "invalidState",
             "Publication scope changed or this run cannot publish",
         ));
     }
-    if store.may_write(&operation_run_id) {
-        let policy = read_bytes(Path::new(&run.policy.source_path), clock)?
-            .ok_or_else(|| fail("invalidState", "Captured significance policy is missing"))?;
-        if digest(&policy) != run.policy.sha256 {
-            return Err(fail(
-                "invalidState",
-                "Policy changed; publication requires a new assessment",
-            ));
+    if let Some(entry) = run
+        .inventory
+        .iter()
+        .find(|entry| entry.pull_request_id == input.number && entry.publication.is_some())
+    {
+        if entry.assessment_inputs()?.0 != input.snapshot {
+            return Err(fail("invalidState", "Publication snapshot changed"));
         }
+        return run.summary(input.number.get().saturating_sub(1), NonZeroUsize::MIN);
     }
+    let policy = read_bytes(Path::new(&run.policy.source_path), clock)?
+        .ok_or_else(|| fail("invalidState", "Captured significance policy is missing"))?;
+    if digest(&policy) != run.policy.sha256 {
+        return Err(fail(
+            "invalidState",
+            "Policy changed; publication requires a new assessment",
+        ));
+    }
+    let index = run
+        .inventory
+        .iter()
+        .position(|entry| entry.pull_request_id == input.number)
+        .ok_or_else(|| fail("invalidInput", "Unknown publication PR"))?;
+    assessment_budget_step(&mut run, index, clock, &journal, BudgetPhase::Publish)?;
     let entry = run
         .inventory
         .iter_mut()
         .find(|entry| entry.pull_request_id == input.number)
         .ok_or_else(|| fail("invalidInput", "Unknown publication PR"))?;
+    let effect_deadline = entry
+        .assessment_budget
+        .as_ref()
+        .map(AssessmentBudget::effect_deadline);
     let (snapshot, evidence) = entry.assessment_inputs()?;
     let assessment = entry
         .assessment
@@ -1402,13 +1618,14 @@ pub(crate) fn publish(
         ));
     }
     let Some(Decision::AssessmentRequired { anchor, .. }) = entry.decision() else {
-        return Err(fail("invalidState", "No external approval authority"));
+        return Err(fail("invalidState", "No provider approval baseline"));
     };
     let target = input.repository.candidate(input.number);
-    let result = store.publish(
+    let result = publication::publish(
         api,
         &target,
         clock,
+        &scope,
         &publication::Input {
             run_id: &operation_run_id,
             assessment_digest: assessment
@@ -1421,64 +1638,16 @@ pub(crate) fn publish(
             source_commit: &assessment.inventory.new_commit,
             attribution: input.attribution,
             explanation: assessment.explanation()?,
+            effect_deadline,
         },
     );
-    // Reporting is part of publication completion, so its failures need the same durable diagnostic.
-    let result = result.and_then(|receipt| {
-        // A completed invocation reports its persisted observation, not later service standing.
-        // The provider has already checked the original immutable assessment before replaying it.
-        if matches!(receipt.outcome, Outcome::Reapproved | Outcome::AlreadyValid)
-            && entry.publication.as_ref().is_some_and(|saved| {
-                saved.operation_id == receipt.operation_id && saved.outcome == receipt.outcome
-            })
-        {
-            return Ok((receipt, entry.automatic_approval.clone()));
-        }
-        let mut automatic_approval =
-            if matches!(receipt.outcome, Outcome::Reapproved | Outcome::AlreadyValid) {
-                store.automatic_approval(&operation_run_id)?
-            } else {
-                None
-            };
-        if receipt.outcome == Outcome::AlreadyValid && automatic_approval.is_none() {
-            // Another run may have renewed approval after this run's inspection.
-            // Capture its origin rather than misreporting absent metadata as an external review.
-            let fresh = Evidence::capture(api, &target)?;
-            if !matches!(
-                fresh.decide(
-                    run.platform,
-                    &run.account_id,
-                    &run.repository_id,
-                    input.number.get(),
-                    clock.now()
-                )?,
-                Decision::AlreadyValid { .. }
-            ) {
-                return Err(fail(
-                    "staleEvidence",
-                    "Approval standing changed before result reporting",
-                ));
-            }
-            automatic_approval = review_notice::automatic_approval(&fresh, &scope, clock.now())?;
-        }
-        Ok((receipt, automatic_approval))
-    });
     match result {
-        Ok((receipt, automatic_approval)) => {
+        Ok(receipt) => {
             if receipt
                 .error
                 .as_ref()
                 .is_some_and(|error| error.kind == "draft")
             {
-                if store.has_effect(&operation_run_id)
-                    || !store.preflight_only(&operation_run_id)
-                    || notices.has_attempt(&operation_run_id)
-                {
-                    return Err(fail(
-                        "ambiguousWrite",
-                        "Draft exclusion cannot discard a possible remote effect",
-                    ));
-                }
                 return run.remove_draft(input.number, &journal);
             }
             let fatal = receipt
@@ -1494,7 +1663,6 @@ pub(crate) fn publish(
                     kind: error.kind.clone(),
                     message: error.message.clone(),
                 });
-            entry.automatic_approval = automatic_approval;
             entry.publication = Some(receipt);
             run.error = fatal;
             run.error_pull_request_id = run.error.as_ref().map(|_| input.number);
@@ -1505,31 +1673,30 @@ pub(crate) fn publish(
             }
         }
         Err(error) => {
-            let error = if store.has_effect(&operation_run_id) {
-                crate::error::caused_by("ambiguousWrite",
-                    "Publication may have completed; retaining the original intent for reconciliation".to_owned(),
-                    error.into_std_error()).into()
-            } else {
-                error
-            };
+            let kind = classification(&error);
+            if kind == "draft" {
+                return run.remove_draft(input.number, &journal);
+            }
+            if kind == "budgetExceeded"
+                && let Some(budget) = entry.assessment_budget.as_mut()
+            {
+                budget.before_publication(clock.now().as_millisecond());
+            }
             let diagnostic = Diagnostic::from_error(&error);
-            if matches!(
-                diagnostic.kind.as_str(),
-                "authentication" | "permissionDenied" | "ambiguousWrite" | "scopeChanged"
-            ) {
+            if kind == "staleEvidence" {
+                entry.execution_error = Some(diagnostic);
+                finish_state(&mut run);
+            } else {
                 run.state = RunState::Failed;
                 run.error = Some(diagnostic);
                 run.error_pull_request_id = Some(input.number);
-            } else {
-                entry.execution_error = Some(diagnostic);
-                finish_state(&mut run);
             }
             run.save(&journal)?;
             return Err(error);
         }
     }
     run.save(&journal)?;
-    Ok(run.summary(input.number.get().saturating_sub(1), NonZeroUsize::MIN))
+    run.summary(input.number.get().saturating_sub(1), NonZeroUsize::MIN)
 }
 
 /// Publishes a completed nonqualifying judgment under the host-before-run lock order.
@@ -1544,6 +1711,60 @@ pub(crate) fn notify(
             "Needs-review publication requires attribution",
         ));
     }
+    let previous = {
+        let journal = FileJournal::open(input.path, clock)?;
+        let bytes = journal
+            .read_bytes()?
+            .ok_or_else(|| fail("invalidState", "Missing run"))?;
+        let document: Value = serde_json::from_slice(&bytes)?;
+        if document.get("schemaVersion") == Some(&json!(14)) {
+            Some((previous_notice(&document, input)?, bytes))
+        } else {
+            None
+        }
+    };
+    if let Some((previous, original)) = previous {
+        let mut notices = review_notice::Store::open(
+            input.repository.platform,
+            input.directory,
+            &previous.scope,
+            clock,
+        )?;
+        // Host-before-run locking preserves the same attempt while provider reads run.
+        let journal = FileJournal::open(input.path, clock)?;
+        if journal.read_bytes()?.as_deref() != Some(original.as_slice()) {
+            return Err(fail("invalidState", "Previous run changed during recovery"));
+        }
+        let notice = notices.recover_previous(
+            api,
+            &input.repository.candidate(input.number),
+            clock,
+            &review_notice::PreviousAttempt {
+                run_id: &previous.operation_run_id,
+                assessment_digest: &previous.assessment_digest,
+                policy_digest: &previous.policy_digest,
+                anchor: &previous.anchor,
+                source_commit: &previous.source_commit,
+            },
+        )?;
+        return Ok(json!({
+            "schemaVersion": 14,
+            "runId": previous.run_id,
+            "repositoryUrl": input.repository.web_url,
+            "state": "reconciled",
+            "recoveryOnly": true,
+            "items": [{
+                "pullRequestId": input.number,
+                "url": previous.url,
+                "title": previous.title,
+                "status": "needsReview",
+                "snapshotDigest": previous.snapshot,
+                "assessmentDigest": previous.assessment_digest,
+                "reviewNotice": notice
+            }],
+            "nextAfter": null
+        }));
+    }
     let (scope, run_id) = {
         let journal = FileJournal::open(input.path, clock)?;
         let run =
@@ -1556,14 +1777,6 @@ pub(crate) fn notify(
         }
         (run.publication_scope(input.number), run.run_id)
     };
-    // Sharing this lock with approval publication prevents opposing writes from overlapping.
-    let publication = publication::ProviderStore::open(
-        input.repository.platform,
-        input.directory,
-        &scope,
-        clock,
-    )?;
-    publication.ensure_resolved()?;
     let mut notices =
         review_notice::Store::open(input.repository.platform, input.directory, &scope, clock)?;
     let journal = FileJournal::open(input.path, clock)?;
@@ -1595,12 +1808,22 @@ pub(crate) fn notify(
                 "Policy changed; notice publication requires a new assessment",
             ));
         }
+        let index = run
+            .inventory
+            .iter()
+            .position(|entry| entry.pull_request_id == input.number)
+            .ok_or_else(|| fail("invalidInput", "Unknown needs-review PR"))?;
+        assessment_budget_step(&mut run, index, clock, &journal, BudgetPhase::Publish)?;
     }
     let entry = run
         .inventory
         .iter_mut()
         .find(|entry| entry.pull_request_id == input.number)
         .ok_or_else(|| fail("invalidInput", "Unknown needs-review PR"))?;
+    let effect_deadline = entry
+        .assessment_budget
+        .as_ref()
+        .map(AssessmentBudget::effect_deadline);
     let (snapshot, evidence) = entry.assessment_inputs()?;
     let assessment = entry
         .assessment
@@ -1619,7 +1842,10 @@ pub(crate) fn notify(
         ));
     }
     let Some(Decision::AssessmentRequired { anchor, .. }) = entry.decision() else {
-        return Err(fail("invalidState", "Missing original approval authority"));
+        return Err(fail(
+            "invalidState",
+            "Missing provider-selected approval baseline",
+        ));
     };
     let result = notices.publish(
         api,
@@ -1639,6 +1865,7 @@ pub(crate) fn notify(
             explanation: assessment
                 .rationale()
                 .ok_or_else(|| fail("invalidState", "Missing significance rationale"))?,
+            effect_deadline,
         },
     );
     match result {
@@ -1652,10 +1879,13 @@ pub(crate) fn notify(
             finish_state(&mut run);
         }
         Err(error) => {
+            if classification(&error) == "budgetExceeded"
+                && let Some(budget) = entry.assessment_budget.as_mut()
+            {
+                budget.before_publication(clock.now().as_millisecond());
+            }
             if classification(&error) == "draft" {
-                if notices.has_attempt(&operation_run_id)
-                    || publication.has_effect(&operation_run_id)
-                {
+                if notices.has_attempt(&operation_run_id) {
                     return Err(fail(
                         "ambiguousWrite",
                         "Draft exclusion cannot discard a possible remote effect",
@@ -1698,7 +1928,7 @@ pub(crate) fn notify(
         }
     }
     run.save(&journal)?;
-    Ok(run.summary(input.number.get().saturating_sub(1), NonZeroUsize::MIN))
+    run.summary(input.number.get().saturating_sub(1), NonZeroUsize::MIN)
 }
 
 /// Reads and updates one immutable-snapshot assessment without provider writes.
@@ -1724,11 +1954,15 @@ pub(crate) fn work(
             "Significance policy changed; start a fresh run",
         ));
     }
+    let index = run
+        .inventory
+        .iter()
+        .position(|entry| entry.pull_request_id == number)
+        .ok_or_else(|| fail("invalidInput", "Unknown assessment PR"))?;
     let entry = run
         .inventory
-        .iter_mut()
-        .find(|entry| entry.pull_request_id == number)
-        .ok_or_else(|| fail("invalidInput", "Unknown assessment PR"))?;
+        .get(index)
+        .ok_or_else(|| fail("invalidState", "Missing assessment PR"))?;
     let (expected, evidence) = entry.assessment_inputs()?;
     if expected != snapshot
         || entry.execution_error.is_some()
@@ -1741,6 +1975,38 @@ pub(crate) fn work(
         ));
     }
     let discussion = discussion::render(evidence)?;
+    if matches!(action, WorkAction::Prepare)
+        && entry.assessment.is_none()
+        && !run.assessment_budget_enabled
+    {
+        return Err(fail(
+            "invalidState",
+            "This run has no assessment budget; start a fresh bounded assessment",
+        ));
+    }
+    assessment_budget_step(&mut run, index, clock, &journal, BudgetPhase::BeginWork)?;
+    if matches!(action, WorkAction::StartWorker) {
+        let budget = run
+            .inventory
+            .get_mut(index)
+            .and_then(|entry| entry.assessment_budget.as_mut())
+            .ok_or_else(|| fail("invalidState", "Worker reservation requires a bounded run"))?;
+        if budget.reserve_worker() != BudgetStatus::Available {
+            finish_state(&mut run);
+            run.save(&journal)?;
+            return Err(fail(
+                "budgetExceeded",
+                "Assessment worker limit exhausted; retain incomplete work without approval or notice",
+            ));
+        }
+        assessment_budget_step(&mut run, index, clock, &journal, BudgetPhase::FinishWork)?;
+        run.save(&journal)?;
+        return run.summary(number.get().saturating_sub(1), NonZeroUsize::MIN);
+    }
+    let entry = run
+        .inventory
+        .get_mut(index)
+        .ok_or_else(|| fail("invalidState", "Missing assessment PR"))?;
     if matches!(action, WorkAction::Prepare) && entry.assessment.is_none() {
         let (old, new) = entry.source_endpoints()?;
         match objects::prepare(
@@ -1751,7 +2017,7 @@ pub(crate) fn work(
             run.tenant.as_deref(),
         ) {
             Ok((inventory, patches)) => {
-                entry.assessment = Some(Assessment::new(
+                entry.assessment = Some(Assessment::new_direct(
                     inventory,
                     &patches,
                     snapshot,
@@ -1761,9 +2027,10 @@ pub(crate) fn work(
             }
             Err(error) => {
                 entry.execution_error = Some(Diagnostic::from_error(&error));
+                assessment_budget_step(&mut run, index, clock, &journal, BudgetPhase::FinishWork)?;
                 finish_state(&mut run);
                 run.save(&journal)?;
-                return Ok(run.summary(number.get().saturating_sub(1), NonZeroUsize::MIN));
+                return run.summary(number.get().saturating_sub(1), NonZeroUsize::MIN);
             }
         }
     }
@@ -1771,8 +2038,18 @@ pub(crate) fn work(
         .assessment
         .as_mut()
         .ok_or_else(|| fail("invalidState", "Prepare the source inventory first"))?;
+    let read_batch = matches!(action, WorkAction::ReadBatch { .. });
+    let evidence_read = read_batch
+        || matches!(
+            action,
+            WorkAction::Read { .. } | WorkAction::SourceContext { .. }
+        );
+    let judgment_batch = matches!(action, WorkAction::JudgeBatch { .. });
     let result = match action {
         WorkAction::Prepare => assessment.summary(0, 10, &run.policy.content, &discussion)?,
+        WorkAction::StartWorker => {
+            return Err(fail("invalidState", "Worker reservation was not handled"));
+        }
         WorkAction::View { after, limit } => assessment.summary(
             after,
             limit.get().min(100),
@@ -1813,7 +2090,10 @@ pub(crate) fn work(
             )?;
             json!({"snapshotDigest":snapshot, "recorded":id, "resolutionDigest":digest})
         }
-        WorkAction::Checkpoint => assessment.checkpoint()?,
+        WorkAction::Checkpoint => {
+            assessment.checkpoint()?;
+            assessment.progress_with_evidence(&run.policy.content, &discussion)?
+        }
         WorkAction::Read {
             reference,
             offset,
@@ -1825,6 +2105,12 @@ pub(crate) fn work(
             &run.policy.content,
             &discussion,
         )?,
+        WorkAction::ReadBatch { request } => {
+            assessment.read_batch(request, &run.policy.content, &discussion)?
+        }
+        WorkAction::JudgeBatch { request } => {
+            assessment.record_batch(request, &run.policy.content, &discussion)?
+        }
         WorkAction::SourceContext { request, limit } => {
             match assessment.source_context(request, limit.get(), &run.policy.content, &discussion)
             {
@@ -1871,6 +2157,15 @@ pub(crate) fn work(
                 "assessmentDigest": assessment.digest, "error": entry.execution_error})
         }
     };
+    if let Some(budget) = entry.assessment_budget.as_mut() {
+        if evidence_read {
+            budget.record_evidence(&result, read_batch)?;
+        }
+        if judgment_batch {
+            budget.record_judgment_batch();
+        }
+    }
+    assessment_budget_step(&mut run, index, clock, &journal, BudgetPhase::FinishWork)?;
     finish_state(&mut run);
     run.save(&journal)?;
     Ok(result)
@@ -1906,10 +2201,10 @@ fn metadata(api: &mut Api<'_>, repository: &Target) -> Result<Vec<Entry>, AppErr
             recency: Recency::pending(),
             inspection: None,
             assessment: None,
+            assessment_budget: None,
             execution_error: None,
             publication: None,
             review_notice: None,
-            automatic_approval: None,
             recovery: Recovery::default(),
         });
     }
@@ -1923,4 +2218,117 @@ fn digest(bytes: &[u8]) -> String {
 
 fn utc(value: Timestamp) -> String {
     format!("{value:.9}")
+}
+
+#[cfg(test)]
+mod tests {
+    #![allow(
+        clippy::indexing_slicing,
+        reason = "Tests mutate bounded synthetic records"
+    )]
+
+    use std::num::NonZeroU32;
+    use std::path::Path;
+
+    use serde_json::{Value, json};
+
+    use super::{PublishInput, digest, previous_notice};
+    use crate::target::Target;
+
+    /// Builds only the previous-format fields used to bind notice recovery.
+    fn previous_run(target: &Target) -> Value {
+        let old = "a".repeat(40);
+        let new = "b".repeat(40);
+        let evidence = if target.platform == crate::target::Platform::GitHub {
+            json!({"platform": "gitHub", "observation": {
+                "scope": "history", "pullRequest": {"number": 1, "base": {"repo": {"id": 123}},
+                    "head": {"sha": new}},
+                "policy": {"requireLastPushApproval": false},
+                "reviews": [], "timeline": [], "comments": [], "reviewComments": []
+            }})
+        } else {
+            json!({"platform": "azureDevOps", "observation": {
+                "scope": "history", "pullRequest": {"pullRequestId": 1, "repository": {"id": "123"}},
+                "sourceCommit": new, "reviewers": [], "iterations": [], "threads": [],
+                "policies": [], "evaluations": []
+            }})
+        };
+        let captured = "2026-01-01T00:00:00Z";
+        let snapshot = digest(
+            &serde_json::to_vec(&json!({"capturedAt": captured, "evidence": evidence})).unwrap(),
+        );
+        let policy = "Synthetic policy";
+        let policy_digest = digest(policy.as_bytes());
+        json!({
+            "schemaVersion": 14, "runId": "70759fa1-3f53-4f78-81e3-49d5ab9be1d4",
+            "repositoryUrl": target.web_url, "repositoryId": "123", "platform": target.platform,
+            "accountId": "42", "tenant": null, "dryRun": false,
+            "policy": {"sha256": policy_digest, "content": policy},
+            "inventory": [{
+                "pullRequestId": 1, "url": target.candidate(NonZeroU32::MIN).web_url,
+                "title": "Synthetic PR", "draft": false,
+                "recovery": {"attemptIds": [], "stale": null, "error": null},
+                "inspection": {"capturedAt": captured, "snapshotDigest": snapshot, "evidence": evidence,
+                    "decision": {"status": "assessmentRequired", "anchor": {
+                        "reviewId": "event", "sourceCommit": old}}},
+                "assessment": {"complete": true, "assessmentDigest": "c".repeat(64),
+                    "policyDigest": policy_digest, "snapshotDigest": snapshot,
+                    "inventory": {"oldCommit": old, "newCommit": new}}
+            }]
+        })
+    }
+
+    #[test]
+    fn previous_notice_binds_both_provider_snapshots_without_reading_judgments() {
+        for url in [
+            "https://github.com/example/widgets",
+            "https://dev.azure.com/org/project/_git/repo",
+        ] {
+            let target = Target::repository(url).unwrap();
+            let run = previous_run(&target);
+            let snapshot = run["inventory"][0]["inspection"]["snapshotDigest"]
+                .as_str()
+                .unwrap();
+            let input = PublishInput {
+                path: Path::new("unused"),
+                number: NonZeroU32::MIN,
+                snapshot,
+                repository: &target,
+                attribution: "Attribution",
+                directory: Path::new("unused"),
+                tenant: None,
+            };
+            let previous = previous_notice(&run, &input).unwrap();
+            assert_eq!(previous.scope.repository_id, "123");
+            assert_eq!(previous.operation_run_id, previous.run_id);
+            assert_eq!(previous.snapshot, snapshot);
+
+            for (path, replacement) in [
+                ("/schemaVersion", json!(15)),
+                ("/dryRun", json!(true)),
+                ("/repositoryId", json!("other")),
+                ("/tenant", json!(12)),
+                ("/policy/content", json!("different policy")),
+                (
+                    "/inventory/0/inspection/evidence/observation/scope",
+                    json!("state"),
+                ),
+                ("/inventory/0/assessment/complete", json!(false)),
+                ("/inventory/0/assessment/snapshotDigest", json!("different")),
+                (
+                    "/inventory/0/assessment/inventory/oldCommit",
+                    json!("different"),
+                ),
+                (
+                    "/inventory/0/assessment/inventory/newCommit",
+                    json!("different"),
+                ),
+                ("/inventory/0/assessment/assessmentDigest", json!("bad")),
+            ] {
+                let mut changed = run.clone();
+                *changed.pointer_mut(path).unwrap() = replacement;
+                assert!(previous_notice(&changed, &input).is_err(), "{path}");
+            }
+        }
+    }
 }
