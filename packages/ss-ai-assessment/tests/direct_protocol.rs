@@ -495,8 +495,8 @@ fn planned_discussion_pages_are_bounded_and_independently_readable() {
         }
     }
     assert!(plans.len() > 2);
-    // One plan plus its windows must require fewer reads than one call per record.
-    assert!(plans.len() + 1 < 60);
+    // The response limit permits several small escaped records per window.
+    assert!(plans.len() <= 12);
     let mut manifest_offset = 0;
     let mut unit_count = 0;
     loop {

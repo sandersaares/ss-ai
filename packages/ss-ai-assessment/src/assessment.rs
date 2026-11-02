@@ -16,6 +16,9 @@ use crate::{Content, ContextRequest, Inventory, Side};
 const RESPONSE_BYTES: usize = 16_384;
 /// Bound the initial text candidate before accounting for its serialized metadata.
 const TEXT_BYTES: usize = 12_288;
+/// Covers worst-case growth of progress counters and digest-based references
+/// while independent windows finish in a different order.
+const PLAN_PROGRESS_RESERVE: usize = 1_024;
 /// Two handoffs permit three workers, including the initial worker.
 pub(crate) const DIRECT_HANDOFF_LIMIT: usize = 2;
 
@@ -190,8 +193,7 @@ impl Assessment {
         let token = self.read_token()?;
         let mut batches = Vec::new();
         let mut start = after;
-        let mut size = 0_usize;
-        let mut count = 0_usize;
+        let mut items = Vec::new();
         let mut next = None;
         for (index, unit) in units.iter().enumerate().skip(after) {
             let request = BatchReadRequest {
@@ -203,25 +205,35 @@ impl Assessment {
                     content_digest: None,
                 }],
             };
-            let response = staged.read_batch(request, policy, discussion)?;
-            let bytes = response_size(&response)?;
-            // Each individual envelope overestimates its contribution to a combined
-            // response, leaving room for progress changes between independent reads.
-            if count > 0 && size.saturating_add(bytes) > RESPONSE_BYTES {
-                batches.push(json!({"after": start, "count": count}));
+            let mut response = staged.read_batch(request, policy, discussion)?;
+            let item = response
+                .get("items")
+                .and_then(Value::as_array)
+                .and_then(|items| items.first())
+                .cloned()
+                .ok_or_else(error::InvalidAssessmentBinding::classified)?;
+            let mut candidate = items.clone();
+            candidate.push(item.clone());
+            *response
+                .get_mut("items")
+                .ok_or_else(error::InvalidAssessmentBinding::classified)? = json!(candidate);
+            // Progress can change as independent windows finish, but the
+            // repeated snapshot and token fields have a fixed size.
+            if !items.is_empty()
+                && response_size(&response)? > RESPONSE_BYTES.saturating_sub(PLAN_PROGRESS_RESERVE)
+            {
+                batches.push(json!({"after": start, "count": items.len()}));
                 if batches.len() == limit {
                     next = Some(index);
                     break;
                 }
                 start = index;
-                size = 0;
-                count = 0;
+                items.clear();
             }
-            size = size.saturating_add(bytes);
-            count = count.saturating_add(1);
+            items.push(item);
         }
-        if next.is_none() && count > 0 {
-            batches.push(json!({"after": start, "count": count}));
+        if next.is_none() && !items.is_empty() {
+            batches.push(json!({"after": start, "count": items.len()}));
         }
         let result = json!({
             "snapshotDigest": self.snapshot_digest,

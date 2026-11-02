@@ -47,6 +47,7 @@ ss-ai autoreapprove inspect --repository-url "{{REPOSITORY}}" --state-path "{{RU
 Omit `--dry-run` only for an authorized publishing invocation. Omit `--tenant`
 when not supplied. The mode and policy are immutable for this run. Read
 `items`, `counts`, `state`, `error`, and `nextAfter`; follow all results pages.
+Omit `--after` for the first page; later cursors are positive PR IDs.
 Inspect only recent nondraft entries requiring assessment. Retain each
 inspection's `snapshotDigest`. Scope failures stop the run; independent PR
 failures remain visible while other eligible PRs can proceed.
@@ -69,7 +70,7 @@ ss-ai autoreapprove read-batch --state-path "{{RUN}}" --pull-request-id "{{PR}}"
 ss-ai autoreapprove unit-read-plan --state-path "{{RUN}}" --pull-request-id "{{PR}}" --snapshot-digest "{{SNAPSHOT}}" --reference discussion --after "{{AFTER_UNIT}}" --limit 100
 ss-ai autoreapprove read-units --state-path "{{RUN}}" --pull-request-id "{{PR}}" --snapshot-digest "{{SNAPSHOT}}" --reference discussion --after "{{AFTER_UNIT}}" --count "{{UNIT_COUNT}}" --read-token "{{READ_TOKEN}}"
 ss-ai autoreapprove read --state-path "{{RUN}}" --pull-request-id "{{PR}}" --snapshot-digest "{{SNAPSHOT}}" --reference "{{REFERENCE}}" --offset "{{OFFSET}}"
-ss-ai autoreapprove source-context --state-path "{{RUN}}" --pull-request-id "{{PR}}" --snapshot-digest "{{SNAPSHOT}}" --change-id "{{SOURCE_CHANGE}}" --side "{{SIDE}}" --start-line "{{START_LINE}}" --line-count "{{LINE_COUNT}}"
+ss-ai autoreapprove source-context --state-path "{{RUN}}" --pull-request-id "{{PR}}" --snapshot-digest "{{SNAPSHOT}}" --change-id "{{SOURCE_CHANGE}}" --side "{{SIDE}}" --start-line "{{START_LINE}}" --line-count "{{LINE_COUNT}}" --limit 16384
 ```
 
 Preparation returns the selected context and the first bounded metadata page.

@@ -69,11 +69,11 @@ without repeating range metadata. Units have independent receipts, so workers
 can request their pages in parallel while the journal serializes updates. Complete
 document coverage still requires each unit and its bindings.
 
-The unit read plan groups independently addressable windows using the serialized
-size of each individual evidence response, including escaping and bindings.
-Summing individual response sizes reserves their repeated envelopes, so progress
-changes can fit without requiring a manifest request before every window. Planning
-simulates delivery on a private copy and never records receipts.
+The unit read plan groups independently addressable windows using serialized
+evidence responses, including escaping and bindings. It reserves space for
+progress changes so windows can finish in any order without requiring a manifest
+request before every window. Planning simulates delivery on a private copy and
+never records receipts.
 
 `checkpoint.rs` owns discussion observations, explicit concern and interaction
 records, evidence-backed dispositions, and dependency digests. The direct protocol

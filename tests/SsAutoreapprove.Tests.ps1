@@ -56,6 +56,18 @@ Describe 'Automatic reapproval repository scope instructions' {
         $assignment | Should -Match 'Do not return source text,\s+discussion transcripts'
     }
 
+    It 'provides a bounded worker-only command guide with complete context pages' {
+        $assignment = Get-Content -LiteralPath (Join-Path $skill 'assessment.md') -Raw
+        $workerPath = Join-Path $skill 'assessment-commands.md'
+        $worker = Get-Content -LiteralPath $workerPath -Raw
+        $assignment | Should -Match 'assessment-commands\.md'
+        ([Text.Encoding]::UTF8.GetByteCount($worker)) | Should -BeLessThan 16384
+        $worker | Should -Match 'source-context[^\r\n]*--limit 16384'
+        $script:Recipes | Should -Match 'source-context[^\r\n]*--limit 16384'
+        $worker | Should -Not -Match 'autoreapprove (discover|inspect|publish|notify)'
+        $script:Recipes | Should -Match 'Omit `--after` for the first page'
+    }
+
     It 'reserves workers across recovery without overlapping or resetting budgets' {
         $script:Prompt | Should -Match 'Reserve a worker with `start-worker`\s+before dispatch'
         $script:Prompt | Should -Match 'at most three workers\s+for one PR across planned handoffs, recovery, and stale snapshots'
@@ -94,9 +106,9 @@ Describe 'Automatic reapproval repository scope instructions' {
         $assignment | Should -Match 'Record checks for concrete unresolved concerns or interactions'
         $assignment | Should -Match 'independently addressable\s+unit references'
         $assignment | Should -Match 'unit-read-plan --reference discussion'
-        $assignment | Should -Match 'Do not fetch the unit\s+manifest again for each window'
+        $assignment | Should -Match 'Do not fetch the unit manifest again for each\s+window'
         $script:Recipes | Should -Match 'including escaped text and metadata'
-        $assignment | Should -Match 'Issue independent batches together'
+        $assignment | Should -Match 'Issue independent batches together\s+as separate calls in one model turn'
         $assignment | Should -Match 'Retain the returned change IDs and their evidence references'
         $assignment | Should -Match 'Follow the returned `nextOffset` rather than advancing by a fixed page size'
         $assignment | Should -Match 'Leave time within the assessment budget for this reasoning and completion'
