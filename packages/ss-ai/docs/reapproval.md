@@ -91,7 +91,8 @@ The orchestrator prepares the comparison and reserves a GPT 6.1 Sol assessment
 worker per eligible PR with explicit medium reasoning and regular context.
 The worker owns bounded evidence reads, judgments, and completion. It returns
 scalar results and a concise reason, not source or discussion text, and cannot
-publish.
+publish. A host-required skill invocation routes an assigned worker directly
+to its assessment rather than starting another orchestrator.
 
 Evidence and metadata responses have a serialized UTF-8 byte budget, including
 JSON escaping and pretty formatting, so a character-count bound cannot hide

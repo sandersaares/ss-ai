@@ -51,9 +51,28 @@ Describe 'Automatic reapproval repository scope instructions' {
         $script:Prompt | Should -Match 'Never assess source changes in the\s+orchestrator or silently substitute another model'
         $script:Prompt | Should -Match 'verify its completion and digest using native `results`'
         $assignment = Get-Content -LiteralPath (Join-Path $skill 'assessment.md') -Raw
-        $assignment | Should -Match 'Do not invoke skills, delegate, publish'
+        $assignment | Should -Match 'Do not invoke skills on your own, delegate, publish'
         $assignment | Should -Match 'following `nextOffset` as needed'
         $assignment | Should -Match 'Do not return\s+source text, discussion transcripts'
+    }
+
+    It 'routes a reserved assessment worker before the orchestrator workflow' {
+        $entry = $script:Prompt.Substring(0, $script:Prompt.IndexOf('# Scope and authority'))
+        $entry | Should -Match 'ss-autoreapprove-assessment-worker'
+        $entry | Should -Match 'reserved run path, PR ID,\s+snapshot digest, and skill root'
+        $entry | Should -Match 'follow \[the assessment assignment\]\(assessment\.md\)\s+directly'
+        $entry | Should -Match 'Do not execute the orchestrator stages below'
+        $entry | Should -Match 'marker and reservation must come from the worker assignment'
+        $entry | Should -Match 'stop and report the incomplete\s+assignment'
+        $script:Prompt | Should -Match 'Identify the worker in its assignment as `ss-autoreapprove-assessment-worker`'
+        $script:Prompt | Should -Match 'state that its native reservation succeeded'
+        $assignment = Get-Content -LiteralPath (Join-Path $skill 'assessment.md') -Raw
+        $assignment | Should -Match 'Follow any host-required skill invocation using the assessment worker entry'
+    }
+
+    It 'reports the request target without making it a work limit' {
+        $script:Prompt | Should -Match '40 serial model requests as a performance target, not a\s+stop condition'
+        $script:Prompt | Should -Match 'Report the count and any target breach'
     }
 
     It 'provides a bounded worker-only command guide with complete context pages' {
