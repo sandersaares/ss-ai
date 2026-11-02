@@ -50,7 +50,9 @@ request has the shape
 Use distinct references. A mutable-record continuation also supplies its
 previous `contentDigest`. A plan returns independent unit windows and a read
 token; `read-units` returns their text and bindings. Read missing bindings and
-continue partial units. Do not combine separately bounded tool outputs.
+continue partial units. The unit ID is part of its `reference`. Batch reads omit
+progress; obtain it from `assessment` when needed. Do not combine separately
+bounded tool outputs.
 
 For several known context ranges, the batch registration request is an array
 such as `[{"changeId":"CHANGE","side":"new","startLine":1,"lineCount":20}]`.

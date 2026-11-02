@@ -122,9 +122,10 @@ the requested batch and replay the same offsets before continuing.
 
 A batch request has the shape
 `{"readToken":"TOKEN","items":[{"reference":"policy","offset":0,"limit":1024},{"reference":"discussion","offset":0,"limit":1024}]}`.
-Use distinct references and positive limits. The response has `items`, a new
-`stateToken`, the `readToken`, and `progress`. Each item carries its own
-`nextOffset` and `contentDigest`. Multiple batches may use the same read token
+Use distinct references and positive limits. The response has `items`, a
+`stateToken`, and the `readToken`. Obtain progress from `assessment` when needed.
+Each item carries its own `nextOffset` and `contentDigest`. Multiple batches
+may use the same read token
 for independent references without waiting for receipt updates. A continuation
 of a mutable semantic record must also supply the preceding `contentDigest`;
 ordinary `read` accepts only its first page, so use `read-batch` for further

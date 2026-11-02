@@ -334,7 +334,8 @@ New assessments use `assessmentProtocol: directV1` and expose `readToken` and
 `stateToken`. `read-batch --batch-json` accepts a JSON object with `readToken` and distinct
 `items`, each containing `reference`, scalar `offset`, and positive character
 `limit`. Its bounded response contains independently paged items, the shared
-snapshot digest, both tokens, and progress. Concurrent independent reads can reuse the same read token;
+snapshot digest, and both tokens. Obtain progress from `assessment` when needed.
+Concurrent independent reads can reuse the same read token;
 mutable-record continuations require their prior `contentDigest`. Registering
 context changes the read token. Delivery receipts do not change the semantic
 state token; judgment submission checks current delivery coverage. Ordinary `read` accepts only the first page of
@@ -410,7 +411,7 @@ without recording evidence delivery. `read-units` accepts the same reference,
 one window's `--after` and `--count`, and the plan's `--read-token`; it returns
 the same bounded evidence pages and receipts as `read-batch`. Windows may be
 read in any order. Continue partial unit text and missing binding metadata with
-their returned references.
+their returned references. The unit ID is part of each unit page's `reference`.
 
 `note` takes `--unit-id`, `--observations`, `--interfaces`, repeated `--evidence`,
 optional repeated `--concern` and `--interaction`, and optional

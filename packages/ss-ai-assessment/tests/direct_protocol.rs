@@ -207,7 +207,9 @@ fn many_small_pages_keep_required_document_progress_exact() {
                 &discussion,
             )
             .unwrap();
-        let progress = &response["progress"];
+        let progress = assessment
+            .progress_with_evidence("policy", &discussion)
+            .unwrap();
         assert_eq!(progress["requiredDocumentCount"], 27);
         if response["items"][0]["complete"] == true {
             assert_eq!(progress["deliveredRequiredDocumentCount"], 2);
@@ -404,7 +406,12 @@ fn context_batch_registers_ranges_atomically_without_claiming_delivery() {
         )
         .unwrap();
     assert_eq!(response["items"].as_array().unwrap().len(), 10);
-    assert_eq!(response["progress"]["deliveredRequiredDocumentCount"], 10);
+    assert_eq!(
+        assessment
+            .progress_with_evidence("policy", "discussion")
+            .unwrap()["deliveredRequiredDocumentCount"],
+        10
+    );
     assert!(
         response["items"]
             .as_array()
@@ -541,15 +548,18 @@ fn compact_units_allow_independent_discussion_delivery() {
 fn planned_discussion_pages_are_bounded_and_independently_readable() {
     let discussion = json!({
         "platform": "gitHub",
-        "reviewComments": (0..60).map(|id| json!({
+        // The retained incident contains this many discussion fragments; the
+        // synthetic records keep the same scale without copying its contents.
+        "reviewComments": (0..149).map(|id| json!({
             "id": id + 1,
             "body": format!("{id} {}", "\\\"\nλ".repeat(90)),
             "path": format!("file{id}"),
         })).collect::<Vec<_>>(),
     })
     .to_string();
-    let mut assessment = fixture(&discussion, 0);
+    let mut assessment = fixture(&discussion, 1);
     let original_state = assessment.state_token().unwrap();
+    let original_reads = serde_json::to_value(&assessment).unwrap()["reads"].clone();
     let mut plans = Vec::new();
     let mut after = 0;
     loop {
@@ -557,6 +567,11 @@ fn planned_discussion_pages_are_bounded_and_independently_readable() {
             .unit_read_plan("discussion", after, 2, "policy", &discussion)
             .unwrap();
         assert_eq!(assessment.state_token().unwrap(), original_state);
+        assert_eq!(
+            serde_json::to_value(&assessment).unwrap()["reads"],
+            original_reads
+        );
+        assert!(plan["items"].as_array().unwrap().len() <= 2);
         plans.extend(plan["items"].as_array().unwrap().iter().cloned());
         match plan["nextOffset"].as_u64() {
             Some(next) => after = usize::try_from(next).unwrap(),
@@ -565,7 +580,7 @@ fn planned_discussion_pages_are_bounded_and_independently_readable() {
     }
     assert!(plans.len() > 2);
     // The response limit permits several small escaped records per window.
-    assert!(plans.len() <= 12);
+    assert!(plans.len() <= 30);
     let mut manifest_offset = 0;
     let mut unit_count = 0;
     loop {
@@ -586,6 +601,19 @@ fn planned_discussion_pages_are_bounded_and_independently_readable() {
         unit_count
     );
     let token = assessment.read_token().unwrap();
+    let change = assessment.inventory.changes[0].id.clone();
+    read(&mut assessment, "policy", "policy", &discussion);
+    read(
+        &mut assessment,
+        &format!("{change}:patch"),
+        "policy",
+        &discussion,
+    );
+    assessment
+        .record(&change, judgment(&change), None, "policy", &discussion)
+        .unwrap();
+    assert_ne!(assessment.state_token().unwrap(), original_state);
+    assert_eq!(assessment.read_token().unwrap(), token);
     // Independent planned windows must work in reverse order as well as forward order.
     for window in plans.iter().rev() {
         let page = assessment
@@ -599,8 +627,13 @@ fn planned_discussion_pages_are_bounded_and_independently_readable() {
             )
             .unwrap();
         assert!(serde_json::to_vec_pretty(&page).unwrap().len() < 16_384);
+        assert!(page.get("progress").is_none());
+        assert_eq!(page["readToken"], token);
         for item in page["items"].as_array().unwrap() {
             assert_eq!(item["complete"], true);
+            assert!(item["reference"].as_str().unwrap().starts_with("unit:"));
+            assert!(item["unit"].get("id").is_none());
+            assert!(item["unit"]["bindingReference"].is_string());
             if item["unit"]["bindings"].is_null() {
                 read(
                     &mut assessment,
@@ -1010,6 +1043,17 @@ fn batch_envelope_can_fall_back_to_binding_continuation() {
     assert!(baseline < 16_380);
     serialized["checkpoints"]["units"][0]["bindings"] =
         json!([{"label": "a".repeat(15_000 + 16_380 - baseline)}]);
+    let mut planned: Assessment = serde_json::from_value(serialized.clone()).unwrap();
+    let token = planned.read_token().unwrap();
+    let original_state = planned.state_token().unwrap();
+    let plan = planned
+        .unit_read_plan("discussion", 0, 100, "policy", "x")
+        .unwrap();
+    assert_eq!(planned.state_token().unwrap(), original_state);
+    assert_eq!(plan["items"], json!([{"after": 0, "count": 1}]));
+    let planned_response = planned
+        .read_units("discussion", 0, 1, token, "policy", "x")
+        .unwrap();
     let mut assessment: Assessment = serde_json::from_value(serialized).unwrap();
     let response = assessment
         .read_batch(
@@ -1018,6 +1062,7 @@ fn batch_envelope_can_fall_back_to_binding_continuation() {
             "x",
         )
         .unwrap();
+    assert_eq!(planned_response, response);
     assert!(response["items"][0]["unit"].get("bindings").is_none());
     assert_eq!(response["items"][0]["unit"]["bindingReference"], binding);
     assert!(serde_json::to_vec_pretty(&response).unwrap().len() < 16_384);

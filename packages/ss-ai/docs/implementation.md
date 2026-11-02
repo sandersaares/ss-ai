@@ -70,10 +70,11 @@ can request their pages in parallel while the journal serializes updates. Comple
 document coverage still requires each unit and its bindings.
 
 The unit read plan groups independently addressable windows using serialized
-evidence responses, including escaping and bindings. It reserves space for
-progress changes so windows can finish in any order without requiring a manifest
-request before every window. Planning simulates delivery on a private copy and
-never records receipts.
+evidence responses, including escaping and bindings. Fixed-size token fields
+allow windows to finish in any order without requiring a manifest request before
+every window. Planning simulates delivery on a private copy and never records
+receipts. It reuses that copy across units rather than copying the full source
+capture for each planned page.
 
 `checkpoint.rs` owns discussion observations, explicit concern and interaction
 records, evidence-backed dispositions, and dependency digests. The direct protocol
@@ -84,7 +85,8 @@ fresh run and assessment; existing files are left untouched.
 Source-context batches register known ranges in one transaction, without
 recording unread text as delivered. Batch read responses put their common
 snapshot and read token in the shared envelope rather than repeating them for
-each evidence page.
+each evidence page. They omit repeated progress and unit IDs already carried by
+page references; progress remains available from assessment metadata.
 The semantic state token excludes read receipts so independent deliveries do
 not invalidate a pending judgment batch. Judgment submission checks the current
 receipts under the same transaction that records the judgments.

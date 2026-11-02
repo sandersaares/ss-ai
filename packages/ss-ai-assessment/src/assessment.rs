@@ -16,9 +16,6 @@ use crate::{Content, ContextRequest, Inventory, Side};
 const RESPONSE_BYTES: usize = 16_384;
 /// Bound the initial text candidate before accounting for its serialized metadata.
 const TEXT_BYTES: usize = 12_288;
-/// Covers worst-case growth of progress counters and digest-based references
-/// while independent windows finish in a different order.
-const PLAN_PROGRESS_RESERVE: usize = 1_024;
 /// Two handoffs permit three workers, including the initial worker.
 pub(crate) const DIRECT_HANDOFF_LIMIT: usize = 2;
 
@@ -215,21 +212,33 @@ impl Assessment {
         let units = self.units_for_reference(reference)?;
         let mut staged: Self = serde_json::from_slice(&serde_json::to_vec(self)?)?;
         let token = self.read_token()?;
+        let state_token = self.state_token()?;
         let mut batches = Vec::new();
         let mut start = after;
         let mut items = Vec::new();
         let mut next = None;
         for (index, unit) in units.iter().enumerate().skip(after) {
-            let request = BatchReadRequest {
-                read_token: token.clone(),
-                items: vec![BatchReadItem {
-                    reference: unit.reference(),
-                    offset: 0,
-                    limit: unit.total_characters.max(1),
-                    content_digest: None,
-                }],
-            };
-            let mut response = staged.read_batch(request, policy, discussion)?;
+            // Planning is private and never publishes receipts, so reuse one
+            // staged assessment instead of cloning the full capture per unit.
+            let reference = unit.reference();
+            let page_limit = unit.total_characters.max(1);
+            let page = staged.read_page(&reference, 0, page_limit, policy, discussion, true)?;
+            let page = compact_batch_page(page)?;
+            let mut response = json!({
+                "snapshotDigest": self.snapshot_digest,
+                "items": [page],
+                "stateToken": state_token,
+                "readToken": token,
+            });
+            if response_size(&response)? > RESPONSE_BYTES {
+                let page =
+                    staged.read_page(&reference, 0, page_limit, policy, discussion, false)?;
+                *response
+                    .get_mut("items")
+                    .ok_or_else(error::OversizedResponse::classified)? =
+                    json!([compact_batch_page(page)?]);
+                check_response(&response)?;
+            }
             let item = response
                 .get("items")
                 .and_then(Value::as_array)
@@ -241,11 +250,9 @@ impl Assessment {
             *response
                 .get_mut("items")
                 .ok_or_else(error::InvalidAssessmentBinding::classified)? = json!(candidate);
-            // Progress can change as independent windows finish, but the
-            // repeated snapshot and token fields have a fixed size.
-            if !items.is_empty()
-                && response_size(&response)? > RESPONSE_BYTES.saturating_sub(PLAN_PROGRESS_RESERVE)
-            {
+            // Snapshot and token values can change between windows, but their
+            // serialized lengths are fixed, so the planned bound remains valid.
+            if !items.is_empty() && response_size(&response)? > RESPONSE_BYTES {
                 batches.push(json!({"after": start, "count": items.len()}));
                 if batches.len() == limit {
                     next = Some(index);
@@ -367,7 +374,7 @@ impl Assessment {
             {
                 return Err(error::MissingReadContentDigest::classified());
             }
-            let mut page = staged.read_page(
+            let page = staged.read_page(
                 &item.reference,
                 item.offset,
                 item.limit,
@@ -375,20 +382,9 @@ impl Assessment {
                 discussion,
                 true,
             )?;
-            let object = page
-                .as_object_mut()
-                .ok_or_else(error::OversizedResponse::classified)?;
-            object.remove("snapshotDigest");
-            object.remove("readToken");
-            if object.get("context").is_some_and(Value::is_null) {
-                object.remove("context");
-            }
-            if object.get("unit").is_some_and(Value::is_null) {
-                object.remove("unit");
-            }
-            items.push(page);
+            items.push(compact_batch_page(page)?);
         }
-        let mut response = json!({"snapshotDigest": staged.snapshot_digest, "items": items, "stateToken": staged.state_token()?, "readToken": staged.read_token()?, "progress": staged.progress_with_evidence(policy, discussion)?});
+        let mut response = json!({"snapshotDigest": staged.snapshot_digest, "items": items, "stateToken": staged.state_token()?, "readToken": staged.read_token()?});
         if let Err(error) = check_response(&response) {
             // The batch envelope may require continuation even when the page
             // alone could include its binding.
@@ -407,7 +403,7 @@ impl Assessment {
                 return Err(error);
             };
             let mut retry: Self = serde_json::from_slice(&serde_json::to_vec(&*self)?)?;
-            let mut page = retry.read_page(
+            let page = retry.read_page(
                 &item.reference,
                 item.offset,
                 item.limit,
@@ -415,15 +411,8 @@ impl Assessment {
                 discussion,
                 false,
             )?;
-            let object = page
-                .as_object_mut()
-                .ok_or_else(error::OversizedResponse::classified)?;
-            object.remove("snapshotDigest");
-            object.remove("readToken");
-            if object.get("context").is_some_and(Value::is_null) {
-                object.remove("context");
-            }
-            response = json!({"snapshotDigest": retry.snapshot_digest, "items": [page], "stateToken": retry.state_token()?, "readToken": retry.read_token()?, "progress": retry.progress_with_evidence(policy, discussion)?});
+            let page = compact_batch_page(page)?;
+            response = json!({"snapshotDigest": retry.snapshot_digest, "items": [page], "stateToken": retry.state_token()?, "readToken": retry.read_token()?});
             check_response(&response)?;
             staged = retry;
         }
@@ -1536,6 +1525,25 @@ fn json_character_bytes(character: char) -> usize {
         character if character.is_control() && character <= '\u{1f}' => 6,
         character => character.len_utf8(),
     }
+}
+
+/// Removes page metadata already available from the enclosing batch or reference.
+fn compact_batch_page(mut page: Value) -> Result<Value, AssessmentError> {
+    let object = page
+        .as_object_mut()
+        .ok_or_else(error::OversizedResponse::classified)?;
+    object.remove("snapshotDigest");
+    object.remove("readToken");
+    if object.get("context").is_some_and(Value::is_null) {
+        object.remove("context");
+    }
+    if object.get("unit").is_some_and(Value::is_null) {
+        object.remove("unit");
+    }
+    if let Some(unit) = object.get_mut("unit").and_then(Value::as_object_mut) {
+        unit.remove("id");
+    }
+    Ok(page)
 }
 
 /// Mutable semantic records require version checks when their pages are continued.
