@@ -56,6 +56,11 @@ assess or report that PR.
 
 # Stage 2: preparation and evidence
 
+For an inspected snapshot, prepare and reserve in one tool call. This keeps
+orchestration delay within the same overall budget while avoiding an extra
+model turn before the worker starts. The first command must succeed and return
+the expected in-progress snapshot before the reservation is attempted.
+
 ```powershell
 #Requires -Version 7.6
 
@@ -63,20 +68,49 @@ Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 $PSNativeCommandUseErrorActionPreference = $true
 
-ss-ai autoreapprove prepare --state-path "{{RUN}}" --pull-request-id "{{PR}}" --snapshot-digest "{{SNAPSHOT}}"
-ss-ai autoreapprove start-worker --state-path "{{RUN}}" --pull-request-id "{{PR}}" --snapshot-digest "{{SNAPSHOT}}"
+$scope = @('--state-path', '{{RUN}}', '--pull-request-id', '{{PR}}', '--snapshot-digest', '{{SNAPSHOT}}')
+$prepared = ss-ai autoreapprove prepare @scope | ConvertFrom-Json
+if ($prepared.snapshotDigest -ne '{{SNAPSHOT}}' -or
+    $prepared.assessmentProtocol -ne 'directV1' -or
+    $prepared.state -ne 'in-progress') {
+    throw 'Preparation did not return the expected in-progress assessment.'
+}
+$reservation = ss-ai autoreapprove start-worker @scope | ConvertFrom-Json
+$item = @($reservation.items)
+if ($item.Count -ne 1 -or $item[0].pullRequestId -ne [int]'{{PR}}' -or
+    $item[0].snapshotDigest -ne '{{SNAPSHOT}}' -or
+    $item[0].status -ne 'assessmentRequired') {
+    throw 'Worker reservation did not return the expected assessment.'
+}
+Write-Output "Snapshot: $($prepared.snapshotDigest)"
+$prepared.progress | Format-List
+$item[0].assessmentBudget | Format-List
+```
+
+Inspect the returned progress and budget before dispatch. A failed command
+or unexpected response stops dispatch and requires reporting or recovery.
+
+```powershell
+#Requires -Version 7.6
+
+Set-StrictMode -Version Latest
+$ErrorActionPreference = 'Stop'
+$PSNativeCommandUseErrorActionPreference = $true
+
 ss-ai autoreapprove assessment --state-path "{{RUN}}" --pull-request-id "{{PR}}" --snapshot-digest "{{SNAPSHOT}}" --after "{{AFTER_CHANGE}}" --compact --limit 100
 ss-ai autoreapprove read-batch --state-path "{{RUN}}" --pull-request-id "{{PR}}" --snapshot-digest "{{SNAPSHOT}}" --batch-json '{{BATCH_JSON}}'
 ss-ai autoreapprove unit-read-plan --state-path "{{RUN}}" --pull-request-id "{{PR}}" --snapshot-digest "{{SNAPSHOT}}" --reference discussion --after "{{AFTER_UNIT}}" --limit 100
 ss-ai autoreapprove read-units --state-path "{{RUN}}" --pull-request-id "{{PR}}" --snapshot-digest "{{SNAPSHOT}}" --reference discussion --after "{{AFTER_UNIT}}" --count "{{UNIT_COUNT}}" --read-token "{{READ_TOKEN}}"
 ss-ai autoreapprove read --state-path "{{RUN}}" --pull-request-id "{{PR}}" --snapshot-digest "{{SNAPSHOT}}" --reference "{{REFERENCE}}" --offset "{{OFFSET}}"
 ss-ai autoreapprove source-context --state-path "{{RUN}}" --pull-request-id "{{PR}}" --snapshot-digest "{{SNAPSHOT}}" --change-id "{{SOURCE_CHANGE}}" --side "{{SIDE}}" --start-line "{{START_LINE}}" --line-count "{{LINE_COUNT}}" --limit 16384
+ss-ai autoreapprove source-context-batch --state-path "{{RUN}}" --pull-request-id "{{PR}}" --snapshot-digest "{{SNAPSHOT}}" --batch-json '{{BATCH_JSON}}'
 ```
 
 Preparation returns the selected context and the first bounded metadata page.
 Its `progress` provides preflight counts. `readToken` identifies immutable
-evidence and registered context; `stateToken` identifies the current assessment
-state. Reserve each worker with `start-worker` before
+evidence and registered context; `stateToken` identifies the current semantic
+assessment state. Independent evidence reads do not change it, but a judgment
+still requires the current evidence receipts. Reserve each worker with `start-worker` before
 dispatch; its returned `assessmentBudget` shows reservations and limits.
 Follow `nextOffset` through the assessment inventory, even when a page contains
 fewer changes than requested. Use each change's `oldLineCount` and

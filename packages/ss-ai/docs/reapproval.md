@@ -81,6 +81,8 @@ and the cumulative judgment. Repeating an existing request leaves
 records intact. Native coverage cannot prove
 that the assessor chose enough context; needed evidence outside the captured
 sides remains explicitly missing.
+Workers can register several known ranges atomically and then read their
+individual references; registration alone does not count as delivery.
 There is no filename, size, or edit-category exemption.
 
 The orchestrator prepares the comparison and reserves a GPT 6.1 Sol assessment

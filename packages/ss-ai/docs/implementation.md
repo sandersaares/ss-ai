@@ -81,6 +81,13 @@ does not require a semantic note for every transport unit. Atomic batch requests
 stage all reads or judgments against a state token before committing, reducing
 round trips without allowing partial results. Earlier run schemas require a
 fresh run and assessment; existing files are left untouched.
+Source-context batches register known ranges in one transaction, without
+recording unread text as delivered. Batch read responses put their common
+snapshot and read token in the shared envelope rather than repeating them for
+each evidence page.
+The semantic state token excludes read receipts so independent deliveries do
+not invalidate a pending judgment batch. Judgment submission checks the current
+receipts under the same transaction that records the judgments.
 
 The shared dependency reader validates citations and bindings at recording and
 reload boundaries. Replacements invalidate transitive dependent records. The

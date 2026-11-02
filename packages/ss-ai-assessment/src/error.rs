@@ -203,6 +203,11 @@ classified_error!(
     "Assessment metadata exceeds the bounded response budget; retain incomplete work without publishing a semantic refusal"
 );
 classified_error!(
+    OversizedContextBatch,
+    "batchTooLarge",
+    "Context registration response exceeds the bounded response budget; retry with smaller batches"
+);
+classified_error!(
     MissingJudgmentEvidence,
     "invalidState",
     "Judgment requires a rationale and evidence"

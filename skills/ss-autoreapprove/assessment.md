@@ -50,12 +50,19 @@ or `newLineCount`; a null count means that side has no readable text. Do not
 request lines outside the captured side. Do not substitute historical excerpts
 or arbitrary files for endpoint source.
 
+When several needed ranges are already known, register them together with
+`source-context-batch`, then read every returned range with the final read token.
+Choose focused ranges that establish the relevant behavior; do not request
+unrelated source merely to fill a batch. Registering ranges does not deliver them.
+
 For a long discussion, call `unit-read-plan --reference discussion` and follow
 its `nextOffset`. It plans bounded responses using the actual escaped evidence
 and returns independent unit windows. Read each window with `read-units`, using
 the plan's `readToken`, `after`, and `count`. Issue independent batches together
-as separate calls in one model turn when the host and available context permit;
-otherwise issue the largest group that fits and continue the remaining windows.
+as separate calls in one model turn when the host and available context permit.
+Four bounded responses occupy at most 64 KiB before host envelopes, so request
+at least that many together when they fit; otherwise use the largest group that
+fits and continue the remaining windows.
 Keep their outputs separate. Do not fetch the unit manifest again for each
 window. Each unit's bindings arrive inline or through
 its returned binding reference; read any missing binding and continue any partial
@@ -86,6 +93,9 @@ multiple distinct judgments atomically, each with its own exact evidence and
 conditional previous digest. Explain behavioral effects, relevant interfaces
 and invariants, and any material concern or cross-change interaction. Never
 infer significance from file size, filename, authorship, or a receipt.
+Keep each rationale concise and specific to the path; one or two sentences are
+enough when they capture the effect and its significance. Do not repeat the
+same explanation across paths, but retain any distinct material evidence.
 Judge coherent groups as their evidence becomes available rather than waiting
 for every other path or the complete discussion. If later evidence changes a
 judgment, replace it using its current digest. Keep the same worker's
@@ -99,6 +109,14 @@ changes and check dispositions prevent renewal even when the cumulative label
 is favorable. Replacing evidence or judgments invalidates their dependent
 records; inspect fresh progress and rebuild only what the native utility marks
 missing.
+
+When a path's own conclusion is significant or uncertain, put the concern and
+its evidence in that judgment. Do not create a separate check merely to repeat
+the same conclusion; use checks for distinct concerns or interactions that
+require further examination. Do not record a check for an interaction already
+resolved by the evidence in your judgment. A pre-existing limitation is a
+concern for this assessment when the captured changes make it relevant to the
+significance policy; its existence alone does not establish a regression.
 
 After all path judgments and checks, independently reason about the combined
 change and complete discussion. Record a cumulative judgment citing policy

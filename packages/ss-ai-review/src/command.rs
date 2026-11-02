@@ -232,6 +232,13 @@ enum Autoreapprove {
         #[arg(long, default_value = "4096")]
         limit: NonZeroUsize,
     },
+    /// Register multiple captured-source ranges before delivering their text.
+    SourceContextBatch {
+        #[command(flatten)]
+        input: WorkInput,
+        #[arg(long)]
+        batch_json: String,
+    },
     /// Record one change judgment, or the cumulative judgment.
     Judge {
         #[command(flatten)]
@@ -567,6 +574,7 @@ fn execute(
             | Autoreapprove::ReadBatch { .. }
             | Autoreapprove::JudgeBatch { .. }
             | Autoreapprove::SourceContext { .. }
+            | Autoreapprove::SourceContextBatch { .. }
             | Autoreapprove::Judge { .. }
             | Autoreapprove::Complete(_)) => work(action, process, clock)?,
             Autoreapprove::Discover {
@@ -874,6 +882,20 @@ fn work(
                     line_count,
                 },
                 limit,
+            },
+        ),
+        Autoreapprove::SourceContextBatch { input, batch_json } => (
+            input,
+            WorkAction::SourceContextBatch {
+                requests: serde_json::from_str::<Vec<ContextRequest>>(&batch_json).map_err(
+                    |error| {
+                        crate::error::caused_by(
+                            "invalidInput",
+                            "Malformed source context batch".to_owned(),
+                            error,
+                        )
+                    },
+                )?,
             },
         ),
         Autoreapprove::Judge {

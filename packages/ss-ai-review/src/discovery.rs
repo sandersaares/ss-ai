@@ -1399,6 +1399,9 @@ pub(crate) enum WorkAction {
         request: ContextRequest,
         limit: NonZeroUsize,
     },
+    SourceContextBatch {
+        requests: Vec<ContextRequest>,
+    },
     Judge {
         id: String,
         judgment: Judgment,
@@ -2244,6 +2247,28 @@ pub(crate) fn work(
                         ));
                     }
                     return Err(error.into());
+                }
+            }
+        }
+        WorkAction::SourceContextBatch { requests } => {
+            match assessment.source_context_batch(requests, &run.policy.content, &discussion) {
+                Ok(result) => result,
+                Err(error) => {
+                    let error: AppError = error.into();
+                    if classification(&error) == "batchTooLarge" {
+                        // Registration is atomic, so a smaller request can retry without losing work.
+                        return Err(error);
+                    }
+                    if assessment.digest.is_none() {
+                        entry.execution_error = Some(Diagnostic::from_error(&error));
+                        finish_state(&mut run);
+                        run.save(&journal)?;
+                        return Err(fail(
+                            "evidenceDelivery",
+                            "Captured source context acquisition failed; retained assessment is incomplete",
+                        ));
+                    }
+                    return Err(error);
                 }
             }
         }

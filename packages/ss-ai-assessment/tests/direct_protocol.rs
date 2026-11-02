@@ -115,7 +115,7 @@ fn summary_exposes_the_current_state_token_within_the_response_budget() {
     assert!(serde_json::to_vec_pretty(&first).unwrap().len() < 16_384);
     read(&mut assessment, "policy", "policy", "discussion");
     let next = assessment.summary(0, 100, "policy", "discussion").unwrap();
-    assert_ne!(first["stateToken"], next["stateToken"]);
+    assert_eq!(first["stateToken"], next["stateToken"]);
     assert_eq!(next["stateToken"], assessment.state_token().unwrap());
     assert_eq!(first["readToken"], next["readToken"]);
     assert!(serde_json::to_vec_pretty(&next).unwrap().len() < 16_384);
@@ -237,19 +237,16 @@ fn read_token_allows_independent_batches_and_rejects_stale_contexts() {
     let first = assessment
         .read_batch(batch("policy"), "policy", "discussion")
         .unwrap();
-    assert_ne!(first["stateToken"], initial_state);
+    assert_eq!(first["stateToken"], initial_state);
     let second = assessment
         .read_batch(batch("discussion"), "policy", "discussion")
         .unwrap();
-    assert_ne!(first["stateToken"], second["stateToken"]);
+    assert_eq!(first["stateToken"], second["stateToken"]);
     assert_eq!(first["readToken"], read_token);
-    assert_eq!(second["items"][0]["readToken"], read_token);
-    assessment
-        .read_batch(batch(&format!("{id}:patch")), "policy", "discussion")
-        .unwrap();
-    assert_eq!(assessment.read_token().unwrap(), read_token);
-    let stale_judgment = BatchJudgmentRequest {
-        state_token: initial_state,
+    assert_eq!(second["readToken"], read_token);
+    assert!(second["items"][0].get("readToken").is_none());
+    let judgment_batch = || BatchJudgmentRequest {
+        state_token: initial_state.clone(),
         items: vec![BatchJudgmentItem {
             id: id.clone(),
             judgment: judgment(&id),
@@ -258,12 +255,21 @@ fn read_token_allows_independent_batches_and_rejects_stale_contexts() {
     };
     assert!(
         assessment
-            .record_batch(stale_judgment, "policy", "discussion")
+            .record_batch(judgment_batch(), "policy", "discussion")
             .is_err()
     );
     assessment
-        .record(&id, judgment(&id), None, "policy", "discussion")
+        .read_batch(batch(&format!("{id}:patch")), "policy", "discussion")
         .unwrap();
+    assert_eq!(assessment.read_token().unwrap(), read_token);
+    assessment
+        .record_batch(judgment_batch(), "policy", "discussion")
+        .unwrap();
+    assert!(
+        assessment
+            .record_batch(judgment_batch(), "policy", "discussion")
+            .is_err()
+    );
     assert_eq!(assessment.read_token().unwrap(), read_token);
     let plan = assessment
         .unit_read_plan("discussion", 0, 100, "policy", "discussion")
@@ -342,6 +348,69 @@ fn read_token_allows_independent_batches_and_rejects_stale_contexts() {
     assert_eq!(
         assessment.state_token().unwrap(),
         retried["stateToken"].as_str().unwrap()
+    );
+}
+
+#[test]
+fn context_batch_registers_ranges_atomically_without_claiming_delivery() {
+    let mut assessment = fixture("discussion", 10);
+    let requests = assessment
+        .inventory
+        .changes
+        .iter()
+        .map(|change| ContextRequest {
+            change_id: change.id.clone(),
+            side: SourceSide::New,
+            start_line: NonZeroUsize::MIN,
+            line_count: NonZeroUsize::MIN,
+        })
+        .collect::<Vec<_>>();
+    let original = assessment.state_token().unwrap();
+    let mut bad = requests.clone();
+    bad[9].start_line = NonZeroUsize::new(2).unwrap();
+    assert!(
+        assessment
+            .source_context_batch(bad, "policy", "discussion")
+            .is_err()
+    );
+    assert_eq!(assessment.state_token().unwrap(), original);
+
+    let old_token = assessment.read_token().unwrap();
+    let batch = assessment
+        .source_context_batch(requests, "policy", "discussion")
+        .unwrap();
+    assert_ne!(batch["readToken"], old_token);
+    assert_eq!(batch["items"].as_array().unwrap().len(), 10);
+    let progress = assessment
+        .progress_with_evidence("policy", "discussion")
+        .unwrap();
+    assert_eq!(progress["requiredDocumentCount"], 22);
+    assert_eq!(progress["deliveredRequiredDocumentCount"], 0);
+
+    let items = batch["items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|item| read_item(item["reference"].as_str().unwrap(), usize::MAX))
+        .collect();
+    let response = assessment
+        .read_batch(
+            BatchReadRequest {
+                read_token: batch["readToken"].as_str().unwrap().into(),
+                items,
+            },
+            "policy",
+            "discussion",
+        )
+        .unwrap();
+    assert_eq!(response["items"].as_array().unwrap().len(), 10);
+    assert_eq!(response["progress"]["deliveredRequiredDocumentCount"], 10);
+    assert!(
+        response["items"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|item| item["text"] == "new\n")
     );
 }
 
@@ -846,7 +915,8 @@ fn unit_pages_inline_bindings_with_unicode_and_contiguous_offsets() {
             .unwrap();
         assert!(serde_json::to_vec_pretty(&response).unwrap().len() < 16_384);
         let page = &response["items"][0];
-        assert_eq!(page["snapshotDigest"], "snapshot");
+        assert_eq!(response["snapshotDigest"], "snapshot");
+        assert!(page.get("snapshotDigest").is_none());
         assert_eq!(page["unit"]["bindingReference"], binding);
         assert!(page["unit"]["bindings"].is_array());
         let text = page["text"].as_str().unwrap();

@@ -297,7 +297,7 @@ indeterminate decisions; obtain fresh evidence in a new run.
 ## Source assessment and publication
 
 The installed `ss-autoreapprove` command recipes cover `prepare`, `start-worker`,
-`assessment`, `read`, `read-batch`, `source-context`, `units`, `unit-read-plan`,
+`assessment`, `read`, `read-batch`, `source-context`, `source-context-batch`, `units`, `unit-read-plan`,
 `read-units`, `note`, `checks`,
 `resolve`, `checkpoint`, `judge`, `judge-batch`, `complete`, `publish`, and
 `notify`. Each requires the absolute
@@ -333,10 +333,11 @@ paths, discussion observation, unresolved checks, and cumulative completion.
 New assessments use `assessmentProtocol: directV1` and expose `readToken` and
 `stateToken`. `read-batch --batch-json` accepts a JSON object with `readToken` and distinct
 `items`, each containing `reference`, scalar `offset`, and positive character
-`limit`. Its bounded response contains independently paged items, both tokens,
-and progress. Concurrent independent reads can reuse the same read token;
+`limit`. Its bounded response contains independently paged items, the shared
+snapshot digest, both tokens, and progress. Concurrent independent reads can reuse the same read token;
 mutable-record continuations require their prior `contentDigest`. Registering
-context changes the read token. Ordinary `read` accepts only the first page of
+context changes the read token. Delivery receipts do not change the semantic
+state token; judgment submission checks current delivery coverage. Ordinary `read` accepts only the first page of
 a mutable semantic record; use `read-batch` to continue it. `judge-batch --batch-json` accepts a state token and distinct changed-path
 items with `id`, a complete `judgment`, and nullable `previousDigest`. Both
 commands validate and commit atomically; stale tokens, malformed items, and
@@ -364,6 +365,12 @@ Registering a new range invalidates its change judgment and the cumulative
 judgment; record them again after reading the range. Repeating an existing
 request does not invalidate judgments.
 Finalized assessments permit existing evidence replay, not new ranges.
+`source-context-batch --batch-json` accepts an array of objects containing
+`changeId`, `side`, `startLine`, and `lineCount`. It atomically registers the
+ranges and returns each reference, character count, and the final read token.
+Registration does not deliver the ranges; read them using `read-batch`.
+An oversized registration returns `batchTooLarge` without registering any
+range; retry it in smaller batches.
 
 The `discussion` reference contains compact JSON with `schemaVersion: 1` and
 `platform`. GitHub supplies `pullRequest`, `reviews`, `comments`,

@@ -63,6 +63,8 @@ Describe 'Automatic reapproval repository scope instructions' {
         $assignment | Should -Match 'assessment-commands\.md'
         ([Text.Encoding]::UTF8.GetByteCount($worker)) | Should -BeLessThan 16384
         $worker | Should -Match 'source-context[^\r\n]*--limit 16384'
+        $worker | Should -Match 'source-context-batch'
+        $assignment | Should -Match 'Registering ranges does not deliver them'
         $script:Recipes | Should -Match 'source-context[^\r\n]*--limit 16384'
         $worker | Should -Not -Match 'autoreapprove (discover|inspect|publish|notify)'
         $script:Recipes | Should -Match 'Omit `--after` for the first page'
@@ -70,6 +72,10 @@ Describe 'Automatic reapproval repository scope instructions' {
 
     It 'reserves workers across recovery without overlapping or resetting budgets' {
         $script:Prompt | Should -Match 'Reserve a worker with `start-worker`\s+before dispatch'
+        $script:Prompt | Should -Match 'do not wait for\s+another model turn between them'
+        $script:Recipes | Should -Match '\$prepared = ss-ai autoreapprove prepare @scope'
+        $script:Recipes | Should -Match '\$reservation = ss-ai autoreapprove start-worker @scope'
+        $script:Recipes | Should -Match '\$prepared\.state -ne ''in-progress'''
         $script:Prompt | Should -Match 'at most three workers\s+for one PR across planned handoffs, recovery, and stale snapshots'
         $script:Prompt | Should -Match 'including replacements, obtain a new native worker reservation'
         $script:Prompt | Should -Match 'Only one worker may be active for a PR'
@@ -104,6 +110,8 @@ Describe 'Automatic reapproval repository scope instructions' {
         $assignment | Should -Match 'do not derive it mechanically from individual labels'
         $assignment | Should -Match 'Judge coherent groups as their evidence becomes available'
         $assignment | Should -Match 'Record checks for concrete unresolved concerns or interactions'
+        $assignment | Should -Match 'Do not record a check for an interaction already\s+resolved'
+        $assignment | Should -Match 'its existence alone does not establish a regression'
         $assignment | Should -Match 'independently addressable\s+unit references'
         $assignment | Should -Match 'unit-read-plan --reference discussion'
         $assignment | Should -Match 'Do not fetch the unit manifest again for each\s+window'
@@ -226,7 +234,7 @@ Describe 'Automatic reapproval provider fixtures' {
         $help = & ss-ai autoreapprove --help | Out-String
         $LASTEXITCODE | Should -Be 0
         foreach ($command in @('discover', 'results', 'inspect', 'refresh', 'prepare', 'start-worker', 'assessment', 'read', 'read-batch', 'source-context', 'units', 'note', 'checks', 'resolve', 'checkpoint', 'judge', 'judge-batch', 'complete', 'publish', 'notify')) {
-            $recipes | Should -Match "(?m)^ss-ai autoreapprove $command "
+            $recipes | Should -Match "(?m)(?:^|=\s)ss-ai autoreapprove $command "
             $help | Should -Match "(?m)^\s+$command\s"
         }
         $recipes | Should -Not -Match 'pwsh .* -File|gh api|az devops|ConvertTo-Json'

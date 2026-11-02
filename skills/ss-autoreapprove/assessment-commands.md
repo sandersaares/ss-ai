@@ -41,6 +41,7 @@ ss-ai autoreapprove unit-read-plan @scope --reference discussion --after "{{AFTE
 ss-ai autoreapprove read-units @scope --reference discussion --after "{{AFTER}}" --count "{{COUNT}}" --read-token "{{READ_TOKEN}}"
 ss-ai autoreapprove read @scope --reference "{{REFERENCE}}" --offset "{{OFFSET}}" --limit 16384
 ss-ai autoreapprove source-context @scope --change-id "{{CHANGE}}" --side "{{SIDE}}" --start-line "{{START_LINE}}" --line-count "{{LINE_COUNT}}" --limit 16384
+ss-ai autoreapprove source-context-batch @scope --batch-json '{{BATCH_JSON}}'
 ```
 
 Follow `nextOffset` for every inventory and evidence page. A `read-batch`
@@ -50,6 +51,14 @@ Use distinct references. A mutable-record continuation also supplies its
 previous `contentDigest`. A plan returns independent unit windows and a read
 token; `read-units` returns their text and bindings. Read missing bindings and
 continue partial units. Do not combine separately bounded tool outputs.
+
+For several known context ranges, the batch registration request is an array
+such as `[{"changeId":"CHANGE","side":"new","startLine":1,"lineCount":20}]`.
+It returns each range's `reference` and `totalCharacters` and the final
+`readToken`; it does not deliver the text. Read every returned reference using
+`read-batch` and continue partial pages. Scope and tokens in a `read-batch`
+response apply to all its items. If registration reports `batchTooLarge`,
+retry the same ranges in smaller batches; no range from that request was registered.
 
 Use the captured side's line count to bound context requests. Registering
 context changes the read token and invalidates dependent judgments and

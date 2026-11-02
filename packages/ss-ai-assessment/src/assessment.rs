@@ -156,9 +156,33 @@ pub enum Disposition {
 }
 
 impl Assessment {
-    /// Returns an optimistic concurrency token for the serialized assessment.
+    /// Returns an optimistic concurrency token for semantic assessment state.
     pub fn state_token(&self) -> Result<String, AssessmentError> {
-        hash(self)
+        // Delivery receipts only grow during independent reads. Their current
+        // coverage is checked when judgments are applied, so they must not
+        // invalidate a concurrently prepared semantic transaction.
+        hash(&(
+            "ss-ai-assessment/state/v2",
+            (
+                self.protocol,
+                &self.snapshot_digest,
+                &self.policy_digest,
+                &self.discussion_digest,
+                &self.inventory,
+                &self.inventory_digest,
+                &self.source_evidence,
+                &self.source_evidence_digest,
+            ),
+            (
+                &self.contexts,
+                &self.checkpoints,
+                &self.documents,
+                &self.decisions,
+                &self.cumulative,
+                self.complete,
+                &self.digest,
+            ),
+        ))
     }
 
     /// Identifies immutable evidence and the current required-context set.
@@ -354,11 +378,17 @@ impl Assessment {
             let object = page
                 .as_object_mut()
                 .ok_or_else(error::OversizedResponse::classified)?;
-            object.insert("readToken".into(), json!(staged.read_token()?));
-            object.insert("contentDigest".into(), json!(content_digest));
+            object.remove("snapshotDigest");
+            object.remove("readToken");
+            if object.get("context").is_some_and(Value::is_null) {
+                object.remove("context");
+            }
+            if object.get("unit").is_some_and(Value::is_null) {
+                object.remove("unit");
+            }
             items.push(page);
         }
-        let mut response = json!({"items": items, "stateToken": staged.state_token()?, "readToken": staged.read_token()?, "progress": staged.progress_with_evidence(policy, discussion)?});
+        let mut response = json!({"snapshotDigest": staged.snapshot_digest, "items": items, "stateToken": staged.state_token()?, "readToken": staged.read_token()?, "progress": staged.progress_with_evidence(policy, discussion)?});
         if let Err(error) = check_response(&response) {
             // The batch envelope may require continuation even when the page
             // alone could include its binding.
@@ -377,7 +407,7 @@ impl Assessment {
                 return Err(error);
             };
             let mut retry: Self = serde_json::from_slice(&serde_json::to_vec(&*self)?)?;
-            let page = retry.read_page(
+            let mut page = retry.read_page(
                 &item.reference,
                 item.offset,
                 item.limit,
@@ -385,7 +415,15 @@ impl Assessment {
                 discussion,
                 false,
             )?;
-            response = json!({"items": [page], "stateToken": retry.state_token()?, "readToken": retry.read_token()?, "progress": retry.progress_with_evidence(policy, discussion)?});
+            let object = page
+                .as_object_mut()
+                .ok_or_else(error::OversizedResponse::classified)?;
+            object.remove("snapshotDigest");
+            object.remove("readToken");
+            if object.get("context").is_some_and(Value::is_null) {
+                object.remove("context");
+            }
+            response = json!({"snapshotDigest": retry.snapshot_digest, "items": [page], "stateToken": retry.state_token()?, "readToken": retry.read_token()?, "progress": retry.progress_with_evidence(policy, discussion)?});
             check_response(&response)?;
             staged = retry;
         }
@@ -993,8 +1031,52 @@ impl Assessment {
         if limit == 0 {
             return Err(error::ZeroReadLimit::classified());
         }
+        let (reference, _) = self.register_context(request, policy, discussion)?;
+        self.read(&reference, 0, limit, policy, discussion)
+    }
+
+    /// Registers independent context ranges in one atomic transaction.
+    pub fn source_context_batch(
+        &mut self,
+        requests: Vec<ContextRequest>,
+        policy: &str,
+        discussion: &str,
+    ) -> Result<Value, AssessmentError> {
+        if requests.is_empty() {
+            return Err(error::EmptyBatch::classified());
+        }
+        let mut staged: Self = serde_json::from_slice(&serde_json::to_vec(self)?)?;
+        let mut items = Vec::new();
+        for request in requests {
+            let (reference, total) =
+                staged.register_context(request.clone(), policy, discussion)?;
+            items.push(
+                json!({"request": request, "reference": reference, "totalCharacters": total}),
+            );
+        }
+        let result = json!({
+            "snapshotDigest": staged.snapshot_digest,
+            "readToken": staged.read_token()?,
+            "stateToken": staged.state_token()?,
+            "items": items,
+        });
+        if response_size(&result)? > RESPONSE_BYTES {
+            return Err(error::OversizedContextBatch::classified());
+        }
+        *self = staged;
+        Ok(result)
+    }
+
+    /// Registers a range without claiming that the worker has received its text.
+    fn register_context(
+        &mut self,
+        request: ContextRequest,
+        policy: &str,
+        discussion: &str,
+    ) -> Result<(String, usize), AssessmentError> {
         let context = SourceContext::new(&self.inventory, &self.snapshot_digest, request)?;
         let reference = context.reference()?;
+        let total = context.character_count()?;
         if !self.contexts.contains_key(&reference) {
             if self.complete {
                 return Err(error::ImmutableAssessment::classified());
@@ -1003,7 +1085,7 @@ impl Assessment {
             self.invalidate_new_context(&context.request.change_id, policy, discussion)?;
             self.contexts.insert(reference.clone(), context);
         }
-        self.read(&reference, 0, limit, policy, discussion)
+        Ok((reference, total))
     }
 
     /// Records a judgment against the bound source comparison.

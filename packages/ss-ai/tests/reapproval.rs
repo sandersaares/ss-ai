@@ -2242,6 +2242,46 @@ fn compact_metadata_commands_expose_the_same_evidence_references() {
         delivered["items"][0]["reference"],
         compact["items"][0]["reference"]
     );
+    let change = prepared["changes"][0]["id"].as_str().unwrap();
+    let ranges = json!([{
+        "changeId": change,
+        "side": "new",
+        "startLine": 1,
+        "lineCount": 1
+    }]);
+    let oversized = json!(vec![ranges[0].clone(); 100]);
+    let error = work(
+        &root,
+        &provider,
+        "source-context-batch",
+        &snapshot,
+        &["--batch-json".into(), oversized.to_string()],
+    )
+    .unwrap_err();
+    assert_eq!(ss_ai::classification(&error), "batchTooLarge");
+    let registered = work(
+        &root,
+        &provider,
+        "source-context-batch",
+        &snapshot,
+        &["--batch-json".into(), ranges.to_string()],
+    )
+    .unwrap();
+    let context = registered["items"][0]["reference"].as_str().unwrap();
+    let read = json!({
+        "readToken": registered["readToken"],
+        "items": [{"reference": context, "offset": 0, "limit": 16384}]
+    });
+    let delivered = work(
+        &root,
+        &provider,
+        "read-batch",
+        &snapshot,
+        &["--batch-json".into(), read.to_string()],
+    )
+    .unwrap();
+    assert_eq!(delivered["items"][0]["reference"], context);
+    assert_eq!(delivered["items"][0]["complete"], true);
 }
 
 #[test]
