@@ -20,7 +20,7 @@ use ohno::AppError;
 use serde_json::{Value, json};
 use ss_ai_review_context::read_diagnostics;
 use ss_ai_review_workflow::worker_input::{AssignmentOptions, create_assignment, read_document};
-use ss_ai_runtime::{Clock, FileTransaction};
+use ss_ai_runtime::{Clock, FileTransaction, classification, fail};
 
 /// Keeps each test's files in an isolated checkout-local directory.
 struct Workspace(PathBuf);
@@ -64,9 +64,16 @@ impl Clock for TestClock {
     }
 }
 
+/// Reports contention and completion through the same ordered channel.
+enum ReadEvent {
+    Waiting(&'static str),
+    Complete(&'static str, Result<Value, (&'static str, String)>),
+}
+
 /// Stops each concurrent reader at its first observed lock conflict.
 struct ContendedClock {
-    observed: Sender<bool>,
+    id: &'static str,
+    events: Sender<ReadEvent>,
     release: Receiver<()>,
     reported: Cell<bool>,
 }
@@ -77,11 +84,15 @@ impl Clock for ContendedClock {
     }
 
     fn wait(&self, _: Duration) -> Result<(), AppError> {
-        if !self.reported.replace(true) {
-            self.observed.send(true).unwrap();
-            self.release.recv().unwrap();
+        if self.reported.replace(true) {
+            return Err(fail("contention", "Unexpected repeated lock contention"));
         }
-        thread::yield_now();
+        self.events
+            .send(ReadEvent::Waiting(self.id))
+            .map_err(|error| fail("io", error.to_string()))?;
+        self.release
+            .recv()
+            .map_err(|error| fail("io", error.to_string()))?;
         Ok(())
     }
 }
@@ -576,35 +587,64 @@ fn concurrent_reads_preserve_diagnostics() {
     let ids = ["scope", "prompt", "workflowData", "missing"];
     let diagnostics = workspace.0.join("attempt O'Brien/input-diagnostics.json");
     let lock = FileTransaction::open(&diagnostics, &TestClock).unwrap();
-    let (observed, events) = mpsc::channel();
+    let (events, received) = mpsc::channel();
     let mut releases = Vec::new();
+    let mut waiting = Vec::new();
+    let mut completed = Vec::new();
     thread::scope(|scope| {
         for id in ids {
             let (release, gate) = mpsc::channel();
-            releases.push(release);
-            let observed = observed.clone();
+            releases.push((id, release));
+            let events = events.clone();
             let path = &path;
             scope.spawn(move || {
-                let clock = ContendedClock {
-                    observed: observed.clone(),
-                    release: gate,
-                    reported: Cell::new(false),
-                };
-                let result = read_document(path, id, 0, &clock);
-                if !clock.reported.get() {
-                    observed.send(false).unwrap();
-                }
-                assert_eq!(result.is_ok(), id != "missing");
+                let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    let clock = ContendedClock {
+                        id,
+                        events: events.clone(),
+                        release: gate,
+                        reported: Cell::new(false),
+                    };
+                    read_document(path, id, 0, &clock)
+                        .map_err(|error| (classification(&error), error.to_string()))
+                }))
+                .unwrap_or_else(|_| Err(("panic", "Reader panicked".to_owned())));
+                events.send(ReadEvent::Complete(id, result)).unwrap();
             });
         }
-        let all_contended = (0..ids.len()).all(|_| events.recv().unwrap());
-        drop(lock);
-        let mut all_released = true;
-        for release in releases {
-            all_released &= release.send(()).is_ok();
+        drop(events);
+        for _ in ids {
+            match received.recv().unwrap() {
+                ReadEvent::Waiting(id) => waiting.push(id),
+                ReadEvent::Complete(id, result) => completed.push((id, result)),
+            }
         }
-        assert!(all_contended && all_released);
+        drop(lock);
+
+        // All readers overlap while blocked on the same lock. Permit each retry
+        // after the preceding reader finishes so the fake clock cannot exhaust
+        // retries while another reader is descheduled inside its transaction.
+        for (id, release) in releases {
+            if waiting.contains(&id) && release.send(()).is_ok() {
+                match received.recv().unwrap() {
+                    ReadEvent::Complete(id, result) => completed.push((id, result)),
+                    ReadEvent::Waiting(id) => panic!("Unexpected second wait from {id}"),
+                }
+            }
+        }
     });
+    waiting.sort_unstable();
+    assert_eq!(waiting, ["missing", "prompt", "scope", "workflowData"]);
+    assert_eq!(completed.len(), ids.len());
+    for (id, result) in completed {
+        if id == "missing" {
+            let (category, message) = result.unwrap_err();
+            assert_eq!(category, "invalidInput");
+            assert!(message.contains("Expected one shared document 'missing'"));
+        } else {
+            result.unwrap();
+        }
+    }
     let counts = read_diagnostics(&diagnostics, &TestClock).unwrap();
     assert_eq!(counts["counts"]["documentReadCalls"], ids.len());
     assert_eq!(counts["counts"]["firstReadFailures"], 1);

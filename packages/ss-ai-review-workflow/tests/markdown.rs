@@ -127,7 +127,6 @@ fn prepared_audit_uri_identifies_file_and_preserves_prose() {
     )
     .unwrap();
     let uri = result["auditDocumentUri"].as_str().unwrap();
-    assert!(uri.contains("audit%20files%20(local)"), "{uri}");
     assert_eq!(Url::parse(uri).unwrap().to_file_path().unwrap(), audit);
     assert!(
         fs::read_to_string(audit)

@@ -18,6 +18,15 @@ use serde_json::{Value, json};
 use ss_ai::{Clock, Http, HttpResponse, Process, ProcessOutput, run};
 use tempfile::{Builder, TempDir};
 
+/// Locates a unique field addition independently of JSON Patch order.
+fn patch_field<'a>(patch: &'a [Value], path: &str) -> &'a Value {
+    let mut matching = patch.iter().filter(|entry| entry["path"] == path);
+    let entry = matching.next().expect("missing patch field");
+    assert!(matching.next().is_none(), "duplicate patch field");
+    assert_eq!(entry["op"], "add");
+    &entry["value"]
+}
+
 /// Keeps file-based inputs and their journal inside the checkout.
 struct Fixture(TempDir);
 
@@ -186,8 +195,8 @@ fn github_graphql_errors_without_http_refusal_keep_ambiguous_intent() {
             body,
             calls: RefCell::new(Vec::new()),
         };
-        let output = run(&fixture.args(false), &provider, &provider, &NoWait).unwrap();
-        let outcome: Value = serde_json::from_str(&output).unwrap();
+        let outcome = run(&fixture.args(false), &provider, &provider, &NoWait).unwrap();
+        let outcome: Value = serde_json::from_str(&outcome).unwrap();
         assert_eq!(outcome["status"], "failed");
         assert_eq!(outcome["ambiguousOperationCount"], 1);
         assert_eq!(fixture.journal()["operations"][0]["outcome"], "ambiguous");
@@ -284,8 +293,8 @@ fn github_lost_read_retries_without_recreating_the_issue() {
         reads: Cell::new(0),
         waits: Cell::new(0),
     };
-    let output = run(&fixture.args(false), &provider, &provider, &provider).unwrap();
-    let outcome: Value = serde_json::from_str(&output).unwrap();
+    let outcome = run(&fixture.args(false), &provider, &provider, &provider).unwrap();
+    let outcome: Value = serde_json::from_str(&outcome).unwrap();
     assert_eq!(outcome["status"], "succeeded");
     assert_eq!(provider.waits.get(), 1);
     assert_eq!(
@@ -315,8 +324,8 @@ fn github_changed_title_or_body_stops_before_the_next_creation() {
             reads: Cell::new(0),
             waits: Cell::new(0),
         };
-        let output = run(&fixture.args(false), &provider, &provider, &NoWait).unwrap();
-        let outcome: Value = serde_json::from_str(&output).unwrap();
+        let outcome = run(&fixture.args(false), &provider, &provider, &NoWait).unwrap();
+        let outcome: Value = serde_json::from_str(&outcome).unwrap();
         assert_eq!(outcome["status"], "failed", "{field}");
         assert!(outcome["summary"].is_null());
         assert_eq!(*provider.calls.borrow(), ["preflight", "create", "read"]);
@@ -346,8 +355,8 @@ fn github_timestamp_shaped_finding_title_is_preserved() {
         reads: Cell::new(0),
         waits: Cell::new(0),
     };
-    let output = run(&fixture.args(false), &provider, &provider, &NoWait).unwrap();
-    let outcome: Value = serde_json::from_str(&output).unwrap();
+    let outcome = run(&fixture.args(false), &provider, &provider, &NoWait).unwrap();
+    let outcome: Value = serde_json::from_str(&outcome).unwrap();
     assert_eq!(outcome["status"], "succeeded");
     assert_eq!(provider.item.borrow().as_ref().unwrap()["title"], title);
     assert_eq!(fixture.journal()["operations"][0]["title"], title);
@@ -511,8 +520,8 @@ fn azure_creation_classifies_refusal_and_service_failure_without_replay() {
     for (status, expected) in [(400, "failed"), (500, "ambiguous")] {
         let fixture = Fixture::new();
         let provider = Azure::new("", status);
-        let output = run(&fixture.args(true), &provider, &provider, &NoWait).unwrap();
-        let outcome: Value = serde_json::from_str(&output).unwrap();
+        let outcome = run(&fixture.args(true), &provider, &provider, &NoWait).unwrap();
+        let outcome: Value = serde_json::from_str(&outcome).unwrap();
         assert_eq!(outcome["status"], "failed");
         assert_eq!(fixture.journal()["operations"][0]["outcome"], expected);
         let requests = provider.requests.borrow();
@@ -531,9 +540,18 @@ fn azure_creation_classifies_refusal_and_service_failure_without_replay() {
         let patch = provider.patch.borrow();
         let patch = patch.as_ref().unwrap().as_array().unwrap();
         assert_eq!(patch.len(), 4);
-        assert_eq!(patch[1]["path"], "/fields/System.Description");
-        assert_eq!(patch[2]["value"], "Project");
-        assert_eq!(patch[3]["value"], "Markdown");
+        assert_eq!(patch_field(patch, "/fields/System.Title"), "A title 雪");
+        assert!(
+            patch_field(patch, "/fields/System.Description")
+                .as_str()
+                .unwrap()
+                .contains("Description")
+        );
+        assert_eq!(patch_field(patch, "/fields/System.AreaPath"), "Project");
+        assert_eq!(
+            patch_field(patch, "/multilineFieldsFormat/System.Description"),
+            "Markdown"
+        );
     }
 }
 
@@ -586,8 +604,10 @@ impl Http for AzureFormat {
             "unexpected repeated Azure creation"
         );
         let patch: Value = serde_json::from_slice(body.unwrap()).unwrap();
+        let patch = patch.as_array().unwrap();
         let mut item = json!({"id":12,"fields":{
-            "System.Title":patch[0]["value"],"System.Description":patch[1]["value"]}});
+            "System.Title":patch_field(patch, "/fields/System.Title"),
+            "System.Description":patch_field(patch, "/fields/System.Description")}});
         if let Some(format) = self.format {
             item["multilineFieldsFormat"] = json!({"System.Description":format});
         }
@@ -620,8 +640,8 @@ fn azure_readback_requires_markdown_case_insensitively_before_next_creation() {
             item: RefCell::new(None),
             reads: Cell::new(0),
         };
-        let output = run(&fixture.args(true), &provider, &provider, &NoWait).unwrap();
-        let outcome: Value = serde_json::from_str(&output).unwrap();
+        let outcome = run(&fixture.args(true), &provider, &provider, &NoWait).unwrap();
+        let outcome: Value = serde_json::from_str(&outcome).unwrap();
         assert_eq!(outcome["status"], expected, "{format:?}");
         let journal = fixture.journal();
         assert_eq!(journal["operations"][0]["outcome"], "succeeded");

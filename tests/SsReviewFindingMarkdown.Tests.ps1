@@ -79,6 +79,7 @@ BeforeAll {
         }
         $process = [Diagnostics.Process]::Start($start)
         try {
+            # Drain both pipes while the child runs so a full pipe cannot block its exit.
             $output = $process.StandardOutput.ReadToEndAsync()
             $errorOutput = $process.StandardError.ReadToEndAsync()
             $process.WaitForExit()

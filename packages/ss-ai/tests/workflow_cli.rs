@@ -934,6 +934,10 @@ fn worker_assignment_and_document_run_with_a_bounded_stack() {
 
 /// Copies installed assets without retaining review script helpers.
 fn copy_skill_assets(source: &Path, destination: &Path) {
+    #[expect(
+        clippy::create_dir,
+        reason = "The copied fixture must not reuse existing state"
+    )]
     fs::create_dir(destination).unwrap();
     for entry in fs::read_dir(source).unwrap() {
         let entry = entry.unwrap();
@@ -1040,7 +1044,10 @@ fn installed_script_free_worker_dispatch_reads_required_guidance() {
         String::from_utf8_lossy(&output.stderr)
     );
     let assignment: Value = serde_json::from_slice(&output.stdout).unwrap();
-    let dispatch = assignment["dispatchPrompt"].as_str().unwrap();
+    let dispatch = assignment
+        .get("dispatchPrompt")
+        .and_then(Value::as_str)
+        .unwrap();
     #[cfg(unix)]
     let block = dispatch.split_once("```bash\n").unwrap().1;
     #[cfg(windows)]
@@ -1095,14 +1102,17 @@ fn installed_script_free_worker_dispatch_reads_required_guidance() {
                 String::from_utf8_lossy(&output.stderr)
             );
             let page: Value = serde_json::from_slice(&output.stdout).unwrap();
-            assert_eq!(page["contentOffset"], offset);
-            content.push_str(page["content"].as_str().unwrap());
-            if page["complete"] == true {
-                assert!(page["nextOffset"].is_null());
+            assert_eq!(
+                page.get("contentOffset").and_then(Value::as_u64),
+                Some(offset)
+            );
+            content.push_str(page.get("content").and_then(Value::as_str).unwrap());
+            if page.get("complete").and_then(Value::as_bool).unwrap() {
+                assert_eq!(page.get("nextOffset"), Some(&Value::Null));
                 complete = true;
                 break;
             }
-            let next = page["nextOffset"].as_u64().unwrap();
+            let next = page.get("nextOffset").and_then(Value::as_u64).unwrap();
             assert!(next > offset);
             offset = next;
         }

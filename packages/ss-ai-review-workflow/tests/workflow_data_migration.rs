@@ -1,4 +1,4 @@
-//! Exercises native workflow-record contracts formerly consumed through scripts.
+//! Exercises workflow-record contracts.
 #![allow(
     clippy::indexing_slicing,
     clippy::assertions_on_result_states,
@@ -16,6 +16,7 @@ use serde_json::{Value, json};
 use ss_ai_review_workflow::focus_area_expansion::{
     Operation, ReferenceInput, ReferenceResult, update,
 };
+use ss_ai_review_workflow::workflow_plan::PlanKind;
 use ss_ai_review_workflow::{audit, findings, review_work, workflow_plan};
 use ss_ai_runtime::Clock;
 
@@ -71,8 +72,6 @@ impl Clock for TestClock {
 
 #[test]
 fn plan_envelopes_drafts_and_replacements_preserve_prior_work() {
-    use workflow_plan::PlanKind;
-
     let workspace = Workspace::new();
     let clock = TestClock;
     let plan = workspace.path("plan.json");

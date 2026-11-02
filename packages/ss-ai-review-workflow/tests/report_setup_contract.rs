@@ -79,6 +79,7 @@ fn inaccessible_output_never_falls_back_or_invokes_renderer() {
     let root = &workspace.0;
     let blocker = root.join("not-a-directory");
     fs::write(&blocker, b"preserve").unwrap();
+    fs::write(root.join("source.md"), "# Report\n\nContent\n").unwrap();
     let tools = ReportTools::new(
         "pandoc".into(),
         None,

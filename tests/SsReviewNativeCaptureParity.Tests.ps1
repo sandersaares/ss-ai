@@ -12,7 +12,7 @@ BeforeAll {
 
     # Exercise the native process with the frozen capture, not a local provider.
     function Invoke-NativeContext {
-        param([string[]] $Arguments, [string] $ExpectedSha256)
+        param([string[]] $Arguments)
 
         $start = [Diagnostics.ProcessStartInfo]::new($script:Native)
         $start.UseShellExecute = $false
@@ -29,14 +29,71 @@ BeforeAll {
             $text = $stdout.GetAwaiter().GetResult()
             $errorText = $stderr.GetAwaiter().GetResult()
             $process.ExitCode | Should -Be 0 -Because $errorText
-            if ($ExpectedSha256) {
-                # The fixture fingerprints cover the complete compact JSON page.
-                $bytes = [Text.UTF8Encoding]::new($false).GetBytes($text.TrimEnd("`r", "`n"))
-                [Convert]::ToHexString([Security.Cryptography.SHA256]::HashData($bytes)) |
-                    Should -BeExactly $ExpectedSha256
-            }
+            [Text.Encoding]::UTF8.GetByteCount($text) | Should -BeLessOrEqual 16384
             ConvertFrom-Json -InputObject $text -AsHashtable -DateKind String
         } finally { $process.Dispose() }
+    }
+
+    # Compare decoded JSON recursively, preserving array order and exact scalar values.
+    function Assert-PageValue {
+        param($Actual, $Expected, [string] $Path = '$')
+
+        if ($Expected -is [Collections.IDictionary]) {
+            ($Actual -is [Collections.IDictionary]) | Should -BeTrue -Because $Path
+            $Actual.Count | Should -Be $Expected.Count -Because $Path
+            foreach ($key in $Expected.Keys) {
+                @($Actual.Keys) -ccontains $key | Should -BeTrue -Because "$Path.$key"
+                Assert-PageValue -Actual $Actual[$key] -Expected $Expected[$key] -Path "$Path.$key"
+            }
+        } elseif ($Expected -is [array]) {
+            ($Actual -is [array]) | Should -BeTrue -Because $Path
+            $Actual.Count | Should -Be $Expected.Count -Because $Path
+            for ($index = 0; $index -lt $Expected.Count; $index++) {
+                Assert-PageValue -Actual $Actual[$index] -Expected $Expected[$index] -Path "$Path[$index]"
+            }
+        } else {
+            if ($null -eq $Expected) {
+                $Actual | Should -BeNullOrEmpty -Because $Path
+                ($null -eq $Actual) | Should -BeTrue -Because $Path
+            } else {
+                if ($Expected -is [string]) {
+                    ($Actual -is [string]) | Should -BeTrue -Because $Path
+                } elseif ($Expected -is [bool]) {
+                    ($Actual -is [bool]) | Should -BeTrue -Because $Path
+                } else {
+                    ($Actual -is [long] -or $Actual -is [int] -or $Actual -is [double] -or $Actual -is [decimal]) |
+                        Should -BeTrue -Because $Path
+                }
+                $Actual | Should -BeExactly $Expected -Because $Path
+            }
+        }
+    }
+
+    # Build the complete expected page from the frozen capture and effective classification.
+    function New-ExpectedCommentPage {
+        param($Capture, [string] $Snapshot)
+
+        $items = @(
+            foreach ($thread in $Capture.threads) {
+                foreach ($comment in $thread.comments) {
+                    @{
+                        threadId = $thread.id; url = $thread.url; openingCommentId = $thread.openingCommentId
+                        kind = $thread.kind; resolution = $thread.resolution; isOutdated = $thread.isOutdated
+                        context = $thread.context; decision = $thread.decision; isAuthoredBySelf = $comment.isAuthoredBySelf
+                        eventUtc = $thread.eventUtc; lastUpdatedUtc = $thread.lastUpdatedUtc
+                        commentId = $comment.id; commentUrl = $comment.url; parentId = $comment.parentId
+                        author = $comment.author; authorship = $comment.authorship; authorshipEvidence = $comment.authorshipEvidence
+                        threadIsAuthoredBySelf = $thread.isAuthoredBySelf; publishedUtc = $comment.publishedUtc
+                        lastEditedUtc = $comment.lastEditedUtc; content = $comment.content; contentOffset = 0
+                        contentLength = $comment.content.Length; contentComplete = $true
+                    }
+                }
+            }
+        )
+        return @{
+            schemaVersion = 1; query = 'comments'; snapshotId = $Snapshot; totalCount = $items.Count
+            items = $items; nextCursor = $null; complete = $true
+        }
     }
 }
 
@@ -45,17 +102,24 @@ AfterAll {
 }
 
 Describe 'Native provider capture reading' {
+    It 'compares JSON values without requiring the same object order or Unicode spelling' {
+        $first = ConvertFrom-Json -InputObject '{"content":"café","items":[1,2],"complete":true}' -AsHashtable -DateKind String
+        $second = ConvertFrom-Json -InputObject '{ "complete": true, "items": [1, 2], "content": "caf\u00e9" }' -AsHashtable -DateKind String
+        Assert-PageValue -Actual $first -Expected $second
+    }
+
     It 'preserves <Provider> Unicode, snapshot and UTF-16 comment lengths' -ForEach @(
-        @{ Provider = 'github'; Thread = 'PRRT_1'; ExpectedCount = 1; PageHash = 'A2949AA0B58F40B574432CDF603E0FF545098AFBFD15CE08F55425DDD1550032' }
-        @{ Provider = 'azure-devops'; Thread = '101'; ExpectedCount = 2; PageHash = 'D249FF8E26B59B6BF1C867343E21F0A8DEA7EF48881550A9D08C30DBFD985543' }
+        @{ Provider = 'github'; Thread = 'PRRT_1'; ExpectedCount = 1 }
+        @{ Provider = 'azure-devops'; Thread = '101'; ExpectedCount = 2 }
     ) {
         $path = Join-Path $script:Scratch "$Provider-baseline-雪.json"
         [IO.File]::Copy((Join-Path $script:Fixtures "$Provider-expected.json"), $path, $true)
         $original = [IO.File]::ReadAllBytes($path)
         $golden = Get-Content -LiteralPath (Join-Path $script:Fixtures "$Provider-refresh-parity.json") -Raw |
             ConvertFrom-Json -AsHashtable
-        $page = Invoke-NativeContext -Arguments @('read', '--path', $path, '--query', 'comments', '--thread-id', $Thread) `
-            -ExpectedSha256 $PageHash
+        $page = Invoke-NativeContext -Arguments @('read', '--path', $path, '--query', 'comments', '--thread-id', $Thread)
+        $capture = ConvertFrom-Json -InputObject ([IO.File]::ReadAllText($path)) -AsHashtable -DateKind String
+        Assert-PageValue -Actual $page -Expected (New-ExpectedCommentPage -Capture $capture -Snapshot $golden.baselineSnapshot)
         $page.schemaVersion | Should -Be 1
         $page.query | Should -BeExactly 'comments'
         $page.snapshotId | Should -BeExactly $golden.baselineSnapshot
@@ -100,8 +164,8 @@ Describe 'Native provider capture reading' {
     }
 
     It 'reads <Provider> classified baseline and refresh sidecars without changing either capture' -ForEach @(
-        @{ Provider = 'github'; Thread = 'PRRT_1'; CommentHash = '8886C55B2389D88197AD4EE12995BBAB4AAFCA23048D246119157CA0B535B72B'; ChangeHash = 'F9F7E5CA3ADF96462258D97F681A51E27EEAE8A634E2B756FE4F1AEEF202F8AE' }
-        @{ Provider = 'azure-devops'; Thread = '101'; CommentHash = '3EF1BE9081A8ECA020ABAFE4E8B0C9F7A6281AA10115839E31B0B1BD2A468EA9'; ChangeHash = 'D4BC0E6530D107AACC0B30477072DC400C690470C6EDD522B76125558B1B850D' }
+        @{ Provider = 'github'; Thread = 'PRRT_1'; Comment = 'PRRC_1' }
+        @{ Provider = 'azure-devops'; Thread = '101'; Comment = '1' }
     ) {
         $previous = Join-Path $script:Scratch "$Provider-classified-baseline.json"
         $current = Join-Path $script:Scratch "$Provider-classified-refresh.json"
@@ -119,8 +183,8 @@ Describe 'Native provider capture reading' {
             [IO.File]::WriteAllText($entry.Path, $json, [Text.UTF8Encoding]::new($false))
         }
         $baseline = Invoke-NativeContext -Arguments @('read', '--path', $previous, '--query', 'comments', '--thread-id', $Thread)
-        $refresh = Invoke-NativeContext -Arguments @('read', '--path', $current, '--query', 'comments', '--thread-id', $Thread) `
-            -ExpectedSha256 $CommentHash
+        $refresh = Invoke-NativeContext -Arguments @('read', '--path', $current, '--query', 'comments', '--thread-id', $Thread)
+        Assert-PageValue -Actual $refresh -Expected (New-ExpectedCommentPage -Capture $golden.refreshEffective -Snapshot $golden.refreshSnapshot)
         $baseline.snapshotId | Should -BeExactly $golden.classifiedSnapshot
         $refresh.snapshotId | Should -BeExactly $golden.refreshSnapshot
         $baseline.items[0].authorship | Should -BeExactly 'human'
@@ -129,8 +193,16 @@ Describe 'Native provider capture reading' {
             $baseline.items[1].authorship | Should -BeExactly 'agent'
             $refresh.items[1].authorship | Should -BeExactly 'agent'
         }
-        $changes = Invoke-NativeContext -Arguments @('read', '--path', $current, '--query', 'changes', '--compare-path', $previous) `
-            -ExpectedSha256 $ChangeHash
+        $changes = Invoke-NativeContext -Arguments @('read', '--path', $current, '--query', 'changes', '--compare-path', $previous)
+        $expectedChanges = @{
+            schemaVersion = 1; query = 'changes'; snapshotId = $golden.refreshSnapshot; totalCount = 2
+            items = @(
+                @{ change = 'commentsEdited'; capture = 'both'; threadId = $Thread; commentId = $Comment }
+                @{ change = 'reviewEvidence'; capture = 'both' }
+            )
+            nextCursor = $null; complete = $true
+        }
+        Assert-PageValue -Actual $changes -Expected $expectedChanges
         @($changes.items | Where-Object { $_.change -ceq 'commentsEdited' }).Count | Should -Be 1
         [IO.File]::ReadAllBytes($previous) | Should -Be $previousBytes
         [IO.File]::ReadAllBytes($current) | Should -Be $currentBytes

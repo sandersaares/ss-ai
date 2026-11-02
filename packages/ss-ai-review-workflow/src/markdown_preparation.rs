@@ -1,6 +1,8 @@
 //! Prepares validated finding documents for audit and delivery rendering.
 
+use std::any::type_name;
 use std::collections::HashSet;
+use std::fmt::{self, Debug, Formatter};
 use std::path::{Path, PathBuf, absolute};
 
 use ohno::AppError;
@@ -12,7 +14,6 @@ use url::Url;
 use crate::{approved, findings, markdown, workflow_plan::parse_json};
 
 /// File inputs for rendering an artifact or approved finding set.
-#[derive(Debug)]
 #[expect(
     clippy::exhaustive_structs,
     reason = "This internal command composition supplies every rendering input"
@@ -34,6 +35,19 @@ pub struct Options<'a> {
     pub context_path: Option<&'a Path>,
     /// Optional overview prepended to the audit document.
     pub overview_path: Option<&'a Path>,
+}
+
+impl Debug for Options<'_> {
+    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
+        f.debug_struct(type_name::<Self>())
+            .field("path", &self.path)
+            .field("output_directory", &self.output_directory)
+            .field("combined_path", &self.combined_path)
+            .field("audit_document_path", &self.audit_document_path)
+            .field("finding_count", &self.finding_ids.len())
+            .field("destination", &self.destination)
+            .finish_non_exhaustive()
+    }
 }
 
 /// Validates the source, then renders the requested files.
@@ -108,7 +122,7 @@ pub fn prepare(options: &Options<'_>, clock: &dyn Clock) -> Result<Value, AppErr
         "outputDirectory": output, "combinedPath": combined, "auditDocumentPath": audit,
         "context": context, "overview": overview,
     });
-    let mut result = markdown::render_files_json(&serde_json::to_vec(&request)?, clock)?;
+    let mut result = markdown::render_files(&request, clock)?;
     result
         .as_object_mut()
         .ok_or_else(|| fail("invalidState", "Renderer returned a non-object result"))?
@@ -136,12 +150,32 @@ fn resolve(path: &Path) -> Result<PathBuf, AppError> {
 #[cfg(test)]
 #[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
-    use super::identifiers;
+    use std::path::Path;
+
+    use super::{Options, identifiers};
 
     #[test]
     fn selection_accepts_commas_repeats_and_unicode() {
-        let input = vec![" F1, é, F1 ".into(), "".into(), "é,F2".into()];
+        let input = vec![" F1, é, F1 ".into(), String::new(), "é,F2".into()];
         assert_eq!(identifiers(&input), ["F1", "é", "F2"]);
         assert!(identifiers(&[" , ".into()]).is_empty());
+    }
+
+    #[test]
+    fn options_debug_handles_empty_and_populated_selections() {
+        let ids = vec!["F1".to_owned(), "F2".to_owned()];
+        for finding_ids in [&[][..], ids.as_slice()] {
+            let options = Options {
+                path: Path::new("source"),
+                output_directory: Path::new("output"),
+                combined_path: None,
+                audit_document_path: None,
+                finding_ids,
+                destination: "tracker",
+                context_path: None,
+                overview_path: None,
+            };
+            drop(format!("{options:?}"));
+        }
     }
 }

@@ -1180,6 +1180,8 @@ mod tests {
 
     #[test]
     fn partial_graphql_submission_preserves_journal_and_blocks_replay() {
+        /// Models possible mutation success despite CLI failure; neither
+        /// network fallback nor a retry wait may hide the uncertain outcome.
         struct PartialResponse {
             calls: Cell<usize>,
             response: &'static [u8],

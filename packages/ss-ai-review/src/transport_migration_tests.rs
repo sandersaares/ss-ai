@@ -8,9 +8,10 @@ use std::time::Duration;
 use jiff::Timestamp;
 use ohno::AppError;
 use serde_json::{Value, json};
+use ss_ai_runtime::fail;
 
 use crate::{
-    Clock, Http, HttpResponse, Process, ProcessOutput, classification, error::fail, target::Target,
+    Clock, Http, HttpResponse, Process, ProcessOutput, classification, target::Target,
     transport::Transport,
 };
 

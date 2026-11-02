@@ -20,6 +20,7 @@ BeforeAll {
         foreach ($argument in @('workflow') + $Arguments) { $start.ArgumentList.Add($argument) }
         $process = [Diagnostics.Process]::Start($start)
         try {
+            # Drain both pipes while the child runs so a full pipe cannot block its exit.
             $stdout = $process.StandardOutput.ReadToEndAsync()
             $stderr = $process.StandardError.ReadToEndAsync()
             $process.WaitForExit()

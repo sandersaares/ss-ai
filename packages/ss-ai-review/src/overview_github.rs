@@ -771,6 +771,8 @@ mod tests {
 
     #[test]
     fn both_writes_retry_established_refusals_and_verify_receipts() {
+        /// Shares a wait budget across writes, each scripted to refuse once
+        /// before succeeding.
         struct RetryClock(Cell<usize>);
         impl Clock for RetryClock {
             fn now(&self) -> Timestamp {

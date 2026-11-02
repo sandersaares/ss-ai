@@ -8,7 +8,7 @@ use std::path::{Path, PathBuf};
 
 use ohno::AppError;
 use serde_json::{Map, Value, json};
-use ss_ai_runtime::{Clock, FileTransaction, fail, read_bytes};
+use ss_ai_runtime::{Clock, FileTransaction, caused_by, fail, read_bytes};
 
 use crate::workflow_plan::{PlanItem, PlanKind, parse_json};
 
@@ -77,16 +77,15 @@ pub fn validate_artifacts(
     clock: &dyn Clock,
 ) -> Result<Value, AppError> {
     let path = std::path::absolute(path)
-        .map_err(|error| ss_ai_runtime::caused_by("io", "Cannot resolve artifact path", error))?;
+        .map_err(|error| caused_by("io", "Cannot resolve artifact path", error))?;
     let mut files = Vec::new();
     let mut errors = Vec::new();
     if path.is_dir() {
         let entries = fs::read_dir(&path)
-            .map_err(|error| ss_ai_runtime::caused_by("io", "Cannot inspect artifacts", error))?;
+            .map_err(|error| caused_by("io", "Cannot inspect artifacts", error))?;
         for entry in entries {
-            let entry = entry.map_err(|error| {
-                ss_ai_runtime::caused_by("io", "Cannot inspect artifact entry", error)
-            })?;
+            let entry =
+                entry.map_err(|error| caused_by("io", "Cannot inspect artifact entry", error))?;
             let entry_path = entry.path();
             let name = entry.file_name();
             let name = name.to_string_lossy();
@@ -746,12 +745,11 @@ fn reviewer_sources(
     clock: &dyn Clock,
 ) -> Result<(Vec<(Value, Value)>, usize), AppError> {
     let entries = fs::read_dir(directory)
-        .map_err(|error| ss_ai_runtime::caused_by("io", "Cannot read reviewer directory", error))?;
+        .map_err(|error| caused_by("io", "Cannot read reviewer directory", error))?;
     let mut paths = Vec::new();
     for entry in entries {
-        let entry = entry.map_err(|error| {
-            ss_ai_runtime::caused_by("io", "Cannot read reviewer directory entry", error)
-        })?;
+        let entry = entry
+            .map_err(|error| caused_by("io", "Cannot read reviewer directory entry", error))?;
         if hidden_entry(&entry)? {
             continue;
         }
@@ -1530,7 +1528,7 @@ fn validate_content(value: &Value, record: bool) -> Result<(), AppError> {
         let length = prose.encode_utf16().count();
         if name == "title" && length > TITLE_LIMIT {
             return Err(invalid(&format!(
-                "The finding reports a title of {length} characters; a title holds at most {TITLE_LIMIT}"
+                "The finding reports a title of {length} UTF-16 code units; a title holds at most {TITLE_LIMIT} UTF-16 code units"
             )));
         }
     }

@@ -370,7 +370,7 @@ fn withdrawal_receipts_survive_before_and_after_completion() {
     }
 }
 
-/// Produces the same authenticated metadata format as generated focus areas.
+/// Produces the same content-hash-bound metadata as generated focus areas.
 fn area(workspace: &Workspace, contexts: &[Value]) -> PathBuf {
     let focus = workspace.path("focus");
     fs::create_dir_all(&focus).unwrap();
@@ -781,7 +781,9 @@ fn bounded_sequences_preserve_complete_coverage_across_retries_and_resume() {
     let clock = FixedClock;
     let mut state = 0x7294_1185_u32;
     let mut committed = Vec::new();
-    // A fixed seed makes every failure reproducible; the finite tail completes work.
+    // Marsaglia's xorshift32 transition uses the published (13, 17, 5) shifts:
+    // https://www.jstatsoft.org/article/view/v008i14
+    // The fixed seed selects reproducible operations; the finite tail completes work.
     for _ in 0..32 {
         state ^= state << 13;
         state ^= state >> 17;

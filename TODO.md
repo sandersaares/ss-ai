@@ -18,17 +18,6 @@ Improvement ideas to revisit when the repo matures.
 - **Evaluation cache/task publication.** Assess shared access to
   `dev/ss-cargo-deps-tidy/evals/Generate-FoloFullTask.ps1` and add transaction
   protection where needed; use disposable checkouts for standalone preparation.
-- **Make concurrent worker-input diagnostics testing deterministic.** The
-  default-parallel Rust suite can fail
-  `worker_input::concurrent_reads_preserve_diagnostics` when a reader exhausts
-  the bounded shared-file contention retries. The same failure occurred in
-  full-suite runs of parent 848274ecbd117bfabceae6732eac506012d43fb9 and
-  descendant 6808c65a42ea87d7cac204042e8a4e5ed580cb5f, with only the test
-  assertion instrumented to print its error. Replace the test's retry
-  scheduling with controlled synchronization and assert the diagnostics
-  explicitly, without increasing production retry budgets or serializing the
-  suite.
-
 ## Skill design
 
 - **Detect hard-linked capture lock files.** Reject aliased retained sibling

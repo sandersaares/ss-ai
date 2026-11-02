@@ -5,10 +5,11 @@ use std::error::Error as StdError;
 use std::fs;
 use std::path::{Path, PathBuf};
 
+use ohno::AppError;
 use regex::Regex;
 use serde_json::{Value, from_str, from_value, json, to_vec_pretty};
 use sha2::{Digest, Sha256};
-use ss_ai_runtime::{Clock, FileTransaction, read_bytes};
+use ss_ai_runtime::{Clock, FileTransaction, fail, read_bytes};
 use uuid::Uuid;
 
 use crate::target::Target;
@@ -272,7 +273,9 @@ fn validate_snapshot(
 
 /// Applies the same ordered heading, placeholder, and private-path gate as PowerShell.
 fn validate_overview(text: &str, output: &Path, skill: &Path) -> Result<(), SnapshotError> {
-    validate_overview_structure(text).map_err(SnapshotError::invalid_input)?;
+    validate_overview_structure(text).map_err(|error| {
+        SnapshotError::invalid_input_caused_by("Invalid overview structure", error.into_std_error())
+    })?;
     // PowerShell's `-match` is case-insensitive by default.
     let placeholder =
         Regex::new(r"\{\{[A-Za-z_][A-Za-z_0-9]*\}\}").expect("Fixed placeholder expression");
@@ -306,7 +309,7 @@ fn validate_overview(text: &str, output: &Path, skill: &Path) -> Result<(), Snap
 ///
 /// Rejects missing, duplicate, empty, or unordered required sections.
 #[doc(hidden)]
-pub fn validate_overview_structure(text: &str) -> Result<(), String> {
+pub fn validate_overview_structure(text: &str) -> Result<(), AppError> {
     let required = [
         "Mission",
         "Substance",
@@ -351,10 +354,16 @@ pub fn validate_overview_structure(text: &str) -> Result<(), String> {
             .filter(|(_, section)| section.0 == name)
             .collect();
         let [(position, (_, body))] = matches.as_slice() else {
-            return Err(format!("Missing, empty, or unordered {name} section"));
+            return Err(fail(
+                "invalidInput",
+                format!("Missing, empty, or unordered {name} section"),
+            ));
         };
         if previous.is_some_and(|index| *position <= index) || body.trim().is_empty() {
-            return Err(format!("Missing, empty, or unordered {name} section"));
+            return Err(fail(
+                "invalidInput",
+                format!("Missing, empty, or unordered {name} section"),
+            ));
         }
         previous = Some(*position);
     }
@@ -666,6 +675,17 @@ mod tests {
         assert_eq!(
             error.find_source::<Error>().unwrap().kind(),
             ErrorKind::PermissionDenied
+        );
+
+        let error: AppError = validate_overview("", Path::new("output"), Path::new("skill"))
+            .unwrap_err()
+            .into();
+        assert!(error.find_source::<InvalidInput>().is_some());
+        assert_eq!(ss_ai_runtime::classification(&error), "invalidInput");
+        assert!(
+            error
+                .to_string()
+                .contains("Missing, empty, or unordered Mission section")
         );
     }
 

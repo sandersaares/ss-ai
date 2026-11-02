@@ -8,6 +8,8 @@ use std::cell::RefCell;
 use std::env;
 use std::fs;
 use std::io;
+#[cfg(unix)]
+use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::Duration;
@@ -95,7 +97,6 @@ fn title_and_relative_output_keep_invocation_directory() {
         fixture_file(&executable, b"");
         #[cfg(unix)]
         {
-            use std::os::unix::fs::PermissionsExt;
             fs::set_permissions(executable, fs::Permissions::from_mode(0o755)).unwrap();
         }
     }

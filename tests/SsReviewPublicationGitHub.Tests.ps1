@@ -1,3 +1,9 @@
+#Requires -Version 7.6
+
+Set-StrictMode -Version Latest
+$ErrorActionPreference = 'Stop'
+$PSNativeCommandUseErrorActionPreference = $true
+
 Describe 'Native GitHub follow-up publication' {
     foreach ($scenario in @(
             @{ Scenario = 'first reopen fails and second succeeds'; Mode = 'normal'; FailSecond = $false }
@@ -182,6 +188,7 @@ Describe 'Native GitHub follow-up publication' {
         }
     }
     $journalPath = Join-Path $env:SS_OUTPUT 'publication-result.json'
+    # Sample durable intent inside the provider before the write response completes the operation.
     if ($state.events.Count -gt $priorEvents -and [IO.File]::Exists($journalPath)) {
         $journal = ConvertFrom-Json -AsHashtable -InputObject ([IO.File]::ReadAllText($journalPath))
         $state.snapshots += @{
@@ -477,6 +484,7 @@ Describe 'Native GitHub follow-up publication' {
                 if ($Mode -eq 'pendingAllowed') { $expectedEvents = @('discard:existing') + $expectedEvents }
                 @($state.events) | Should -Be $expectedEvents
                 @($state.snapshots).Count | Should -Be 6
+                # Each provider-side sample must already record the in-flight write as ambiguous.
                 foreach ($snapshot in $state.snapshots) {
                     $snapshot.inFlight | Should -Not -BeNullOrEmpty
                     $snapshot.operations[$snapshot.inFlight.index].outcome | Should -Be 'ambiguous'

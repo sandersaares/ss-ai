@@ -1321,8 +1321,11 @@ fn finding_validation_covers_prose_controls_and_structured_fields() {
         assert_eq!(result.is_ok(), accepted, "UTF-16 title bound");
         if let Err(error) = result {
             let message = error.to_string();
-            assert!(message.contains("256 characters"), "{message}");
-            assert!(message.contains("at most 255"), "{message}");
+            assert!(message.contains("256 UTF-16 code units"), "{message}");
+            assert!(
+                message.contains("at most 255 UTF-16 code units"),
+                "{message}"
+            );
         }
     }
 

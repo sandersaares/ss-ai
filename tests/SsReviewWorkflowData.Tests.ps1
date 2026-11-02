@@ -1,3 +1,9 @@
+#Requires -Version 7.6
+
+Set-StrictMode -Version Latest
+$ErrorActionPreference = 'Stop'
+$PSNativeCommandUseErrorActionPreference = $true
+
 BeforeAll {
     $script:SchemaPath = Join-Path (Split-Path -Parent $PSScriptRoot) 'skills\ss-review\schemas\workflow-data.schema.json'
     $null = Get-Command Test-Json -Module Microsoft.PowerShell.Utility

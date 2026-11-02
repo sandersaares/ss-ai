@@ -1,4 +1,4 @@
-//! Covers rendering contracts formerly exercised through the PowerShell helpers.
+//! Covers finding Markdown rendering contracts.
 
 #![allow(
     clippy::indexing_slicing,

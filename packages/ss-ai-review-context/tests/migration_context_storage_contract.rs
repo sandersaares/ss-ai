@@ -43,6 +43,8 @@ impl Files {
             .parent()
             .unwrap()
             .join("target");
+        // Cargo's output may be redirected, leaving the checkout without this directory.
+        fs::create_dir_all(&target).unwrap();
         for id in 0..1024 {
             let stem = target.join(format!("context-storage-{}-{id}", std::process::id()));
             let reservation = stem.with_extension("reservation");

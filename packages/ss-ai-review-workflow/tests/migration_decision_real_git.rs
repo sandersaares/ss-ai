@@ -109,6 +109,8 @@ fn real_git_approval_rebinds_capture_and_filters_only_missing_files() {
     let repo = workspace.0.join("repo");
     fs::create_dir_all(repo.join("src")).unwrap();
     git(&repo, &["init", "--quiet"]);
+    // The file extends beyond the finding's anchor, which lies outside the
+    // changed hunk: approval eligibility is independent of inline placement.
     let content = "unchanged line\n".repeat(60);
     fs::write(repo.join("src/retry.rs"), &content).unwrap();
     fs::write(repo.join("src/parse.rs"), "unchanged\n").unwrap();

@@ -30,6 +30,7 @@ BeforeAll {
         $path
     }
 
+    # Exercise relative capture paths by passing a filename from the child's working directory.
     function Invoke-ContextQuery {
         param([string] $Path)
 
@@ -47,6 +48,7 @@ BeforeAll {
         }
         $process = [Diagnostics.Process]::Start($start)
         try {
+            # Drain both pipes while the child runs so a full pipe cannot block its exit.
             $out = $process.StandardOutput.ReadToEndAsync()
             $err = $process.StandardError.ReadToEndAsync()
             $process.WaitForExit()

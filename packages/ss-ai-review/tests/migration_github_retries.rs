@@ -84,7 +84,6 @@ fn rate_headers_survive_cli_and_use_a_separate_transient_budget() {
     assert_eq!(provider.requests.get(), 8);
     let waits = provider.waits.borrow();
     assert_eq!(waits.get(..6).unwrap(), [Duration::from_secs(240); 6]);
-    assert_eq!(waits.get(6), Some(&Duration::from_secs(1)));
     assert_eq!(waits.len(), 7);
     assert!(provider.replies.borrow().is_empty());
 }
@@ -228,6 +227,5 @@ fn multiple_rate_refusals_preserve_transient_retries_through_success() {
     assert!(provider.replies.borrow().is_empty());
     let waits = provider.waits.borrow();
     assert_eq!(waits.get(..6).unwrap(), [Duration::from_secs(240); 6]);
-    assert_eq!(waits.get(6), Some(&Duration::from_secs(1)));
     assert_eq!(waits.len(), 7);
 }

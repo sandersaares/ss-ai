@@ -71,6 +71,7 @@ impl Files {
         // Exclusive creation handles process ID reuse; the bound avoids a stuck test
         // if the namespace cannot provide a fresh name.
         for _ in 0..1024 {
+            // The counter only supplies candidate names, not fixture state.
             let id = NEXT.fetch_add(1, Ordering::Relaxed);
             let stem = format!("migration-saved-{}-{id}", std::process::id());
             let capture = output.join(format!("{stem}-capture.json"));

@@ -94,7 +94,11 @@ Describe 'prepared helper' {
             $helper | Should -Not -BeNullOrEmpty
             Test-Path -LiteralPath $helper -PathType Leaf | Should -BeTrue
             [IO.File]::ReadAllText($helper) | Should -Be 'fixture'
-            (Split-Path -Parent $helper) | Should -Be (Get-Content -LiteralPath '__TARGET_LOG__' | Select-Object -First 1)
+            $target = Get-Content -LiteralPath '__TARGET_LOG__' | Select-Object -First 1
+            $relative = [IO.Path]::GetRelativePath($target, $helper)
+            [IO.Path]::IsPathRooted($relative) | Should -BeFalse
+            $relative | Should -Not -Be '..'
+            $relative.StartsWith('..' + [IO.Path]::DirectorySeparatorChar) | Should -BeFalse
         }
     }
 }

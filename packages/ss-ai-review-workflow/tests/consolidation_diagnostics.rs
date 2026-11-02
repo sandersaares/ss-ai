@@ -13,6 +13,7 @@ use jiff::Timestamp;
 use ohno::AppError;
 use serde_json::{Value, json};
 use ss_ai_review_workflow::findings;
+use ss_ai_review_workflow::overview_validation;
 use ss_ai_runtime::{Clock, classification, fail};
 
 /// Rejects unexpected contention without introducing real-time waits.
@@ -151,6 +152,35 @@ fn malformed_stored_finding_identifies_its_artifact_and_identifier() {
     bad.as_object_mut().unwrap().remove("id");
     let error = findings::validate_artifact(&reviewer("g1", json!([bad]))).unwrap_err();
     assert_invalid(&error, &["missing or invalid identifier", "'id'"]);
+}
+
+/// Malformed artifact diagnostics identify both the input and the parsing failure.
+#[test]
+fn malformed_artifact_identifies_json_failure() {
+    let workspace = Workspace::new("json-cause");
+    let path = workspace.path("broken.json");
+    fs::write(&path, b"{").unwrap();
+    let error = findings::read_artifact(&path, &FixedClock).unwrap_err();
+    assert_invalid(&error, &["broken.json", "Invalid JSON"]);
+}
+
+/// Preparation propagates the supplied validator's classification and cause.
+#[test]
+fn overview_validation_retains_injected_error() {
+    let workspace = Workspace::new("overview-cause");
+    let path = workspace.path("overview.md");
+    fs::write(&path, "# Content overview\n").unwrap();
+    let validator = |_: &str| {
+        Err(ss_ai_runtime::caused_by(
+            "invalidInput",
+            "Invalid structure",
+            std::io::Error::other("validator cause"),
+        )
+        .into())
+    };
+    let error = overview_validation::validate(&path, None, &validator, &FixedClock).unwrap_err();
+    assert_invalid(&error, &["Invalid structure", "validator cause"]);
+    assert!(error.find_source::<std::io::Error>().is_some());
 }
 
 /// Merge diagnostics identify unknown sources and each kind of uncovered location.

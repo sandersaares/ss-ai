@@ -730,6 +730,7 @@ fn install_pandoc(tools_dir: &Path, process: &dyn Process) -> Result<(), AppErro
 }
 
 #[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
     use super::*;
 
@@ -741,7 +742,7 @@ mod tests {
         validate_staged_lockfile(&destination, Ok(selected.to_vec())).unwrap();
         let error =
             validate_staged_lockfile(&destination, Ok(b"changed lockfile".to_vec())).unwrap_err();
-        assert!(format!("{error:?}").contains("lockfile changed during setup"));
+        assert!(error.to_string().contains("lockfile changed during setup"));
     }
 
     /// A failed staged read cannot be mistaken for a changed lockfile.
@@ -752,6 +753,14 @@ mod tests {
             Err(io::Error::new(io::ErrorKind::PermissionDenied, "denied")),
         )
         .unwrap_err();
-        assert!(format!("{error:?}").contains("Cannot read staged dependency lockfile"));
+        assert!(
+            error
+                .to_string()
+                .contains("Cannot read staged dependency lockfile")
+        );
+        assert_eq!(
+            error.find_source::<io::Error>().unwrap().kind(),
+            io::ErrorKind::PermissionDenied
+        );
     }
 }

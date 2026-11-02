@@ -11,7 +11,7 @@ use std::fs;
 use std::io::{self, BufRead, BufReader, Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
-use std::sync::Mutex;
+use std::sync::{Mutex, PoisonError};
 use std::time::Duration;
 
 use jiff::Timestamp;
@@ -24,6 +24,7 @@ use ss_ai_review_workflow::audit::{
 use ss_ai_runtime::{Clock, FileTransaction, SystemClock, caused_by, fail};
 
 /// Prevents a concurrent subprocess launch from temporarily inheriting a test's held lock.
+/// Poisoning does not compromise fixture data: the mutex protects only exclusion.
 static PROCESS_LAUNCH: Mutex<()> = Mutex::new(());
 
 /// Keeps non-concurrent tests independent of wall time and contention delays.
@@ -216,7 +217,9 @@ fn audit_interop_helper_reports_real_contention_for_each_operation() {
             &json!({"schemaVersion":1, "kind":"consolidated",
                 "findings":[finding("F-1","a.rs")], "removed":[]}),
         );
-        let launch = PROCESS_LAUNCH.lock().unwrap();
+        let launch = PROCESS_LAUNCH
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
         let lock = FileTransaction::open(&record, &clock).unwrap();
         let mut child = Command::new(env::current_exe().unwrap())
             .args(["native_audit_lock_interop_helper", "--exact", "--nocapture"])
@@ -302,7 +305,9 @@ fn decisions_validate_complete_batches_and_preserve_verbatim_feedback() {
 #[test]
 fn individual_decision_normalization_keeps_plans_and_journals_strict() {
     // A concurrent subprocess launch can briefly inherit a held file lock.
-    let _launch = PROCESS_LAUNCH.lock().unwrap();
+    let _launch = PROCESS_LAUNCH
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner);
     let workspace = Workspace::new("individual-decisions");
     let path = workspace.path("decisions.json");
     let clock = FixedClock;
@@ -756,7 +761,9 @@ fn overlapping_native_updates_keep_both_transactions() {
                 {"findingId":"F-2","decision":"approved"}]}),
             )
         };
-        let launch = PROCESS_LAUNCH.lock().unwrap();
+        let launch = PROCESS_LAUNCH
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
         let transaction = FileTransaction::open(&record, &clock).unwrap();
         let mut child = Command::new(env::current_exe().unwrap())
             .args(["native_audit_lock_interop_helper", "--exact", "--nocapture"])

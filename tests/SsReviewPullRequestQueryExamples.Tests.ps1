@@ -347,6 +347,7 @@ Describe 'Documented native pull request query examples' {
             $seed = [Security.Cryptography.RandomNumberGenerator]::GetInt32([int]::MaxValue)
             $random = [Random]::new($seed)
             $alphabet = @('a', '"', '\', "`r`n", [string] [char] 0x03A9, [char]::ConvertFromUtf32(0x1F916))
+            # Cover a small body and a page-spanning body; repetitions balance random coverage and cost.
             foreach ($size in @(12, 12000)) {
                 foreach ($case in 1..4) {
                     $body = [Text.StringBuilder]::new()
@@ -360,7 +361,7 @@ Describe 'Documented native pull request query examples' {
                     $rebuilt = [Text.StringBuilder]::new()
                     $cursor = ''
                     $complete = $false
-                    # The bounded fixture requires fewer pages; the bound detects stalled continuations.
+                    # The bound comfortably exceeds pages needed for this body and detects stalled continuations.
                     for ($attempt = 0; $attempt -lt 100; $attempt++) {
                         $selection = if ($cursor) { $arguments + @('--cursor', $cursor) } else { $arguments }
                         $result = Invoke-NativeQuery $selection
@@ -436,6 +437,7 @@ if ($args -ccontains '--slurp') { $value = "[$value]" }
                 $baseline = Invoke-NativeQuery -Group context -Command create -Arguments $arguments -Environment $environment
                 $baseline.ExitCode | Should -Be 0 -Because $baseline.Error
                 $baselinePath = (ConvertFrom-Json -InputObject $baseline.Output).contextPath
+                # Repeated long comments would exceed the output ceiling if emitted in the summary.
                 $fixture.responses.reviewThreads.data.repository.pullRequest.reviewThreads.nodes = @(
                     foreach ($index in 1..1000) {
                         $thread = ConvertFrom-Json -InputObject $template -AsHashtable -DateKind String
@@ -559,6 +561,7 @@ if ($args -ccontains '--slurp') { $value = "[$value]" }
         $failedRead.Error | Should -Not -Match 'raw capture sentinel'
         [IO.File]::WriteAllBytes($capture, $before)
 
+        # Even one thread per page fits within this bound for the fixture.
         for ($attempt = 0; $attempt -lt 30; $attempt++) {
             [Text.Encoding]::UTF8.GetByteCount($lines[-1] + "`n") | Should -BeLessOrEqual 16384
             foreach ($item in $page.items) { $ids.Add($item.threadId) | Should -BeTrue }

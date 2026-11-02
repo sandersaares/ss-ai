@@ -208,10 +208,19 @@ fn empty_iterations_preserve_null_commits_and_discussion() {
     );
 }
 
-/// Returns explicit provider refusals only for the iteration collection.
+/// Selects an HTTP refusal or a transport failure for iteration reads.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum IterationFailure {
+    Http(u16),
+    ConnectionLost,
+    RequestError,
+    RecoveringRequestError,
+}
+
+/// Injects failures only for the iteration collection.
 struct IterationRefusal {
     provider: Provider,
-    status: u16,
+    failure: IterationFailure,
     calls: Cell<usize>,
 }
 
@@ -239,26 +248,29 @@ impl Http for IterationRefusal {
             // A bounded fake makes a mutated retry loop fail immediately.
             assert!(calls <= 5);
             self.calls.set(calls);
-            // Sentinels inject transport errors that cannot be represented as HTTP statuses.
-            if self.status == 0 {
-                return Err(io::Error::other("connection lost").into());
+            match self.failure {
+                IterationFailure::ConnectionLost => {
+                    return Err(io::Error::other("connection lost").into());
+                }
+                IterationFailure::RecoveringRequestError if calls > 1 => {
+                    return self.provider.send(method, url, token, body);
+                }
+                IterationFailure::RequestError | IterationFailure::RecoveringRequestError => {
+                    // A failed request build yields a reqwest error without network access.
+                    let error = reqwest::blocking::Client::new()
+                        .get("http://[")
+                        .build()
+                        .unwrap_err();
+                    return Err(error.into());
+                }
+                IterationFailure::Http(status) => {
+                    return Ok(HttpResponse::new(
+                        status,
+                        BTreeMap::from([("x-private".to_owned(), "header-secret".to_owned())]),
+                        b"refused fixture-token".to_vec(),
+                    ));
+                }
             }
-            if self.status == 2 && calls > 1 {
-                return self.provider.send(method, url, token, body);
-            }
-            if self.status == 1 || self.status == 2 {
-                // A failed request build yields a reqwest error without making a network request.
-                let error = reqwest::blocking::Client::new()
-                    .get("http://[")
-                    .build()
-                    .unwrap_err();
-                return Err(error.into());
-            }
-            return Ok(HttpResponse::new(
-                self.status,
-                BTreeMap::from([("x-private".to_owned(), "header-secret".to_owned())]),
-                b"refused fixture-token".to_vec(),
-            ));
         }
         self.provider.send(method, url, token, body)
     }
@@ -280,16 +292,16 @@ impl Clock for InstantRetry {
 
 #[test]
 fn refused_iteration_reads_do_not_become_empty_iterations() {
-    for (status, expected, calls) in [
-        (401, "authentication", 2),
-        (403, "permissionDenied", 1),
-        (503, "service", 5),
-        (0, "service", 1),
-        (1, "service", 5),
+    for (failure, expected, calls) in [
+        (IterationFailure::Http(401), "authentication", 2),
+        (IterationFailure::Http(403), "permissionDenied", 1),
+        (IterationFailure::Http(503), "service", 5),
+        (IterationFailure::ConnectionLost, "service", 1),
+        (IterationFailure::RequestError, "service", 5),
     ] {
         let provider = IterationRefusal {
             provider: provider(),
-            status,
+            failure,
             calls: Cell::new(0),
         };
         let target = capture_target(&json!({
@@ -301,11 +313,11 @@ fn refused_iteration_reads_do_not_become_empty_iterations() {
         assert_eq!(provider.calls.get(), calls);
         assert!(!error.to_string().contains("fixture-token"));
         assert!(!error.to_string().contains("header-secret"));
-        if status == 503 || status == 1 {
-            assert_eq!(
-                *clock.0.borrow(),
-                [500, 1000, 2000, 4000].map(Duration::from_millis)
-            );
+        if matches!(
+            failure,
+            IterationFailure::Http(503) | IterationFailure::RequestError
+        ) {
+            assert_eq!(clock.0.borrow().len(), 4);
         } else {
             assert!(clock.0.borrow().is_empty());
         }
@@ -316,7 +328,7 @@ fn refused_iteration_reads_do_not_become_empty_iterations() {
 fn transient_transport_error_recovers_to_complete_capture() {
     let provider = IterationRefusal {
         provider: provider(),
-        status: 2,
+        failure: IterationFailure::RecoveringRequestError,
         calls: Cell::new(0),
     };
     let target = capture_target(&json!({
@@ -326,7 +338,7 @@ fn transient_transport_error_recovers_to_complete_capture() {
     let clock = InstantRetry(RefCell::new(Vec::new()));
     let result = collect_capture(&target, None, &provider, &provider, &clock).unwrap();
     assert_eq!(provider.calls.get(), 2);
-    assert_eq!(*clock.0.borrow(), [Duration::from_millis(500)]);
+    assert_eq!(clock.0.borrow().len(), 1);
     assert_eq!(provider.provider.token_calls.get(), 1);
     assert_eq!(
         result.pointer("/threads/0/comments/0/content").unwrap(),

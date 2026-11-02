@@ -70,17 +70,19 @@ pub(crate) fn state(
     }
     let types = transport.list(&format!("{project_segment}/_apis/wit/workitemtypes"))?;
     let mut resolved_type = None;
-    let mut available_types = Vec::new();
     for candidate in &types {
         let name = service_text(candidate, "name")?;
-        available_types.push(name);
         if name.eq_ignore_ascii_case(requested_type)
             && resolved_type.replace(name.to_owned()).is_some()
         {
             return Err(fail("service", "Azure returned duplicate work item types"));
         }
     }
-    let resolved_type = resolved_type.ok_or_else(|| {
+    let Some(resolved_type) = resolved_type else {
+        let available_types: Vec<_> = types
+            .iter()
+            .map(|candidate| service_text(candidate, "name"))
+            .collect::<Result<_, _>>()?;
         let message = if available_types.is_empty() {
             format!("The project does not define work item type {requested_type:?}")
         } else {
@@ -88,8 +90,8 @@ pub(crate) fn state(
                 "The project does not define work item type {requested_type:?}; available work item types: {available_types:?}"
             )
         };
-        fail("invalidInput", message)
-    })?;
+        return Err(fail("invalidInput", message));
+    };
     let type_record = get(
         transport,
         &format!(

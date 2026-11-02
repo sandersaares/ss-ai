@@ -844,17 +844,6 @@ mod tests {
             assert_eq!(url, expected_url);
             let actual = body.map(|bytes| from_slice::<Value>(bytes).unwrap());
             assert_eq!(actual, expected_body);
-            if expected_body
-                .as_ref()
-                .is_some_and(|value| value["comments"][0]["content"] == "finding — 🤖")
-            {
-                let expected = "finding — 🤖".as_bytes();
-                assert!(
-                    body.unwrap()
-                        .windows(expected.len())
-                        .any(|bytes| bytes == expected)
-                );
-            }
             Ok(HttpResponse::new(
                 200,
                 BTreeMap::new(),

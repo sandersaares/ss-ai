@@ -17,7 +17,7 @@ use ss_ai_runtime::{Clock, caused_by, fail, read_bytes};
 pub fn validate(
     path: &Path,
     context_path: Option<&Path>,
-    validate_structure: &dyn Fn(&str) -> Result<(), String>,
+    validate_structure: &dyn Fn(&str) -> Result<(), AppError>,
     clock: &dyn Clock,
 ) -> Result<Value, AppError> {
     let path =
@@ -40,7 +40,7 @@ pub fn validate(
         .transpose()?;
     // Composition supplies the publication validator without making this
     // workflow library depend on the provider-backed review library.
-    validate_structure(&text).map_err(|error| fail("invalidInput", error))?;
+    validate_structure(&text)?;
     validate_title_and_link(&text, url).map_err(|error| fail("invalidInput", error))?;
     Ok(json!({"isValid": true, "path": path}))
 }
@@ -95,7 +95,7 @@ mod tests {
 
     #[test]
     fn bom_selected_decoders_replace_invalid_sequences() {
-        assert!(decode_overview(&[0xff]).is_err());
+        decode_overview(&[0xff]).unwrap_err();
         for bytes in [
             &[0xef, 0xbb, 0xbf, 0xff][..],
             &[0xff, 0xfe, 0x00, 0xd8][..],
@@ -119,13 +119,13 @@ mod tests {
             "Related history",
             "Related work",
         ];
-        format!(
-            "# Content overview\n{}",
-            sections
-                .iter()
-                .map(|section| format!("## {section}\nRésumé\n"))
-                .collect::<String>()
-        )
+        let mut text = String::from("# Content overview\n");
+        for section in sections {
+            text.push_str("## ");
+            text.push_str(section);
+            text.push_str("\nRésumé\n");
+        }
+        text
     }
 
     #[test]
@@ -136,15 +136,13 @@ mod tests {
             "# Content overview\n\n**Pull request:** https://example.test/é",
             1,
         );
-        assert!(validate_title_and_link(&linked, Some("https://example.test/é")).is_ok());
-        assert!(validate_title_and_link(&linked, None).is_err());
-        assert!(validate_title_and_link(&linked, Some("wrong")).is_err());
-        assert!(
-            validate_title_and_link(
-                &text.replace("# Content overview", "# content overview"),
-                None
-            )
-            .is_err()
-        );
+        validate_title_and_link(&linked, Some("https://example.test/é")).unwrap();
+        validate_title_and_link(&linked, None).unwrap_err();
+        validate_title_and_link(&linked, Some("wrong")).unwrap_err();
+        validate_title_and_link(
+            &text.replace("# Content overview", "# content overview"),
+            None,
+        )
+        .unwrap_err();
     }
 }

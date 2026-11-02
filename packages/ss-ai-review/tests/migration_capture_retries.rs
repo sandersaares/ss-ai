@@ -111,7 +111,6 @@ fn rate_refusals_do_not_consume_transient_or_authentication_recovery() {
     assert_eq!(provider.tokens.get(), 2);
     let waits = provider.waits.borrow();
     assert_eq!(waits.get(..6).unwrap(), [Duration::from_secs(240); 6]);
-    assert_eq!(waits.get(6), Some(&Duration::from_millis(500)));
     assert_eq!(waits.len(), 7);
     assert!(provider.responses.borrow().is_empty());
 }

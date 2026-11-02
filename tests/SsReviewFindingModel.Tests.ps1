@@ -202,11 +202,6 @@ BeforeAll {
 
     # --- Child process helpers ------------------------------------------------------------------
 
-    # Renders a child process's error stream as a single line.
-    #
-    # The concise error view wraps a message to the console width and prefixes each continuation
-    # line with a pipe, so a phrase the caller has to recognize arrives split across lines whenever
-    # the message is long - and these messages quote a full path, so they always are.
     # Exercises the native gate while preserving its JSON result and exit status separately.
     function Invoke-FindingValidation {
         param([string] $Path, [string[]] $ReviewerId)
@@ -264,6 +259,7 @@ BeforeAll {
         } finally { $process.Dispose() }
     }
 
+    # Normalize formatting and whitespace so assertions can recognize a message across lines.
     function Get-SingleLineErrorText {
         param(
             [AllowEmptyString()]

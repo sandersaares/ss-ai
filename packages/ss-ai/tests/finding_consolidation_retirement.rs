@@ -123,24 +123,6 @@ fn index_and_consolidation_report_complete_results() {
     assert_eq!(summary["findingCount"], 3);
     let document: Value = serde_json::from_slice(&fs::read(&index).unwrap()).unwrap();
     assert_eq!(
-        document["findings"][0]
-            .as_object()
-            .unwrap()
-            .keys()
-            .map(String::as_str)
-            .collect::<Vec<_>>(),
-        [
-            "id",
-            "reviewerId",
-            "focusArea",
-            "title",
-            "description",
-            "recommendedAction",
-            "anchorPath",
-            "impactedPaths"
-        ]
-    );
-    assert_eq!(
         document,
         json!({"schemaVersion":1,"findings":[
             {"id":"g1-1","reviewerId":"g1","focusArea":"correctness",

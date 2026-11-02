@@ -680,8 +680,8 @@ mod tests {
             render("{{first}}{{second}}!", &bindings).unwrap(),
             "α{{second}}β!"
         );
-        assert!(render("{{first", &bindings).is_err());
-        assert!(render("{{missing}}", &bindings).is_err());
+        render("{{first", &bindings).unwrap_err();
+        render("{{missing}}", &bindings).unwrap_err();
     }
 
     #[test]

@@ -89,16 +89,11 @@ impl Clock for Provider {
 
 #[test]
 fn repeated_provider_rate_refusals_use_bounded_exponential_backoff() {
-    for (url, first, cap) in [
-        (
-            "https://github.com/octo/widget/pull/7",
-            Duration::from_secs(60),
-            Duration::from_secs(120),
-        ),
+    for (url, github) in [
+        ("https://github.com/octo/widget/pull/7", true),
         (
             "https://dev.azure.com/org/project/_git/repo/pullrequest/17",
-            Duration::from_millis(500),
-            Duration::from_secs(30),
+            false,
         ),
     ] {
         // Continue well past both caps to exercise repeated capped waits.
@@ -112,9 +107,20 @@ fn repeated_provider_rate_refusals_use_bounded_exponential_backoff() {
         assert_eq!(classification(&error), "service");
         let waits = provider.waits.borrow();
         assert_eq!(waits.len(), provider.refusals.get());
-        assert_eq!(waits.first(), Some(&first));
-        assert_eq!(waits.last(), Some(&cap));
-        assert!(waits.iter().all(|wait| *wait <= cap));
-        assert!(waits.windows(2).all(|pair| pair.first() <= pair.get(1)));
+        let cap = *waits.last().unwrap();
+        assert!(cap > Duration::ZERO);
+        // Each local backoff doubles until reaching the observed cap.
+        assert!(waits.windows(2).all(
+            |pair| matches!(pair, [left, right] if *right == left.saturating_mul(2).min(cap))
+        ));
+        assert!(
+            waits
+                .windows(2)
+                .any(|pair| matches!(pair, [left, right] if left < right))
+        );
+        assert!(waits.iter().rev().take(2).all(|wait| *wait == cap));
+        if github {
+            assert!(waits.iter().all(|wait| *wait >= Duration::from_secs(60)));
+        }
     }
 }

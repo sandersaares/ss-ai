@@ -1,8 +1,11 @@
 //! Exercises bounded claim, completion, and resume sequences through native APIs.
 #![allow(
     clippy::indexing_slicing,
-    clippy::assertions_on_result_states,
     reason = "The fixture uses fixed-size records"
+)]
+#![allow(
+    clippy::assertions_on_result_states,
+    reason = "These cases check refusal and journal preservation rather than diagnostic details"
 )]
 
 use std::env;
@@ -84,7 +87,9 @@ fn migration_bounded_claim_resume_sequences_preserve_exact_coverage() {
         let mut random = seed;
         let mut completed = 0;
         let mut current = false;
-        // A fixed operation budget and a deterministic completion tail prevent hangs.
+        // This LCG uses the multiplier and increment from PCG's 64-bit state
+        // transition (https://www.pcg-random.org/); upper bits avoid the short
+        // periods of its low bits. The fixed budget and completion tail prevent hangs.
         for _ in 0..64 {
             random = random.wrapping_mul(6364136223846793005).wrapping_add(1);
             match (random >> 32) % 4 {

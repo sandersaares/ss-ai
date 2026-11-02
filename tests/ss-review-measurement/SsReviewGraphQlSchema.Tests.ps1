@@ -73,9 +73,26 @@ Describe 'Offline GraphQL schema checker' {
             $query = 'query=' + [IO.File]::ReadAllText($document.FullName)
             $call = @($calls | Where-Object { $_ -ccontains $query })
             $call.Count | Should -Be 1
-            $call[0] | Should -Contain 'owner=x'
-            $call[0] | Should -Contain 'repo=x'
-            $call[0] | Should -Contain 'num=1'
+            $signature = [regex]::Match($query, '\((?<variables>[^)]*)\)')
+            $signature.Success | Should -BeTrue
+            $required = [regex]::Matches($signature.Groups['variables'].Value, '\$(?<name>\w+)\s*:\s*(?<type>\w+)!')
+            $required.Count | Should -BeGreaterThan 0
+            foreach ($variable in $required) {
+                $name = $variable.Groups['name'].Value
+                $index = [array]::FindIndex([string[]] $call[0], [Predicate[string]] { param($arg) $arg.StartsWith("$name=", [StringComparison]::Ordinal) })
+                $index | Should -BeGreaterThan 0
+                $value = $call[0][$index].Substring($name.Length + 1)
+                $value | Should -Not -BeNullOrEmpty
+                switch ($variable.Groups['type'].Value) {
+                    'Int' {
+                        $call[0][$index - 1] | Should -BeExactly '-F'
+                        $number = 0
+                        [int]::TryParse($value, [ref] $number) | Should -BeTrue
+                    }
+                    'String' { $call[0][$index - 1] | Should -BeExactly '-f' }
+                    default { throw "Add dummy-input assertions for required type $($variable.Groups['type'].Value)." }
+                }
+            }
         }
     }
 
@@ -92,7 +109,11 @@ Describe 'Offline GraphQL schema checker' {
         $result.Output | Should -Match 'Example'
         $result.Output | Should -Match "doesn't exist on type"
         $call = ConvertFrom-Json -InputObject ([IO.File]::ReadAllText($script:Calls)) -NoEnumerate
-        $call | Should -Contain 'id=PRR_kwDOAAAAAAAAAAA'
+        $idIndex = [array]::FindIndex([string[]] $call, [Predicate[string]] { param($arg) $arg.StartsWith('id=', [StringComparison]::Ordinal) })
+        $idIndex | Should -BeGreaterThan 0
+        $call[$idIndex - 1] | Should -BeExactly '-f'
+        # A long zero-encoded suffix identifies a dummy rather than a meaningful review object.
+        $call[$idIndex] | Should -Match '^id=PRR_[A-Za-z0-9_-]*A{6,}$'
     }
 
     It 'reports a failed invocation without output' {

@@ -113,8 +113,9 @@ the cache key, so incompatible instruction provenance produces a miss.
 Selected repository sources use `review-repository/<root-identity>/<relative-path>`
 and the same origin identity. The returned mapping retains the selected spelling
 for reference expansion.
-Native commands, report templates, and pinned npm manifests stay together in
-the skill tree so installed links and checkout-relative use share assets.
+The shared native executable is discovered through `PATH`. Report templates
+and pinned npm manifests stay in the skill tree, selected through the active
+skill root for both installed links and checkout-relative use.
 
 `ss-ai workflow worker-assignment` builds bounded preparation
 and focus-area reviewer tasks using the active skill's assets. It renders phase instructions, states the

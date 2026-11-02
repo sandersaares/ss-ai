@@ -122,6 +122,8 @@ fn refresh_reuses_unchanged_decisions_and_pages_only_changed_comments() {
         comment["content"] = json!(format!("Human comment {id}"));
         comment
     };
+    // The baseline is an arbitrary large set. Removing and editing one each
+    // leaves reusable decisions; additions span several filtered query pages.
     capture["threads"][0]["comments"] = json!((1..=135).map(make_comment).collect::<Vec<_>>());
     capture["threads"][0]["openingCommentId"] = json!("1");
     prepare_capture(&files.baseline, None, &target, &clock)

@@ -35,6 +35,7 @@ struct Workspace(PathBuf);
 impl Workspace {
     fn new() -> Self {
         static NEXT: AtomicUsize = AtomicUsize::new(0);
+        // The counter only supplies unique names; it does not publish fixture state.
         let sequence = NEXT.fetch_add(1, Ordering::Relaxed);
         let path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join(format!(
             ".workflow-data-cli-{}-{sequence}",

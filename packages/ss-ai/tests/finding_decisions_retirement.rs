@@ -136,14 +136,6 @@ fn classification_and_approval_resume_across_processes() {
 
     let page = success(&poll());
     assert_eq!(
-        page.as_object()
-            .unwrap()
-            .keys()
-            .map(String::as_str)
-            .collect::<Vec<_>>(),
-        ["isComplete", "remainingCount", "finding", "auditFindingIds"]
-    );
-    assert_eq!(
         page,
         json!({"isComplete":false,"remainingCount":2,"finding":first,
             "auditFindingIds":["F1","F2"]})

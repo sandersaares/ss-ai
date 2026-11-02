@@ -111,8 +111,8 @@ fn invalid_prose_reports_source_field_control_and_title_bound() {
     let error = String::from_utf8_lossy(&result.stderr);
     assert!(!result.status.success(), "{error}");
     assert!(error.contains(text(&source)), "{error}");
-    assert!(error.contains("256 characters"), "{error}");
-    assert!(error.contains("at most 255"), "{error}");
+    assert!(error.contains("256 UTF-16 code units"), "{error}");
+    assert!(error.contains("at most 255 UTF-16 code units"), "{error}");
     assert_eq!(fs::read(&artifact).unwrap(), before);
 
     finding["schemaVersion"] = json!(1);
@@ -137,8 +137,8 @@ fn invalid_prose_reports_source_field_control_and_title_bound() {
     assert_eq!(report["isValid"], false);
     let errors = report["errors"].to_string();
     assert!(errors.contains("reviewer.json"), "{errors}");
-    assert!(errors.contains("256 characters"), "{errors}");
-    assert!(errors.contains("at most 255"), "{errors}");
+    assert!(errors.contains("256 UTF-16 code units"), "{errors}");
+    assert!(errors.contains("at most 255 UTF-16 code units"), "{errors}");
     let before = fs::read(&artifact).unwrap();
     let source = workspace.write(
         "valid-input.json",
@@ -160,7 +160,7 @@ fn invalid_prose_reports_source_field_control_and_title_bound() {
     let error = String::from_utf8_lossy(&result.stderr);
     assert!(!result.status.success());
     assert!(error.contains(text(&artifact)), "{error}");
-    assert!(error.contains("256 characters"), "{error}");
+    assert!(error.contains("256 UTF-16 code units"), "{error}");
     assert_eq!(fs::read(&artifact).unwrap(), before);
 }
 

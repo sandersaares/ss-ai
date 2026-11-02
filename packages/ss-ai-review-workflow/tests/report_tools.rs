@@ -272,9 +272,13 @@ fn offline_child() {
     let initial = discover(&skill, &tools_dir, &process, &guard).unwrap();
     assert!(initial.missing.contains(&"mermaid-cli".to_owned()));
     let before_approval = assert_ready(&initial, false).unwrap_err();
-    assert!(format!("{before_approval:?}").contains("installation permission"));
+    assert!(
+        before_approval
+            .to_string()
+            .contains("installation permission")
+    );
     let after_approval = assert_ready(&initial, true).unwrap_err();
-    assert!(format!("{after_approval:?}").contains("approved installation"));
+    assert!(after_approval.to_string().contains("approved installation"));
     let not_ready = readiness(&skill, &tools_dir, &process, &clock, |_, _| {
         panic!("missing dependencies must not probe")
     })
@@ -306,6 +310,8 @@ fn offline_child() {
     assert_eq!(process.npm_calls.get(), 1);
     #[cfg(unix)]
     exercise_unreadable_manifest(&skill, &tools_dir, &process, &clock, &installed);
+    // The executable is inside the Mermaid package beneath node_modules;
+    // Puppeteer is a sibling package in that same node_modules directory.
     let puppet = installed
         .mermaid
         .ancestors()
@@ -332,7 +338,9 @@ fn offline_child() {
             .contains("browser discovery failure")
     );
     assert!(
-        format!("{:?}", assert_ready(&discovery, false).unwrap_err())
+        assert_ready(&discovery, false)
+            .unwrap_err()
+            .to_string()
             .contains("browser discovery failure")
     );
     process.fail_discovery.set(false);
@@ -424,6 +432,8 @@ fn exercise_incomplete_first_install(
     clock: &FixedClock,
 ) {
     let guard = tools_lock(tools_dir, LockMode::Shared, clock).unwrap();
+    // The Mermaid executable is nested under node_modules in the published
+    // installation root, whose absence proves that staging was not published.
     let destination = discover(skill, tools_dir, process, &guard)
         .unwrap()
         .mermaid
@@ -439,7 +449,7 @@ fn exercise_incomplete_first_install(
     })
     .unwrap_err();
     *process.omit_package.borrow_mut() = None;
-    assert!(format!("{error:?}").contains("did not provide the required"));
+    assert!(error.to_string().contains("did not provide the required"));
     assert!(!destination.exists());
     assert_eq!(process.browser_installs.get(), browser_installs);
     assert!(fs::read_dir(tools_dir).unwrap().all(|entry| {
@@ -460,6 +470,7 @@ fn exercise_unreadable_manifest(
     clock: &FixedClock,
     installed: &ReportTools,
 ) {
+    // Puppeteer is a sibling of the Mermaid package under node_modules.
     let manifest = installed
         .mermaid
         .ancestors()
@@ -485,8 +496,18 @@ fn exercise_unreadable_manifest(
     });
     fs::set_permissions(&manifest, permissions).unwrap();
 
-    assert!(format!("{:?}", discovery.unwrap_err()).contains("Cannot read Puppeteer manifest"));
-    assert!(format!("{:?}", installation.unwrap_err()).contains("Cannot read Puppeteer manifest"));
+    assert!(
+        discovery
+            .unwrap_err()
+            .to_string()
+            .contains("Cannot read Puppeteer manifest")
+    );
+    assert!(
+        installation
+            .unwrap_err()
+            .to_string()
+            .contains("Cannot read Puppeteer manifest")
+    );
     assert_eq!(process.npm_calls.get(), calls);
 }
 
@@ -498,6 +519,7 @@ fn exercise_repairs(
     clock: &FixedClock,
     installed: &ReportTools,
 ) {
+    // The executable is nested beneath node_modules in the published installation root.
     let directory = installed.mermaid.ancestors().nth(5).unwrap();
     let manifest = directory.join("node_modules/puppeteer/package.json");
     let marker = directory.join("old-tree");
@@ -597,7 +619,7 @@ fn exercise_system_failures(
             panic!("missing system tool must not probe")
         })
         .unwrap_err();
-        assert!(format!("{error:?}").contains(program));
+        assert!(error.to_string().contains(program));
         assert!(process.system_calls.borrow().is_empty());
         file(&executable, "");
         fs::set_permissions(executable, fs::Permissions::from_mode(0o755)).unwrap();

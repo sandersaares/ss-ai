@@ -90,15 +90,23 @@ BeforeAll {
         } finally { $process.Dispose() }
     }
 
+    # Translate existing test inputs to the native authorship command and bind its capture snapshot.
     function Invoke-AuthorshipProcess {
-        param([Parameter(Mandatory)] [AllowEmptyCollection()] [string[]] $ArgumentList)
+        param(
+            [Parameter(Mandatory)] [AllowEmptyCollection()] [string[]] $ArgumentList,
+            [switch] $UnreadableCapture
+        )
 
         $capturePathIndex = [array]::IndexOf($ArgumentList, '-Path')
         $capturePath = $ArgumentList[$capturePathIndex + 1]
         $page = Invoke-Native -ArgumentList @('context', 'read', '--path', $capturePath, '--query', 'metadata', '--field', 'title')
         $snapshot = if ($page.ExitCode -eq 0) {
             (Get-SingleJsonResult -StandardOutput $page.StandardOutput).snapshotId
-        } else { 'invalid-snapshot' }
+        } else {
+            if (-not $UnreadableCapture) { throw "Reading capture metadata failed: $($page.StandardError)" }
+            # The unreadable capture case must still exercise the consumer's rejection path.
+            'invalid-snapshot'
+        }
         $translated = foreach ($argument in $ArgumentList) {
             switch -Exact ($argument) {
                 '-Path' { '--path' }
@@ -453,7 +461,7 @@ Describe 'Set-CommentAuthorship' {
         $before = Get-FileFingerprint -Path $script:CapturePath
         $classification = ConvertTo-ClassificationText -Entry @((New-Classification -ThreadId '1' -CommentId '1' -Kind 'human'))
 
-        $result = Invoke-AuthorshipProcess -ArgumentList @('-Path', $script:CapturePath, '-Classification', $classification)
+        $result = Invoke-AuthorshipProcess -ArgumentList @('-Path', $script:CapturePath, '-Classification', $classification) -UnreadableCapture
 
         $result.ExitCode | Should -Not -Be 0
         $message = Get-ErrorText -Text $result.StandardError

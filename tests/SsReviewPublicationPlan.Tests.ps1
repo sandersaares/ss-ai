@@ -1,3 +1,9 @@
+#Requires -Version 7.6
+
+Set-StrictMode -Version Latest
+$ErrorActionPreference = 'Stop'
+$PSNativeCommandUseErrorActionPreference = $true
+
 Describe 'Preflight performs no write' {
     Describe 'Native publication approval authority' {
         BeforeAll {

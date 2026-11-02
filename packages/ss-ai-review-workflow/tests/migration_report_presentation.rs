@@ -1,4 +1,4 @@
-//! Preserves report presentation contracts formerly exercised through PowerShell.
+//! Exercises report presentation contracts.
 #![allow(
     clippy::indexing_slicing,
     reason = "The test owns the small, fixed Pandoc fixture"
