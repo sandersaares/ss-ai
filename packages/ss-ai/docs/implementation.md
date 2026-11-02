@@ -37,7 +37,7 @@ identity rules without requiring a selection journal.
 Read the topics relevant to the responsibility being changed:
 
 - [Automatic reapproval](reapproval.md) defines approval recognition, exact source
-  evidence, assessment, publication recovery, and supported provider boundaries.
+  evidence, assessment, publication, and supported provider boundaries.
 - [Provider evidence and identities](implementation/providers.md) explains
   complete enumeration, coordinate resolution, and non-destructive registration.
 - [Transport and authentication](implementation/transport.md) explains process
@@ -69,10 +69,8 @@ context for policy, exact follow-up evidence, and reasoning.
 records, evidence-backed dispositions, and dependency digests. The direct protocol
 does not require a semantic note for every transport unit. Atomic batch requests
 stage all reads or judgments against a state token before committing, reducing
-round trips without allowing partial results. The legacy protocol retains its
-original notes, aggregate requirements, serialization, and digest calculation so
-the current utility can reconcile existing publication journals. Unknown
-protocols fail validation rather than being interpreted as legacy.
+round trips without allowing partial results. Earlier run schemas require a
+fresh run and assessment; existing files are left untouched.
 
 The shared dependency reader validates citations and bindings at recording and
 reload boundaries. Replacements invalidate transitive dependent records. The

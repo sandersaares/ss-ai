@@ -1,46 +1,8 @@
 # Offline assessment operational replay
 
-`operational_replay` builds invented source endpoints, replacement patches, and
-discussion in memory and drives the native assessment to completion. The
-discussion includes a review, replies, shared excerpt references, and a
-top-level comment. The generated source is data, not a program: the replay
-does not execute it, access a provider, invoke a model, or publish anything.
-
-Run the replay from the checkout root:
-
-```powershell
-#Requires -Version 7.6
-Set-StrictMode -Version Latest
-$ErrorActionPreference = 'Stop'
-$PSNativeCommandUseErrorActionPreference = $true
-
-cargo run -p ss-ai-assessment --example operational_replay
-```
-
-The JSON report includes the actual aggregate patch bytes, discussion bytes,
-unit count, successful native API call count, evidence-read call count,
-state-mutation call count, and compact JSON bytes returned by measured calls.
-Native calls here mean `Assessment` construction and methods; fixture
-generation and `change_id` helper calls are outside the count. The mutation
-count covers operations on an existing assessment, not construction.
-The byte count includes serialized digest strings, not the production command
-wrapper, pretty-printing, or process transport. It is not a token count.
-Evidence reads mutate delivery progress and count in both read and mutation
-categories. Creation and finish count as calls, but return no measured JSON.
-The report also states that the replay itself starts no commands and performs
-no filesystem reads or writes; Cargo and the terminal running it are outside
-that boundary. The elapsed measurement includes fixture generation and the
-in-process native replay, not compilation or output serialization. It is a local
-observation, not a service, production command, or model latency measurement.
-
-The simulated critical path is an idealized count of sequential native calls:
-it replaces the sum of the independent unit chains with their longest chain
-and leaves all other measured calls serial. It assumes unlimited workers and
-no scheduling, process, serialization, network, contention, or model cost.
-It is not a prediction of elapsed time or a claim that parallel execution was
-performed. The synthetic notes and insignificant dispositions are fixed
-placeholders used to exercise dependencies. They do not establish significance,
-model quality, or authorization to approve.
+`operational_replay` generates invented source endpoints and discussion with
+reviews, replies, and shared excerpts for an offline canary. The fixture is data,
+not a program; generating it does not access a provider or publish anything.
 
 ## Direct protocol replay
 
@@ -83,7 +45,7 @@ This input does not contain expected judgments or ground truth.
 ## Nonpublishing model canary
 
 The `synthetic_assessment` executable has no provider or publication commands.
-Initialize it with `--direct`, a fresh absolute state path, a synthetic fixture,
+Initialize it with a fresh absolute state path, a synthetic fixture,
 and the repository's significance policy. Its `read-batch` and `judge-batch`
 operations use `--batch-json` with the same request shapes as the native utility.
 For example:
@@ -94,7 +56,7 @@ Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 $PSNativeCommandUseErrorActionPreference = $true
 
-cargo run --quiet -p ss-ai-assessment --example synthetic_assessment -- --operation init --direct --state-path "{{STATE}}" --fixture-path "{{FIXTURE}}" --policy-path "{{POLICY}}"
+cargo run --quiet -p ss-ai-assessment --example synthetic_assessment -- --operation init --state-path "{{STATE}}" --fixture-path "{{FIXTURE}}" --policy-path "{{POLICY}}"
 ```
 
 Give a fresh assessor only its assignment, the executable and state paths,
@@ -134,5 +96,4 @@ feasibility for that run, not the p95 target.
 ## Deterministic check
 
 `cargo test -p ss-ai-assessment --example operational_replay` verifies the
-fixture dimensions, completion, counts, and repeatability without a clock or
-sleep. Native calls still perform their ordinary in-memory work.
+fixture dimensions and discussion without a clock or sleep.

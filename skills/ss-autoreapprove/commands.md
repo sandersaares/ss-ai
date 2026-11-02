@@ -115,9 +115,9 @@ exact `context` binding. Continue through `read` using that reference and
 `requestedContextCount` and `nextContextReference` at assessment and change level
 to resume required context. Full `:old` / `:new` reads remain available as
 optional context. All offsets count Unicode scalar values, not UTF-8 bytes.
-Registering a new range removes that change's unit notes and judgment, their
-dependents, the discussion aggregate, all check dispositions, and the cumulative
-judgment. After reading the range, rebuild the missing records.
+Registering a new range removes that change's judgment, its dependents, the
+discussion observation, check dispositions, and the cumulative judgment. After
+reading the range, rebuild the missing records.
 Invalid or unavailable requested context is a retained incomplete-evidence
 failure, never a reason to publish a needs-review notice. Finalized assessments
 allow replay of existing evidence but no new ranges.
@@ -226,8 +226,8 @@ ss-ai autoreapprove results --state-path "{{RUN}}"
 ```
 
 For `staleEvidence` or `staleDuringExecution` from any stage, stop the old PR
-worker, read `results`, and call `refresh`. It accepts only stale PRs without an
-attempted approval or notice effect and performs no remote writes. It consumes
+worker, read `results`, and call `refresh`. It accepts stale assessments
+without a completed publication and performs no remote writes. It consumes
 one of two persisted recovery attempts before reacquiring evidence; interrupted
 capture resumes with ordinary `inspect` rather than consuming another attempt.
 Follow stale refresh results with another `refresh`. Once the budget is used,
@@ -243,38 +243,23 @@ and lost authority instead follow their returned nonassessment outcomes.
 An uncertain assessment's stale notification remains recoverable and does not
 erase its uncertainty diagnostic.
 
-An attempted or unknown effect blocks refresh, including accepted-but-stale
-publication. Reconcile only through the original `publish` or `notify` command.
-Keep the original run and snapshot for the reconciliation below;
-do not treat a null publication or review ID alone as proof of no remote effect.
-Only stale evidence qualifies for this retry path; unrelated failures do not.
-
-GitHub publication creates a source-bound submitted approval and audit body.
-ADO publication preserves the account's positive vote strength using
-`isReapprove`, verifies a unique new structured vote on the assessed iteration,
-then creates a separate authenticated audit carrying the original anchor.
-ADO has no atomic source-SHA vote precondition; changed evidence produces an
-explicit stale result rather than rollback. Clean preflight staleness uses
-bounded refresh; accepted-but-stale results retain their original effects.
-Never substitute a direct vote write.
-Read the outcome and any publication error, including accepted-but-stale
-effects. Do not interpret a `failed` run as no remote change.
+GitHub publication submits an approval bound to the assessed source SHA.
+ADO preserves the account's positive vote strength using `isReapprove`;
+the API has no atomic source-SHA precondition. A successful provider response
+finishes the operation without later provider calls. Never substitute a direct
+vote write. Report a request error or unknown outcome and do not automatically
+resend it in the same attempt. Do not interpret a `failed` run as no remote change.
 Publication or notification can also return no item when preflight finds a
 draft; do not report or perform further work on that PR.
 
-The same publication command reconciles an interrupted attempt using its
-original run and assessment. It never repeats an effect that might have
-succeeded. Recovery may finish an unattempted ADO audit or retry an explicitly
-refused audit after fresh vote verification, but never repeats an uncertain effect.
-Unknown effects block later runs on the same publishing host.
-Do not alter journals, delete retained locks, or issue manual retry writes.
-
 `notify` accepts only a completed significant or uncertain live assessment. It refreshes
-source and decision evidence under the publication lock, posts an attributed
+source and decision evidence, posts an attributed
 standalone needs-review comment with a hidden marker, and verifies the owned
 comment. Repeating the original command reconciles the same intent without
-posting again. An unknown comment effect blocks later approval writes on this
-host; preserve the original run for reconciliation. Never call `notify` for
+posting again, including for a previous schema-14 run. This recovery does not
+resume the previous assessment or change its run file. For that run, use the
+`recoveryOnly` response to report the recovered notice; do not call `results`
+on the previous run. Preserve an unknown comment attempt for reconciliation. Never call `notify` for
 a dry run, an existing active marker, missing approval authority, or a tooling
 failure without a completed assessment. Uncertain assessments retain their
 failure diagnostic and partial run status after notification.
@@ -282,6 +267,5 @@ failure diagnostic and partial run status after notification.
 Follow every final `results` page. Each in-range item supplies its title and
 URL for the linked summary, `assessmentReason` for a completed judgment,
 `reviewNotice` (`commentId`, `createdAt`, `rationale`) for a current or retained
-needs-review comment, and `automaticApproval` (`approvalEventId`, `approvedAt`)
-only for valid automatic approval standing. Null automatic metadata with
-`alreadyValid` means an external approval, not an automatic one.
+needs-review comment. `alreadyValid` does not identify who or what submitted the
+account's approval.

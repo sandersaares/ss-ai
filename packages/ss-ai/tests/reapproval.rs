@@ -127,6 +127,8 @@ struct Provider {
     repository: PathBuf,
     evidence: RefCell<Value>,
     writes: Cell<usize>,
+    service_calls: Cell<usize>,
+    calls_at_approval: Cell<usize>,
     fetches: Cell<usize>,
     fault: Cell<&'static str>,
     target_reads: Cell<usize>,
@@ -161,6 +163,8 @@ impl Provider {
             repository: repository.to_owned(),
             evidence: RefCell::new(evidence),
             writes: Cell::new(0),
+            service_calls: Cell::new(0),
+            calls_at_approval: Cell::new(0),
             fetches: Cell::new(0),
             fault: Cell::new(""),
             target_reads: Cell::new(0),
@@ -261,7 +265,7 @@ impl Provider {
         }
     }
 
-    /// Reporting faults begin only after the provider's terminal receipt is durable.
+    /// Simulates moving observations and notice-only recovery scenarios.
     fn observation_override(&self) -> Option<Value> {
         let fault = self.fault.get();
         if fault == "cosmeticEvidence" {
@@ -312,39 +316,6 @@ impl Provider {
                 evidence["pullRequest"]["head"]["repo"] = Value::Null;
             }
         }
-        if !matches!(fault, "reportReadFailure" | "reportStandingChanged") {
-            return None;
-        }
-        let path = host_journal(self.host_directory.borrow().as_ref().unwrap());
-        let record: Value = serde_json::from_slice(&fs::read(path).unwrap()).unwrap();
-        if !record["operations"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .any(|operation| operation["result"]["outcome"] == "alreadyValid")
-        {
-            return None;
-        }
-        if fault == "reportReadFailure" {
-            return Some(Value::Null);
-        }
-        self.fault.set("");
-        if self.ado {
-            self.ado_vote(0, 41, "2026-09-28T09:07:00Z");
-        } else {
-            let mut evidence = self.evidence.borrow_mut();
-            let source = evidence["pullRequest"]["head"]["sha"].clone();
-            evidence["reviews"].as_array_mut().unwrap().push(json!({
-                "id": 99, "node_id": "reporting-withdrawal", "user": {"id": 42, "node_id": "user-42"},
-                "state": "CHANGES_REQUESTED", "submitted_at": "2026-09-28T09:07:00Z",
-                "commit_id": source, "body": "Independent later decision."
-            }));
-            evidence["timeline"].as_array_mut().unwrap().push(json!({
-                "__typename": "PullRequestReview", "id": "reporting-withdrawal",
-                "state": "CHANGES_REQUESTED"
-            }));
-        }
-
         None
     }
 
@@ -450,6 +421,7 @@ impl Process for Provider {
         arguments: &[String],
         input: &[u8],
     ) -> io::Result<ProcessOutput> {
+        self.service_calls.set(self.service_calls.get() + 1);
         if self.ado {
             assert_eq!(program, "az");
             assert_eq!(&arguments[..2], ["account", "get-access-token"]);
@@ -504,6 +476,7 @@ impl Process for Provider {
         }
         if method == "POST" && path.ends_with("/reviews") {
             self.writes.set(self.writes.get() + 1);
+            self.calls_at_approval.set(self.service_calls.get());
             if self.fault.get() == "rateLimit" {
                 return Ok(ProcessOutput::new(
                     false,
@@ -534,53 +507,7 @@ impl Process for Provider {
                     .push(review.clone());
                 evidence["timeline"].as_array_mut().unwrap().push(json!({"__typename": "PullRequestReview", "id": "renewal-review", "state": "APPROVED"}));
             }
-            if self.fault.get() == "postPush" {
-                evidence["pullRequest"]["head"]["sha"] = json!("f".repeat(40));
-            }
-            if self.fault.get() == "postDismissal" {
-                evidence["pullRequest"]["head"]["sha"] = json!("f".repeat(40));
-                evidence["reviews"]
-                    .as_array_mut()
-                    .unwrap()
-                    .last_mut()
-                    .unwrap()["state"] = json!("DISMISSED");
-                evidence["timeline"]
-                    .as_array_mut()
-                    .unwrap()
-                    .last_mut()
-                    .unwrap()["state"] = json!("DISMISSED");
-                evidence["timeline"].as_array_mut().unwrap().push(json!({
-                    "__typename": "ReviewDismissedEvent", "id": "renewal-dismissal",
-                    "review": {"id": "renewal-review"}, "previousReviewState": "APPROVED",
-                    "createdAt": "2026-09-28T09:10:00Z",
-                    "pullRequestCommit": {"commit": {"oid": "f".repeat(40)}}
-                }));
-            }
-            if self.fault.get() == "postWrongCommit" {
-                evidence["reviews"]
-                    .as_array_mut()
-                    .unwrap()
-                    .last_mut()
-                    .unwrap()["commit_id"] = json!("f".repeat(40));
-            }
-            if self.fault.get() == "duplicate" {
-                let mut duplicate = review.clone();
-                duplicate["id"] = json!(6);
-                duplicate["node_id"] = json!("duplicate-renewal");
-                evidence["reviews"].as_array_mut().unwrap().push(duplicate);
-                evidence["timeline"].as_array_mut().unwrap().push(json!({
-                    "__typename": "PullRequestReview", "id": "duplicate-renewal", "state": "APPROVED"
-                }));
-            }
-            drop(evidence);
-            if self.fault.get() == "postWithdrawal" {
-                self.later("CHANGES_REQUESTED");
-            }
-            if self.fault.get() == "journalFailure" {
-                // A directory at the journal name deterministically refuses atomic file replacement.
-                self.fail_journal_save();
-            }
-            return Ok(if matches!(self.fault.get(), "lostReply" | "unknown") {
+            return Ok(if self.fault.get() == "unknown" {
                 ProcessOutput::new(false, Vec::new(), b"connection lost".to_vec())
             } else {
                 ProcessOutput::new(true, serde_json::to_vec(&review).unwrap(), Vec::new())
@@ -733,6 +660,7 @@ impl Http for Provider {
         token: &str,
         body: Option<&[u8]>,
     ) -> Result<HttpResponse, AppError> {
+        self.service_calls.set(self.service_calls.get() + 1);
         assert!(self.ado, "GitHub must use the injected CLI");
         assert_eq!(token, "fixture-oauth");
         let url = Url::parse(url).unwrap();
@@ -750,12 +678,15 @@ impl Http for Provider {
             let request: Value = serde_json::from_slice(body.unwrap()).unwrap();
             let vote = method == "PUT";
             assert!(vote || method == "POST");
+            if vote {
+                self.calls_at_approval.set(self.service_calls.get());
+            }
             if self.fault.get() == "rateLimit"
                 || self.fault.get() == "permission"
                 || !vote
                     && matches!(
                         self.fault.get(),
-                        "auditRefused" | "noticeRefused" | "noticeRefusalJournalFailure"
+                        "noticeRefused" | "noticeRefusalJournalFailure"
                     )
             {
                 if self.fault.get() == "noticeRefusalJournalFailure" {
@@ -778,39 +709,20 @@ impl Http for Provider {
                     "vote": self.evidence.borrow()["reviewers"][0]["vote"], "isReapprove": true})
                 );
                 if self.fault.get() != "unknown" {
-                    if self.fault.get() == "sourceAtVote" {
-                        self.ado_push();
-                        self.evidence.borrow_mut()["iterations"][2]["createdDate"] =
-                            json!("2026-09-28T08:59:00Z");
-                    }
                     self.ado_vote(
                         request["vote"].as_i64().unwrap(),
                         20,
                         "2026-09-28T09:00:00Z",
                     );
-                    if self.fault.get() == "duplicate" {
-                        self.ado_vote(
-                            request["vote"].as_i64().unwrap(),
-                            21,
-                            "2026-09-28T09:01:00Z",
-                        );
-                    }
-                    if self.fault.get() == "postWithdrawal" {
-                        self.ado_vote(0, 21, "2026-09-28T09:01:00Z");
-                    }
-                    if self.fault.get() == "postPush" {
-                        self.ado_push();
-                    }
-                    if self.fault.get() == "policyCompleted" {
-                        let mut evidence = self.evidence.borrow_mut();
-                        evidence["evaluations"][0]["status"] = json!("approved");
-                        evidence["evaluations"][0]["context"] =
-                            json!({"reviewers": ["newly satisfied"]});
-                        evidence["reviewers"][0]["isReapprove"] = json!(true);
-                    }
                 }
-                if matches!(self.fault.get(), "lostVoteReply" | "unknown") {
+                if self.fault.get() == "unknown" {
                     return Err(io::Error::other("Lost vote reply").into());
+                }
+                if self.fault.get() == "differentResponse" {
+                    return response(
+                        200,
+                        json!({"id": "another-account", "vote": request["vote"]}),
+                    );
                 }
                 return response(200, self.evidence.borrow()["reviewers"][0].clone());
             }
@@ -820,6 +732,7 @@ impl Http for Provider {
                 .as_str()
                 .unwrap()
                 .contains("<!-- ss-autoreapprove-needs-review ");
+            assert!(notice, "Approval must not post a separate audit thread");
             let at = if notice {
                 self.notice_time()
             } else {
@@ -831,7 +744,7 @@ impl Http for Provider {
                     "author": {"id": "10000000-0000-4000-8000-000000000001"},
                     "content": request["comments"][0]["content"], "publishedDate": at,
                     "lastContentUpdatedDate": at, "lastUpdatedDate": at}], "isDeleted": false, "properties": {}});
-            if !matches!(self.fault.get(), "auditUnknown" | "noticeUnknown") {
+            if self.fault.get() != "noticeUnknown" {
                 self.evidence.borrow_mut()["threads"]
                     .as_array_mut()
                     .unwrap()
@@ -840,10 +753,7 @@ impl Http for Provider {
             if self.fault.get() == "noticeJournalFailure" {
                 self.fail_journal_save();
             }
-            if matches!(
-                self.fault.get(),
-                "lostAuditReply" | "auditUnknown" | "lostNoticeReply" | "noticeUnknown"
-            ) {
+            if matches!(self.fault.get(), "lostNoticeReply" | "noticeUnknown") {
                 return Err(io::Error::other("Lost audit reply").into());
             }
             return response(200, thread);
@@ -1124,143 +1034,39 @@ fn work(
     invoke(root, provider, operation, &all)
 }
 
-/// Publication matrices supply ordinary checkpoint observations after their raw delivery.
-/// Dedicated assessment tests exercise missing notes, replacement, and incomplete handoffs.
+/// Publication matrices supply the direct discussion observation after evidence delivery.
 fn fixture_checkpoint_inputs(
     root: &Path,
     provider: &Provider,
     snapshot: &str,
     id: &str,
 ) -> Result<(), AppError> {
-    let mut after = 0;
-    let mut changes = Vec::new();
-    let mut ready = BTreeMap::new();
-    loop {
-        let page = work(
-            root,
-            provider,
-            "assessment",
-            snapshot,
-            &["--after".into(), after.to_string()],
-        )?;
-        if page["documentReads"][0]["complete"] != true {
-            return Ok(());
-        }
-        ready.insert(
-            "discussion".to_owned(),
-            page["documentReads"][1]["complete"] == true,
-        );
-        for change in page["changes"].as_array().unwrap() {
-            ready.insert(
-                format!("{}:patch", change["id"].as_str().unwrap()),
-                change["requiredPatch"]["complete"] == true,
-            );
-            changes.push(change.clone());
-        }
-        let Some(next) = page["nextOffset"].as_u64() else {
-            break;
-        };
-        assert!(next > after);
-        after = next;
-    }
-    let reference = if id == "cumulative" {
-        "discussion".to_owned()
-    } else {
-        format!("{id}:patch")
-    };
-    if ready.get(&reference) != Some(&true) {
+    if id != "cumulative" {
         return Ok(());
     }
-    let mut after = 0;
-    loop {
-        let page = work(
-            root,
-            provider,
-            "units",
-            snapshot,
-            &["--after".into(), after.to_string()],
-        )?;
-        for item in page["items"].as_array().unwrap() {
-            if item["unit"]["reference"] != reference {
-                continue;
-            }
-            let unit_reference = item["reference"].as_str().unwrap();
-            read_evidence(root, provider, snapshot, unit_reference, None, None);
-            read_evidence(
-                root,
-                provider,
-                snapshot,
-                item["bindingReference"].as_str().unwrap(),
-                None,
-                None,
-            );
-            if item["completed"] != true {
-                work(
-                    root,
-                    provider,
-                    "note",
-                    snapshot,
-                    &[
-                        "--unit-id".into(),
-                        item["unit"]["id"].as_str().unwrap().into(),
-                        "--observations".into(),
-                        "Complete synthetic fixture evidence.".into(),
-                        "--interfaces".into(),
-                        "Fixture contract examined.".into(),
-                        "--evidence".into(),
-                        unit_reference.into(),
-                    ],
-                )?;
-            }
-            read_evidence(
-                root,
-                provider,
-                snapshot,
-                item["noteReference"].as_str().unwrap(),
-                None,
-                None,
-            );
-        }
-        let Some(next) = page["nextOffset"].as_u64() else {
-            break;
-        };
-        assert!(next > after);
-        after = next;
+    let page = work(root, provider, "assessment", snapshot, &[])?;
+    if page["documentReads"][0]["complete"] != true
+        || page["documentReads"][1]["complete"] != true
+        || !page["discussionNoteDigest"].is_null()
+    {
+        return Ok(());
     }
-    if id == "cumulative" {
-        let page = work(root, provider, "assessment", snapshot, &[])?;
-        if page["discussionNoteDigest"].is_null() {
-            work(
-                root,
-                provider,
-                "note",
-                snapshot,
-                &[
-                    "--unit-id".into(),
-                    "discussion".into(),
-                    "--observations".into(),
-                    "Complete synthetic discussion.".into(),
-                    "--interfaces".into(),
-                    "Fixture contract examined.".into(),
-                    "--evidence".into(),
-                    "discussion".into(),
-                ],
-            )?;
-        }
-        read_evidence(root, provider, snapshot, "discussion-note", None, None);
-        for change in changes {
-            if !change["decision"].is_null() {
-                read_evidence(
-                    root,
-                    provider,
-                    snapshot,
-                    &format!("judgment:{}", change["id"].as_str().unwrap()),
-                    None,
-                    None,
-                );
-            }
-        }
-    }
+    work(
+        root,
+        provider,
+        "note",
+        snapshot,
+        &[
+            "--unit-id".into(),
+            "discussion".into(),
+            "--observations".into(),
+            "Complete synthetic discussion.".into(),
+            "--interfaces".into(),
+            "Fixture contract examined.".into(),
+            "--evidence".into(),
+            "discussion".into(),
+        ],
+    )?;
     Ok(())
 }
 
@@ -1350,16 +1156,12 @@ fn read_evidence(
 ) {
     // Match Command::Read's ordinary default and Assessment::read's response cap.
     let page_limit = limit.map_or(4096, NonZeroUsize::get).min(16_384);
-    let length = evidence_length(root, provider, snapshot, reference);
     let mut offset = 0;
     let mut pages = 0;
     let mut total_chars = 0;
+    let mut total_length = None;
 
     loop {
-        assert!(
-            pages < length.max(1),
-            "Evidence exceeded its captured length"
-        );
         let mut arguments = vec![
             "--reference".into(),
             reference.into(),
@@ -1375,6 +1177,13 @@ fn read_evidence(
         assert_eq!(read["snapshotDigest"], snapshot);
         assert_eq!(read["reference"], reference);
         assert_eq!(read["offset"], offset);
+        let reported_length = usize::try_from(read["totalCharacters"].as_u64().unwrap()).unwrap();
+        let expected_length = *total_length.get_or_insert(reported_length);
+        assert_eq!(reported_length, expected_length);
+        assert!(
+            pages < expected_length.max(1),
+            "Evidence exceeded its captured length"
+        );
         let page = read["text"].as_str().unwrap();
         let length = page.chars().count();
         assert!(length <= page_limit);
@@ -1398,77 +1207,7 @@ fn read_evidence(
         offset = next;
     }
 
-    assert_eq!(total_chars, length);
-}
-
-/// Bounds command paging from captured input, without fabricating any read receipts.
-fn evidence_length(root: &Path, provider: &Provider, snapshot: &str, reference: &str) -> usize {
-    if reference.ends_with(":patch")
-        || reference.contains(":context:")
-        || reference == "discussion-note"
-        || [
-            "unit:",
-            "binding:",
-            "note:",
-            "judgment:",
-            "check:",
-            "resolution:",
-        ]
-        .iter()
-        .any(|prefix| reference.starts_with(prefix))
-    {
-        let first = work(
-            root,
-            provider,
-            "read",
-            snapshot,
-            &[
-                "--reference".into(),
-                reference.into(),
-                "--limit".into(),
-                "1".into(),
-            ],
-        )
-        .unwrap();
-        return usize::try_from(first["totalCharacters"].as_u64().unwrap()).unwrap();
-    }
-    if reference == "discussion" {
-        let metadata = work(root, provider, "assessment", snapshot, &[]).unwrap();
-        return usize::try_from(
-            metadata["documentReads"][1]["totalCharacters"]
-                .as_u64()
-                .unwrap(),
-        )
-        .unwrap();
-    }
-    let record: Value = serde_json::from_slice(&fs::read(root.join("run.json")).unwrap()).unwrap();
-    let entry = record["inventory"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .find(|entry| entry["pullRequestId"] == provider.number)
-        .unwrap();
-
-    match reference {
-        "policy" => record["policy"]["content"]
-            .as_str()
-            .unwrap()
-            .chars()
-            .count(),
-        _ => {
-            let (id, side) = reference.split_once(':').unwrap();
-            entry["assessment"]["inventory"]["changes"]
-                .as_array()
-                .unwrap()
-                .iter()
-                .find(|change| change["id"] == id)
-                .unwrap()[side]["content"]["text"]
-                .as_str()
-                .unwrap()
-                .chars()
-                .count()
-        }
-    }
+    assert_eq!(Some(total_chars), total_length);
 }
 
 /// Notice publication carries the same immutable snapshot and attribution as approval.
@@ -1605,7 +1344,8 @@ fn stale_preflight_recovery_reassesses_source_before_any_effect() {
                 ss_ai::classification(&refresh(&root, &provider).unwrap_err()),
                 "invalidState"
             );
-            assert_eq!(fs::read(root.join("run.json")).unwrap(), unchanged);
+            assert_only_work_commands_changed(&root.join("run.json"), &unchanged, 1);
+            assert_eq!(provider.writes.get(), 0);
             if ado {
                 provider.ado_push();
                 let mut evidence = provider.evidence.borrow_mut();
@@ -1635,17 +1375,6 @@ fn stale_preflight_recovery_reassesses_source_before_any_effect() {
                     serde_json::from_slice(&fs::read(root.join("run.json")).unwrap()).unwrap();
                 assert_eq!(record["inventory"][0]["executionError"]["kind"], "service");
             }
-            if disposition == "insignificant" {
-                let path = host_journal(&scope.path().join("host-store").join("publications"));
-                let retained = path.with_extension("retained");
-                fs::rename(&path, &retained).unwrap();
-                // A missing publishing-host journal cannot prove that the receipt preceded a write.
-                assert_eq!(
-                    ss_ai::classification(&refresh(&root, &provider).unwrap_err()),
-                    "ambiguousWrite"
-                );
-                fs::rename(&retained, &path).unwrap();
-            }
             let refreshed = refresh(&root, &provider).unwrap();
             assert_eq!(refreshed["items"][0]["status"], "assessmentRequired");
             assert_eq!(refreshed["items"][0]["staleRecovery"]["attempts"], 1);
@@ -1670,20 +1399,12 @@ fn stale_preflight_recovery_reassesses_source_before_any_effect() {
                 notify(&root, &provider, current).unwrap()
             };
             let writes = provider.writes.get();
-            assert_eq!(
-                writes,
-                if ado && disposition == "insignificant" {
-                    2
-                } else {
-                    1
-                }
-            );
+            assert_eq!(writes, 1);
             if disposition == "insignificant" {
                 assert_eq!(
                     result["items"][0]["status"], "reapproved",
                     "{ado}: {result}"
                 );
-                assert_ne!(result["items"][0]["publication"]["runId"], result["runId"]);
                 publish(&root, &provider, current).unwrap();
             } else {
                 assert_eq!(
@@ -1771,8 +1492,6 @@ fn repeated_observation_has_a_distinct_snapshot() {
             Provider::new(repository.path(), &old, &new)
         };
         let (original, prepared) = prepare(&root, &provider, false);
-        let initial: Value =
-            serde_json::from_slice(&fs::read(root.join("run.json")).unwrap()).unwrap();
         assess_as(&root, &provider, &original, &prepared, "significant");
 
         let key = if ado { "description" } else { "body" };
@@ -1796,22 +1515,6 @@ fn repeated_observation_has_a_distinct_snapshot() {
         assert_ne!(snapshot, original);
         assert_eq!(refreshed["items"][0]["staleRecovery"]["attempts"], 1);
         assert_eq!(provider.writes.get(), 0);
-
-        // Earlier schema-8 records used the observation-only digest.
-        let path = root.join("run.json");
-        let current = fs::read(&path).unwrap();
-        let mut legacy: Value = serde_json::from_slice(&current).unwrap();
-        assert_eq!(
-            legacy["inventory"][0]["inspection"]["evidence"],
-            initial["inventory"][0]["inspection"]["evidence"]
-        );
-        legacy["inventory"][0]["inspection"]["snapshotDigest"] = json!(original);
-        fs::write(&path, serde_json::to_vec(&legacy).unwrap()).unwrap();
-        assert_eq!(
-            invoke(&root, &provider, "results", &[]).unwrap()["items"][0]["snapshotDigest"],
-            original
-        );
-        fs::write(&path, current).unwrap();
 
         let prepared = work(&root, &provider, "prepare", snapshot, &[]).unwrap();
         assess_as(&root, &provider, snapshot, &prepared, "significant");
@@ -1872,79 +1575,39 @@ fn stale_inspection_recovery_is_bounded_and_rechecks_authority() {
     }
 }
 
-/// Staleness after an attempted effect is never permission to authorize another write.
-fn stale_refresh_preserves_accepted_and_unknown_effects() {
+/// An uncertain notice remains bound to its original attempt after stale recovery.
+fn stale_refresh_preserves_unknown_notice() {
     let repository = TempDir::new().unwrap();
     let (old, new) = sources(repository.path());
     for ado in [false, true] {
-        for fault in ["postPush", "unknown", "noticeUnknown"] {
-            let scope = TempDir::new().unwrap();
-            let root = scope.path().join("run");
-            let provider = if ado {
-                Provider::ado(repository.path(), &old, &new)
-            } else {
-                Provider::new(repository.path(), &old, &new)
-            };
-            let (snapshot, prepared) = prepare(&root, &provider, false);
-            let disposition = if fault == "noticeUnknown" {
-                "significant"
-            } else {
-                "insignificant"
-            };
-            // Page size matches native reads; this scenario targets remote-effect safety.
-            assess_as(&root, &provider, &snapshot, &prepared, disposition);
-            let key = if ado { "description" } else { "body" };
-            provider.evidence.borrow_mut()["pullRequest"][key] =
-                json!("Changed before the first effect.");
-            if fault == "noticeUnknown" {
-                notify(&root, &provider, &snapshot).unwrap_err();
-            } else {
-                assert_eq!(
-                    publish(&root, &provider, &snapshot).unwrap()["items"][0]["status"],
-                    "staleDuringExecution"
-                );
-            }
-            let refreshed = refresh(&root, &provider).unwrap();
-            let snapshot = refreshed["items"][0]["snapshotDigest"].as_str().unwrap();
-            let prepared = work(&root, &provider, "prepare", snapshot, &[]).unwrap();
-            assess_as(&root, &provider, snapshot, &prepared, disposition);
-            provider.fault.set(fault);
-            if fault == "noticeUnknown" {
-                notify(&root, &provider, snapshot).unwrap_err();
-            } else if fault == "postPush" {
-                assert_eq!(
-                    publish(&root, &provider, snapshot).unwrap()["items"][0]["status"],
-                    "staleDuringExecution"
-                );
-            } else {
-                assert_eq!(
-                    publish(&root, &provider, snapshot).unwrap()["error"]["kind"],
-                    "ambiguousWrite"
-                );
-            }
-            let before = fs::read(root.join("run.json")).unwrap();
-            let writes = provider.writes.get();
-            assert!(writes > 0);
-            assert_eq!(
-                ss_ai::classification(&refresh(&root, &provider).unwrap_err()),
-                "ambiguousWrite"
-            );
-            assert_eq!(fs::read(root.join("run.json")).unwrap(), before);
-            assert_eq!(provider.writes.get(), writes);
-            if fault == "postPush" {
-                let path = host_journal(&scope.path().join("host-store").join("publications"));
-                fs::rename(&path, path.with_extension("retained")).unwrap();
-                assert_eq!(
-                    ss_ai::classification(&refresh(&root, &provider).unwrap_err()),
-                    "ambiguousWrite"
-                );
-                assert_eq!(fs::read(root.join("run.json")).unwrap(), before);
-                assert_eq!(provider.writes.get(), writes);
-            }
-        }
+        let scope = TempDir::new().unwrap();
+        let root = scope.path().join("run");
+        let provider = if ado {
+            Provider::ado(repository.path(), &old, &new)
+        } else {
+            Provider::new(repository.path(), &old, &new)
+        };
+        let (snapshot, prepared) = prepare(&root, &provider, false);
+        assess_as(&root, &provider, &snapshot, &prepared, "significant");
+        let key = if ado { "description" } else { "body" };
+        provider.evidence.borrow_mut()["pullRequest"][key] = json!("Changed before notice.");
+        notify(&root, &provider, &snapshot).unwrap_err();
+        let refreshed = refresh(&root, &provider).unwrap();
+        let snapshot = refreshed["items"][0]["snapshotDigest"].as_str().unwrap();
+        let prepared = work(&root, &provider, "prepare", snapshot, &[]).unwrap();
+        assess_as(&root, &provider, snapshot, &prepared, "significant");
+        provider.fault.set("noticeUnknown");
+        notify(&root, &provider, snapshot).unwrap_err();
+        let before = fs::read(root.join("run.json")).unwrap();
+        assert_eq!(provider.writes.get(), 1);
+        assert_eq!(
+            ss_ai::classification(&refresh(&root, &provider).unwrap_err()),
+            "ambiguousWrite"
+        );
+        assert_eq!(fs::read(root.join("run.json")).unwrap(), before);
+        assert_eq!(provider.writes.get(), 1);
     }
 }
-
 /// Exercises both providers' persistent refusal and independent-approval reset.
 fn needs_review_notices_short_circuit_and_expire_only_after_external_approval(
     repository: &Sources,
@@ -2029,7 +1692,6 @@ fn needs_review_notices_short_circuit_and_expire_only_after_external_approval(
         }
         let reset = discover_inspect(&scope.path().join("reset"), &provider, false);
         assert_eq!(reset["items"][0]["status"], "alreadyValid");
-        assert!(reset["items"][0]["automaticApproval"].is_null());
         if ado {
             provider.ado_push();
             provider.evidence.borrow_mut()["iterations"][2]["createdDate"] =
@@ -2121,170 +1783,11 @@ fn notice_dry_runs_refusals_and_uncertain_effects_do_not_duplicate_writes(reposi
                 result.unwrap_err();
                 notify(&root, &provider, &snapshot).unwrap_err();
             }
-            if fault == "noticeUnknown" {
-                provider.fault.set("");
-                let later = scope.path().join("later");
-                let (snapshot, prepared) = prepare(&later, &provider, false);
-                assess(&later, &provider, &snapshot, &prepared);
-                assert_eq!(
-                    ss_ai::classification(&publish(&later, &provider, &snapshot).unwrap_err()),
-                    "ambiguousWrite"
-                );
-            }
             assert_eq!(
                 provider.writes.get(),
                 usize::from(!matches!(fault, "dryRun" | "prePush")),
                 "{ado}: {fault}"
             );
-        }
-    }
-}
-
-/// Keeps automatic timestamps distinct from external approvals across fresh runs.
-fn valid_automatic_approval_timestamps_survive_later_invocations(repository: &Sources) {
-    for ado in [false, true] {
-        let scope = TempDir::new().unwrap();
-        let root = scope.path().join("first");
-        let provider = repository.provider(ado);
-        let (snapshot, prepared) = prepare(&root, &provider, false);
-        assess(&root, &provider, &snapshot, &prepared);
-        let overlapping = scope.path().join("overlapping");
-        let (overlapping_snapshot, overlapping_prepared) = prepare(&overlapping, &provider, false);
-        assess(
-            &overlapping,
-            &provider,
-            &overlapping_snapshot,
-            &overlapping_prepared,
-        );
-        let published = publish(&root, &provider, &snapshot).unwrap();
-        let automatic = &published["items"][0]["automaticApproval"];
-        assert_eq!(automatic["approvedAt"], "2026-09-28T09:00:00Z");
-        assert_eq!(published["items"][0]["status"], "reapproved");
-        let shared = publish(&overlapping, &provider, &overlapping_snapshot).unwrap();
-        assert_eq!(shared["items"][0]["status"], "alreadyValid");
-        assert_eq!(&shared["items"][0]["automaticApproval"], automatic);
-        provider.fault.set("preflightReadFailure");
-        assert_eq!(publish(&root, &provider, &snapshot).unwrap(), published);
-        assert_eq!(
-            publish(&overlapping, &provider, &overlapping_snapshot).unwrap(),
-            shared
-        );
-        provider.fault.set("");
-        let later = discover_inspect(&scope.path().join("later"), &provider, false);
-        assert_eq!(later["items"][0]["status"], "alreadyValid");
-        assert_eq!(&later["items"][0]["automaticApproval"], automatic);
-        assert_eq!(
-            later["items"][0]["title"],
-            if ado { "Recent" } else { "Recent source" }
-        );
-        assert!(
-            later["items"][0]["url"]
-                .as_str()
-                .unwrap()
-                .starts_with(provider.url())
-        );
-        assert_eq!(
-            later["items"].as_array().unwrap().len(),
-            1,
-            "Out-of-range PRs appear only in counts"
-        );
-    }
-}
-
-/// A terminal provider receipt cannot leave reporting errors absent from results.
-fn publication_reporting_failures_are_persisted(repository: &Sources) {
-    for ado in [false, true] {
-        for fault in ["reportReadFailure", "reportStandingChanged"] {
-            let scope = TempDir::new().unwrap();
-            let root = scope.path().join("first");
-            let provider = repository.provider(ado);
-            let (snapshot, prepared) = prepare(&root, &provider, false);
-            assess(&root, &provider, &snapshot, &prepared);
-            if ado {
-                provider.ado_vote(10, 40, "2026-09-28T09:06:00Z");
-            } else {
-                provider.later("APPROVED");
-            }
-            provider
-                .host_directory
-                .replace(Some(scope.path().join("host-store/publications")));
-            provider.fault.set(fault);
-            let error = publish(&root, &provider, &snapshot).unwrap_err();
-            let result = invoke(&root, &provider, "results", &[]).unwrap();
-            assert_eq!(result["state"], "partial");
-            assert_eq!(
-                result["items"][0]["status"],
-                if fault == "reportStandingChanged" {
-                    "staleDuringExecution"
-                } else {
-                    "failed"
-                }
-            );
-            assert_eq!(
-                result["items"][0]["error"]["kind"],
-                ss_ai::classification(&error)
-            );
-            assert!(result["items"][0]["publication"].is_null());
-            assert!(result["items"][0]["automaticApproval"].is_null());
-            assert_eq!(provider.writes.get(), 0);
-            provider.fault.set("");
-            publish(&root, &provider, &snapshot).unwrap_err();
-            assert_eq!(invoke(&root, &provider, "results", &[]).unwrap(), result);
-        }
-    }
-}
-
-/// A completed run retains its observed result rather than mixing it with later service state.
-fn persisted_already_valid_results_replay_without_refreshing_reporting(repository: &Sources) {
-    let new = &repository.new;
-    for ado in [false, true] {
-        for fault in ["reportReadFailure", "reportStandingChanged"] {
-            let scope = TempDir::new().unwrap();
-            let root = scope.path().join("run");
-            let provider = repository.provider(ado);
-            let (snapshot, prepared) = prepare(&root, &provider, false);
-            assess(&root, &provider, &snapshot, &prepared);
-            if ado {
-                provider.ado_vote(10, 40, "2026-09-28T09:06:00Z");
-            } else {
-                provider.later("APPROVED");
-            }
-            provider
-                .host_directory
-                .replace(Some(scope.path().join("host-store/publications")));
-            let published = publish(&root, &provider, &snapshot).unwrap();
-            assert_eq!(published["state"], "complete");
-            assert_eq!(published["items"][0]["status"], "alreadyValid");
-            assert!(published["items"][0]["publication"].is_object());
-            assert!(published["items"][0]["automaticApproval"].is_null());
-            let run_bytes = fs::read(root.join("run.json")).unwrap();
-            if fault == "reportStandingChanged" {
-                if ado {
-                    provider.ado_vote(0, 41, "2026-09-28T09:07:00Z");
-                } else {
-                    let mut evidence = provider.evidence.borrow_mut();
-                    evidence["reviews"].as_array_mut().unwrap().push(json!({
-                        "id": 99, "node_id": "later-withdrawal",
-                        "user": {"id": 42, "node_id": "user-42"},
-                        "state": "CHANGES_REQUESTED", "submitted_at": "2026-09-28T09:07:00Z",
-                        "commit_id": new, "body": "Independent later decision."
-                    }));
-                    evidence["timeline"].as_array_mut().unwrap().push(json!({
-                        "__typename": "PullRequestReview", "id": "later-withdrawal",
-                        "state": "CHANGES_REQUESTED"
-                    }));
-                }
-            } else {
-                provider.fault.set(fault);
-            }
-            let reads = provider.target_reads.get();
-            let replayed = publish(&root, &provider, &snapshot)
-                .unwrap_or_else(|error| panic!("{ado}: {fault}: {error}"));
-            assert_eq!(replayed, published, "{ado}: {fault}");
-            assert_eq!(invoke(&root, &provider, "results", &[]).unwrap(), published);
-            assert_eq!(fs::read(root.join("run.json")).unwrap(), run_bytes);
-            assert_eq!(provider.target_reads.get(), reads);
-            assert_eq!(provider.writes.get(), 0);
         }
     }
 }
@@ -3206,306 +2709,352 @@ fn legacy_run_without_assessment_refuses_new_work_without_mutation() {
     assert_eq!(provider.writes.get(), 0);
 }
 
+/// Previous-format runs remain untouched when their schema is unsupported.
 #[test]
-fn legacy_completed_assessments_reconcile_effects_without_the_old_binary() {
+fn legacy_records_require_a_fresh_run() {
+    let _guard = PROCESS_TEST_LOCK
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner);
+    for ado in [false, true] {
+        let scope = TempDir::new().unwrap();
+        let root = scope.path().join("legacy");
+        fs::create_dir_all(&root).unwrap();
+        let path = root.join("run.json");
+        fs::write(
+            &path,
+            serde_json::to_vec(&json!({"schemaVersion": 14})).unwrap(),
+        )
+        .unwrap();
+        let before = fs::read(&path).unwrap();
+        let provider = if ado {
+            Provider::ado(scope.path(), &"a".repeat(40), &"b".repeat(40))
+        } else {
+            Provider::new(scope.path(), &"a".repeat(40), &"b".repeat(40))
+        };
+        let error = invoke(&root, &provider, "results", &[]).unwrap_err();
+        assert_eq!(ss_ai::classification(&error), "invalidState");
+        assert_eq!(fs::read(&path).unwrap(), before);
+        assert_eq!(provider.writes.get(), 0);
+        assert_eq!(provider.service_calls.get(), 0);
+    }
+}
+
+/// An original schema-14 notice attempt permits readback, not a new provider write.
+#[test]
+fn previous_notice_recovery_reads_only_the_original_attempt() {
     let _guard = PROCESS_TEST_LOCK
         .lock()
         .unwrap_or_else(PoisonError::into_inner);
     let repository = Sources::new();
     for ado in [false, true] {
-        for fault in ["unknown", "postPush", "noticeUnknown"] {
+        for present in [false, true] {
             let scope = TempDir::new().unwrap();
-            let root = scope.path().join("legacy");
+            let root = scope.path().join("run");
             let provider = repository.provider(ado);
-            let (snapshot, _) = prepare(&root, &provider, false);
-            // An empty schema-14 assessment has the same manifest in both protocols.
-            // Remove only fields that did not exist in schema 14 before adding legacy work.
-            let path = root.join("run.json");
-            let mut record: Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
-            record
-                .as_object_mut()
-                .unwrap()
-                .remove("assessmentBudgetEnabled");
-            let entry = record["inventory"][0].as_object_mut().unwrap();
-            entry.remove("assessmentBudget");
-            entry
-                .get_mut("assessment")
-                .unwrap()
-                .as_object_mut()
-                .unwrap()
-                .remove("protocol");
-            fs::write(&path, serde_json::to_vec(&record).unwrap()).unwrap();
-            let prepared = work(&root, &provider, "assessment", &snapshot, &[]).unwrap();
-            assert_eq!(prepared["assessmentProtocol"], "legacy");
-            let disposition = if fault == "noticeUnknown" {
-                "significant"
-            } else {
-                "insignificant"
-            };
-            assess_as(&root, &provider, &snapshot, &prepared, disposition);
-            provider.fault.set(fault);
-            if fault == "noticeUnknown" {
-                notify(&root, &provider, &snapshot).unwrap_err();
-            } else if fault == "unknown" {
-                assert_eq!(
-                    publish(&root, &provider, &snapshot).unwrap()["error"]["kind"],
-                    "ambiguousWrite"
-                );
-            } else {
-                assert_eq!(
-                    publish(&root, &provider, &snapshot).unwrap()["items"][0]["status"],
-                    "staleDuringExecution"
-                );
-            }
-            let writes = provider.writes.get();
-            assert!(writes > 0);
-            let before = fs::read(&path).unwrap();
+            let (snapshot, prepared) = prepare(&root, &provider, false);
+            assess_as(&root, &provider, &snapshot, &prepared, "significant");
+            provider.fault.set("noticeUnknown");
             assert_eq!(
-                ss_ai::classification(&refresh(&root, &provider).unwrap_err()),
+                ss_ai::classification(&notify(&root, &provider, &snapshot).unwrap_err()),
                 "ambiguousWrite"
             );
-            assert_eq!(fs::read(&path).unwrap(), before);
-            if fault == "unknown" || fault == "noticeUnknown" {
-                provider.fault.set("");
-                let new_root = scope.path().join("new-run");
-                let (new_snapshot, new_prepared) = prepare(&new_root, &provider, false);
-                assess(&new_root, &provider, &new_snapshot, &new_prepared);
+            assert_eq!(provider.writes.get(), 1);
+            let notice_path = host_journal(&scope.path().join("host-store").join("review-notices"));
+            let notice: Value = serde_json::from_slice(&fs::read(notice_path).unwrap()).unwrap();
+            assert_eq!(notice["attempts"][0]["state"], "intent");
+            let body = notice["attempts"][0]["body"].clone();
+
+            let run_path = root.join("run.json");
+            let mut record: Value = serde_json::from_slice(&fs::read(&run_path).unwrap()).unwrap();
+            record["schemaVersion"] = json!(14);
+            let before = serde_json::to_vec(&record).unwrap();
+            fs::write(&run_path, &before).unwrap();
+            provider.fault.set("");
+            if present {
+                let at = "2026-09-28T09:05:00Z";
+                if ado {
+                    provider.evidence.borrow_mut()["threads"].as_array_mut().unwrap().push(json!({
+                        "id": 31, "publishedDate": at, "lastUpdatedDate": at, "status": "closed",
+                        "comments": [{"id": 1, "parentCommentId": 0, "commentType": "text",
+                            "author": {"id": "10000000-0000-4000-8000-000000000001"},
+                            "content": body, "publishedDate": at,
+                            "lastContentUpdatedDate": at, "lastUpdatedDate": at}],
+                        "isDeleted": false, "properties": {}
+                    }));
+                } else {
+                    provider.evidence.borrow_mut()["comments"]
+                        .as_array_mut()
+                        .unwrap()
+                        .push(json!({"id": 51, "user": {"id": 42}, "body": body,
+                            "created_at": at, "updated_at": at}));
+                }
+            }
+            let result = notify(&root, &provider, &snapshot);
+            if present {
+                let result = result.unwrap();
+                assert_eq!(result["state"], "reconciled", "ADO={ado}: {result}");
+                assert_eq!(result["recoveryOnly"], true);
+                assert_eq!(result["items"][0]["status"], "needsReview");
+            } else {
                 assert_eq!(
-                    ss_ai::classification(
-                        &publish(&new_root, &provider, &new_snapshot).unwrap_err()
-                    ),
+                    ss_ai::classification(&result.unwrap_err()),
                     "ambiguousWrite"
                 );
-                assert_eq!(provider.writes.get(), writes);
-                provider.fault.set(fault);
             }
-            let later = OffsetClock(Duration::from_mins(10));
-            let args = [
-                "--pull-request-id".into(),
-                provider.number.to_string(),
-                "--snapshot-digest".into(),
-                snapshot.clone(),
-                "--repository-url".into(),
-                provider.url().into(),
-                "--attribution".into(),
-                "[Copilot speaking]".into(),
-            ];
-            let operation = if fault == "noticeUnknown" {
-                "notify"
-            } else {
-                "publish"
-            };
-            let reconciled = invoke_at(&root, &provider, operation, &args, &later);
-            if let Err(error) = &reconciled {
-                assert_ne!(ss_ai::classification(error), "budgetExceeded");
-            }
-            assert_eq!(provider.writes.get(), writes);
+            assert_eq!(
+                provider.writes.get(),
+                1,
+                "Recovery must not issue another write"
+            );
+            assert_eq!(fs::read(&run_path).unwrap(), before);
         }
     }
 }
 
 #[test]
-fn identifiable_dismissed_renewal_is_stale_not_an_unknown_effect() {
+fn ado_acknowledged_vote_is_the_final_remote_action() {
     let _guard = PROCESS_TEST_LOCK
         .lock()
         .unwrap_or_else(PoisonError::into_inner);
     let repository = Sources::new();
     let scope = TempDir::new().unwrap();
-    let root = scope.path().join("dismissed");
-    let provider = repository.provider(false);
+    let root = scope.path().join("ado");
+    let provider = repository.provider(true);
     let (snapshot, prepared) = prepare(&root, &provider, false);
     assess(&root, &provider, &snapshot, &prepared);
-    provider.fault.set("postDismissal");
+
+    // Any read after the vote is rejected, and an audit POST is counted as a
+    // second write. Success therefore requires the vote to be the last action.
+    provider.fault.set("postReadFailure");
     let result = publish(&root, &provider, &snapshot).unwrap();
-    assert_eq!(result["items"][0]["status"], "staleDuringExecution");
+    assert_eq!(result["items"][0]["status"], "reapproved");
+    assert_eq!(result["items"][0]["publication"]["reviewId"], Value::Null);
     assert_eq!(provider.writes.get(), 1);
-    let recovered = publish(&root, &provider, &snapshot).unwrap();
-    assert_eq!(recovered["items"][0]["status"], "staleDuringExecution");
+    let replay = publish(&root, &provider, &snapshot).unwrap();
+    assert_eq!(replay["items"][0]["status"], "reapproved");
     assert_eq!(provider.writes.get(), 1);
 }
 
-#[test]
-fn mismatched_owned_review_remains_ambiguous_until_original_run_reconciles() {
-    let _guard = PROCESS_TEST_LOCK
-        .lock()
-        .unwrap_or_else(PoisonError::into_inner);
-    let repository = Sources::new();
-    let scope = TempDir::new().unwrap();
-    let root = scope.path().join("first");
-    let provider = repository.provider(false);
-    let (snapshot, prepared) = prepare(&root, &provider, false);
-    assess(&root, &provider, &snapshot, &prepared);
-    let new_root = scope.path().join("second");
-    let (new_snapshot, new_prepared) = prepare(&new_root, &provider, false);
-    assess(&new_root, &provider, &new_snapshot, &new_prepared);
-    provider.fault.set("postWrongCommit");
-    let result = publish(&root, &provider, &snapshot).unwrap();
-    assert_eq!(result["error"]["kind"], "ambiguousWrite");
-    assert_eq!(provider.writes.get(), 1);
+/// Changes only the observation or response selected by a publication case.
+fn configure_publication_case(root: &Path, provider: &Provider, ado: bool, fault: &str) {
+    match fault {
+        "source" if ado => provider.ado_push(),
+        "source" => {
+            provider.evidence.borrow_mut()["pullRequest"]["head"]["sha"] = json!("f".repeat(40));
+        }
+        "policy" => fs::write(root.join("policy.md"), "Changed policy").unwrap(),
+        "providerPolicy" if ado => {
+            let mut evidence = provider.evidence.borrow_mut();
+            let policy = evidence["policies"]
+                .as_array_mut()
+                .unwrap()
+                .iter_mut()
+                .find(|policy| policy["id"] == 99)
+                .unwrap();
+            policy["settings"]["minimumApproverCount"] = json!(2);
+            evidence["evaluations"][0]["configuration"]["settings"]["minimumApproverCount"] =
+                json!(2);
+        }
+        "providerPolicy" => {
+            provider.evidence.borrow_mut()["policy"]["requireLastPushApproval"] = json!(true);
+        }
+        "alreadyValid" if ado => provider.ado_vote(10, 40, "2026-09-28T09:06:00Z"),
+        "alreadyValid" => provider.later("APPROVED"),
+        "ineligible" if ado => provider.ado_vote(-10, 40, "2026-09-28T09:06:00Z"),
+        "ineligible" => provider.later("CHANGES_REQUESTED"),
+        "draft" => {
+            provider.evidence.borrow_mut()["pullRequest"][if ado { "isDraft" } else { "draft" }] =
+                json!(true);
+        }
+        "permission" => provider.fault.set("permission"),
+        "unknown" => provider.fault.set("unknown"),
+        "differentResponse" => provider.fault.set("differentResponse"),
+        _ => {}
+    }
+}
 
-    provider.fault.set("");
-    // Both runs share the host journal; an unverified owned effect blocks a new write.
+/// Confirms a single successful request becomes the next source baseline.
+fn assert_successful_publication(
+    scope: &Path,
+    root: &Path,
+    repository: &Sources,
+    provider: &Provider,
+    ado: bool,
+    result: &Value,
+) {
     assert_eq!(
-        ss_ai::classification(&publish(&new_root, &provider, &new_snapshot).unwrap_err()),
-        "ambiguousWrite"
+        result["items"][0]["status"], "reapproved",
+        "ADO={ado}: {result}"
     );
+    assert!(result["items"][0].get("automaticApproval").is_none());
     assert_eq!(provider.writes.get(), 1);
-
-    provider.evidence.borrow_mut()["reviews"]
-        .as_array_mut()
-        .unwrap()
-        .last_mut()
-        .unwrap()["commit_id"] = json!(repository.new);
-    let recovered = publish(&root, &provider, &snapshot).unwrap();
-    assert_eq!(recovered["items"][0]["status"], "reapproved");
-    assert_eq!(provider.writes.get(), 1);
+    assert_eq!(
+        provider.service_calls.get(),
+        provider.calls_at_approval.get()
+    );
+    if ado {
+        assert!(result["items"][0]["publication"]["reviewId"].is_null());
+    }
+    let record: Value = serde_json::from_slice(&fs::read(root.join("run.json")).unwrap()).unwrap();
+    assert_eq!(record["schemaVersion"], 15);
+    assert!(!scope.join("host-store").join("publications").exists());
+    // A later source push binds the next assessment to this ordinary approval.
+    if ado {
+        provider.ado_push();
+    } else {
+        let mut evidence = provider.evidence.borrow_mut();
+        evidence["pullRequest"]["head"]["sha"] = json!("f".repeat(40));
+        evidence["reviews"]
+            .as_array_mut()
+            .unwrap()
+            .last_mut()
+            .unwrap()["state"] = json!("DISMISSED");
+        evidence["timeline"]
+            .as_array_mut()
+            .unwrap()
+            .last_mut()
+            .unwrap()["state"] = json!("DISMISSED");
+        evidence["timeline"].as_array_mut().unwrap().push(json!({
+            "__typename": "ReviewDismissedEvent", "id": "later-dismissal",
+            "review": {"id": "renewal-review"}, "previousReviewState": "APPROVED",
+            "createdAt": "2026-09-28T09:10:00Z",
+            "pullRequestCommit": {"commit": {"oid": "f".repeat(40)}}
+        }));
+    }
+    let later_root = scope.join("later");
+    let later = discover_inspect(&later_root, provider, true);
+    assert_eq!(
+        later["items"][0]["status"], "assessmentRequired",
+        "ADO={ado}: {later}"
+    );
+    let record: Value =
+        serde_json::from_slice(&fs::read(later_root.join("run.json")).unwrap()).unwrap();
+    assert_eq!(
+        record["inventory"][0]["inspection"]["decision"]["anchor"]["sourceCommit"],
+        repository.new
+    );
 }
 
+/// Approval effects end at the single provider request on both platforms.
 #[test]
 fn native_git_assessment_and_guarded_publication_have_exact_effect_boundaries() {
     let _guard = PROCESS_TEST_LOCK
         .lock()
         .unwrap_or_else(PoisonError::into_inner);
     let repository = Sources::new();
-    let (old, new) = repository.commits();
-    let baseline = git(repository.path(), &["status", "--porcelain=v1"]);
-    for fault in [
-        "",
-        "lastPush",
-        "dryRun",
-        "lostReply",
-        "unknown",
-        "prePush",
-        "postPush",
-        "withdrawal",
-        "pending",
-        "discussion",
-        "auth",
-        "postWithdrawal",
-        "postReadFailure",
-        "duplicate",
-        "rateLimit",
-        "permission",
-        "journalFailure",
-        "otherUnknown",
-    ] {
-        let scope = TempDir::new().unwrap();
-        let root = scope.path().join("first");
-        // Keep a complete real-Git lifecycle; fault cases vary publication effects only.
-        let provider = if fault.is_empty() {
-            Provider::new(repository.path(), &old, &new)
-        } else {
-            repository.provider(false)
-        };
-        if fault == "lastPush" {
-            let mut evidence = provider.evidence.borrow_mut();
-            evidence["policy"]["requireLastPushApproval"] = json!(true);
-            evidence["reviews"][1]["state"] = json!("APPROVED");
-            evidence["timeline"][1]["state"] = json!("APPROVED");
-            evidence["timeline"].as_array_mut().unwrap().remove(2);
-        }
-        let (snapshot, prepared) = prepare(&root, &provider, fault == "dryRun");
-        assert_eq!(prepared["oldCommit"], old);
-        assert_eq!(prepared["newCommit"], new);
-        assert_eq!(prepared["changeCount"], 1);
-        work(&root, &provider, "complete", &snapshot, &[]).unwrap_err();
-        work(
-            &root,
-            &provider,
-            "read",
-            &snapshot,
-            &[
-                "--reference".into(),
-                "policy".into(),
-                "--offset".into(),
-                "10".into(),
-            ],
-        )
-        .unwrap_err();
-        assess(&root, &provider, &snapshot, &prepared);
-        assert_eq!(provider.writes.get(), 0);
-        provider.fault.set(fault);
-        match fault {
-            "prePush" => {
-                provider.evidence.borrow_mut()["pullRequest"]["head"]["sha"] =
-                    json!("e".repeat(40));
+    for ado in [false, true] {
+        for fault in [
+            "success",
+            "source",
+            "policy",
+            "providerPolicy",
+            "alreadyValid",
+            "ineligible",
+            "draft",
+            "permission",
+            "unknown",
+            "differentResponse",
+        ] {
+            if fault == "differentResponse" && !ado {
+                continue;
             }
-            "withdrawal" => provider.later("CHANGES_REQUESTED"),
-            "pending" => provider.later("PENDING"),
-            "discussion" => {
-                provider.evidence.borrow_mut()["pullRequest"]["body"] =
-                    json!("New unresolved objection.");
+            eprintln!("Publication case: ADO={ado}; {fault}");
+            let scope = TempDir::new().unwrap();
+            let root = scope.path().join("run");
+            let provider = repository.provider(ado);
+            let (snapshot, prepared) = prepare(&root, &provider, false);
+            assert_eq!(prepared["oldCommit"], repository.old);
+            assert_eq!(prepared["newCommit"], repository.new);
+            assess(&root, &provider, &snapshot, &prepared);
+            configure_publication_case(&root, &provider, ado, fault);
+            let result = publish(&root, &provider, &snapshot);
+            match fault {
+                "success" | "differentResponse" => {
+                    assert_successful_publication(
+                        scope.path(),
+                        &root,
+                        &repository,
+                        &provider,
+                        ado,
+                        &result.unwrap(),
+                    );
+                }
+                "source" | "providerPolicy" => {
+                    let result = result.unwrap();
+                    assert_eq!(
+                        result["items"][0]["status"], "staleDuringExecution",
+                        "ADO={ado}: {fault}: {result}"
+                    );
+                    assert_eq!(provider.writes.get(), 0);
+                }
+                "alreadyValid" | "ineligible" => {
+                    let result = result.unwrap();
+                    assert_eq!(result["items"][0]["status"], fault, "ADO={ado}: {result}");
+                    assert_eq!(provider.writes.get(), 0);
+                }
+                "draft" => {
+                    let result = result.unwrap();
+                    assert_eq!(result["items"], json!([]), "ADO={ado}: {result}");
+                    assert_eq!(provider.writes.get(), 0);
+                }
+                "policy" => {
+                    assert_eq!(ss_ai::classification(&result.unwrap_err()), "invalidState");
+                    assert_eq!(provider.writes.get(), 0);
+                }
+                _ => {
+                    let error = result.unwrap_err();
+                    assert_eq!(
+                        ss_ai::classification(&error),
+                        if fault == "permission" {
+                            "permissionDenied"
+                        } else {
+                            "ambiguousWrite"
+                        },
+                        "ADO={ado}: {fault}: {error}"
+                    );
+                    assert_eq!(provider.writes.get(), 1);
+                    assert_eq!(
+                        provider.service_calls.get(),
+                        provider.calls_at_approval.get(),
+                        "ADO={ado}: {fault}"
+                    );
+                }
             }
-            _ => {}
         }
-        if fault == "dryRun" {
-            publish(&root, &provider, &snapshot).unwrap_err();
-            let result = invoke(&root, &provider, "results", &[]).unwrap();
-            assert_eq!(result["state"], "complete");
-            assert_eq!(result["items"][0]["status"], "wouldReapprove");
-            assert_eq!(provider.writes.get(), 0);
-            continue;
-        }
-        if fault == "auth" {
-            let error = publish(&root, &provider, &snapshot).unwrap_err();
-            assert_eq!(ss_ai::classification(&error), "authentication");
-            assert_eq!(provider.writes.get(), 0);
-            assert_eq!(
-                invoke(&root, &provider, "results", &[]).unwrap()["state"],
-                "failed"
-            );
-            continue;
-        }
-        if fault == "otherUnknown" {
-            let path = root.join("run.json");
-            let mut record: Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
-            record["state"] = json!("failed");
-            record["error"] =
-                json!({"kind": "ambiguousWrite", "message": "Another PR has unresolved work."});
-            fs::write(path, serde_json::to_vec(&record).unwrap()).unwrap();
-            publish(&root, &provider, &snapshot).unwrap_err();
-            assert_eq!(provider.writes.get(), 0);
-            continue;
-        }
-        check_publication(&root, &provider, &snapshot, fault);
     }
+}
 
-    assert_eq!(
-        git(repository.path(), &["status", "--porcelain=v1"]),
-        baseline
-    );
-    assert_eq!(git(repository.path(), &["rev-parse", "HEAD"]), new);
-    // Keep subprocess scenarios under the guard: concurrent process creation can
-    // briefly inherit another thread's held file lock.
+/// Retains independent notification and source coverage using shared immutable Git replies.
+#[test]
+fn native_assessment_and_notice_boundaries() {
+    let _guard = PROCESS_TEST_LOCK
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner);
+    let repository = Sources::new();
+    let baseline = git(repository.path(), &["status", "--porcelain=v1"]);
     risk_judgments_and_uncertainty_prevent_publication(&repository);
-    prepared_run_cannot_bypass_another_runs_unknown_effect(&repository);
-    ado_publication_preserves_authority_and_never_replays_unknown_effects(&repository);
     needs_review_notices_short_circuit_and_expire_only_after_external_approval(&repository);
     notice_dry_runs_refusals_and_uncertain_effects_do_not_duplicate_writes(&repository);
-    valid_automatic_approval_timestamps_survive_later_invocations(&repository);
-    publication_reporting_failures_are_persisted(&repository);
-    persisted_already_valid_results_replay_without_refreshing_reporting(&repository);
     notice_terminal_save_failures_preserve_original_recovery(&repository);
     uncertain_assessment_diagnostic_survives_notification_retry(&repository);
     notice_recovery_is_bound_to_the_failed_pull_request(&repository);
     ado_notice_recovery_does_not_require_current_approval_eligibility(&repository);
     notice_readback_survives_closure_and_draft_conversion(&repository);
     expired_edited_notices_do_not_block_new_notice_readback(&repository);
-
     assert_eq!(
         git(repository.path(), &["status", "--porcelain=v1"]),
         baseline
     );
-    assert_eq!(git(repository.path(), &["rev-parse", "HEAD"]), new);
-
-    // Source-mutating scenarios own their repositories rather than the shared editorial fixture.
+    assert_eq!(
+        git(repository.path(), &["rev-parse", "HEAD"]),
+        repository.new
+    );
     force_push_inventory_preserves_every_path_kind_and_rejects_missing_objects();
     empty_source_diff_and_corrupted_assessments_never_bypass_discussion_or_coverage();
     pagination_requires_complete_contiguous_snapshot_bound_unicode_evidence();
     recorded_git_rejects_unknown_commands_and_changed_source(&repository);
     eprintln!("Reapproval work: {:?}", WORK_COUNTS.get());
 }
-
 /// Pins recorded replies to their real-Git command sequence, with no native fallback.
 fn recorded_git_rejects_unknown_commands_and_changed_source(repository: &Sources) {
     for ado in [false, true] {
@@ -3715,7 +3264,7 @@ fn native_stale_evidence_recovery_preserves_assessment_and_effect_boundaries() {
     stale_notification_recovery_exhausts_without_remote_writes();
     repeated_observation_has_a_distinct_snapshot();
     stale_inspection_recovery_is_bounded_and_rechecks_authority();
-    stale_refresh_preserves_accepted_and_unknown_effects();
+    stale_refresh_preserves_unknown_notice();
 }
 
 /// Inspection persists chronological decline decisions without any service effects.
@@ -3816,10 +3365,7 @@ fn ado_project_bookkeeping_does_not_stale_capture_publication_or_notice() {
             },
             "{result}"
         );
-        assert_eq!(
-            provider.writes.get(),
-            if disposition == "insignificant" { 2 } else { 1 }
-        );
+        assert_eq!(provider.writes.get(), 1);
         assert_ne!(
             project["revision"],
             provider.evidence.borrow()["pullRequest"]["repository"]["project"]["revision"]
@@ -3873,215 +3419,6 @@ fn cosmetic_evidence_churn_does_not_stale_approval_or_notice_on_either_provider(
             assert_eq!(&updated["inventory"][0]["inspection"], inspection);
         }
     }
-}
-
-/// Exercises real command dispatch and records while ADO effects remain entirely in memory.
-#[expect(
-    clippy::cognitive_complexity,
-    reason = "The bounded scenario table verifies each distinct effect boundary"
-)]
-fn ado_publication_preserves_authority_and_never_replays_unknown_effects(repository: &Sources) {
-    let (old, new) = repository.commits();
-    for fault in [
-        "",
-        "suggestions",
-        "dryRun",
-        "lostVoteReply",
-        "lostAuditReply",
-        "unknown",
-        "auditUnknown",
-        "auditRefused",
-        "policyCompleted",
-        "sourceAtVote",
-        "prePush",
-        "postPush",
-        "withdrawal",
-        "postWithdrawal",
-        "pending",
-        "declined",
-        "pendingThread",
-        "discussion",
-        "auth",
-        "duplicate",
-        "postReadFailure",
-        "permission",
-        "rateLimit",
-    ] {
-        let scope = TempDir::new().unwrap();
-        let root = scope.path().join("ado");
-        // Cumulative-anchor cases fetch a deliberately unavailable subsequent push.
-        let provider = if matches!(
-            fault,
-            "" | "suggestions"
-                | "lostVoteReply"
-                | "lostAuditReply"
-                | "postReadFailure"
-                | "auditRefused"
-        ) {
-            Provider::ado(repository.path(), &old, &new)
-        } else {
-            repository.provider(true)
-        };
-        if fault == "suggestions" {
-            let mut evidence = provider.evidence.borrow_mut();
-            evidence["reviewers"][0]["vote"] = json!(5);
-            evidence["threads"][1]["properties"]["CodeReviewVoteResult"]["$value"] = json!("5");
-        }
-        let (snapshot, prepared) = prepare(&root, &provider, fault == "dryRun");
-        assert_eq!(prepared["oldCommit"], old, "{fault}: {prepared}");
-        assert_eq!(prepared["newCommit"], new);
-        assess(&root, &provider, &snapshot, &prepared);
-        let original_run = fs::read(root.join("run.json")).unwrap();
-        let second = scope.path().join("overlapping");
-        let second_snapshot = if matches!(fault, "unknown" | "auditUnknown" | "duplicate") {
-            let (snapshot, prepared) = prepare(&second, &provider, false);
-            assess(&second, &provider, &snapshot, &prepared);
-            Some(snapshot)
-        } else {
-            None
-        };
-        provider.fault.set(fault);
-        match fault {
-            "prePush" => provider.ado_push(),
-            "withdrawal" => provider.ado_vote(0, 19, "2026-09-28T08:00:00Z"),
-            "pending" => provider.evidence.borrow_mut()["reviewers"][0]["isFlagged"] = json!(true),
-            "declined" => provider.evidence.borrow_mut()["reviewers"][0]["hasDeclined"] = json!(true),
-            "discussion" => provider.evidence.borrow_mut()["pullRequest"]["description"] = json!("New human objection."),
-            "pendingThread" => provider.evidence.borrow_mut()["threads"].as_array_mut().unwrap().push(json!({
-                "id": 19, "status": "pending", "comments": [{"commentType": "text",
-                    "author": {"id": "10000000-0000-4000-8000-000000000001"}, "content": "Pending human review"}]})),
-            _ => {}
-        }
-        if fault == "dryRun" || fault == "auth" {
-            publish(&root, &provider, &snapshot).unwrap_err();
-            assert_eq!(provider.writes.get(), 0);
-            continue;
-        }
-        let result = publish(&root, &provider, &snapshot).unwrap();
-        let expected = match fault {
-            "unknown" | "auditUnknown" | "auditRefused" | "lostAuditReply" | "duplicate"
-            | "postReadFailure" | "permission" | "rateLimit" => "failed",
-            "prePush" | "postPush" | "sourceAtVote" | "postWithdrawal" | "discussion" => {
-                "staleDuringExecution"
-            }
-            "withdrawal" | "pending" | "declined" | "pendingThread" => "ineligible",
-            _ => "reapproved",
-        };
-        assert_eq!(result["items"][0]["status"], expected, "{fault}: {result}");
-        let writes = provider.writes.get();
-        if let Some(second_snapshot) = second_snapshot {
-            let error = publish(&second, &provider, &second_snapshot).unwrap_err();
-            assert_eq!(ss_ai::classification(&error), "ambiguousWrite");
-            assert_eq!(
-                provider.writes.get(),
-                writes,
-                "Unresolved effects block overlapping runs"
-            );
-        }
-        if matches!(
-            fault,
-            "prePush" | "withdrawal" | "pending" | "declined" | "pendingThread" | "discussion"
-        ) {
-            assert_eq!(writes, 0, "{fault}");
-        } else if matches!(
-            fault,
-            "unknown" | "duplicate" | "postReadFailure" | "permission" | "rateLimit"
-        ) {
-            assert_eq!(writes, 1, "{fault}");
-        } else {
-            assert_eq!(writes, 2, "{fault}");
-        }
-        provider.fault.set("");
-        if fault.is_empty() {
-            // Host persistence precedes run persistence. Restore the original run
-            // to simulate interruption between those saves, then consume the receipt.
-            fs::write(root.join("run.json"), original_run).unwrap();
-        }
-        if fault == "permission" {
-            publish(&root, &provider, &snapshot).unwrap_err();
-            assert_eq!(provider.writes.get(), writes);
-            continue;
-        }
-        let recovered =
-            publish(&root, &provider, &snapshot).unwrap_or_else(|error| panic!("{fault}: {error}"));
-        if fault == "lostAuditReply" || fault == "postReadFailure" || fault == "auditRefused" {
-            assert_eq!(
-                recovered["items"][0]["status"], "reapproved",
-                "{fault}: {recovered}"
-            );
-            assert_eq!(
-                provider.writes.get(),
-                writes + usize::from(fault != "lostAuditReply")
-            );
-        } else {
-            assert_eq!(recovered["items"][0]["status"], expected, "{fault}");
-            assert_eq!(provider.writes.get(), writes, "No replay for {fault}");
-        }
-        if matches!(
-            fault,
-            "" | "suggestions"
-                | "lostVoteReply"
-                | "lostAuditReply"
-                | "postReadFailure"
-                | "auditRefused"
-        ) {
-            // On the next push, cumulative authority must still name the external
-            // approval, not the automatic vote or its audit thread.
-            provider.ado_push();
-            let later = scope.path().join("later");
-            let (_, later_prepared) = prepare(&later, &provider, true);
-            // The fake new source is deliberately unavailable locally. Inspection,
-            // not successful object fetching, must already preserve the anchor.
-            assert_eq!(later_prepared["items"][0]["status"], "failed");
-            let saved: Value =
-                serde_json::from_slice(&fs::read(later.join("run.json")).unwrap()).unwrap();
-            assert_eq!(
-                saved["inventory"][0]["inspection"]["decision"]["anchor"]["sourceCommit"],
-                old
-            );
-            assert_eq!(
-                saved["inventory"][0]["inspection"]["decision"]["anchor"]["reviewId"],
-                "2"
-            );
-        }
-    }
-}
-
-/// A saved preparation does not reserve permission to write after another run becomes uncertain.
-fn prepared_run_cannot_bypass_another_runs_unknown_effect(repository: &Sources) {
-    let scope = TempDir::new().unwrap();
-    let first = scope.path().join("first");
-    let second = scope.path().join("second");
-    let provider = repository.provider(false);
-    let (snapshot, prepared) = prepare(&first, &provider, false);
-    assess(&first, &provider, &snapshot, &prepared);
-    let run_path = first.join("run.json");
-    let before = fs::read(&run_path).unwrap();
-
-    // Refuse preflight after preparation, then restore the run as if the process
-    // stopped before saving its error. The host's prepared record remains intact.
-    provider.fault.set("auth");
-    assert_eq!(
-        ss_ai::classification(&publish(&first, &provider, &snapshot).unwrap_err()),
-        "authentication"
-    );
-    fs::write(&run_path, before).unwrap();
-    provider.fault.set("");
-    let (second_snapshot, prepared) = prepare(&second, &provider, false);
-    assess(&second, &provider, &second_snapshot, &prepared);
-    provider.fault.set("unknown");
-    let result = publish(&second, &provider, &second_snapshot).unwrap();
-    assert_eq!(result["state"], "failed");
-    assert_eq!(provider.writes.get(), 1);
-
-    provider.fault.set("");
-    let error = publish(&first, &provider, &snapshot).unwrap_err();
-    assert_eq!(ss_ai::classification(&error), "ambiguousWrite");
-    assert_eq!(
-        provider.writes.get(),
-        1,
-        "Prepared work must not replay an unknown effect"
-    );
 }
 
 /// Each policy concern and insufficient evidence independently prevents a remote effect.
@@ -4200,7 +3537,8 @@ fn incomplete_evidence_does_not_authorize_approval_or_needs_review_publication()
             )
             .unwrap_err();
             work(scope.path(), &provider, "complete", &snapshot, &[]).unwrap_err();
-            assert_only_work_commands_changed(&scope.path().join("run.json"), &before, 3);
+            // The rejected judgment and completion each consume one work command.
+            assert_only_work_commands_changed(&scope.path().join("run.json"), &before, 2);
             notify(scope.path(), &provider, &snapshot).unwrap_err();
             publish(scope.path(), &provider, &snapshot).unwrap_err();
             let result = invoke(scope.path(), &provider, "results", &[]).unwrap();
@@ -4507,7 +3845,7 @@ fn concern_resolution_survives_reload_and_vetoes_favorable_aggregate() {
             )
             .unwrap();
             let checkpoint = work(scope.path(), &provider, "checkpoint", &snapshot, &[]).unwrap();
-            assert!(checkpoint["checkpointCount"].as_u64().unwrap() > 0);
+            assert!(checkpoint["directHandoffCount"].as_u64().unwrap() > 0);
             work(scope.path(), &provider, "checkpoint", &snapshot, &[]).unwrap_err();
             fixture_checkpoint_inputs(scope.path(), &provider, &snapshot, "cumulative").unwrap();
             let checks = work(scope.path(), &provider, "checks", &snapshot, &[]).unwrap();
@@ -4518,6 +3856,14 @@ fn concern_resolution_survives_reload_and_vetoes_favorable_aggregate() {
             let check_ref = check["reference"].as_str().unwrap();
             let resolution_ref = check["resolutionReference"].as_str().unwrap();
             assert_eq!(check["origin"], format!("judgment:{id}"));
+            read_evidence(
+                scope.path(),
+                &provider,
+                &snapshot,
+                &format!("judgment:{id}"),
+                None,
+                None,
+            );
             read_evidence(scope.path(), &provider, &snapshot, check_ref, None, None);
             let resolve = |disposition: &str| {
                 vec![
@@ -5023,87 +4369,6 @@ fn compact_discussion_is_snapshot_bound_and_keeps_objections_on_both_providers()
     }
 }
 
-/// Checks terminal effects and recovery separately from scenario preparation.
-fn check_publication(root: &Path, provider: &Provider, snapshot: &str, fault: &str) {
-    let result = if fault == "journalFailure" {
-        recover_failed_journal(root, provider, snapshot)
-    } else {
-        publish(root, provider, snapshot).unwrap()
-    };
-    let expected = match fault {
-        "unknown" | "postReadFailure" | "duplicate" | "rateLimit" | "permission" => "failed",
-        "prePush" | "postPush" | "discussion" | "postWithdrawal" => "staleDuringExecution",
-        "withdrawal" | "pending" => "ineligible",
-        _ => "reapproved",
-    };
-    assert_eq!(result["items"][0]["status"], expected, "{fault}: {result}");
-    assert_eq!(
-        provider.writes.get(),
-        usize::from(!matches!(
-            fault,
-            "prePush" | "withdrawal" | "pending" | "discussion"
-        ))
-    );
-    if fault == "permission" {
-        assert_eq!(result["state"], "failed");
-        publish(root, provider, snapshot).unwrap_err();
-    } else {
-        publish(root, provider, snapshot).unwrap();
-    }
-    assert_eq!(
-        provider.writes.get(),
-        usize::from(!matches!(
-            fault,
-            "prePush" | "withdrawal" | "pending" | "discussion"
-        )),
-        "Recovery must never duplicate a write"
-    );
-    let receipt = &result["items"][0]["publication"];
-    let host_path = Path::new(receipt["journalPath"].as_str().unwrap());
-    assert!(host_path.is_absolute() && host_path.is_file());
-    if fault.is_empty() {
-        reject_publication_corruption(host_path, root, provider, snapshot);
-    }
-    if fault == "postReadFailure" {
-        fs::write(root.join("policy.md"), "Updated installed policy.").unwrap();
-        provider.fault.set("");
-        let run_path = root.join("run.json");
-        let pending = fs::read(&run_path).unwrap();
-        let recovered = publish(root, provider, snapshot).unwrap();
-        assert_eq!(recovered["items"][0]["status"], "reapproved");
-        assert_eq!(provider.writes.get(), 1);
-
-        // Retain the terminal host record but replay the last durable run bytes,
-        // as when execution stops between the host save and the run save.
-        fs::write(&run_path, pending).unwrap();
-        let reads = provider.target_reads.get();
-        let repaired = publish(root, provider, snapshot).unwrap();
-        assert_eq!(repaired["items"][0]["status"], "reapproved");
-        assert_eq!(
-            repaired["items"][0]["publication"],
-            recovered["items"][0]["publication"]
-        );
-        assert_eq!(
-            provider.target_reads.get(),
-            reads,
-            "Terminal recovery is local only"
-        );
-        assert_eq!(
-            provider.writes.get(),
-            1,
-            "Receipt recovery must never replay a review"
-        );
-    }
-    if fault == "unknown" {
-        let second = root.parent().unwrap().join("second");
-        let (snapshot, prepared) = prepare(&second, provider, false);
-        assess(&second, provider, &snapshot, &prepared);
-        let error = publish(&second, provider, &snapshot).unwrap_err();
-        assert_eq!(ss_ai::classification(&error), "ambiguousWrite");
-        assert_eq!(provider.writes.get(), 1);
-    }
-}
-
 fn host_journal(directory: &Path) -> PathBuf {
     fs::read_dir(directory)
         .unwrap()
@@ -5113,60 +4378,6 @@ fn host_journal(directory: &Path) -> PathBuf {
                 .is_some_and(|extension| extension == "json")
         })
         .unwrap()
-}
-
-/// A failed acknowledgement save must leave a recoverable intent, not a blocked assessment error.
-fn recover_failed_journal(root: &Path, provider: &Provider, snapshot: &str) -> Value {
-    let directory = root
-        .parent()
-        .unwrap()
-        .join("host-store")
-        .join("publications");
-    provider.host_directory.replace(Some(directory.clone()));
-    let error = publish(root, provider, snapshot).unwrap_err();
-    assert_eq!(ss_ai::classification(&error), "ambiguousWrite");
-    assert_eq!(
-        invoke(root, provider, "results", &[]).unwrap()["state"],
-        "failed"
-    );
-    let path = host_journal(&directory);
-    fs::remove_dir(&path).unwrap();
-    fs::rename(path.with_extension("saved"), &path).unwrap();
-    provider.fault.set("");
-    let result = publish(root, provider, snapshot).unwrap();
-    assert_eq!(provider.writes.get(), 1);
-    result
-}
-
-/// Recovery validates the effect and readback instead of trusting a terminal status string.
-fn reject_publication_corruption(
-    host_path: &Path,
-    root: &Path,
-    provider: &Provider,
-    snapshot: &str,
-) {
-    let bytes = fs::read(host_path).unwrap();
-    let record: Value = serde_json::from_slice(&bytes).unwrap();
-    for (path, replacement) in [
-        ("/operations/0/state", json!("write-intent")),
-        ("/operations/0/effect/state", json!("unknown")),
-        (
-            "/operations/0/effect/acknowledgement/commit_id",
-            json!("a".repeat(40)),
-        ),
-        ("/operations/0/result/reviewId", json!("different-review")),
-        (
-            "/operations/0/verification/evidence/observation/pullRequest/head/sha",
-            json!("a".repeat(40)),
-        ),
-    ] {
-        let mut corrupt = record.clone();
-        *corrupt.pointer_mut(path).unwrap() = replacement;
-        fs::write(host_path, serde_json::to_vec(&corrupt).unwrap()).unwrap();
-        publish(root, provider, snapshot).unwrap_err();
-        assert_eq!(provider.writes.get(), 1);
-    }
-    fs::write(host_path, bytes).unwrap();
 }
 
 fn force_push_inventory_preserves_every_path_kind_and_rejects_missing_objects() {

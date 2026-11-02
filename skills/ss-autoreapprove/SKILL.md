@@ -81,8 +81,15 @@ approval history or the cumulative comparison.
 
 # Stage 2: inspect eligible history
 
-Page through discovery results and inspect only `assessmentRequired` entries
-without an inspection snapshot. Already-valid, no-prior-approval, and ineligible
+Page through discovery results and process one candidate at a time. For an
+`assessmentRequired` entry without an inspection snapshot, inspect it and
+continue through stages 3 and 4, including any required recovery, before
+inspecting the next candidate. Inspection starts that PR's persisted time
+budget; inspecting the entire queue first would charge later candidates for
+time spent assessing earlier ones. Resume any previously inspected candidate
+using its existing budget; never reset it to start another candidate.
+
+Already-valid, no-prior-approval, and ineligible
 entries need no content work. An unresolved inspection needs recovery or an explicit tooling failure,
 not an acceptable terminal result. Do not interpret failed or partial discovery
 as no work.
@@ -91,12 +98,12 @@ a draft, skip it without further work or reporting.
 
 An account-owned needs-review comment short-circuits source assessment and
 returns `needsReview`, including when a previous invocation posted it. Only
-an external approval by the authenticated account strictly after the comment's
-service timestamp invalidates that marker. Another account's approval or an
-automatic renewal does not reset it. Never reassess an active marker.
+an approval by the authenticated account strictly after the comment's
+service timestamp invalidates that marker. Another account's approval does not
+reset it. Never reassess an active marker.
 
-The anchor is the latest applicable approval by the authenticated account
-not issued by this skill. Renewals retain that anchor. Later human withdrawals,
+The anchor is the latest applicable provider approval by the authenticated
+account, regardless of how it was submitted. Later withdrawals,
 negative decisions, removals, and pending reviews prevent automatic renewal.
 GitHub requires either a service-proven change-caused dismissal or an effective
 last-push approval requirement with a retained approval on an older source
@@ -121,6 +128,9 @@ policy/history shapes are actionable tooling failures; do not guess approval
 authority or conduct additional service experiments.
 
 # Stage 3: assess exact source changes
+
+Apply this stage to the candidate just inspected, not to a separate pass over
+all inspected candidates.
 
 For each eligible snapshot, run native `prepare` to capture the exact comparison
 and obtain the preflight progress counts. Reserve a worker with `start-worker`
@@ -169,8 +179,7 @@ confirm it has ended before a replacement starts; use the same assignment,
 model, snapshot, and run path. Do not pass semantic conclusions or conduct the
 assessment in the orchestrator. Do not create a new run, refresh, or notify to
 recover unfinished work. A completed significant or uncertain assessment follows
-stage 4. A legacy assessment remains on its original protocol; retain its run
-for compatible continuation or effect reconciliation.
+stage 4. A previous-format assessment cannot continue; start a fresh assessment.
 
 The persisted per-PR budget includes inspection and assessment and reserves
 time for freshness and publication. A `budgetExceeded` result is incomplete,
@@ -182,12 +191,11 @@ host exposes that measurement. If it does not, report the count as unavailable.
 # Stage 4: publish or retain the dry-run result
 
 Publish only `readyToReapprove`, passing attribution required by the user's
-communication policy. The utility refreshes authority and source evidence,
-holds a same-host account/repository/PR lock, and verifies the result.
-GitHub submits an explicit source SHA. ADO preserves the positive vote strength,
-requires a unique new account-owned vote event on the assessed source iteration,
-and publishes a source-bound audit. Its vote API cannot condition the write on
-a source SHA; preflight and postflight detect movement, not atomically prevent it.
+communication policy. The utility refreshes authority and source evidence before publication.
+GitHub submits an explicit source SHA. ADO preserves the positive vote strength;
+its vote API cannot condition the write on a source SHA, so a source change can
+race with submission. A successful provider response finishes the operation,
+with no later provider calls.
 The utility checks provider-returned evidence for pending human reviews.
 On ADO, publication stops for returned pending threads containing the account's
 comment, requests for the account's attention (`isFlagged: true` on its reviewer
@@ -196,7 +204,7 @@ This does not establish whether unpublished server-saved drafts appear or
 provide comprehensive draft detection.
 
 Dry runs end at `wouldReapprove`. Both providers publish only through the native
-transaction; never issue a direct reviewer vote or assemble an audit manually.
+transaction; never issue a direct reviewer vote.
 Significant work ends at `needsReview`; uncertain evaluation fails explicitly.
 For each newly completed significant or uncertain assessment in a live run,
 execute native `notify` with the required attribution. Uncertainty retains its
@@ -218,8 +226,7 @@ for every PR.
 not terminal decisions. After inspection, preparation, assessment, notification,
 or publication reports staleness, read native `results` and recover through
 native `refresh` in the same run. Stop any previous worker for that PR before
-refreshing; do not overlap assessments. The utility checks the retained host
-journals before allowing refresh and permits two recovery attempts per PR after
+refreshing; do not overlap assessments. The utility permits two recovery attempts per PR after
 the initial attempt. Follow repeated stale results through that budget; do not
 stop at the first stale rejection or create new runs to reset the budget.
 After another stale result, call `refresh` to persist and report explicit
@@ -235,35 +242,24 @@ even when the changed-path list looks unchanged. Refresh discards the obsolete
 assessment and isolates the next publication intent from the previous one.
 Dry-run inspection failures use the same bounded recovery without remote writes.
 
-Distinguish a clean stale preflight rejection from an accepted-but-stale or
-unknown effect. A receipt without a review ID does not prove that no write was
-attempted. If `refresh` reports an attempted or unresolved remote effect, retain
-the original snapshot and reconcile only through the original `publish` or
-`notify` command. Do not refresh it in a new run, reassess to authorize another
-write, or retry a provider command. A verified accepted-but-stale effect remains
-an explicit remote-effect warning, not retry exhaustion or a successful renewal.
+Recover only staleness detected before an approval request. If the approval
+request fails or its outcome is unknown, report the error and do not resend it
+during that attempt. A missing result does not establish that no write occurred.
 Authentication, scope, policy-file changes, malformed evidence, and unrelated
 tooling failures are not stale-retry permission. A changed installed policy
 requires a fresh run and fresh assessments under that policy; it must not be
 used to bypass an exhausted stale-recovery budget.
 
-An accepted write can race with a push, a human decision, or existing auto-merge.
-Postflight detection is not atomic prevention. Never clear or dismiss a vote
-as rollback. An unknown write stops further publication. Preserve the run and
-host journal; native publication recovery can reconcile a unique owned effect
-without repeating it. ADO recovery can finish a not-yet-attempted audit after
-identifying the original vote; it never repeats an uncertain vote or audit.
-Do not fabricate records or replay provider commands.
-Overlapping schedules for one account and repository must use one publishing
-host; local locks do not promise distributed exactly-once behavior.
+An approval request can race with a push, a human decision, or existing
+auto-merge. The utility does not promise atomic source fencing on ADO or
+exactly-once publication. Never clear or dismiss a vote as rollback.
 
 # Stage 5: report
 
 Report the resolved repository and whether it was explicit or defaulted from
 the invocation checkout, PR links and outcomes, actionable significance/uncertainty reasons,
 partial or failed scope, aggregate recency exclusions, and the absolute run
-path. Highlight any accepted-but-stale or unknown publication and its retained
-host journal. Include stale-recovery attempts and explicit retry exhaustion
+path. Highlight any failed or unknown publication. Include stale-recovery attempts and explicit retry exhaustion
 where applicable, the policy digest, and whether this was a dry run.
 The final report MUST include a Markdown table with one row for every in-range
 candidate returned across all final `results` pages. Include retained decisions,
@@ -276,8 +272,8 @@ for Azure DevOps) and an explicit decision:
 | Decision | Required detail |
 | --- | --- |
 | Separate new review required | `needsReview`; say whether determined now or retained from `reviewNotice.createdAt`, and include the significance reason. |
-| Automatic approval valid | `reapproved` or `alreadyValid` with nonnull `automaticApproval`; include its service `approvedAt` timestamp, even when issued in a previous invocation. |
-| External approval valid | `alreadyValid` with null `automaticApproval`; do not describe it as an automatic approval. |
+| Approval published | `reapproved`; the provider accepted this run's approval. |
+| Approval already valid | `alreadyValid`; do not infer who or what submitted it. |
 | Would reapprove | Dry-run outcome; no approval or comment was posted. |
 | No prior approval / ineligible | State the missing authority or returned reason; do not imply assessment occurred. |
 | Failed / stale / incomplete | Include the diagnostic and any possible remote effect; a completed uncertain assessment also needs a separate new review. Do not imply success. |
@@ -290,8 +286,7 @@ For each assessed PR, report the final `assessmentProgress` even when work is
 unfinished: changed paths judged versus total, required documents and requested
 context ranges delivered versus total, unresolved checks, and planned handoffs.
 State whether the discussion observation, cumulative judgment, and assessment
-are complete. Transport fragments are not separate required judgments; legacy
-unit progress applies only to legacy assessments. Delivery does not prove
+are complete. Transport fragments are not separate required judgments. Delivery does not prove
 comprehension. Do not estimate command counts, model requests, elapsed phase
 times, repeated bytes, or budget usage from these figures. Report those metrics
 as unavailable when not measured.
@@ -306,4 +301,4 @@ measurement of the current time or of an individual phase. Model request and
 actual worker counts are unavailable unless the orchestration environment
 supplies them. A `budgetExceeded` diagnostic or an
 exhausted budget leaves the assessment incomplete: do not approve or post a
-needs-review notice. Preserve the run and its journals for effect reconciliation.
+needs-review notice. Preserve the run for diagnostics.

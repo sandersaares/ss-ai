@@ -18,7 +18,7 @@ likely violations of intended behavior, safety, security, or data integrity.
 
 ## Assessment
 
-Compare exact source contents cumulatively from the original external approval,
+Compare exact source contents cumulatively from the provider-selected approval,
 not from the most recent push or tool renewal. Assess every change and their
 combined effect, including paths and modes. Do not assess target-branch changes
 or require historical target information.

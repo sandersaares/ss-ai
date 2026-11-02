@@ -65,6 +65,13 @@ Describe 'Automatic reapproval repository scope instructions' {
         $script:Prompt | Should -Match 'Do not create a new run, refresh, or notify to\s+recover unfinished work'
     }
 
+    It 'finishes each candidate before starting another inspection budget' {
+        $script:Prompt | Should -Match 'process one candidate at a time'
+        $script:Prompt | Should -Match 'continue through stages 3 and 4, including any required recovery, before\s+inspecting the next candidate'
+        $script:Prompt | Should -Match 'Resume any previously inspected candidate\s+using its existing budget'
+        $script:Prompt | Should -Match 'not to a separate pass over\s+all inspected candidates'
+    }
+
     It 'requires coverage repair instead of treating completion as a probe' {
         $assignment = Get-Content -LiteralPath (Join-Path $skill 'assessment.md') -Raw
         $assignment | Should -Match 'Record one final judgment per changed-path record, after reading its policy'
@@ -134,16 +141,15 @@ Describe 'Automatic reapproval repository scope instructions' {
         }
     }
 
-    It 'reports every in-range result with linked identity and service approval time' {
+    It 'reports every in-range result without inventing approval origin' {
         $script:Prompt | Should -Match 'final report MUST include a Markdown table with one row for every in-range\s+candidate returned across all final `results` pages'
         $script:Prompt | Should -Match 'retained decisions,\s+already-valid approvals, no-prior-approval and ineligible outcomes, and failures'
         $script:Prompt | Should -Match 'table must have `PR`, `Decision`, and `Required detail` columns'
         $script:Prompt | Should -Match '\[PR number \+ title\]\(PR URL\)'
         $script:Prompt | Should -Match 'retained from `reviewNotice.createdAt`'
-        $script:Prompt | Should -Match 'service `approvedAt` timestamp, even when issued in a previous invocation'
-        $script:Prompt | Should -Match 'External approval valid'
+        $script:Prompt | Should -Match 'Approval already valid'
+        $script:Prompt | Should -Match 'do not infer who or what submitted it'
         $script:Prompt | Should -Match 'required documents and requested\s+context ranges delivered versus total'
-        $script:Prompt | Should -Match 'legacy\s+unit progress applies only to legacy assessments'
         $script:Prompt | Should -Match 'Transport fragments are not separate required judgments'
     }
 
@@ -153,8 +159,8 @@ Describe 'Automatic reapproval repository scope instructions' {
         $script:Recipes | Should -Match 'return no item when a PR has become a draft'
     }
 
-    It 'retains refusal markers until a strictly later external approval' {
-        $script:Prompt | Should -Match 'Only\s+an external approval by the authenticated account strictly after'
+    It 'retains refusal markers until a strictly later account approval' {
+        $script:Prompt | Should -Match 'an approval by the authenticated account strictly after'
         $script:Prompt | Should -Match 'Never reassess an active marker'
         $script:Prompt | Should -Match 'Dry runs report the decision without posting a marker'
         $script:Recipes | Should -Match 'Repeating the original command reconciles the same intent without\s+posting again'
@@ -168,8 +174,8 @@ Describe 'Automatic reapproval repository scope instructions' {
         $script:Prompt | Should -Match 'Stop any previous worker'
         $script:Prompt | Should -Not -Match 'ends this PR''s attempt rather than chasing'
         $script:Recipes | Should -Match 'stale refresh request records `retryExhausted`'
-        $script:Recipes | Should -Match 'An attempted or unknown effect blocks refresh, including accepted-but-stale'
-        $script:Recipes | Should -Match 'original `publish` or\s+`notify` command'
+        $script:Recipes | Should -Match 'do not automatically\s+resend it in the same attempt'
+        $script:Recipes | Should -Not -Match 'accepted-but-stale'
     }
 }
 
@@ -196,16 +202,16 @@ Describe 'Automatic reapproval provider fixtures' {
         $recipes | Should -Not -Match 'pwsh .* -File|gh api|az devops|ConvertTo-Json'
     }
 
-    It 'routes ADO publication and recovery through the guarded native transaction' {
+    It 'routes ADO publication through the native transaction without post-vote calls' {
         $skill = Join-Path (Split-Path -Parent $PSScriptRoot) 'skills\ss-autoreapprove'
         $prompt = Get-Content -LiteralPath (Join-Path $skill 'SKILL.md') -Raw
         $recipes = Get-Content -LiteralPath (Join-Path $skill 'commands.md') -Raw
         $prompt | Should -Not -Match 'ADO publication.*not supported|ADO inspection and assessment are read-only'
         $recipes | Should -Not -Match 'ADO supports read-only|unsupported publication transaction'
         $recipes | Should -Match '(?m)^ss-ai autoreapprove publish .*--tenant "\{\{TENANT\}\}"'
-        $recipes | Should -Match 'unique new structured vote on the assessed iteration'
+        $recipes | Should -Match 'without later provider calls'
         $prompt | Should -Match 'never issue a direct reviewer vote'
-        $prompt | Should -Match 'never repeats an uncertain vote or audit'
+        $prompt | Should -Match 'do not resend it\s+during that attempt'
         $help = & ss-ai autoreapprove publish --help | Out-String
         $LASTEXITCODE | Should -Be 0
         $help | Should -Match '\-\-tenant'

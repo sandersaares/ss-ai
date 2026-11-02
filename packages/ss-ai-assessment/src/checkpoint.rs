@@ -5,7 +5,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
-use crate::assessment::{DIRECT_HANDOFF_LIMIT, Protocol, check_response, document_digest, hash};
+use crate::assessment::{DIRECT_HANDOFF_LIMIT, check_response, document_digest, hash};
 use crate::error::{self, AssessmentError};
 use crate::units::{EvidenceUnit, partition};
 use crate::{Assessment, Judgment, required_optional};
@@ -54,7 +54,6 @@ pub(crate) type CheckIndex = BTreeMap<String, Check>;
 pub(crate) struct Checkpoints {
     pub(crate) units: Vec<EvidenceUnit>,
     pub(crate) manifest_digest: String,
-    pub(crate) notes: BTreeMap<String, Bound<Note>>,
     #[serde(deserialize_with = "required_optional")]
     pub(crate) discussion: Option<Bound<Note>>,
     pub(crate) aggregates: BTreeMap<String, BTreeMap<String, String>>,
@@ -78,7 +77,6 @@ impl Checkpoints {
         Ok(Self {
             manifest_digest: hash(&units)?,
             units,
-            notes: BTreeMap::new(),
             discussion: None,
             aggregates: BTreeMap::new(),
             resolutions: BTreeMap::new(),
@@ -120,16 +118,13 @@ impl Assessment {
                 Ok(json!({
                     "unit": unit.metadata(), "reference": unit.reference(),
                     "bindingReference": unit.binding_reference(),
-                    "noteReference": format!("note:{}", unit.id),
-                    "noteDigest": self.checkpoints.notes.get(&unit.id).map(hash).transpose()?,
-                    "readOffset": self.reads.get(&unit.reference()),
-                    "completed": self.checkpoints.notes.contains_key(&unit.id)
+                    "readOffset": self.reads.get(&unit.reference())
                 }))
             });
         page(records, after, limit, &self.snapshot_digest)
     }
 
-    /// Records a completed unit or the single discussion aggregate.
+    /// Records the discussion observation used by the direct assessment.
     pub fn note(
         &mut self,
         id: &str,
@@ -138,26 +133,19 @@ impl Assessment {
         policy: &str,
         discussion: &str,
     ) -> Result<String, AssessmentError> {
+        if id != "discussion" {
+            return Err(error::OnlyDiscussionObservation::classified());
+        }
         if self.complete {
             return Err(error::ImmutableAssessment::classified());
         }
-        let dependencies = self.note_dependencies(id, &note, policy, discussion)?;
-        let source = self
-            .checkpoints
-            .units
-            .iter()
-            .find(|unit| unit.id == id)
-            .map(|unit| unit.reference.as_str());
-        self.required_contexts(source, policy, discussion)?;
+        let dependencies = self.note_dependencies(&note, policy, discussion)?;
+        self.required_contexts(policy, discussion)?;
         let bound = Bound {
             value: note,
             dependencies,
         };
-        let previous = if id == "discussion" {
-            self.checkpoints.discussion.as_ref()
-        } else {
-            self.checkpoints.notes.get(id)
-        };
+        let previous = self.checkpoints.discussion.as_ref();
         let digest = hash(&bound)?;
         if previous == Some(&bound) {
             return Ok(digest);
@@ -166,23 +154,12 @@ impl Assessment {
             return Err(error::StaleJudgment::classified());
         }
         let replacing = previous.is_some();
-        let reference = if id == "discussion" {
-            "discussion-note".to_owned()
-        } else {
-            format!("note:{id}")
-        };
+        let reference = "discussion-note".to_owned();
         if replacing {
             self.invalidate(&reference, policy, discussion)?;
         }
-        if id == "discussion" {
-            self.checkpoints.discussion = Some(bound);
-            if self.protocol == Protocol::DirectV1 {
-                self.checkpoints.completed_work.insert(reference);
-            }
-        } else {
-            self.checkpoints.notes.insert(id.to_owned(), bound);
-            self.checkpoints.completed_work.insert(reference);
-        }
+        self.checkpoints.discussion = Some(bound);
+        self.checkpoints.completed_work.insert(reference);
         if replacing {
             self.remove_obsolete_reads(policy, discussion);
         }
@@ -244,7 +221,7 @@ impl Assessment {
             discussion,
         )?;
         self.bind_read(&check.origin, &mut dependencies, policy, discussion)?;
-        self.required_contexts(None, policy, discussion)?;
+        self.required_contexts(policy, discussion)?;
         let bound = Bound {
             value: judgment,
             dependencies,
@@ -271,17 +248,8 @@ impl Assessment {
     /// Counts planned handoffs without treating delivery as semantic work.
     pub fn checkpoint(&mut self) -> Result<Value, AssessmentError> {
         if self.complete
-            || (self.protocol == Protocol::Legacy
-                && self.checkpoints.completed_work.len() <= self.checkpoints.checkpoint_progress)
-            || self.checkpoints.handoffs
-                >= if self.protocol == Protocol::Legacy {
-                    self.checkpoints
-                        .units
-                        .len()
-                        .saturating_add(self.inventory.changes.len())
-                } else {
-                    DIRECT_HANDOFF_LIMIT
-                }
+            || self.checkpoints.completed_work.len() <= self.checkpoints.checkpoint_progress
+            || self.checkpoints.handoffs >= DIRECT_HANDOFF_LIMIT
         {
             return Err(error::NoCheckpointProgress::classified());
         }
@@ -290,7 +258,7 @@ impl Assessment {
         Ok(self.progress())
     }
 
-    /// Aggregates consume every relevant note and bind all exact citations.
+    /// Judgment dependencies bind all exact citations and relevant semantic records.
     pub(crate) fn aggregate_dependencies(
         &self,
         id: &str,
@@ -361,37 +329,21 @@ impl Assessment {
                     checks,
                 )?;
             }
-        } else if self.protocol == Protocol::Legacy {
-            for unit in self
-                .checkpoints
-                .units
-                .iter()
-                .filter(|unit| unit.reference == format!("{id}:patch"))
-            {
-                self.bind_read(
-                    &format!("note:{}", unit.id),
-                    &mut dependencies,
-                    policy,
-                    discussion,
-                )?;
-            }
         }
-        if self.protocol == Protocol::DirectV1 {
-            self.bind_read("policy", &mut dependencies, policy, discussion)?;
-            if id == "cumulative" {
-                self.bind_read("discussion", &mut dependencies, policy, discussion)?;
-            } else {
-                self.bind_read(
-                    &format!("{id}:patch"),
-                    &mut dependencies,
-                    policy,
-                    discussion,
-                )?;
-            }
-            for (reference, context) in &self.contexts {
-                if id == "cumulative" || context.request.change_id == id {
-                    self.bind_read(reference, &mut dependencies, policy, discussion)?;
-                }
+        self.bind_read("policy", &mut dependencies, policy, discussion)?;
+        if id == "cumulative" {
+            self.bind_read("discussion", &mut dependencies, policy, discussion)?;
+        } else {
+            self.bind_read(
+                &format!("{id}:patch"),
+                &mut dependencies,
+                policy,
+                discussion,
+            )?;
+        }
+        for (reference, context) in &self.contexts {
+            if id == "cumulative" || context.request.change_id == id {
+                self.bind_read(reference, &mut dependencies, policy, discussion)?;
             }
         }
         Ok(dependencies)
@@ -407,7 +359,7 @@ impl Assessment {
         discussion: &str,
         checks: &CheckIndex,
     ) -> Result<(), AssessmentError> {
-        if self.cumulative_semantic_dependency(id, reference) {
+        if Self::cumulative_semantic_dependency(id, reference) {
             let content = self.content_indexed(reference, policy, discussion, checks)?;
             dependencies.insert(reference.to_owned(), document_digest(&content));
         } else {
@@ -439,37 +391,22 @@ impl Assessment {
         let expected = Checkpoints::new(&self.snapshot_digest, &sources, discussion)?;
         if self.checkpoints.units != expected.units
             || self.checkpoints.manifest_digest != expected.manifest_digest
-            || (self.protocol == Protocol::Legacy
-                && self.checkpoints.handoffs > self.checkpoints.checkpoint_progress)
             || self.checkpoints.checkpoint_progress > self.checkpoints.completed_work.len()
-            || (self.protocol == Protocol::DirectV1
-                && self.checkpoints.handoffs > DIRECT_HANDOFF_LIMIT)
+            || self.checkpoints.handoffs > DIRECT_HANDOFF_LIMIT
         {
             return Err(error::InvalidUnitManifest::classified());
         }
         for work in &self.checkpoints.completed_work {
-            if let Some(id) = work.strip_prefix("note:") {
-                if !self.checkpoints.units.iter().any(|unit| unit.id == id) {
-                    return Err(error::InvalidUnitManifest::classified());
-                }
-            } else if let Some(id) = work.strip_prefix("judgment:") {
+            if let Some(id) = work.strip_prefix("judgment:") {
                 if !self.inventory.changes.iter().any(|change| change.id == id) {
                     return Err(error::InvalidUnitManifest::classified());
                 }
-            } else if work != "discussion-note" || self.protocol == Protocol::Legacy {
+            } else if work != "discussion-note" {
                 return Err(error::InvalidUnitManifest::classified());
             }
         }
-        for (id, bound) in &self.checkpoints.notes {
-            if bound.dependencies != self.note_dependencies(id, &bound.value, policy, discussion)? {
-                return Err(error::InvalidCheckpointNote::classified());
-            }
-            self.validate_dependencies(&bound.dependencies, policy, discussion, checks)?;
-        }
         if let Some(bound) = &self.checkpoints.discussion {
-            if bound.dependencies
-                != self.note_dependencies("discussion", &bound.value, policy, discussion)?
-            {
+            if bound.dependencies != self.note_dependencies(&bound.value, policy, discussion)? {
                 return Err(error::InvalidCheckpointNote::classified());
             }
             self.validate_dependencies(&bound.dependencies, policy, discussion, checks)?;
@@ -534,74 +471,34 @@ impl Assessment {
     /// Producer and consumer enforce the same fixed-level note contract.
     fn note_dependencies(
         &self,
-        id: &str,
         note: &Note,
         policy: &str,
         discussion: &str,
     ) -> Result<BTreeMap<String, String>, AssessmentError> {
         validate_note(note)?;
-        // Only discussion aggregation consumes unit notes. Later judgments and
-        // checks cannot feed back into notes; the reader owns citation identity
-        // and delivery, without a second classification of source and metadata.
+        // Later judgments and checks cannot feed back into the discussion observation.
         if note.evidence.iter().any(|reference| {
             reference == "discussion-note"
-                || ["judgment:", "check:", "resolution:"]
+                || ["note:", "judgment:", "check:", "resolution:"]
                     .iter()
                     .any(|prefix| reference.starts_with(prefix))
-                || ((id != "discussion" || self.protocol == Protocol::DirectV1)
-                    && reference.starts_with("note:"))
         }) {
             return Err(error::MissingExactEvidence::classified());
         }
         self.require_read("policy", policy)?;
         let mut dependencies = self.dependencies(&note.evidence, policy, discussion)?;
-        if id == "discussion" {
-            self.require_read("discussion", discussion)?;
-            if self.protocol == Protocol::Legacy {
-                for unit in self
-                    .checkpoints
-                    .units
-                    .iter()
-                    .filter(|unit| unit.reference == "discussion")
-                {
-                    self.bind_read(
-                        &format!("note:{}", unit.id),
-                        &mut dependencies,
-                        policy,
-                        discussion,
-                    )?;
-                }
-            } else {
-                self.bind_read("policy", &mut dependencies, policy, discussion)?;
-                self.bind_read("discussion", &mut dependencies, policy, discussion)?;
-                for reference in self.contexts.keys() {
-                    self.bind_read(reference, &mut dependencies, policy, discussion)?;
-                }
-            }
-            if !note
-                .evidence
-                .iter()
-                .any(|reference| self.raw_reference(reference))
-            {
-                return Err(error::MissingExactEvidence::classified());
-            }
-        } else {
-            let unit = self
-                .checkpoints
-                .units
-                .iter()
-                .find(|unit| unit.id == id)
-                .ok_or_else(error::UnknownUnit::classified)?;
-            if !note.evidence.contains(&unit.reference()) {
-                return Err(error::MissingExactEvidence::classified());
-            }
-            self.bind_read(&unit.reference(), &mut dependencies, policy, discussion)?;
-            self.bind_read(
-                &unit.binding_reference(),
-                &mut dependencies,
-                policy,
-                discussion,
-            )?;
+        self.require_read("discussion", discussion)?;
+        self.bind_read("policy", &mut dependencies, policy, discussion)?;
+        self.bind_read("discussion", &mut dependencies, policy, discussion)?;
+        for reference in self.contexts.keys() {
+            self.bind_read(reference, &mut dependencies, policy, discussion)?;
+        }
+        if !note
+            .evidence
+            .iter()
+            .any(|reference| self.raw_reference(reference))
+        {
+            return Err(error::MissingExactEvidence::classified());
         }
         Ok(dependencies)
     }
@@ -635,20 +532,12 @@ impl Assessment {
                 .ok_or_else(error::UnknownUnit::classified)?;
             return Ok(Some(serde_json::to_string(&unit.bindings)?));
         }
-        if let Some(id) = reference.strip_prefix("note:") {
-            return Ok(Some(serde_json::to_string(
-                self.checkpoints
-                    .notes
-                    .get(id)
-                    .ok_or_else(error::IncompleteUnits::classified)?,
-            )?));
-        }
         if reference == "discussion-note" {
             return Ok(Some(serde_json::to_string(
                 self.checkpoints
                     .discussion
                     .as_ref()
-                    .ok_or_else(error::IncompleteUnits::classified)?,
+                    .ok_or_else(error::MissingDiscussionObservation::classified)?,
             )?));
         }
         if let Some(id) = reference.strip_prefix("judgment:") {
@@ -690,11 +579,9 @@ impl Assessment {
     /// Binding metadata must be delivered separately when it is not in the page.
     pub(crate) fn unit_delivered(&self, unit: &EvidenceUnit) -> bool {
         self.reads.get(&unit.reference()).copied() == Some(unit.total_characters)
-            && (self.protocol == Protocol::Legacy
-                || serde_json::to_string(&unit.bindings).is_ok_and(|content| {
-                    self.reads.get(&unit.binding_reference()).copied()
-                        == Some(content.chars().count())
-                }))
+            && serde_json::to_string(&unit.bindings).is_ok_and(|content| {
+                self.reads.get(&unit.binding_reference()).copied() == Some(content.chars().count())
+            })
     }
 
     /// Replaced semantic records have no valid delivery receipt under their former identity.
@@ -786,31 +673,17 @@ impl Assessment {
 
     pub(crate) fn required_contexts(
         &self,
-        source: Option<&str>,
         policy: &str,
         discussion: &str,
     ) -> Result<(), AssessmentError> {
-        for (reference, context) in &self.contexts {
-            if source.is_none_or(|source| source == format!("{}:patch", context.request.change_id))
-            {
-                self.require_read(reference, &self.content(reference, policy, discussion)?)?;
-            }
+        for reference in self.contexts.keys() {
+            self.require_read(reference, &self.content(reference, policy, discussion)?)?;
         }
         Ok(())
     }
 
     pub(crate) fn check_records(&self) -> Result<Vec<Check>, AssessmentError> {
         let mut checks = Vec::new();
-        for (id, bound) in &self.checkpoints.notes {
-            append_checks(
-                &mut checks,
-                &format!("note:{id}"),
-                &bound.value.concerns,
-                &bound.value.interactions,
-                &bound.value.evidence,
-                &hash(bound)?,
-            )?;
-        }
         if let Some(bound) = &self.checkpoints.discussion {
             append_checks(
                 &mut checks,
@@ -863,19 +736,6 @@ impl Assessment {
         policy: &str,
         discussion: &str,
     ) -> Result<(), AssessmentError> {
-        let notes = self
-            .checkpoints
-            .units
-            .iter()
-            .filter(|unit| unit.reference == format!("{change_id}:patch"))
-            .map(|unit| unit.id.clone())
-            .collect::<Vec<_>>();
-        for id in notes {
-            if self.checkpoints.notes.contains_key(&id) {
-                self.invalidate(&format!("note:{id}"), policy, discussion)?;
-                self.checkpoints.notes.remove(&id);
-            }
-        }
         self.invalidate(&format!("judgment:{change_id}"), policy, discussion)?;
         self.decisions.remove(change_id);
         self.checkpoints.aggregates.remove(change_id);
@@ -890,7 +750,7 @@ impl Assessment {
         Ok(())
     }
 
-    /// Replacement removes every transitive dependent; unrelated notes remain reusable.
+    /// Replacement removes every transitive dependent; unrelated judgments remain reusable.
     pub(crate) fn invalidate(
         &mut self,
         reference: &str,
@@ -905,17 +765,6 @@ impl Assessment {
         // Each iteration removes a persisted node. No recursive summarization or retry is involved.
         loop {
             let before = removed.len();
-            let notes = self
-                .checkpoints
-                .notes
-                .iter()
-                .filter(|(_, bound)| bound.dependencies.keys().any(|key| removed.contains(key)))
-                .map(|(id, _)| id.clone())
-                .collect::<Vec<_>>();
-            for id in notes {
-                self.checkpoints.notes.remove(&id);
-                removed.insert(format!("note:{id}"));
-            }
             if self
                 .checkpoints
                 .discussion

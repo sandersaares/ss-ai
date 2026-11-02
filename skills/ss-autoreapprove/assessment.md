@@ -20,7 +20,7 @@ Prepare the snapshot and retain its `readToken` and `stateToken`. Follow every i
 Retain the returned change IDs and their evidence references so the continuing
 worker does not need to traverse the inventory again after recording judgments.
 Follow the returned `nextOffset` rather than advancing by a fixed page size.
-The captured comparison uses the original external approval anchor and exact
+The captured comparison uses the provider-selected approval baseline and exact
 current endpoint, including force-push removals and merge-derived changes. Do
 not substitute the last automatic renewal, a merge base, or a checkout.
 
@@ -48,11 +48,6 @@ identity, path, revision, and reply relationships of each objection. Resolved,
 outdated, repeated, and agent-authored discussion is not automatically
 irrelevant. Record one `discussion` observation covering material objections,
 interfaces, concerns, and interactions, citing exact evidence.
-
-For `assessmentProtocol: legacy`, do not reinterpret existing notes or
-judgments using the direct protocol. Report that the retained assessment uses
-the legacy protocol and needs a compatible continuation. The installed utility
-still supports reconciliation of its prior publication or notice effects.
 
 # Stage 2: judge and complete
 

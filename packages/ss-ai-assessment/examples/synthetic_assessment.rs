@@ -28,9 +28,6 @@ struct Arguments {
     fixture_path: Option<PathBuf>,
     #[arg(long)]
     policy_path: Option<PathBuf>,
-    /// Select the direct protocol for a newly initialized synthetic state.
-    #[arg(long)]
-    direct: bool,
     /// Typed batch request; this never contains or edits retained workflow state.
     #[arg(long)]
     batch_json: Option<String>,
@@ -305,11 +302,8 @@ fn initialize(arguments: &Arguments, clock: &SystemClock) -> Result<State, AppEr
         changes,
         complete: true,
     };
-    let assessment = if arguments.direct {
-        Assessment::new_direct(inventory, &patches, &snapshot, &policy_digest, &discussion)?
-    } else {
-        Assessment::new(inventory, &patches, &snapshot, &policy_digest, &discussion)?
-    };
+    let assessment =
+        Assessment::new_direct(inventory, &patches, &snapshot, &policy_digest, &discussion)?;
     Ok(State {
         schema_version: 1,
         snapshot,

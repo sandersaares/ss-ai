@@ -59,9 +59,9 @@ classified_error!(
 );
 classified_error!(UnknownUnit, "invalidInput", "Unknown evidence unit");
 classified_error!(
-    IncompleteUnits,
+    MissingDiscussionObservation,
     "invalidState",
-    "Complete and read every required unit note before aggregation"
+    "Record the discussion observation before cumulative assessment"
 );
 classified_error!(
     InvalidCheckpointNote,
@@ -136,6 +136,11 @@ classified_error!(
     ImmutableAssessment,
     "invalidState",
     "Completed assessments are immutable"
+);
+classified_error!(
+    OnlyDiscussionObservation,
+    "invalidInput",
+    "Direct assessments accept only the discussion observation, not transport-unit notes"
 );
 classified_error!(
     StaleJudgment,
@@ -336,7 +341,7 @@ mod tests {
     #[test]
     fn assessment_failures_keep_distinct_types_and_categories() {
         let mut assessment =
-            Assessment::new(inventory(), &[], "snapshot", "policy", "discussion").unwrap();
+            Assessment::new_direct(inventory(), &[], "snapshot", "policy", "discussion").unwrap();
         assert_failure::<IncompleteCoverage>(
             assessment.finish("policy", "discussion").unwrap_err(),
             "invalidState",

@@ -147,6 +147,14 @@ pub(crate) struct Transport<'a> {
     pub(crate) clock: &'a dyn Clock,
 }
 
+/// Approval writes accept status acknowledgements without replaying the effect.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum RequestPolicy {
+    Standard,
+    WriteOnce,
+    ApprovalOnce,
+}
+
 impl<'a> Transport<'a> {
     /// Binds provider coordinates and dependencies without acquiring credentials.
     ///
@@ -177,7 +185,7 @@ impl<'a> Transport<'a> {
         body: Option<&Value>,
     ) -> Result<Value, AppError> {
         match self.platform {
-            Platform::GitHub => self.github(path, method, body, false, true),
+            Platform::GitHub => self.github(path, method, body, false, RequestPolicy::Standard),
             Platform::AzureDevOps => {
                 let page = self.ado(path, method, body, &[], "7.1")?;
                 if page.continuation.is_some() {
@@ -197,7 +205,13 @@ impl<'a> Transport<'a> {
 
     /// Renewal writes cannot retry even an explicit rate refusal without a new freshness check.
     pub(crate) fn github_write_once(&self, path: &str, body: &Value) -> Result<Value, AppError> {
-        self.github(path, "POST", Some(body), false, false)
+        self.github(path, "POST", Some(body), false, RequestPolicy::WriteOnce)
+    }
+
+    /// Approval success requires no response metadata and is never replayed.
+    pub(crate) fn github_approve_once(&self, path: &str, body: &Value) -> Result<(), AppError> {
+        self.github(path, "POST", Some(body), false, RequestPolicy::ApprovalOnce)?;
+        Ok(())
     }
 
     /// A renewal must recheck freshness rather than replay a refused ADO write.
@@ -207,11 +221,31 @@ impl<'a> Transport<'a> {
         method: &str,
         body: &Value,
     ) -> Result<Value, AppError> {
-        let page = self.ado_request(path, method, Some(body), &[], "7.1", false)?;
+        let page = self.ado_request(
+            path,
+            method,
+            Some(body),
+            &[],
+            "7.1",
+            RequestPolicy::WriteOnce,
+        )?;
         if page.continuation.is_some() {
             return Err(fail("ambiguousWrite", "Unexpected ADO write continuation"));
         }
         Ok(page.payload)
+    }
+
+    /// A successful vote needs no response payload and is never replayed.
+    pub(crate) fn ado_approve_once(&mut self, path: &str, body: &Value) -> Result<(), AppError> {
+        self.ado_request(
+            path,
+            "PUT",
+            Some(body),
+            &[],
+            "7.1",
+            RequestPolicy::ApprovalOnce,
+        )?;
+        Ok(())
     }
 
     /// Reads GitHub slurped REST pages or a checked ADO list envelope.
@@ -224,7 +258,7 @@ impl<'a> Transport<'a> {
                     "GET",
                     None,
                     true,
-                    true,
+                    RequestPolicy::Standard,
                 )?;
                 let Value::Array(pages) = pages else {
                     return Err(fail("service", "Expected an array in service evidence"));
@@ -253,7 +287,7 @@ impl<'a> Transport<'a> {
             "POST",
             Some(&json!({ "query": query, "variables": variables })),
             false,
-            true,
+            RequestPolicy::Standard,
         )?;
         if value
             .get("errors")
@@ -280,7 +314,7 @@ impl<'a> Transport<'a> {
         method: &str,
         body: Option<&Value>,
         paginated: bool,
-        retry_refusals: bool,
+        policy: RequestPolicy,
     ) -> Result<Value, AppError> {
         let mut arguments = vec![
             "api".to_owned(),
@@ -311,6 +345,10 @@ impl<'a> Transport<'a> {
                         error,
                     )
                 })?;
+            if policy == RequestPolicy::ApprovalOnce && output.success {
+                // The CLI's successful exit confirms the approval regardless of body.
+                return Ok(Value::Null);
+            }
             let stdout = String::from_utf8(output.stdout).map_err(|error| {
                 crate::error::caused_by(
                     if read { "service" } else { "ambiguousWrite" },
@@ -325,7 +363,7 @@ impl<'a> Transport<'a> {
             let json = serde_json::from_str::<Value>(payload);
             let rate_limited = github_rate_limit(&status_text, &error_text, json.as_ref().ok());
             if rate_limited {
-                if !retry_refusals {
+                if policy != RequestPolicy::Standard {
                     return Err(fail(
                         "rateLimited",
                         "GitHub refused the renewal for rate limiting; no write was retried",
@@ -461,7 +499,7 @@ impl<'a> Transport<'a> {
         query: &[(&str, String)],
         version: &str,
     ) -> Result<Page, AppError> {
-        self.ado_request(path, method, body, query, version, true)
+        self.ado_request(path, method, body, query, version, RequestPolicy::Standard)
     }
 
     /// Keeps ordinary transport recovery separate from freshness-bound publication.
@@ -472,7 +510,7 @@ impl<'a> Transport<'a> {
         body: Option<&Value>,
         query: &[(&str, String)],
         version: &str,
-        retry_refusals: bool,
+        policy: RequestPolicy,
     ) -> Result<Page, AppError> {
         let collection = self
             .collection
@@ -519,7 +557,7 @@ impl<'a> Transport<'a> {
                 }
             };
             if response.status == 429 {
-                if !retry_refusals {
+                if policy != RequestPolicy::Standard {
                     return Err(fail(
                         "rateLimited",
                         "ADO publication was rate limited; write not replayed",
@@ -547,6 +585,25 @@ impl<'a> Transport<'a> {
                 ))?;
                 transient_attempt = transient_attempt.saturating_add(1);
                 continue;
+            }
+            if policy == RequestPolicy::ApprovalOnce && (200..300).contains(&response.status) {
+                let text = String::from_utf8_lossy(&response.body);
+                if response
+                    .headers
+                    .get("content-type")
+                    .is_some_and(|value| value.to_ascii_lowercase().contains("text/html"))
+                    || text.trim_start().starts_with('<')
+                {
+                    return Err(fail(
+                        "ambiguousWrite",
+                        "Azure DevOps returned a sign-in document; authenticate with the collection's tenant",
+                    ));
+                }
+                // The HTTP status acknowledges the vote without an event identifier.
+                return Ok(Page {
+                    payload: Value::Null,
+                    continuation: None,
+                });
             }
             let text = String::from_utf8(response.body).map_err(|error| {
                 crate::error::caused_by(
@@ -817,4 +874,232 @@ fn diagnostic(value: &str) -> String {
     }
     // Keep useful error context without echoing an arbitrarily large response.
     value.chars().take(2000).collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use std::cell::Cell;
+    use std::collections::BTreeMap;
+    use std::io;
+    use std::time::Duration;
+
+    use jiff::Timestamp;
+    use ohno::AppError;
+    use serde_json::json;
+
+    use super::{Http, HttpResponse, Transport};
+    use crate::clock::timestamp;
+    use crate::error::fail;
+    use crate::target::Target;
+    use crate::{Clock, Process, ProcessOutput};
+
+    /// Simulates one response and detects any attempted retry.
+    struct Provider {
+        status: u16,
+        body: Vec<u8>,
+        headers: BTreeMap<String, String>,
+        fail: bool,
+        calls: Cell<usize>,
+    }
+
+    impl Provider {
+        fn new(status: u16, body: &[u8]) -> Self {
+            Self {
+                status,
+                body: body.to_vec(),
+                headers: BTreeMap::new(),
+                fail: false,
+                calls: Cell::new(0),
+            }
+        }
+
+        fn called(&self) {
+            self.calls.set(self.calls.get().checked_add(1).unwrap());
+            assert_eq!(self.calls.get(), 1, "Approval must not be retried");
+        }
+    }
+
+    impl Process for Provider {
+        fn execute(
+            &self,
+            program: &str,
+            _arguments: &[String],
+            _input: &[u8],
+        ) -> io::Result<ProcessOutput> {
+            if program == "az" {
+                return Ok(ProcessOutput::new(true, b"fixture-token".to_vec(), vec![]));
+            }
+            assert_eq!(program, "gh");
+            self.called();
+            if self.fail {
+                return Err(io::Error::other("simulated failure"));
+            }
+            let mut output = format!("HTTP/2 {}\r\n\r\n", self.status).into_bytes();
+            output.extend_from_slice(&self.body);
+            Ok(ProcessOutput::new(
+                (200..300).contains(&self.status),
+                output,
+                vec![],
+            ))
+        }
+    }
+
+    impl Http for Provider {
+        fn send(
+            &self,
+            _method: &str,
+            _url: &str,
+            _token: &str,
+            _body: Option<&[u8]>,
+        ) -> Result<HttpResponse, AppError> {
+            self.called();
+            if self.fail {
+                return Err(fail("service", "simulated failure"));
+            }
+            Ok(HttpResponse::new(
+                self.status,
+                self.headers.clone(),
+                self.body.clone(),
+            ))
+        }
+    }
+
+    /// Approval retries would wait, so fail immediately if one is attempted.
+    struct FixedClock;
+
+    impl Clock for FixedClock {
+        fn now(&self) -> Timestamp {
+            timestamp("2026-01-01T00:00:00Z").unwrap()
+        }
+
+        fn wait(&self, _duration: Duration) -> Result<(), AppError> {
+            panic!("Approval must not wait for a retry")
+        }
+    }
+
+    fn target(ado: bool) -> Target {
+        Target::repository(if ado {
+            "https://dev.azure.com/org/project/_git/repo"
+        } else {
+            "https://github.com/owner/repo"
+        })
+        .unwrap()
+    }
+
+    #[test]
+    fn approvals_accept_success_without_json_while_other_writes_remain_strict() {
+        for ado in [false, true] {
+            for body in [&b""[..], &b"not json"[..], &b"\xff"[..]] {
+                let provider = Provider::new(200, body);
+                let mut transport =
+                    Transport::new(&target(ado), None, &provider, &provider, &FixedClock);
+                if ado {
+                    transport.ado_approve_once("vote", &json!({})).unwrap();
+                } else {
+                    transport.github_approve_once("review", &json!({})).unwrap();
+                }
+                assert_eq!(provider.calls.get(), 1);
+
+                let provider = Provider::new(200, body);
+                let mut transport =
+                    Transport::new(&target(ado), None, &provider, &provider, &FixedClock);
+                if ado {
+                    transport
+                        .ado_write_once("notice", "POST", &json!({}))
+                        .unwrap_err();
+                } else {
+                    transport
+                        .github_write_once("comment", &json!({}))
+                        .unwrap_err();
+                }
+                assert_eq!(provider.calls.get(), 1);
+            }
+        }
+    }
+
+    #[test]
+    fn approvals_accept_empty_no_content_response() {
+        for ado in [false, true] {
+            let mut provider = Provider::new(204, b"");
+            provider
+                .headers
+                .insert("x-ms-continuationtoken".to_owned(), "unused".to_owned());
+            let mut transport =
+                Transport::new(&target(ado), None, &provider, &provider, &FixedClock);
+            if ado {
+                transport.ado_approve_once("vote", &json!({})).unwrap();
+            } else {
+                transport.github_approve_once("review", &json!({})).unwrap();
+            }
+            assert_eq!(provider.calls.get(), 1);
+        }
+    }
+
+    #[test]
+    fn approvals_report_refusals_and_transport_failures_without_retry() {
+        for ado in [false, true] {
+            for (status, expected) in [
+                (403, "permissionDenied"),
+                (429, "rateLimited"),
+                (500, "ambiguousWrite"),
+            ] {
+                let provider = Provider::new(status, b"refused");
+                let mut transport =
+                    Transport::new(&target(ado), None, &provider, &provider, &FixedClock);
+                let error = if ado {
+                    transport.ado_approve_once("vote", &json!({})).unwrap_err()
+                } else {
+                    transport
+                        .github_approve_once("review", &json!({}))
+                        .unwrap_err()
+                };
+                assert_eq!(crate::classification(&error), expected);
+                assert_eq!(provider.calls.get(), 1);
+            }
+            let mut provider = Provider::new(200, b"");
+            provider.fail = true;
+            let mut transport =
+                Transport::new(&target(ado), None, &provider, &provider, &FixedClock);
+            let error = if ado {
+                transport.ado_approve_once("vote", &json!({})).unwrap_err()
+            } else {
+                transport
+                    .github_approve_once("review", &json!({}))
+                    .unwrap_err()
+            };
+            assert_eq!(crate::classification(&error), "ambiguousWrite");
+            assert_eq!(provider.calls.get(), 1);
+        }
+    }
+
+    #[test]
+    fn github_rate_limit_refusal_is_not_replayed() {
+        let provider = Provider::new(403, br#"{"message":"API rate limit exceeded"}"#);
+        let transport = Transport::new(&target(false), None, &provider, &provider, &FixedClock);
+        let error = transport
+            .github_approve_once("review", &json!({}))
+            .unwrap_err();
+        assert_eq!(crate::classification(&error), "rateLimited");
+        assert_eq!(provider.calls.get(), 1);
+    }
+
+    #[test]
+    fn ado_sign_in_documents_do_not_acknowledge_votes() {
+        for (body, content_type) in [
+            (b"<html>sign in</html>".as_slice(), None),
+            (b"sign in".as_slice(), Some("text/html")),
+        ] {
+            let mut provider = Provider::new(200, body);
+            if let Some(content_type) = content_type {
+                provider
+                    .headers
+                    .insert("content-type".to_owned(), content_type.to_owned());
+            }
+            let mut transport =
+                Transport::new(&target(true), None, &provider, &provider, &FixedClock);
+            let error = transport.ado_approve_once("vote", &json!({})).unwrap_err();
+            assert_eq!(crate::classification(&error), "ambiguousWrite");
+            assert_eq!(provider.calls.get(), 1);
+        }
+    }
 }

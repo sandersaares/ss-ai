@@ -50,8 +50,7 @@ explicit recoverable stale condition. Captures retain focused evidence rather
 than provider presentation or bookkeeping. Stable scope, account attribution,
 human discussion, and effective approval authority remain guarded; project
 revision counters, profile changes, reactions, and merge-job progress do not
-cause staleness. The same rules govern approval and needs-review publication,
-including discussion-only reconciliation.
+cause staleness. Needs-review notice recovery can use discussion-only readback.
 
 Structured vote events, current reviewer state, source iterations, and applicable
 reviewer policies establish approval standing. Ordinary build, status, required
@@ -86,7 +85,7 @@ within the run rather than terminating the PR's work.
 
 Complete submitted reviews, service dismissal events, and effective branch review
 requirements establish current standing. A dismissal cause identifies the invalidating commit, not the
-approved baseline. Later manual approvals replace earlier authority;
+approved baseline. Later account-owned approvals replace earlier authority;
 comment-only reviews leave it unchanged, including when GitHub omits them from
 the timeline. Negative decisions and removal of the account's review request
 prevent reuse of the old approval.
@@ -102,17 +101,15 @@ source remains valid. Different source commits without that requirement do not
 establish expiry. This classification preserves the account's existing authority;
 it does not assert that aggregate merge requirements are met or identify the last pusher.
 
-Inspection preserves pending human reviews and treats unknown renewal markers
-as unreconciled evidence, not new external approvals. It captures current
-discussion and fences complete observations. Proven commit-caused invalidation
-permits source assessment, not immediate renewal. UI and pre-install approvals
-can qualify without historical target context. Renewals preserve the original
-external approval as their cumulative source anchor. The
-[reapproval authority contract](reapproval.md) defines recognition and provenance.
+Inspection preserves pending human reviews and captures current discussion.
+Proven commit-caused invalidation permits source assessment, not immediate renewal.
+The provider's applicable approval supplies the source baseline, regardless of
+how that approval was submitted. The [reapproval contract](reapproval.md)
+describes the provider evidence.
 
 ## Reapproval assessment and publication
 
-An isolated bare Git store supplies exact original-approved/current source
+An isolated bare Git store supplies exact provider-approved/current source
 trees, including force-push removals, paths, modes, and opaque content.
 No reviewed code executes. Target-tip advancement alone does not affect
 eligibility or assessment.
@@ -157,23 +154,20 @@ regressions, or likely correctness regressions; it does not restrict edit catego
 
 A significant or uncertain live assessment produces an attributed standalone needs-review
 comment with a hidden marker. Future runs retain that decision without another
-source assessment or duplicate comment. Only a strictly later external approval
-by the authenticated account expires older markers; other reviewers and automatic
-renewals cannot reset them. Uncertainty retains its explicit failure diagnostic;
+source assessment or duplicate comment. A strictly later approval by the
+authenticated account expires older markers; another account cannot reset them.
+Uncertainty retains its explicit failure diagnostic;
 posting a notice does not turn the assessment into success. Dry runs never post notices.
 
 Every in-range candidate appears in the skill's final linked summary with its
-decision. Separate new reviews remain visible across invocations. Valid automatic
-approvals include their service approval timestamps even when a previous run
-issued them; independent approvals remain distinct.
+decision. Separate new reviews remain visible across invocations.
 
-A stable same-host scope lock encloses publication and its run update.
-Intent precedes each provider effect. GitHub submits an explicit-commit approval;
-ADO fences a mutable vote and a separate source-bound audit. Acknowledgement and postflight
-verification remain distinct. Unknown writes are reconciled read-only, never
-blindly replayed; they block later runs. A concurrent push or human decision
-can make an accepted effect stale. The utility reports it without rollback
-and does not claim that detection prevents existing auto-merge.
+The utility checks source and authority before submitting an approval. GitHub
+submits an explicit-commit approval; ADO submits the current positive vote.
+A successful provider response finishes the operation without later provider
+calls. Errors are reported without automatically repeating the request.
+ADO's vote API does not bind the write to a source commit, so a concurrent
+source change can race with submission.
 Needs-review notice readback remains available after PR closure or draft conversion.
 
 Staleness before any attempted remote effect permits two recovery attempts per
@@ -181,8 +175,8 @@ PR after the initial attempt. Native refresh reacquires complete current evidenc
 and authority, discards obsolete judgments, and requires a fresh isolated
 assessment when eligible. Repeated movement produces explicit retry exhaustion.
 The budget survives interruption and applies to inspection, assessment, approval,
-and notice preflight failures. Accepted-but-stale and uncertain effects retain
-their original assessments for reconciliation; they never authorize another write.
+and notice preflight failures. A failed approval request does not trigger an
+automatic retry in the same attempt.
 
 ## Git comparisons
 
@@ -210,8 +204,8 @@ a supported SDK.
   eligible work and verifies ownership before the calling skill proceeds.
 - [Reviewer registration](design/reviewer-registration.md) records participation
   without changing review judgments or existing reviewer state.
-- [Automatic reapproval](reapproval.md) preserves an external approval across
-  qualifying source changes without moving its anchor.
+- [Automatic reapproval](reapproval.md) assesses source changes from the
+  provider-selected approval baseline.
 
 Each area owns its complete operation rather than exposing a sequence of
 service requests for an agent to assemble. Provider differences stay within
