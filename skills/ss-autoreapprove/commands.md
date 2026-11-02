@@ -47,6 +47,7 @@ ss-ai autoreapprove inspect --repository-url "{{REPOSITORY}}" --state-path "{{RU
 Omit `--dry-run` only for an authorized publishing invocation. Omit `--tenant`
 when not supplied. The mode and policy are immutable for this run. Read
 `items`, `counts`, `state`, `error`, and `nextAfter`; follow all results pages.
+Omit `--after` for the first page; later cursors are positive PR IDs.
 Inspect only recent nondraft entries requiring assessment. Retain each
 inspection's `snapshotDigest`. Scope failures stop the run; independent PR
 failures remain visible while other eligible PRs can proceed.
@@ -55,6 +56,11 @@ assess or report that PR.
 
 # Stage 2: preparation and evidence
 
+For an inspected snapshot, prepare and reserve in one tool call. This keeps
+orchestration delay within the same overall budget while avoiding an extra
+model turn before the worker starts. The first command must succeed and return
+the expected in-progress snapshot before the reservation is attempted.
+
 ```powershell
 #Requires -Version 7.6
 
@@ -62,21 +68,53 @@ Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 $PSNativeCommandUseErrorActionPreference = $true
 
-ss-ai autoreapprove prepare --state-path "{{RUN}}" --pull-request-id "{{PR}}" --snapshot-digest "{{SNAPSHOT}}"
-ss-ai autoreapprove start-worker --state-path "{{RUN}}" --pull-request-id "{{PR}}" --snapshot-digest "{{SNAPSHOT}}"
-ss-ai autoreapprove assessment --state-path "{{RUN}}" --pull-request-id "{{PR}}" --snapshot-digest "{{SNAPSHOT}}" --after "{{AFTER_CHANGE}}"
+$scope = @('--state-path', '{{RUN}}', '--pull-request-id', '{{PR}}', '--snapshot-digest', '{{SNAPSHOT}}')
+$prepared = ss-ai autoreapprove prepare @scope | ConvertFrom-Json
+if ($prepared.snapshotDigest -ne '{{SNAPSHOT}}' -or
+    $prepared.assessmentProtocol -ne 'directV1' -or
+    $prepared.state -ne 'in-progress') {
+    throw 'Preparation did not return the expected in-progress assessment.'
+}
+$reservation = ss-ai autoreapprove start-worker @scope | ConvertFrom-Json
+$item = @($reservation.items)
+if ($item.Count -ne 1 -or $item[0].pullRequestId -ne [int]'{{PR}}' -or
+    $item[0].snapshotDigest -ne '{{SNAPSHOT}}' -or
+    $item[0].status -ne 'assessmentRequired') {
+    throw 'Worker reservation did not return the expected assessment.'
+}
+Write-Output "Snapshot: $($prepared.snapshotDigest)"
+$prepared.progress | Format-List
+$item[0].assessmentBudget | Format-List
+```
+
+Inspect the returned progress and budget before dispatch. A failed command
+or unexpected response stops dispatch and requires reporting or recovery.
+
+```powershell
+#Requires -Version 7.6
+
+Set-StrictMode -Version Latest
+$ErrorActionPreference = 'Stop'
+$PSNativeCommandUseErrorActionPreference = $true
+
+ss-ai autoreapprove assessment --state-path "{{RUN}}" --pull-request-id "{{PR}}" --snapshot-digest "{{SNAPSHOT}}" --after "{{AFTER_CHANGE}}" --compact --limit 100
 ss-ai autoreapprove read-batch --state-path "{{RUN}}" --pull-request-id "{{PR}}" --snapshot-digest "{{SNAPSHOT}}" --batch-json '{{BATCH_JSON}}'
+ss-ai autoreapprove unit-read-plan --state-path "{{RUN}}" --pull-request-id "{{PR}}" --snapshot-digest "{{SNAPSHOT}}" --reference discussion --after "{{AFTER_UNIT}}" --limit 100
+ss-ai autoreapprove read-units --state-path "{{RUN}}" --pull-request-id "{{PR}}" --snapshot-digest "{{SNAPSHOT}}" --reference discussion --after "{{AFTER_UNIT}}" --count "{{UNIT_COUNT}}" --read-token "{{READ_TOKEN}}"
 ss-ai autoreapprove read --state-path "{{RUN}}" --pull-request-id "{{PR}}" --snapshot-digest "{{SNAPSHOT}}" --reference "{{REFERENCE}}" --offset "{{OFFSET}}"
-ss-ai autoreapprove source-context --state-path "{{RUN}}" --pull-request-id "{{PR}}" --snapshot-digest "{{SNAPSHOT}}" --change-id "{{SOURCE_CHANGE}}" --side "{{SIDE}}" --start-line "{{START_LINE}}" --line-count "{{LINE_COUNT}}"
+ss-ai autoreapprove source-context --state-path "{{RUN}}" --pull-request-id "{{PR}}" --snapshot-digest "{{SNAPSHOT}}" --change-id "{{SOURCE_CHANGE}}" --side "{{SIDE}}" --start-line "{{START_LINE}}" --line-count "{{LINE_COUNT}}" --limit 16384
+ss-ai autoreapprove source-context-batch --state-path "{{RUN}}" --pull-request-id "{{PR}}" --snapshot-digest "{{SNAPSHOT}}" --batch-json '{{BATCH_JSON}}'
 ```
 
 Preparation returns the selected context and the first bounded metadata page.
 Its `progress` provides preflight counts. `readToken` identifies immutable
-evidence and registered context; `stateToken` identifies the current assessment
-state. Reserve each worker with `start-worker` before
+evidence and registered context; `stateToken` identifies the current semantic
+assessment state. Independent evidence reads do not change it, but a judgment
+still requires the current evidence receipts. Reserve each worker with `start-worker` before
 dispatch; its returned `assessmentBudget` shows reservations and limits.
 Follow `nextOffset` through the assessment inventory, even when a page contains
-fewer changes than requested. Native metadata and evidence responses fit within
+fewer changes than requested. Use each change's `oldLineCount` and
+`newLineCount` to keep context requests within the captured source. Native metadata and evidence responses fit within
 16 KiB of pretty-printed UTF-8 JSON, including the final newline. The read
 character limit is an upper bound; JSON escaping and multibyte text can shorten
 a page. Do not print the retained run. If a tool truncates delivery, reduce
@@ -84,17 +122,30 @@ the requested batch and replay the same offsets before continuing.
 
 A batch request has the shape
 `{"readToken":"TOKEN","items":[{"reference":"policy","offset":0,"limit":1024},{"reference":"discussion","offset":0,"limit":1024}]}`.
-Use distinct references and positive limits. The response has `items`, a new
-`stateToken`, the `readToken`, and `progress`. Each item carries its own
-`nextOffset` and `contentDigest`. Multiple batches may use the same read token
+Use distinct references and positive limits. The response has `items`, a
+`stateToken`, and the `readToken`. Obtain progress from `assessment` when needed.
+Each item carries its own `nextOffset` and `contentDigest`. Multiple batches
+may use the same read token
 for independent references without waiting for receipt updates. A continuation
 of a mutable semantic record must also supply the preceding `contentDigest`;
 ordinary `read` accepts only its first page, so use `read-batch` for further
-pages. Registering source context changes the read token. A batch
+pages. Registering source context changes the read token; use the new token
+returned by `source-context`. A batch
 whose combined response exceeds the native limit fails without committing any
-receipts; retry smaller batches. If the host truncates a successful response,
+receipts; retry smaller batches. If a batch rejects a token after context was
+registered, use `assessment` to get the current token and retry undelivered
+pages at the same offsets in the same worker. This is not snapshot staleness.
+If the host truncates a successful response,
 reacquire a fresh `readToken` with `assessment` and repeat those pages before
 proceeding. Repeated pages do not prove that the worker understood them.
+
+`unit-read-plan` returns windows selected from actual serialized unit responses,
+including escaped text and metadata. Follow `nextOffset` to enumerate the plan;
+the returned `after` and `count` values select independent windows for
+`read-units`. The plan records no evidence receipts. A unit that does not fit
+entirely in its window reports `nextOffset`; continue it with `read-batch`.
+Read any binding not included inline. If context registration changes the read
+token, acquire the new token and retry undelivered windows.
 
 `documentReads` reports `reference`, `totalCharacters`, nullable `readOffset`,
 and `complete` for policy and discussion. Each present source side exposes its
@@ -102,6 +153,11 @@ and `complete` for policy and discussion. Each present source side exposes its
 offset means no receipt, including for an empty document. Use this progress
 to find missing work, not to infer another worker's knowledge.
 `pendingChangeCount` and `nextChangeOffset` locate unjudged source.
+Reading assessment metadata after completion does not consume the assessment
+budget. Publication still checks the overall deadline and freshness.
+The compact inventory represents `old` and `new` as paths or null rather than
+side metadata. Required patch documents still contain complete source bindings
+and content classifications. Omit `--compact` when full side metadata is needed.
 Each change exposes `requiredPatch` with the same progress fields and `hunkCount`.
 Read the captured policy, discussion, and every required patch document. Evidence
 responses contain `text`, `totalCharacters`, `complete`, and `nextOffset`; consume contiguous
@@ -170,6 +226,15 @@ complete discussion and policy; include material concerns and interactions.
 All check resolutions require exact evidence, the originating semantic record,
 and the check itself. Replacements invalidate dependent records. `checkpoint`
 is for a context-pressure handoff after new semantic work, not for each batch.
+
+For a compact unit list, add `--compact`; each item retains its unit ID,
+character count, evidence reference, binding reference, and read offset.
+Read units by their returned `unit:` references and any separately returned
+`binding:` references. Each unit starts at offset zero independently, so batches
+using the same current `readToken` can be issued together. All units and their
+bindings must be delivered to establish complete coverage of the original
+document. A source-context registration changes the token; finish outstanding
+batches before registering context or retry with the new token.
 
 # Stage 3: judgments and completion
 

@@ -81,6 +81,8 @@ and the cumulative judgment. Repeating an existing request leaves
 records intact. Native coverage cannot prove
 that the assessor chose enough context; needed evidence outside the captured
 sides remains explicitly missing.
+Workers can register several known ranges atomically and then read their
+individual references; registration alone does not count as delivery.
 There is no filename, size, or edit-category exemption.
 
 The orchestrator prepares the comparison and reserves a GPT 6.1 Sol assessment
@@ -138,6 +140,11 @@ worker dispatch reservations across interruption and stale recovery. Exhaustion
 leaves explicit unfinished work. Legacy assessments cannot continue; a fresh
 assessment is required. Earlier run schemas require a fresh run and assessment;
 existing files are left untouched.
+
+After completion, metadata inspection does not consume the assessment budget.
+Publication still checks the overall deadline and current provider evidence.
+Registering source context changes the local read token, not the snapshot; the
+same worker can obtain a new token and retry undelivered pages.
 
 ## Material evidence
 

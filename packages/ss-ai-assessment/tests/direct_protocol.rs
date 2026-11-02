@@ -115,7 +115,7 @@ fn summary_exposes_the_current_state_token_within_the_response_budget() {
     assert!(serde_json::to_vec_pretty(&first).unwrap().len() < 16_384);
     read(&mut assessment, "policy", "policy", "discussion");
     let next = assessment.summary(0, 100, "policy", "discussion").unwrap();
-    assert_ne!(first["stateToken"], next["stateToken"]);
+    assert_eq!(first["stateToken"], next["stateToken"]);
     assert_eq!(next["stateToken"], assessment.state_token().unwrap());
     assert_eq!(first["readToken"], next["readToken"]);
     assert!(serde_json::to_vec_pretty(&next).unwrap().len() < 16_384);
@@ -207,7 +207,9 @@ fn many_small_pages_keep_required_document_progress_exact() {
                 &discussion,
             )
             .unwrap();
-        let progress = &response["progress"];
+        let progress = assessment
+            .progress_with_evidence("policy", &discussion)
+            .unwrap();
         assert_eq!(progress["requiredDocumentCount"], 27);
         if response["items"][0]["complete"] == true {
             assert_eq!(progress["deliveredRequiredDocumentCount"], 2);
@@ -237,19 +239,16 @@ fn read_token_allows_independent_batches_and_rejects_stale_contexts() {
     let first = assessment
         .read_batch(batch("policy"), "policy", "discussion")
         .unwrap();
-    assert_ne!(first["stateToken"], initial_state);
+    assert_eq!(first["stateToken"], initial_state);
     let second = assessment
         .read_batch(batch("discussion"), "policy", "discussion")
         .unwrap();
-    assert_ne!(first["stateToken"], second["stateToken"]);
+    assert_eq!(first["stateToken"], second["stateToken"]);
     assert_eq!(first["readToken"], read_token);
-    assert_eq!(second["items"][0]["readToken"], read_token);
-    assessment
-        .read_batch(batch(&format!("{id}:patch")), "policy", "discussion")
-        .unwrap();
-    assert_eq!(assessment.read_token().unwrap(), read_token);
-    let stale_judgment = BatchJudgmentRequest {
-        state_token: initial_state,
+    assert_eq!(second["readToken"], read_token);
+    assert!(second["items"][0].get("readToken").is_none());
+    let judgment_batch = || BatchJudgmentRequest {
+        state_token: initial_state.clone(),
         items: vec![BatchJudgmentItem {
             id: id.clone(),
             judgment: judgment(&id),
@@ -258,13 +257,25 @@ fn read_token_allows_independent_batches_and_rejects_stale_contexts() {
     };
     assert!(
         assessment
-            .record_batch(stale_judgment, "policy", "discussion")
+            .record_batch(judgment_batch(), "policy", "discussion")
             .is_err()
     );
     assessment
-        .record(&id, judgment(&id), None, "policy", "discussion")
+        .read_batch(batch(&format!("{id}:patch")), "policy", "discussion")
         .unwrap();
     assert_eq!(assessment.read_token().unwrap(), read_token);
+    assessment
+        .record_batch(judgment_batch(), "policy", "discussion")
+        .unwrap();
+    assert!(
+        assessment
+            .record_batch(judgment_batch(), "policy", "discussion")
+            .is_err()
+    );
+    assert_eq!(assessment.read_token().unwrap(), read_token);
+    let plan = assessment
+        .unit_read_plan("discussion", 0, 100, "policy", "discussion")
+        .unwrap();
     let page = assessment
         .source_context(
             ContextRequest {
@@ -287,6 +298,41 @@ fn read_token_allows_independent_batches_and_rejects_stale_contexts() {
             .is_err()
     );
     assert_eq!(assessment.state_token().unwrap(), state);
+    let count = usize::try_from(plan["items"][0]["count"].as_u64().unwrap()).unwrap();
+    assert!(
+        assessment
+            .read_units(
+                "discussion",
+                0,
+                count,
+                read_token.clone(),
+                "policy",
+                "discussion"
+            )
+            .is_err()
+    );
+    assert_eq!(assessment.state_token().unwrap(), state);
+    assessment
+        .read_units(
+            "discussion",
+            0,
+            count,
+            page["readToken"].as_str().unwrap().into(),
+            "policy",
+            "discussion",
+        )
+        .unwrap();
+    let retried = assessment
+        .read_batch(
+            BatchReadRequest {
+                read_token: page["readToken"].as_str().unwrap().into(),
+                items: vec![read_item("policy", 1)],
+            },
+            "policy",
+            "discussion",
+        )
+        .unwrap();
+    assert_eq!(retried["items"][0]["text"], "p");
     let unavailable_offset = BatchReadRequest {
         read_token: assessment.read_token().unwrap(),
         items: vec![BatchReadItem {
@@ -301,7 +347,308 @@ fn read_token_allows_independent_batches_and_rejects_stale_contexts() {
             .read_batch(unavailable_offset, "policy", "discussion")
             .is_err()
     );
-    assert_eq!(assessment.state_token().unwrap(), state);
+    assert_eq!(
+        assessment.state_token().unwrap(),
+        retried["stateToken"].as_str().unwrap()
+    );
+}
+
+#[test]
+fn context_batch_registers_ranges_atomically_without_claiming_delivery() {
+    let mut assessment = fixture("discussion", 10);
+    let requests = assessment
+        .inventory
+        .changes
+        .iter()
+        .map(|change| ContextRequest {
+            change_id: change.id.clone(),
+            side: SourceSide::New,
+            start_line: NonZeroUsize::MIN,
+            line_count: NonZeroUsize::MIN,
+        })
+        .collect::<Vec<_>>();
+    let original = assessment.state_token().unwrap();
+    let mut bad = requests.clone();
+    bad[9].start_line = NonZeroUsize::new(2).unwrap();
+    assert!(
+        assessment
+            .source_context_batch(bad, "policy", "discussion")
+            .is_err()
+    );
+    assert_eq!(assessment.state_token().unwrap(), original);
+
+    let old_token = assessment.read_token().unwrap();
+    let batch = assessment
+        .source_context_batch(requests, "policy", "discussion")
+        .unwrap();
+    assert_ne!(batch["readToken"], old_token);
+    assert_eq!(batch["items"].as_array().unwrap().len(), 10);
+    let progress = assessment
+        .progress_with_evidence("policy", "discussion")
+        .unwrap();
+    assert_eq!(progress["requiredDocumentCount"], 22);
+    assert_eq!(progress["deliveredRequiredDocumentCount"], 0);
+
+    let items = batch["items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|item| read_item(item["reference"].as_str().unwrap(), usize::MAX))
+        .collect();
+    let response = assessment
+        .read_batch(
+            BatchReadRequest {
+                read_token: batch["readToken"].as_str().unwrap().into(),
+                items,
+            },
+            "policy",
+            "discussion",
+        )
+        .unwrap();
+    assert_eq!(response["items"].as_array().unwrap().len(), 10);
+    assert_eq!(
+        assessment
+            .progress_with_evidence("policy", "discussion")
+            .unwrap()["deliveredRequiredDocumentCount"],
+        10
+    );
+    assert!(
+        response["items"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|item| item["text"] == "new\n")
+    );
+}
+
+#[test]
+fn incident_sized_inventories_need_fewer_pages_at_the_supported_limit() {
+    // The path counts mirror the reported incidents without retaining their source.
+    for count in [37, 50] {
+        let assessment = fixture("discussion", count);
+        let pages = |limit, compact| {
+            let mut offset = 0;
+            let mut ids = Vec::new();
+            let mut calls = 0;
+            loop {
+                let page = if compact {
+                    assessment.compact_summary(offset, limit, "policy", "discussion")
+                } else {
+                    assessment.summary(offset, limit, "policy", "discussion")
+                }
+                .unwrap();
+                calls += 1;
+                ids.extend(
+                    page["changes"]
+                        .as_array()
+                        .unwrap()
+                        .iter()
+                        .map(|change| change["id"].as_str().unwrap().to_owned()),
+                );
+                match page["nextOffset"].as_u64() {
+                    Some(next) => offset = usize::try_from(next).unwrap(),
+                    None => break,
+                }
+            }
+            (calls, ids)
+        };
+        let baseline = pages(10, false);
+        let batched = pages(100, true);
+        assert_eq!(baseline.1.len(), count);
+        assert_eq!(batched.1, baseline.1);
+        assert!(batched.0 < baseline.0);
+    }
+}
+
+#[test]
+fn compact_inventory_preserves_required_work_and_path_identity() {
+    let assessment = fixture("discussion", 1);
+    let full = assessment.summary(0, 100, "policy", "discussion").unwrap();
+    let compact = assessment
+        .compact_summary(0, 100, "policy", "discussion")
+        .unwrap();
+    for key in ["snapshotDigest", "readToken", "stateToken", "progress"] {
+        assert_eq!(compact[key], full[key]);
+    }
+    let full_change = &full["changes"][0];
+    let compact_change = &compact["changes"][0];
+    for key in [
+        "id",
+        "kind",
+        "oldLineCount",
+        "newLineCount",
+        "contentAvailable",
+        "requiredPatch",
+        "hunkCount",
+        "requestedContextCount",
+        "nextContextReference",
+        "decision",
+        "decisionDigest",
+    ] {
+        assert_eq!(compact_change[key], full_change[key]);
+    }
+    assert_eq!(compact_change["old"], full_change["old"]["path"]);
+    assert_eq!(compact_change["new"], full_change["new"]["path"]);
+    assert_eq!(compact_change["oldLineCount"], 1);
+    assert_eq!(compact_change["newLineCount"], 1);
+}
+
+#[test]
+fn compact_units_allow_independent_discussion_delivery() {
+    let discussion = json!({
+        "platform": "gitHub",
+        "reviewComments": (0..4).map(|id| json!({
+            "id": id + 1,
+            "body": format!("objection {id}"),
+            "path": format!("file{id}"),
+        })).collect::<Vec<_>>(),
+    })
+    .to_string();
+    let mut assessment = fixture(&discussion, 0);
+    let full = assessment.units_for(Some("discussion"), 0, 100).unwrap();
+    let compact = assessment
+        .compact_units_for(Some("discussion"), 0, 100)
+        .unwrap();
+    let full = full["items"].as_array().unwrap();
+    let compact = compact["items"].as_array().unwrap();
+    assert!(compact.len() > 1);
+    assert_eq!(compact.len(), full.len());
+    for (item, original) in compact.iter().zip(full) {
+        assert_eq!(item["reference"], original["reference"]);
+        assert_eq!(item["bindingReference"], original["bindingReference"]);
+        assert_eq!(item["unit"]["id"], original["unit"]["id"]);
+        assert_eq!(
+            item["unit"]["totalCharacters"],
+            original["unit"]["totalCharacters"]
+        );
+    }
+    // Independent unit receipts permit delivery in any order.
+    for item in compact.iter().rev() {
+        read(
+            &mut assessment,
+            item["reference"].as_str().unwrap(),
+            "policy",
+            &discussion,
+        );
+        read(
+            &mut assessment,
+            item["bindingReference"].as_str().unwrap(),
+            "policy",
+            &discussion,
+        );
+    }
+    let summary = assessment.summary(0, 100, "policy", &discussion).unwrap();
+    assert_eq!(summary["documentReads"][1]["complete"], true);
+    assessment
+        .validate("snapshot", "policy", "policy", &discussion)
+        .unwrap();
+}
+
+#[test]
+fn planned_discussion_pages_are_bounded_and_independently_readable() {
+    let discussion = json!({
+        "platform": "gitHub",
+        // The retained incident contains this many discussion fragments; the
+        // synthetic records keep the same scale without copying its contents.
+        "reviewComments": (0..149).map(|id| json!({
+            "id": id + 1,
+            "body": format!("{id} {}", "\\\"\nλ".repeat(90)),
+            "path": format!("file{id}"),
+        })).collect::<Vec<_>>(),
+    })
+    .to_string();
+    let mut assessment = fixture(&discussion, 1);
+    let original_state = assessment.state_token().unwrap();
+    let original_reads = serde_json::to_value(&assessment).unwrap()["reads"].clone();
+    let mut plans = Vec::new();
+    let mut after = 0;
+    loop {
+        let plan = assessment
+            .unit_read_plan("discussion", after, 2, "policy", &discussion)
+            .unwrap();
+        assert_eq!(assessment.state_token().unwrap(), original_state);
+        assert_eq!(
+            serde_json::to_value(&assessment).unwrap()["reads"],
+            original_reads
+        );
+        assert!(plan["items"].as_array().unwrap().len() <= 2);
+        plans.extend(plan["items"].as_array().unwrap().iter().cloned());
+        match plan["nextOffset"].as_u64() {
+            Some(next) => after = usize::try_from(next).unwrap(),
+            None => break,
+        }
+    }
+    assert!(plans.len() > 2);
+    // The response limit permits several small escaped records per window.
+    assert!(plans.len() <= 30);
+    let mut manifest_offset = 0;
+    let mut unit_count = 0;
+    loop {
+        let page = assessment
+            .compact_units_for(Some("discussion"), manifest_offset, 100)
+            .unwrap();
+        unit_count += page["items"].as_array().unwrap().len();
+        match page["nextOffset"].as_u64() {
+            Some(next) => manifest_offset = usize::try_from(next).unwrap(),
+            None => break,
+        }
+    }
+    assert_eq!(
+        plans
+            .iter()
+            .map(|window| usize::try_from(window["count"].as_u64().unwrap()).unwrap())
+            .sum::<usize>(),
+        unit_count
+    );
+    let token = assessment.read_token().unwrap();
+    let change = assessment.inventory.changes[0].id.clone();
+    read(&mut assessment, "policy", "policy", &discussion);
+    read(
+        &mut assessment,
+        &format!("{change}:patch"),
+        "policy",
+        &discussion,
+    );
+    assessment
+        .record(&change, judgment(&change), None, "policy", &discussion)
+        .unwrap();
+    assert_ne!(assessment.state_token().unwrap(), original_state);
+    assert_eq!(assessment.read_token().unwrap(), token);
+    // Independent planned windows must work in reverse order as well as forward order.
+    for window in plans.iter().rev() {
+        let page = assessment
+            .read_units(
+                "discussion",
+                usize::try_from(window["after"].as_u64().unwrap()).unwrap(),
+                usize::try_from(window["count"].as_u64().unwrap()).unwrap(),
+                token.clone(),
+                "policy",
+                &discussion,
+            )
+            .unwrap();
+        assert!(serde_json::to_vec_pretty(&page).unwrap().len() < 16_384);
+        assert!(page.get("progress").is_none());
+        assert_eq!(page["readToken"], token);
+        for item in page["items"].as_array().unwrap() {
+            assert_eq!(item["complete"], true);
+            assert!(item["reference"].as_str().unwrap().starts_with("unit:"));
+            assert!(item["unit"].get("id").is_none());
+            assert!(item["unit"]["bindingReference"].is_string());
+            if item["unit"]["bindings"].is_null() {
+                read(
+                    &mut assessment,
+                    item["unit"]["bindingReference"].as_str().unwrap(),
+                    "policy",
+                    &discussion,
+                );
+            }
+        }
+    }
+    let summary = assessment.summary(0, 100, "policy", &discussion).unwrap();
+    assert_eq!(summary["documentReads"][1]["complete"], true);
+    assessment
+        .validate("snapshot", "policy", "policy", &discussion)
+        .unwrap();
 }
 
 #[test]
@@ -601,7 +948,8 @@ fn unit_pages_inline_bindings_with_unicode_and_contiguous_offsets() {
             .unwrap();
         assert!(serde_json::to_vec_pretty(&response).unwrap().len() < 16_384);
         let page = &response["items"][0];
-        assert_eq!(page["snapshotDigest"], "snapshot");
+        assert_eq!(response["snapshotDigest"], "snapshot");
+        assert!(page.get("snapshotDigest").is_none());
         assert_eq!(page["unit"]["bindingReference"], binding);
         assert!(page["unit"]["bindings"].is_array());
         let text = page["text"].as_str().unwrap();
@@ -695,6 +1043,17 @@ fn batch_envelope_can_fall_back_to_binding_continuation() {
     assert!(baseline < 16_380);
     serialized["checkpoints"]["units"][0]["bindings"] =
         json!([{"label": "a".repeat(15_000 + 16_380 - baseline)}]);
+    let mut planned: Assessment = serde_json::from_value(serialized.clone()).unwrap();
+    let token = planned.read_token().unwrap();
+    let original_state = planned.state_token().unwrap();
+    let plan = planned
+        .unit_read_plan("discussion", 0, 100, "policy", "x")
+        .unwrap();
+    assert_eq!(planned.state_token().unwrap(), original_state);
+    assert_eq!(plan["items"], json!([{"after": 0, "count": 1}]));
+    let planned_response = planned
+        .read_units("discussion", 0, 1, token, "policy", "x")
+        .unwrap();
     let mut assessment: Assessment = serde_json::from_value(serialized).unwrap();
     let response = assessment
         .read_batch(
@@ -703,6 +1062,7 @@ fn batch_envelope_can_fall_back_to_binding_continuation() {
             "x",
         )
         .unwrap();
+    assert_eq!(planned_response, response);
     assert!(response["items"][0]["unit"].get("bindings").is_none());
     assert_eq!(response["items"][0]["unit"]["bindingReference"], binding);
     assert!(serde_json::to_vec_pretty(&response).unwrap().len() < 16_384);

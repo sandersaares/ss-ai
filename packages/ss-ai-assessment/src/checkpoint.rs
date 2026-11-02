@@ -100,6 +100,26 @@ impl Assessment {
         after: usize,
         limit: usize,
     ) -> Result<Value, AssessmentError> {
+        self.unit_page(reference, after, limit, false)
+    }
+
+    /// Lists independently readable units without repeating their range metadata.
+    pub fn compact_units_for(
+        &self,
+        reference: Option<&str>,
+        after: usize,
+        limit: usize,
+    ) -> Result<Value, AssessmentError> {
+        self.unit_page(reference, after, limit, true)
+    }
+
+    fn unit_page(
+        &self,
+        reference: Option<&str>,
+        after: usize,
+        limit: usize,
+        compact: bool,
+    ) -> Result<Value, AssessmentError> {
         if reference.is_some_and(|reference| {
             reference != "discussion"
                 && !self
@@ -115,8 +135,13 @@ impl Assessment {
             .iter()
             .filter(|unit| reference.is_none_or(|reference| reference == unit.reference))
             .map(|unit| {
+                let metadata = if compact {
+                    json!({"id": unit.id, "totalCharacters": unit.total_characters})
+                } else {
+                    unit.metadata()
+                };
                 Ok(json!({
-                    "unit": unit.metadata(), "reference": unit.reference(),
+                    "unit": metadata, "reference": unit.reference(),
                     "bindingReference": unit.binding_reference(),
                     "readOffset": self.reads.get(&unit.reference())
                 }))

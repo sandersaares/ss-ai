@@ -2156,6 +2156,191 @@ fn exhausted_assessment_budget_survives_resume_without_remote_effects() {
 }
 
 #[test]
+fn compact_metadata_commands_expose_the_same_evidence_references() {
+    let _guard = PROCESS_TEST_LOCK
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner);
+    let repository = Sources::new();
+    let scope = TempDir::new().unwrap();
+    let root = scope.path().join("compact-metadata");
+    let provider = repository.provider(false);
+    let (snapshot, prepared) = prepare(&root, &provider, true);
+    let compact = work(
+        &root,
+        &provider,
+        "assessment",
+        &snapshot,
+        &["--compact".into(), "--limit".into(), "100".into()],
+    )
+    .unwrap();
+    assert_eq!(
+        compact["changes"][0]["requiredPatch"],
+        prepared["changes"][0]["requiredPatch"]
+    );
+    let full = work(
+        &root,
+        &provider,
+        "units",
+        &snapshot,
+        &[
+            "--reference".into(),
+            "discussion".into(),
+            "--limit".into(),
+            "100".into(),
+        ],
+    )
+    .unwrap();
+    let compact = work(
+        &root,
+        &provider,
+        "units",
+        &snapshot,
+        &[
+            "--reference".into(),
+            "discussion".into(),
+            "--compact".into(),
+            "--limit".into(),
+            "100".into(),
+        ],
+    )
+    .unwrap();
+    assert_eq!(
+        compact["items"][0]["reference"],
+        full["items"][0]["reference"]
+    );
+    assert_eq!(
+        compact["items"][0]["bindingReference"],
+        full["items"][0]["bindingReference"]
+    );
+    let plan = work(
+        &root,
+        &provider,
+        "unit-read-plan",
+        &snapshot,
+        &["--reference".into(), "discussion".into()],
+    )
+    .unwrap();
+    let window = &plan["items"][0];
+    let delivered = work(
+        &root,
+        &provider,
+        "read-units",
+        &snapshot,
+        &[
+            "--reference".into(),
+            "discussion".into(),
+            "--after".into(),
+            window["after"].to_string(),
+            "--count".into(),
+            window["count"].to_string(),
+            "--read-token".into(),
+            plan["readToken"].as_str().unwrap().into(),
+        ],
+    )
+    .unwrap();
+    assert_eq!(
+        delivered["items"][0]["reference"],
+        compact["items"][0]["reference"]
+    );
+    let change = prepared["changes"][0]["id"].as_str().unwrap();
+    let ranges = json!([{
+        "changeId": change,
+        "side": "new",
+        "startLine": 1,
+        "lineCount": 1
+    }]);
+    let oversized = json!(vec![ranges[0].clone(); 100]);
+    let error = work(
+        &root,
+        &provider,
+        "source-context-batch",
+        &snapshot,
+        &["--batch-json".into(), oversized.to_string()],
+    )
+    .unwrap_err();
+    assert_eq!(ss_ai::classification(&error), "batchTooLarge");
+    let registered = work(
+        &root,
+        &provider,
+        "source-context-batch",
+        &snapshot,
+        &["--batch-json".into(), ranges.to_string()],
+    )
+    .unwrap();
+    let context = registered["items"][0]["reference"].as_str().unwrap();
+    let read = json!({
+        "readToken": registered["readToken"],
+        "items": [{"reference": context, "offset": 0, "limit": 16384}]
+    });
+    let delivered = work(
+        &root,
+        &provider,
+        "read-batch",
+        &snapshot,
+        &["--batch-json".into(), read.to_string()],
+    )
+    .unwrap();
+    assert_eq!(delivered["items"][0]["reference"], context);
+    assert_eq!(delivered["items"][0]["complete"], true);
+}
+
+#[test]
+fn completed_assessment_metadata_does_not_consume_publication_reserve() {
+    let _guard = PROCESS_TEST_LOCK
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner);
+    let repository = Sources::new();
+    let scope = TempDir::new().unwrap();
+    let root = scope.path().join("completed-budget");
+    let provider = repository.provider(false);
+    let (snapshot, prepared) = prepare(&root, &provider, false);
+    assess(&root, &provider, &snapshot, &prepared);
+    let before = invoke(&root, &provider, "results", &[]).unwrap();
+    let arguments = [
+        "--pull-request-id".into(),
+        provider.number.to_string(),
+        "--snapshot-digest".into(),
+        snapshot,
+    ];
+
+    let page = invoke_at(
+        &root,
+        &provider,
+        "assessment",
+        &arguments,
+        &OffsetClock(Duration::from_mins(8)),
+    )
+    .unwrap();
+    assert_eq!(page["state"], "complete");
+    for (command, extra) in [
+        ("units", vec!["--reference".into(), "discussion".into()]),
+        (
+            "unit-read-plan",
+            vec!["--reference".into(), "discussion".into()],
+        ),
+        ("checks", Vec::new()),
+    ] {
+        let mut metadata_arguments = arguments.to_vec();
+        metadata_arguments.extend(extra);
+        invoke_at(
+            &root,
+            &provider,
+            command,
+            &metadata_arguments,
+            &OffsetClock(Duration::from_mins(8)),
+        )
+        .unwrap();
+    }
+    let after = invoke(&root, &provider, "results", &[]).unwrap();
+    assert_eq!(after["items"][0]["status"], "readyToReapprove");
+    assert_eq!(
+        after["items"][0]["assessmentBudget"],
+        before["items"][0]["assessmentBudget"]
+    );
+    assert_eq!(provider.writes.get(), 0);
+}
+
+#[test]
 fn expired_publication_budget_never_starts_an_approval() {
     let _guard = PROCESS_TEST_LOCK
         .lock()

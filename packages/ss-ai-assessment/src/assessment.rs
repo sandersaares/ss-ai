@@ -153,9 +153,33 @@ pub enum Disposition {
 }
 
 impl Assessment {
-    /// Returns an optimistic concurrency token for the serialized assessment.
+    /// Returns an optimistic concurrency token for semantic assessment state.
     pub fn state_token(&self) -> Result<String, AssessmentError> {
-        hash(self)
+        // Delivery receipts only grow during independent reads. Their current
+        // coverage is checked when judgments are applied, so they must not
+        // invalidate a concurrently prepared semantic transaction.
+        hash(&(
+            "ss-ai-assessment/state/v2",
+            (
+                self.protocol,
+                &self.snapshot_digest,
+                &self.policy_digest,
+                &self.discussion_digest,
+                &self.inventory,
+                &self.inventory_digest,
+                &self.source_evidence,
+                &self.source_evidence_digest,
+            ),
+            (
+                &self.contexts,
+                &self.checkpoints,
+                &self.documents,
+                &self.decisions,
+                &self.cumulative,
+                self.complete,
+                &self.digest,
+            ),
+        ))
     }
 
     /// Identifies immutable evidence and the current required-context set.
@@ -174,6 +198,133 @@ impl Assessment {
             &self.checkpoints.manifest_digest,
             &self.contexts,
         ))
+    }
+
+    /// Plans independently readable unit batches using their serialized response sizes.
+    pub fn unit_read_plan(
+        &self,
+        reference: &str,
+        after: usize,
+        limit: usize,
+        policy: &str,
+        discussion: &str,
+    ) -> Result<Value, AssessmentError> {
+        let units = self.units_for_reference(reference)?;
+        let mut staged: Self = serde_json::from_slice(&serde_json::to_vec(self)?)?;
+        let token = self.read_token()?;
+        let state_token = self.state_token()?;
+        let mut batches = Vec::new();
+        let mut start = after;
+        let mut items = Vec::new();
+        let mut next = None;
+        for (index, unit) in units.iter().enumerate().skip(after) {
+            // Planning is private and never publishes receipts, so reuse one
+            // staged assessment instead of cloning the full capture per unit.
+            let reference = unit.reference();
+            let page_limit = unit.total_characters.max(1);
+            let page = staged.read_page(&reference, 0, page_limit, policy, discussion, true)?;
+            let page = compact_batch_page(page)?;
+            let mut response = json!({
+                "snapshotDigest": self.snapshot_digest,
+                "items": [page],
+                "stateToken": state_token,
+                "readToken": token,
+            });
+            if response_size(&response)? > RESPONSE_BYTES {
+                let page =
+                    staged.read_page(&reference, 0, page_limit, policy, discussion, false)?;
+                *response
+                    .get_mut("items")
+                    .ok_or_else(error::OversizedResponse::classified)? =
+                    json!([compact_batch_page(page)?]);
+                check_response(&response)?;
+            }
+            let item = response
+                .get("items")
+                .and_then(Value::as_array)
+                .and_then(|items| items.first())
+                .cloned()
+                .ok_or_else(error::InvalidAssessmentBinding::classified)?;
+            let mut candidate = items.clone();
+            candidate.push(item.clone());
+            *response
+                .get_mut("items")
+                .ok_or_else(error::InvalidAssessmentBinding::classified)? = json!(candidate);
+            // Snapshot and token values can change between windows, but their
+            // serialized lengths are fixed, so the planned bound remains valid.
+            if !items.is_empty() && response_size(&response)? > RESPONSE_BYTES {
+                batches.push(json!({"after": start, "count": items.len()}));
+                if batches.len() == limit {
+                    next = Some(index);
+                    break;
+                }
+                start = index;
+                items.clear();
+            }
+            items.push(item);
+        }
+        if next.is_none() && !items.is_empty() {
+            batches.push(json!({"after": start, "count": items.len()}));
+        }
+        let result = json!({
+            "snapshotDigest": self.snapshot_digest,
+            "readToken": token,
+            "items": batches,
+            "nextOffset": next
+        });
+        check_response(&result)?;
+        Ok(result)
+    }
+
+    /// Delivers one preplanned unit window without repeating its manifest lookup.
+    pub fn read_units(
+        &mut self,
+        reference: &str,
+        after: usize,
+        count: usize,
+        read_token: String,
+        policy: &str,
+        discussion: &str,
+    ) -> Result<Value, AssessmentError> {
+        let units = self.units_for_reference(reference)?;
+        let end = after
+            .checked_add(count)
+            .ok_or_else(error::ReadOffsetOverflow::classified)?;
+        let selected = units
+            .get(after..end)
+            .filter(|selected| !selected.is_empty())
+            .ok_or_else(error::UnknownUnit::classified)?;
+        let items = selected
+            .iter()
+            .map(|unit| BatchReadItem {
+                reference: unit.reference(),
+                offset: 0,
+                limit: unit.total_characters.max(1),
+                content_digest: None,
+            })
+            .collect();
+        self.read_batch(BatchReadRequest { read_token, items }, policy, discussion)
+    }
+
+    /// Resolves a document to its immutable unit order for planning and delivery.
+    fn units_for_reference(
+        &self,
+        reference: &str,
+    ) -> Result<Vec<&crate::units::EvidenceUnit>, AssessmentError> {
+        if reference != "discussion"
+            && !self
+                .source_evidence
+                .keys()
+                .any(|id| reference == format!("{id}:patch"))
+        {
+            return Err(error::InvalidReference::classified());
+        }
+        Ok(self
+            .checkpoints
+            .units
+            .iter()
+            .filter(|unit| unit.reference == reference)
+            .collect())
     }
 
     /// Delivers all requested pages atomically within one response budget.
@@ -223,7 +374,7 @@ impl Assessment {
             {
                 return Err(error::MissingReadContentDigest::classified());
             }
-            let mut page = staged.read_page(
+            let page = staged.read_page(
                 &item.reference,
                 item.offset,
                 item.limit,
@@ -231,14 +382,9 @@ impl Assessment {
                 discussion,
                 true,
             )?;
-            let object = page
-                .as_object_mut()
-                .ok_or_else(error::OversizedResponse::classified)?;
-            object.insert("readToken".into(), json!(staged.read_token()?));
-            object.insert("contentDigest".into(), json!(content_digest));
-            items.push(page);
+            items.push(compact_batch_page(page)?);
         }
-        let mut response = json!({"items": items, "stateToken": staged.state_token()?, "readToken": staged.read_token()?, "progress": staged.progress_with_evidence(policy, discussion)?});
+        let mut response = json!({"snapshotDigest": staged.snapshot_digest, "items": items, "stateToken": staged.state_token()?, "readToken": staged.read_token()?});
         if let Err(error) = check_response(&response) {
             // The batch envelope may require continuation even when the page
             // alone could include its binding.
@@ -265,7 +411,8 @@ impl Assessment {
                 discussion,
                 false,
             )?;
-            response = json!({"items": [page], "stateToken": retry.state_token()?, "readToken": retry.read_token()?, "progress": retry.progress_with_evidence(policy, discussion)?});
+            let page = compact_batch_page(page)?;
+            response = json!({"snapshotDigest": retry.snapshot_digest, "items": [page], "stateToken": retry.state_token()?, "readToken": retry.read_token()?});
             check_response(&response)?;
             staged = retry;
         }
@@ -605,6 +752,28 @@ impl Assessment {
         policy: &str,
         discussion: &str,
     ) -> Result<Value, AssessmentError> {
+        self.summary_page(after, limit, policy, discussion, false)
+    }
+
+    /// Pages assessment work without repeating optional source-side metadata.
+    pub fn compact_summary(
+        &self,
+        after: usize,
+        limit: usize,
+        policy: &str,
+        discussion: &str,
+    ) -> Result<Value, AssessmentError> {
+        self.summary_page(after, limit, policy, discussion, true)
+    }
+
+    fn summary_page(
+        &self,
+        after: usize,
+        limit: usize,
+        policy: &str,
+        discussion: &str,
+        compact: bool,
+    ) -> Result<Value, AssessmentError> {
         let mut result = json!({
             "snapshotDigest": self.snapshot_digest, "inventoryDigest": self.inventory_digest,
             "stateToken": self.state_token()?, "readToken": self.read_token()?,
@@ -637,10 +806,20 @@ impl Assessment {
                 .source_evidence
                 .get(&change.id)
                 .ok_or_else(error::InvalidSourceEvidence::classified)?;
+            // Patch documents retain the complete bindings and source classifications.
+            let side = |name: &str, side: Option<&Side>| {
+                if compact {
+                    json!(side.map(|side| &side.path))
+                } else {
+                    json!(side.map(|side| self.side_summary(&change.id, name, side)))
+                }
+            };
             let change = json!({
                 "id": change.id, "kind": change.kind,
-                "old": change.old.as_ref().map(|side| self.side_summary(&change.id, "old", side)),
-                "new": change.new.as_ref().map(|side| self.side_summary(&change.id, "new", side)),
+                "old": side("old", change.old.as_ref()),
+                "new": side("new", change.new.as_ref()),
+                "oldLineCount": Self::source_line_count(change.old.as_ref()),
+                "newLineCount": Self::source_line_count(change.new.as_ref()),
                 "contentAvailable": change.content_available(),
                 "requiredPatch": self.read_progress(&format!("{}:patch", change.id), &source.document()?),
                 "hunkCount": source.hunks.len(),
@@ -841,8 +1020,52 @@ impl Assessment {
         if limit == 0 {
             return Err(error::ZeroReadLimit::classified());
         }
+        let (reference, _) = self.register_context(request, policy, discussion)?;
+        self.read(&reference, 0, limit, policy, discussion)
+    }
+
+    /// Registers independent context ranges in one atomic transaction.
+    pub fn source_context_batch(
+        &mut self,
+        requests: Vec<ContextRequest>,
+        policy: &str,
+        discussion: &str,
+    ) -> Result<Value, AssessmentError> {
+        if requests.is_empty() {
+            return Err(error::EmptyBatch::classified());
+        }
+        let mut staged: Self = serde_json::from_slice(&serde_json::to_vec(self)?)?;
+        let mut items = Vec::new();
+        for request in requests {
+            let (reference, total) =
+                staged.register_context(request.clone(), policy, discussion)?;
+            items.push(
+                json!({"request": request, "reference": reference, "totalCharacters": total}),
+            );
+        }
+        let result = json!({
+            "snapshotDigest": staged.snapshot_digest,
+            "readToken": staged.read_token()?,
+            "stateToken": staged.state_token()?,
+            "items": items,
+        });
+        if response_size(&result)? > RESPONSE_BYTES {
+            return Err(error::OversizedContextBatch::classified());
+        }
+        *self = staged;
+        Ok(result)
+    }
+
+    /// Registers a range without claiming that the worker has received its text.
+    fn register_context(
+        &mut self,
+        request: ContextRequest,
+        policy: &str,
+        discussion: &str,
+    ) -> Result<(String, usize), AssessmentError> {
         let context = SourceContext::new(&self.inventory, &self.snapshot_digest, request)?;
         let reference = context.reference()?;
+        let total = context.character_count()?;
         if !self.contexts.contains_key(&reference) {
             if self.complete {
                 return Err(error::ImmutableAssessment::classified());
@@ -851,7 +1074,7 @@ impl Assessment {
             self.invalidate_new_context(&context.request.change_id, policy, discussion)?;
             self.contexts.insert(reference.clone(), context);
         }
-        self.read(&reference, 0, limit, policy, discussion)
+        Ok((reference, total))
     }
 
     /// Records a judgment against the bound source comparison.
@@ -1020,6 +1243,14 @@ impl Assessment {
         json!({"reference": reference, "totalCharacters": content.chars().count(),
             "readOffset": self.reads.get(reference),
             "complete": self.require_read(reference, content).is_ok()})
+    }
+
+    /// Bounds source-context requests using the same line definition as capture.
+    fn source_line_count(side: Option<&Side>) -> Option<usize> {
+        match side.map(|side| &side.content) {
+            Some(Content::Text { text }) => Some(text.split_inclusive('\n').count()),
+            _ => None,
+        }
     }
 
     /// Makes absent, opaque, and unread text distinguishable before attempting a read.
@@ -1294,6 +1525,25 @@ fn json_character_bytes(character: char) -> usize {
         character if character.is_control() && character <= '\u{1f}' => 6,
         character => character.len_utf8(),
     }
+}
+
+/// Removes page metadata already available from the enclosing batch or reference.
+fn compact_batch_page(mut page: Value) -> Result<Value, AssessmentError> {
+    let object = page
+        .as_object_mut()
+        .ok_or_else(error::OversizedResponse::classified)?;
+    object.remove("snapshotDigest");
+    object.remove("readToken");
+    if object.get("context").is_some_and(Value::is_null) {
+        object.remove("context");
+    }
+    if object.get("unit").is_some_and(Value::is_null) {
+        object.remove("unit");
+    }
+    if let Some(unit) = object.get_mut("unit").and_then(Value::as_object_mut) {
+        unit.remove("id");
+    }
+    Ok(page)
 }
 
 /// Mutable semantic records require version checks when their pages are continued.

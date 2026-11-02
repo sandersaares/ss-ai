@@ -134,7 +134,9 @@ all inspected candidates.
 
 For each eligible snapshot, run native `prepare` to capture the exact comparison
 and obtain the preflight progress counts. Reserve a worker with `start-worker`
-before dispatch. The reservation persists even if dispatch or the session fails;
+before dispatch. Execute preparation and reservation in one tool call using the
+[combined recipe](commands.md#stage-2-preparation-and-evidence); do not wait for
+another model turn between them. The reservation persists even if dispatch or the session fails;
 never dispatch without it.
 
 Dispatch one fresh subagent per eligible PR with explicit spawn arguments

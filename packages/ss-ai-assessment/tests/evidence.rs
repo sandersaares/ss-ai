@@ -244,6 +244,55 @@ fn escaped_and_unicode_evidence_is_delivered_exactly_with_a_serialized_byte_boun
 }
 
 #[test]
+fn large_context_limit_completes_ordinary_ranges_and_preserves_escaped_continuations() {
+    for (text, complete) in [("a".repeat(8000), true), ("\\".repeat(8000), false)] {
+        let text = format!("{text}\n");
+        let change = change(
+            "file",
+            Content::Text {
+                text: "old\n".into(),
+            },
+            Content::Text { text: text.clone() },
+        );
+        let id = change.id.clone();
+        let mut assessment = assessment(inventory(vec![change]), "discussion");
+        let first = assessment
+            .source_context(
+                ContextRequest {
+                    change_id: id,
+                    side: SourceSide::New,
+                    start_line: NonZeroUsize::MIN,
+                    line_count: NonZeroUsize::MIN,
+                },
+                16_384,
+                "policy",
+                "discussion",
+            )
+            .unwrap();
+        assert_bounded(&first);
+        assert_eq!(first["complete"], complete);
+        let mut delivered = first["text"].as_str().unwrap().to_owned();
+        let reference = first["reference"].as_str().unwrap();
+        while delivered.chars().count() < text.chars().count() {
+            let page = assessment
+                .read(
+                    reference,
+                    delivered.chars().count(),
+                    16_384,
+                    "policy",
+                    "discussion",
+                )
+                .unwrap();
+            assert_bounded(&page);
+            let fragment = page["text"].as_str().unwrap();
+            assert!(!fragment.is_empty());
+            delivered.push_str(fragment);
+        }
+        assert_eq!(delivered, text);
+    }
+}
+
+#[test]
 fn context_pages_fit_long_escaped_bindings_and_preserve_required_delivery() {
     // Escaped path metadata exceeds the ordinary text-page reserve while remaining
     // a valid captured Git path. Escaped text and Unicode exercise byte sizing.
