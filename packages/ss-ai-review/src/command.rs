@@ -105,6 +105,9 @@ enum Autoreapprove {
         after: usize,
         #[arg(long, default_value = "10")]
         limit: NonZeroUsize,
+        /// Omit optional side metadata; required patches retain complete bindings.
+        #[arg(long)]
+        compact: bool,
     },
     /// Page immutable evidence units without their text.
     Units {
@@ -116,6 +119,33 @@ enum Autoreapprove {
         after: usize,
         #[arg(long, default_value = "10")]
         limit: NonZeroUsize,
+        /// Omit ranges from unit metadata; the evidence page retains bindings.
+        #[arg(long)]
+        compact: bool,
+    },
+    /// Plan bounded, independently readable windows of a single evidence document.
+    UnitReadPlan {
+        #[command(flatten)]
+        input: WorkInput,
+        #[arg(long)]
+        reference: String,
+        #[arg(long, default_value = "0")]
+        after: usize,
+        #[arg(long, default_value = "100")]
+        limit: NonZeroUsize,
+    },
+    /// Deliver one planned window of evidence units.
+    ReadUnits {
+        #[command(flatten)]
+        input: WorkInput,
+        #[arg(long)]
+        reference: String,
+        #[arg(long)]
+        after: usize,
+        #[arg(long)]
+        count: NonZeroUsize,
+        #[arg(long)]
+        read_token: String,
     },
     /// Page recorded concern and interaction references.
     Checks {
@@ -527,6 +557,8 @@ fn execute(
             | Autoreapprove::StartWorker(_)
             | Autoreapprove::Assessment { .. }
             | Autoreapprove::Units { .. }
+            | Autoreapprove::UnitReadPlan { .. }
+            | Autoreapprove::ReadUnits { .. }
             | Autoreapprove::Checks { .. }
             | Autoreapprove::Note { .. }
             | Autoreapprove::Resolve { .. }
@@ -682,18 +714,56 @@ fn work(
             input,
             after,
             limit,
-        } => (input, WorkAction::View { after, limit }),
+            compact,
+        } => (
+            input,
+            WorkAction::View {
+                after,
+                limit,
+                compact,
+            },
+        ),
         Autoreapprove::Units {
             input,
             reference,
             after,
             limit,
+            compact,
         } => (
             input,
             WorkAction::Units {
                 reference,
                 after,
                 limit,
+                compact,
+            },
+        ),
+        Autoreapprove::UnitReadPlan {
+            input,
+            reference,
+            after,
+            limit,
+        } => (
+            input,
+            WorkAction::UnitReadPlan {
+                reference,
+                after,
+                limit,
+            },
+        ),
+        Autoreapprove::ReadUnits {
+            input,
+            reference,
+            after,
+            count,
+            read_token,
+        } => (
+            input,
+            WorkAction::ReadUnits {
+                reference,
+                after,
+                count,
+                read_token,
             },
         ),
         Autoreapprove::Checks {

@@ -1350,11 +1350,24 @@ pub(crate) enum WorkAction {
     View {
         after: usize,
         limit: NonZeroUsize,
+        compact: bool,
     },
     Units {
         reference: Option<String>,
         after: usize,
         limit: NonZeroUsize,
+        compact: bool,
+    },
+    UnitReadPlan {
+        reference: String,
+        after: usize,
+        limit: NonZeroUsize,
+    },
+    ReadUnits {
+        reference: String,
+        after: usize,
+        count: NonZeroUsize,
+        read_token: String,
     },
     Checks {
         after: usize,
@@ -1975,6 +1988,60 @@ pub(crate) fn work(
         ));
     }
     let discussion = discussion::render(evidence)?;
+    if let Some(assessment) = &entry.assessment
+        && assessment.digest.is_some()
+    {
+        // Inspecting a completed assessment must not consume the publication reserve.
+        let metadata = match &action {
+            WorkAction::View {
+                after,
+                limit,
+                compact,
+            } => Some(if *compact {
+                assessment.compact_summary(
+                    *after,
+                    limit.get().min(100),
+                    &run.policy.content,
+                    &discussion,
+                )
+            } else {
+                assessment.summary(
+                    *after,
+                    limit.get().min(100),
+                    &run.policy.content,
+                    &discussion,
+                )
+            }),
+            WorkAction::Units {
+                reference,
+                after,
+                limit,
+                compact,
+            } => Some(if *compact {
+                assessment.compact_units_for(reference.as_deref(), *after, limit.get().min(100))
+            } else {
+                assessment.units_for(reference.as_deref(), *after, limit.get().min(100))
+            }),
+            WorkAction::UnitReadPlan {
+                reference,
+                after,
+                limit,
+            } => Some(assessment.unit_read_plan(
+                reference,
+                *after,
+                limit.get().min(100),
+                &run.policy.content,
+                &discussion,
+            )),
+            WorkAction::Checks { after, limit } => {
+                Some(assessment.checks(*after, limit.get().min(100)))
+            }
+            _ => None,
+        };
+        if let Some(metadata) = metadata {
+            return metadata.map_err(Into::into);
+        }
+    }
     if matches!(action, WorkAction::Prepare)
         && entry.assessment.is_none()
         && !run.assessment_budget_enabled
@@ -2038,7 +2105,10 @@ pub(crate) fn work(
         .assessment
         .as_mut()
         .ok_or_else(|| fail("invalidState", "Prepare the source inventory first"))?;
-    let read_batch = matches!(action, WorkAction::ReadBatch { .. });
+    let read_batch = matches!(
+        action,
+        WorkAction::ReadBatch { .. } | WorkAction::ReadUnits { .. }
+    );
     let evidence_read = read_batch
         || matches!(
             action,
@@ -2050,17 +2120,63 @@ pub(crate) fn work(
         WorkAction::StartWorker => {
             return Err(fail("invalidState", "Worker reservation was not handled"));
         }
-        WorkAction::View { after, limit } => assessment.summary(
+        WorkAction::View {
+            after,
+            limit,
+            compact,
+        } => {
+            if compact {
+                assessment.compact_summary(
+                    after,
+                    limit.get().min(100),
+                    &run.policy.content,
+                    &discussion,
+                )?
+            } else {
+                assessment.summary(
+                    after,
+                    limit.get().min(100),
+                    &run.policy.content,
+                    &discussion,
+                )?
+            }
+        }
+        WorkAction::Units {
+            reference,
+            after,
+            limit,
+            compact,
+        } => {
+            if compact {
+                assessment.compact_units_for(reference.as_deref(), after, limit.get().min(100))?
+            } else {
+                assessment.units_for(reference.as_deref(), after, limit.get().min(100))?
+            }
+        }
+        WorkAction::UnitReadPlan {
+            reference,
+            after,
+            limit,
+        } => assessment.unit_read_plan(
+            &reference,
             after,
             limit.get().min(100),
             &run.policy.content,
             &discussion,
         )?,
-        WorkAction::Units {
+        WorkAction::ReadUnits {
             reference,
             after,
-            limit,
-        } => assessment.units_for(reference.as_deref(), after, limit.get().min(100))?,
+            count,
+            read_token,
+        } => assessment.read_units(
+            &reference,
+            after,
+            count.get(),
+            read_token,
+            &run.policy.content,
+            &discussion,
+        )?,
         WorkAction::Checks { after, limit } => assessment.checks(after, limit.get().min(100))?,
         WorkAction::Note {
             id,

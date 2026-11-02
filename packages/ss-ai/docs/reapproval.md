@@ -139,6 +139,11 @@ leaves explicit unfinished work. Legacy assessments cannot continue; a fresh
 assessment is required. Earlier run schemas require a fresh run and assessment;
 existing files are left untouched.
 
+After completion, metadata inspection does not consume the assessment budget.
+Publication still checks the overall deadline and current provider evidence.
+Registering source context changes the local read token, not the snapshot; the
+same worker can obtain a new token and retry undelivered pages.
+
 ## Material evidence
 
 Freshness checks compare potentially material changes, not complete provider JSON.

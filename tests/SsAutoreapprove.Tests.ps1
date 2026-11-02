@@ -90,10 +90,28 @@ Describe 'Automatic reapproval repository scope instructions' {
         $assignment | Should -Match 'Do not write a note per unit'
         $assignment | Should -Match 'independently reason about the combined\s+change'
         $assignment | Should -Match 'do not derive it mechanically from individual labels'
+        $assignment | Should -Match 'Judge coherent groups as their evidence becomes available'
+        $assignment | Should -Match 'Record checks for concrete unresolved concerns or interactions'
+        $assignment | Should -Match 'independently addressable\s+unit references'
+        $assignment | Should -Match 'unit-read-plan --reference discussion'
+        $assignment | Should -Match 'Do not fetch the unit\s+manifest again for each window'
+        $script:Recipes | Should -Match 'including escaped text and metadata'
+        $assignment | Should -Match 'Issue independent batches together'
         $assignment | Should -Match 'Retain the returned change IDs and their evidence references'
         $assignment | Should -Match 'Follow the returned `nextOffset` rather than advancing by a fixed page size'
         $assignment | Should -Match 'Leave time within the assessment budget for this reasoning and completion'
         $script:Recipes | Should -Match 'commits the entire batch atomically'
+    }
+
+    It 'recovers local read-token changes without replacing the worker' {
+        $assignment = Get-Content -LiteralPath (Join-Path $skill 'assessment.md') -Raw
+        $assignment | Should -Match 'Start with `assessment`\s+using `--compact --limit 100`'
+        $assignment | Should -Match 'new `readToken` returned by `source-context`'
+        $assignment | Should -Match 'oldLineCount'
+        $assignment | Should -Match 'Do not\s+request lines outside the captured side'
+        $assignment | Should -Match 'obtain the new token from `assessment`\s+and retry the undelivered references at the same offsets in this worker'
+        $assignment | Should -Match 'Do not\s+restart the worker or refresh the snapshot'
+        $script:Recipes | Should -Match 'This is not snapshot staleness'
     }
 
     It 'keeps output and context limits separate from semantic uncertainty' {

@@ -265,6 +265,9 @@ fn read_token_allows_independent_batches_and_rejects_stale_contexts() {
         .record(&id, judgment(&id), None, "policy", "discussion")
         .unwrap();
     assert_eq!(assessment.read_token().unwrap(), read_token);
+    let plan = assessment
+        .unit_read_plan("discussion", 0, 100, "policy", "discussion")
+        .unwrap();
     let page = assessment
         .source_context(
             ContextRequest {
@@ -287,6 +290,41 @@ fn read_token_allows_independent_batches_and_rejects_stale_contexts() {
             .is_err()
     );
     assert_eq!(assessment.state_token().unwrap(), state);
+    let count = usize::try_from(plan["items"][0]["count"].as_u64().unwrap()).unwrap();
+    assert!(
+        assessment
+            .read_units(
+                "discussion",
+                0,
+                count,
+                read_token.clone(),
+                "policy",
+                "discussion"
+            )
+            .is_err()
+    );
+    assert_eq!(assessment.state_token().unwrap(), state);
+    assessment
+        .read_units(
+            "discussion",
+            0,
+            count,
+            page["readToken"].as_str().unwrap().into(),
+            "policy",
+            "discussion",
+        )
+        .unwrap();
+    let retried = assessment
+        .read_batch(
+            BatchReadRequest {
+                read_token: page["readToken"].as_str().unwrap().into(),
+                items: vec![read_item("policy", 1)],
+            },
+            "policy",
+            "discussion",
+        )
+        .unwrap();
+    assert_eq!(retried["items"][0]["text"], "p");
     let unavailable_offset = BatchReadRequest {
         read_token: assessment.read_token().unwrap(),
         items: vec![BatchReadItem {
@@ -301,7 +339,214 @@ fn read_token_allows_independent_batches_and_rejects_stale_contexts() {
             .read_batch(unavailable_offset, "policy", "discussion")
             .is_err()
     );
-    assert_eq!(assessment.state_token().unwrap(), state);
+    assert_eq!(
+        assessment.state_token().unwrap(),
+        retried["stateToken"].as_str().unwrap()
+    );
+}
+
+#[test]
+fn incident_sized_inventories_need_fewer_pages_at_the_supported_limit() {
+    // The path counts mirror the reported incidents without retaining their source.
+    for count in [37, 50] {
+        let assessment = fixture("discussion", count);
+        let pages = |limit, compact| {
+            let mut offset = 0;
+            let mut ids = Vec::new();
+            let mut calls = 0;
+            loop {
+                let page = if compact {
+                    assessment.compact_summary(offset, limit, "policy", "discussion")
+                } else {
+                    assessment.summary(offset, limit, "policy", "discussion")
+                }
+                .unwrap();
+                calls += 1;
+                ids.extend(
+                    page["changes"]
+                        .as_array()
+                        .unwrap()
+                        .iter()
+                        .map(|change| change["id"].as_str().unwrap().to_owned()),
+                );
+                match page["nextOffset"].as_u64() {
+                    Some(next) => offset = usize::try_from(next).unwrap(),
+                    None => break,
+                }
+            }
+            (calls, ids)
+        };
+        let baseline = pages(10, false);
+        let batched = pages(100, true);
+        assert_eq!(baseline.1.len(), count);
+        assert_eq!(batched.1, baseline.1);
+        assert!(batched.0 < baseline.0);
+    }
+}
+
+#[test]
+fn compact_inventory_preserves_required_work_and_path_identity() {
+    let assessment = fixture("discussion", 1);
+    let full = assessment.summary(0, 100, "policy", "discussion").unwrap();
+    let compact = assessment
+        .compact_summary(0, 100, "policy", "discussion")
+        .unwrap();
+    for key in ["snapshotDigest", "readToken", "stateToken", "progress"] {
+        assert_eq!(compact[key], full[key]);
+    }
+    let full_change = &full["changes"][0];
+    let compact_change = &compact["changes"][0];
+    for key in [
+        "id",
+        "kind",
+        "oldLineCount",
+        "newLineCount",
+        "contentAvailable",
+        "requiredPatch",
+        "hunkCount",
+        "requestedContextCount",
+        "nextContextReference",
+        "decision",
+        "decisionDigest",
+    ] {
+        assert_eq!(compact_change[key], full_change[key]);
+    }
+    assert_eq!(compact_change["old"], full_change["old"]["path"]);
+    assert_eq!(compact_change["new"], full_change["new"]["path"]);
+    assert_eq!(compact_change["oldLineCount"], 1);
+    assert_eq!(compact_change["newLineCount"], 1);
+}
+
+#[test]
+fn compact_units_allow_independent_discussion_delivery() {
+    let discussion = json!({
+        "platform": "gitHub",
+        "reviewComments": (0..4).map(|id| json!({
+            "id": id + 1,
+            "body": format!("objection {id}"),
+            "path": format!("file{id}"),
+        })).collect::<Vec<_>>(),
+    })
+    .to_string();
+    let mut assessment = fixture(&discussion, 0);
+    let full = assessment.units_for(Some("discussion"), 0, 100).unwrap();
+    let compact = assessment
+        .compact_units_for(Some("discussion"), 0, 100)
+        .unwrap();
+    let full = full["items"].as_array().unwrap();
+    let compact = compact["items"].as_array().unwrap();
+    assert!(compact.len() > 1);
+    assert_eq!(compact.len(), full.len());
+    for (item, original) in compact.iter().zip(full) {
+        assert_eq!(item["reference"], original["reference"]);
+        assert_eq!(item["bindingReference"], original["bindingReference"]);
+        assert_eq!(item["unit"]["id"], original["unit"]["id"]);
+        assert_eq!(
+            item["unit"]["totalCharacters"],
+            original["unit"]["totalCharacters"]
+        );
+    }
+    // Independent unit receipts permit delivery in any order.
+    for item in compact.iter().rev() {
+        read(
+            &mut assessment,
+            item["reference"].as_str().unwrap(),
+            "policy",
+            &discussion,
+        );
+        read(
+            &mut assessment,
+            item["bindingReference"].as_str().unwrap(),
+            "policy",
+            &discussion,
+        );
+    }
+    let summary = assessment.summary(0, 100, "policy", &discussion).unwrap();
+    assert_eq!(summary["documentReads"][1]["complete"], true);
+    assessment
+        .validate("snapshot", "policy", "policy", &discussion)
+        .unwrap();
+}
+
+#[test]
+fn planned_discussion_pages_are_bounded_and_independently_readable() {
+    let discussion = json!({
+        "platform": "gitHub",
+        "reviewComments": (0..60).map(|id| json!({
+            "id": id + 1,
+            "body": format!("{id} {}", "\\\"\nλ".repeat(90)),
+            "path": format!("file{id}"),
+        })).collect::<Vec<_>>(),
+    })
+    .to_string();
+    let mut assessment = fixture(&discussion, 0);
+    let original_state = assessment.state_token().unwrap();
+    let mut plans = Vec::new();
+    let mut after = 0;
+    loop {
+        let plan = assessment
+            .unit_read_plan("discussion", after, 2, "policy", &discussion)
+            .unwrap();
+        assert_eq!(assessment.state_token().unwrap(), original_state);
+        plans.extend(plan["items"].as_array().unwrap().iter().cloned());
+        match plan["nextOffset"].as_u64() {
+            Some(next) => after = usize::try_from(next).unwrap(),
+            None => break,
+        }
+    }
+    assert!(plans.len() > 2);
+    // One plan plus its windows must require fewer reads than one call per record.
+    assert!(plans.len() + 1 < 60);
+    let mut manifest_offset = 0;
+    let mut unit_count = 0;
+    loop {
+        let page = assessment
+            .compact_units_for(Some("discussion"), manifest_offset, 100)
+            .unwrap();
+        unit_count += page["items"].as_array().unwrap().len();
+        match page["nextOffset"].as_u64() {
+            Some(next) => manifest_offset = usize::try_from(next).unwrap(),
+            None => break,
+        }
+    }
+    assert_eq!(
+        plans
+            .iter()
+            .map(|window| usize::try_from(window["count"].as_u64().unwrap()).unwrap())
+            .sum::<usize>(),
+        unit_count
+    );
+    let token = assessment.read_token().unwrap();
+    // Independent planned windows must work in reverse order as well as forward order.
+    for window in plans.iter().rev() {
+        let page = assessment
+            .read_units(
+                "discussion",
+                usize::try_from(window["after"].as_u64().unwrap()).unwrap(),
+                usize::try_from(window["count"].as_u64().unwrap()).unwrap(),
+                token.clone(),
+                "policy",
+                &discussion,
+            )
+            .unwrap();
+        assert!(serde_json::to_vec_pretty(&page).unwrap().len() < 16_384);
+        for item in page["items"].as_array().unwrap() {
+            assert_eq!(item["complete"], true);
+            if item["unit"]["bindings"].is_null() {
+                read(
+                    &mut assessment,
+                    item["unit"]["bindingReference"].as_str().unwrap(),
+                    "policy",
+                    &discussion,
+                );
+            }
+        }
+    }
+    let summary = assessment.summary(0, 100, "policy", &discussion).unwrap();
+    assert_eq!(summary["documentReads"][1]["complete"], true);
+    assessment
+        .validate("snapshot", "policy", "policy", &discussion)
+        .unwrap();
 }
 
 #[test]

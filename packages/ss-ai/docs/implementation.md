@@ -64,6 +64,16 @@ records through bounded digest-based binding references. Exact metadata remains
 in the covered original ranges rather than being repeated on every fragment.
 Workers use the stable parent to reacquire related evidence. Unit bounds reserve regular worker
 context for policy, exact follow-up evidence, and reasoning.
+Compact unit listings retain the references and sizes needed to schedule reads
+without repeating range metadata. Units have independent receipts, so workers
+can request their pages in parallel while the journal serializes updates. Complete
+document coverage still requires each unit and its bindings.
+
+The unit read plan groups independently addressable windows using the serialized
+size of each individual evidence response, including escaping and bindings.
+Summing individual response sizes reserves their repeated envelopes, so progress
+changes can fit without requiring a manifest request before every window. Planning
+simulates delivery on a private copy and never records receipts.
 
 `checkpoint.rs` owns discussion observations, explicit concern and interaction
 records, evidence-backed dispositions, and dependency digests. The direct protocol

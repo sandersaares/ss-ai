@@ -16,7 +16,8 @@ the orchestrator owns refresh and publication.
 
 # Stage 1: prepare and assess evidence
 
-Prepare the snapshot and retain its `readToken` and `stateToken`. Follow every inventory page.
+The orchestrator has already prepared the snapshot. Start with `assessment`
+using `--compact --limit 100`, and retain its `readToken` and `stateToken`. Follow every inventory page.
 Retain the returned change IDs and their evidence references so the continuing
 worker does not need to traverse the inventory again after recording judgments.
 Follow the returned `nextOffset` rather than advancing by a fixed page size.
@@ -28,7 +29,10 @@ For `assessmentProtocol: directV1`, read the complete captured policy,
 discussion, and each required patch. Use bounded `read-batch` requests with
 independently addressable references and offsets. Keep each returned page in
 context; if a response does not fit, retry a smaller batch from the same
-offsets. Continue every page through its returned `nextOffset`. A receipt
+offsets. Group small documents using their reported character counts, leaving
+room for JSON metadata and escaping within the response limit; request enough
+characters to finish each document instead of using small fixed fragments.
+Continue every page through its returned `nextOffset`. A receipt
 proves delivery, not comprehension. Work in batches sized to the actual
 available context; do not use a fixed number of fragments as a handoff trigger.
 Keep separately bounded responses separate in the host tool output; combining
@@ -40,14 +44,36 @@ Do not write a note per unit. Full captured `:old` and `:new` sides are optional
 context. When the patch or discussion does not explain relevant behavior,
 interfaces, invariants, objections, or combined effects, register and read
 the necessary exact captured-side `source-context`. Every registered range is
-required evidence. Do not substitute historical excerpts or arbitrary files
-for endpoint source.
+required evidence. Bound each requested range by the inventory's `oldLineCount`
+or `newLineCount`; a null count means that side has no readable text. Do not
+request lines outside the captured side. Do not substitute historical excerpts
+or arbitrary files for endpoint source.
+
+For a long discussion, call `unit-read-plan --reference discussion` and follow
+its `nextOffset`. It plans bounded responses using the actual escaped evidence
+and returns independent unit windows. Read each window with `read-units`, using
+the plan's `readToken`, `after`, and `count`. Issue independent batches together
+when the host permits, keeping their outputs separate. Do not fetch the unit
+manifest again for each window. Each unit's bindings arrive inline or through
+its returned binding reference; read any missing binding and continue any partial
+unit using its independently addressable unit references. Complete unit coverage
+counts as delivery of the original discussion. Retain the bindings and exact
+text so comments, replies, and excerpts remain distinguishable. Do not register
+source context concurrently with batches using the old read token.
+
+Registering context changes the read token without changing the snapshot. Use
+the new `readToken` returned by `source-context` for subsequent batches. If a
+batch reports that its read token changed, obtain the new token from `assessment`
+and retry the undelivered references at the same offsets in this worker. Do not
+restart the worker or refresh the snapshot for this local token change.
 
 Read all discussion bodies and shared historical excerpts, retaining the
 identity, path, revision, and reply relationships of each objection. Resolved,
 outdated, repeated, and agent-authored discussion is not automatically
 irrelevant. Record one `discussion` observation covering material objections,
 interfaces, concerns, and interactions, citing exact evidence.
+Reading discussion can proceed alongside the path judgments in stage 2; it
+does not need to finish before those judgments begin.
 
 # Stage 2: judge and complete
 
@@ -57,9 +83,15 @@ multiple distinct judgments atomically, each with its own exact evidence and
 conditional previous digest. Explain behavioral effects, relevant interfaces
 and invariants, and any material concern or cross-change interaction. Never
 infer significance from file size, filename, authorship, or a receipt.
+Judge coherent groups as their evidence becomes available rather than waiting
+for every other path or the complete discussion. If later evidence changes a
+judgment, replace it using its current digest. Keep the same worker's
+understanding for the independent cumulative assessment.
 
-List explicit checks, inspect each concern or interaction and its originating
-record, and record an evidence-backed resolution. Significant or uncertain
+Record checks for concrete unresolved concerns or interactions, not generic
+reminders to consider the combined change. Inspect each check and its originating
+record, and record an evidence-backed resolution as soon as its evidence is
+available, without waiting for unrelated paths. Significant or uncertain
 changes and check dispositions prevent renewal even when the cumulative label
 is favorable. Replacing evidence or judgments invalidates their dependent
 records; inspect fresh progress and rebuild only what the native utility marks

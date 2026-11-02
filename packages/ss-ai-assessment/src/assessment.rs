@@ -176,6 +176,114 @@ impl Assessment {
         ))
     }
 
+    /// Plans independently readable unit batches using their serialized response sizes.
+    pub fn unit_read_plan(
+        &self,
+        reference: &str,
+        after: usize,
+        limit: usize,
+        policy: &str,
+        discussion: &str,
+    ) -> Result<Value, AssessmentError> {
+        let units = self.units_for_reference(reference)?;
+        let mut staged: Self = serde_json::from_slice(&serde_json::to_vec(self)?)?;
+        let token = self.read_token()?;
+        let mut batches = Vec::new();
+        let mut start = after;
+        let mut size = 0_usize;
+        let mut count = 0_usize;
+        let mut next = None;
+        for (index, unit) in units.iter().enumerate().skip(after) {
+            let request = BatchReadRequest {
+                read_token: token.clone(),
+                items: vec![BatchReadItem {
+                    reference: unit.reference(),
+                    offset: 0,
+                    limit: unit.total_characters.max(1),
+                    content_digest: None,
+                }],
+            };
+            let response = staged.read_batch(request, policy, discussion)?;
+            let bytes = response_size(&response)?;
+            // Each individual envelope overestimates its contribution to a combined
+            // response, leaving room for progress changes between independent reads.
+            if count > 0 && size.saturating_add(bytes) > RESPONSE_BYTES {
+                batches.push(json!({"after": start, "count": count}));
+                if batches.len() == limit {
+                    next = Some(index);
+                    break;
+                }
+                start = index;
+                size = 0;
+                count = 0;
+            }
+            size = size.saturating_add(bytes);
+            count = count.saturating_add(1);
+        }
+        if next.is_none() && count > 0 {
+            batches.push(json!({"after": start, "count": count}));
+        }
+        let result = json!({
+            "snapshotDigest": self.snapshot_digest,
+            "readToken": token,
+            "items": batches,
+            "nextOffset": next
+        });
+        check_response(&result)?;
+        Ok(result)
+    }
+
+    /// Delivers one preplanned unit window without repeating its manifest lookup.
+    pub fn read_units(
+        &mut self,
+        reference: &str,
+        after: usize,
+        count: usize,
+        read_token: String,
+        policy: &str,
+        discussion: &str,
+    ) -> Result<Value, AssessmentError> {
+        let units = self.units_for_reference(reference)?;
+        let end = after
+            .checked_add(count)
+            .ok_or_else(error::ReadOffsetOverflow::classified)?;
+        let selected = units
+            .get(after..end)
+            .filter(|selected| !selected.is_empty())
+            .ok_or_else(error::UnknownUnit::classified)?;
+        let items = selected
+            .iter()
+            .map(|unit| BatchReadItem {
+                reference: unit.reference(),
+                offset: 0,
+                limit: unit.total_characters.max(1),
+                content_digest: None,
+            })
+            .collect();
+        self.read_batch(BatchReadRequest { read_token, items }, policy, discussion)
+    }
+
+    /// Resolves a document to its immutable unit order for planning and delivery.
+    fn units_for_reference(
+        &self,
+        reference: &str,
+    ) -> Result<Vec<&crate::units::EvidenceUnit>, AssessmentError> {
+        if reference != "discussion"
+            && !self
+                .source_evidence
+                .keys()
+                .any(|id| reference == format!("{id}:patch"))
+        {
+            return Err(error::InvalidReference::classified());
+        }
+        Ok(self
+            .checkpoints
+            .units
+            .iter()
+            .filter(|unit| unit.reference == reference)
+            .collect())
+    }
+
     /// Delivers all requested pages atomically within one response budget.
     #[expect(
         clippy::needless_pass_by_value,
@@ -605,6 +713,28 @@ impl Assessment {
         policy: &str,
         discussion: &str,
     ) -> Result<Value, AssessmentError> {
+        self.summary_page(after, limit, policy, discussion, false)
+    }
+
+    /// Pages assessment work without repeating optional source-side metadata.
+    pub fn compact_summary(
+        &self,
+        after: usize,
+        limit: usize,
+        policy: &str,
+        discussion: &str,
+    ) -> Result<Value, AssessmentError> {
+        self.summary_page(after, limit, policy, discussion, true)
+    }
+
+    fn summary_page(
+        &self,
+        after: usize,
+        limit: usize,
+        policy: &str,
+        discussion: &str,
+        compact: bool,
+    ) -> Result<Value, AssessmentError> {
         let mut result = json!({
             "snapshotDigest": self.snapshot_digest, "inventoryDigest": self.inventory_digest,
             "stateToken": self.state_token()?, "readToken": self.read_token()?,
@@ -637,10 +767,20 @@ impl Assessment {
                 .source_evidence
                 .get(&change.id)
                 .ok_or_else(error::InvalidSourceEvidence::classified)?;
+            // Patch documents retain the complete bindings and source classifications.
+            let side = |name: &str, side: Option<&Side>| {
+                if compact {
+                    json!(side.map(|side| &side.path))
+                } else {
+                    json!(side.map(|side| self.side_summary(&change.id, name, side)))
+                }
+            };
             let change = json!({
                 "id": change.id, "kind": change.kind,
-                "old": change.old.as_ref().map(|side| self.side_summary(&change.id, "old", side)),
-                "new": change.new.as_ref().map(|side| self.side_summary(&change.id, "new", side)),
+                "old": side("old", change.old.as_ref()),
+                "new": side("new", change.new.as_ref()),
+                "oldLineCount": Self::source_line_count(change.old.as_ref()),
+                "newLineCount": Self::source_line_count(change.new.as_ref()),
                 "contentAvailable": change.content_available(),
                 "requiredPatch": self.read_progress(&format!("{}:patch", change.id), &source.document()?),
                 "hunkCount": source.hunks.len(),
@@ -1020,6 +1160,14 @@ impl Assessment {
         json!({"reference": reference, "totalCharacters": content.chars().count(),
             "readOffset": self.reads.get(reference),
             "complete": self.require_read(reference, content).is_ok()})
+    }
+
+    /// Bounds source-context requests using the same line definition as capture.
+    fn source_line_count(side: Option<&Side>) -> Option<usize> {
+        match side.map(|side| &side.content) {
+            Some(Content::Text { text }) => Some(text.split_inclusive('\n').count()),
+            _ => None,
+        }
     }
 
     /// Makes absent, opaque, and unread text distinguishable before attempting a read.

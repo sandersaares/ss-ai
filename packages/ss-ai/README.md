@@ -297,7 +297,8 @@ indeterminate decisions; obtain fresh evidence in a new run.
 ## Source assessment and publication
 
 The installed `ss-autoreapprove` command recipes cover `prepare`, `start-worker`,
-`assessment`, `read`, `read-batch`, `source-context`, `units`, `note`, `checks`,
+`assessment`, `read`, `read-batch`, `source-context`, `units`, `unit-read-plan`,
+`read-units`, `note`, `checks`,
 `resolve`, `checkpoint`, `judge`, `judge-batch`, `complete`, `publish`, and
 `notify`. Each requires the absolute
 `--state-path`, positive `--pull-request-id`, and exact `--snapshot-digest`.
@@ -306,7 +307,11 @@ provider-approved/current source trees, including merge-derived content and remo
 It does not read historical target tips, execute source, or initialize submodules.
 
 `assessment` accepts nonnegative `--after` and positive `--limit` (default 10,
-maximum output 100 changes). `read` takes `--reference`, nonnegative `--offset`
+maximum output 100 changes). With `--compact`, each change's `old` and `new`
+are paths or null; the required patch still contains complete side bindings and
+content classifications. Each change includes `oldLineCount` and `newLineCount`
+for readable text sides, or null when the side has no readable text. Use these
+counts to select `source-context` line ranges. `read` takes `--reference`, nonnegative `--offset`
 and positive `--limit` (default 4,096, at most 16,384 characters).
 Metadata and evidence pages fit within 16 KiB of pretty-printed UTF-8 JSON
 including the trailing newline. Follow `nextOffset`; serialized byte limits
@@ -317,7 +322,7 @@ or replay an already read region. References are `policy`, `discussion`, and
 `CHANGE_ID:patch`, `CHANGE_ID:old` / `CHANGE_ID:new` for present source sides,
 and stable context references returned by `source-context`.
 Evidence pages include `totalCharacters`. Metadata includes `documentReads`
-for policy/discussion and `content` on each source side; text content exposes
+for policy/discussion and, without `--compact`, `content` on each source side; text content exposes
 `progress`. Progress contains `reference`, `totalCharacters`, nullable
 `readOffset`, and `complete`. A null offset means no read, including for empty
 text. `pendingChangeCount` and nullable `nextChangeOffset` identify missing
@@ -376,6 +381,8 @@ policy records remain in native authority evidence, not this discussion document
 `discussionDigest` binds the document's exact UTF-8 bytes.
 
 `units` accepts `--after`, `--limit`, and optional `--reference discussion|CHANGE_ID:patch`.
+With `--compact`, each item omits its range metadata but retains the unit ID,
+character count, evidence and binding references, and read offset.
 It returns bounded `items` and `nextOffset` over the selected immutable unit
 list. Each item supplies its `unit`, raw `reference`, `bindingReference`, and
 nullable `readOffset`.
@@ -388,6 +395,15 @@ and digests. Exact identities, locations, and excerpt links remain in the origin
 unit text. Read other units with the same parent and reacquire original evidence
 as needed to interpret a fragment.
 Complete unit and binding coverage also satisfies the original document's required read.
+
+`unit-read-plan` accepts `--reference discussion|CHANGE_ID:patch`, `--after`,
+and `--limit`. Its `items` contain independent unit windows with `after` and
+`count`, and its `nextOffset` continues the plan. It returns a `readToken`
+without recording evidence delivery. `read-units` accepts the same reference,
+one window's `--after` and `--count`, and the plan's `--read-token`; it returns
+the same bounded evidence pages and receipts as `read-batch`. Windows may be
+read in any order. Continue partial unit text and missing binding metadata with
+their returned references.
 
 `note` takes `--unit-id`, `--observations`, `--interfaces`, repeated `--evidence`,
 optional repeated `--concern` and `--interaction`, and optional
