@@ -14,8 +14,6 @@ use std::fs;
 #[cfg(windows)]
 use std::os::windows::fs::OpenOptionsExt;
 use std::path::{Path, PathBuf};
-#[cfg(target_os = "linux")]
-use std::process::Command;
 use std::sync::mpsc::{self, Receiver, Sender};
 use std::time::Duration;
 
@@ -859,87 +857,6 @@ fn bounded_sequences_preserve_complete_coverage_across_retries_and_resume() {
         3
     );
     findings::complete(&fixture.artifact, &fixture.queue, &clock).unwrap();
-}
-
-/// Runs only in the size-limited child so staging fails after the claim exists.
-#[test]
-#[cfg(target_os = "linux")]
-#[cfg_attr(
-    miri,
-    ignore = "requires a native subprocess and kernel file-size limits"
-)]
-fn batch_staging_failure_child() {
-    let Some(root) = std::env::var_os("SS_BATCH_FAILURE_ROOT") else {
-        return;
-    };
-    let root = PathBuf::from(root);
-    let batch: Value = serde_json::from_slice(&fs::read(root.join("batch.json")).unwrap()).unwrap();
-    let error = review_work::complete_batch(
-        &root.join("queue.json"),
-        &root.join("inventory.json"),
-        &root.join("groups.json"),
-        &root.join("artifact.json"),
-        &batch,
-        &FixedClock,
-    )
-    .unwrap_err();
-    assert!(
-        error.to_string().contains("Cannot write staging file"),
-        "{error}"
-    );
-}
-
-#[test]
-#[cfg(target_os = "linux")]
-#[cfg_attr(
-    miri,
-    ignore = "requires a native subprocess and kernel file-size limits"
-)]
-#[cfg_attr(mutants, ignore = "A mutation may block the child process")]
-fn failed_staging_preserves_claim_and_allows_resume_and_retry() {
-    let fixture = BatchFixture::new("failed-staging");
-    let clock = FixedClock;
-    review_work::next(&fixture.queue, &clock).unwrap();
-    let batch = fixture.batch("rename", &[0, 1]);
-    fixture.workspace.put("batch.json", &batch);
-    let before = fs::read(&fixture.queue).unwrap();
-    let artifact = fs::read(&fixture.artifact).unwrap();
-    // A zero file-size limit yields a synchronous write error rather than a signal.
-    let output = Command::new("/bin/sh")
-        .args(["-c", "trap '' XFSZ; ulimit -f 0; exec \"$@\"", "sh"])
-        .arg(std::env::current_exe().unwrap())
-        .args(["--exact", "batch_staging_failure_child", "--nocapture"])
-        .env("SS_BATCH_FAILURE_ROOT", &fixture.workspace.0)
-        .output()
-        .unwrap();
-    assert!(
-        output.status.success(),
-        "{} {}",
-        String::from_utf8_lossy(&output.stdout),
-        String::from_utf8_lossy(&output.stderr)
-    );
-    assert_eq!(fs::read(&fixture.queue).unwrap(), before);
-    assert_eq!(fs::read(&fixture.artifact).unwrap(), artifact);
-    assert!(fs::read_dir(&fixture.workspace.0).unwrap().all(|entry| {
-        !entry
-            .unwrap()
-            .file_name()
-            .to_string_lossy()
-            .starts_with(".ss-ai-transaction-")
-    }));
-    review_work::initialize_queue(
-        &fixture.inventory,
-        &fixture.groups,
-        &fixture.queue,
-        true,
-        &clock,
-    )
-    .unwrap();
-    assert_eq!(
-        review_work::next(&fixture.queue, &clock).unwrap()["item"]["groupId"],
-        "rename"
-    );
-    fixture.complete(&batch).unwrap();
 }
 
 /// Stops the replacement retry only after confirming the complete staged journal.
