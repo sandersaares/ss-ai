@@ -1397,6 +1397,7 @@ pub(crate) enum WorkAction {
     },
     ReadNext {
         read_token: String,
+        changes: Vec<String>,
     },
     Conclude {
         request: GroupedConclusions,
@@ -2249,9 +2250,10 @@ pub(crate) fn work(
         WorkAction::JudgeBatch { request } => {
             assessment.record_batch(request, &run.policy.content, &discussion)?
         }
-        WorkAction::ReadNext { read_token } => {
-            assessment.read_next(&read_token, &run.policy.content, &discussion)?
-        }
+        WorkAction::ReadNext {
+            read_token,
+            changes,
+        } => assessment.read_next_for(&read_token, &changes, &run.policy.content, &discussion)?,
         WorkAction::Conclude { request } => {
             assessment.conclude(request, &run.policy.content, &discussion)?
         }

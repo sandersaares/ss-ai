@@ -202,6 +202,7 @@ Transport fragment counts describe the manifest, not unfinished unit work.
 ```powershell
 ss-ai autoreapprove units --state-path "{{RUN}}" --pull-request-id "{{PR}}" --snapshot-digest "{{SNAPSHOT}}" --after "{{AFTER}}" --limit "{{LIMIT}}" --reference "{{DOCUMENT}}"
 ss-ai autoreapprove read-next --state-path "{{RUN}}" --pull-request-id "{{PR}}" --snapshot-digest "{{SNAPSHOT}}" --read-token "{{READ_TOKEN}}"
+ss-ai autoreapprove read-next --state-path "{{RUN}}" --pull-request-id "{{PR}}" --snapshot-digest "{{SNAPSHOT}}" --read-token "{{READ_TOKEN}}" --change-id "{{CHANGE}}"
 ss-ai autoreapprove checkpoint --state-path "{{RUN}}" --pull-request-id "{{PR}}" --snapshot-digest "{{SNAPSHOT}}"
 ```
 
@@ -215,6 +216,9 @@ Other placeholders retain their definitions above/below. Follow each returned
 `nextOffset`. Unit metadata gives exact ranges and bindings, but direct
 assessments need no unit or discussion notes. `read-next` derives bounded batches
 and continuation offsets for policy, discussion, patches, and requested context.
+Repeat `--change-id` to deliver policy and the selected changes' patches and
+context without waiting for unrelated documents. An empty selected batch means
+that selection is delivered, not that the whole assessment has coverage.
 Read every returned page; complete delivery does not prove comprehension.
 Replacements invalidate dependent records. `checkpoint`
 is for a context-pressure handoff after new semantic work, not for each batch.

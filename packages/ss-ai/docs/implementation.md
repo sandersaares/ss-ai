@@ -83,7 +83,9 @@ patches and requested context, and derives conditional replacement digests.
 This keeps evidence bookkeeping outside agent-authored prose without weakening
 per-change validation. `read-next` stages required-document delivery using actual
 serialized response sizes and current contiguous receipts; only the fitting batch
-commits. A changed local token fails without receipts and requires no new snapshot.
+commits. Optional change selection filters patches and their requested context
+before batching, so targeted assessment does not require worker-managed offsets.
+A changed local token fails without receipts and requires no new snapshot.
 
 `checkpoint.rs` owns immutable transport units and dependency digests.
 Discussion notes and explicit checks are optional low-level records, not worker

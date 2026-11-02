@@ -114,8 +114,9 @@ bindings. Sharing excerpt text never merges its referencing threads. The direct
 protocol delivers independently addressable pages in bounded atomic batches.
 `read-next` derives grouping and contiguous offsets from native receipts and
 actual serialized response sizes. Its change references match the short
-snapshot-scoped references in the inventory. Transport fragments need no
-semantic notes.
+snapshot-scoped references in the inventory. A worker can select changes for
+targeted delivery without reading unrelated documents; native code still owns
+their continuation offsets. Transport fragments need no semantic notes.
 Workers submit concise grouped conclusions using native short change references.
 The snapshot and state token bind those references to exact inventory records.
 Native code derives member patch citations, requested-context dependencies,

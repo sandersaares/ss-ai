@@ -244,20 +244,50 @@ impl Assessment {
         policy: &str,
         discussion: &str,
     ) -> Result<Value, AssessmentError> {
+        self.read_next_for(read_token, &[], policy, discussion)
+    }
+
+    /// Selects relevant changes while native code owns their evidence continuations.
+    pub fn read_next_for(
+        &mut self,
+        read_token: &str,
+        changes: &[String],
+        policy: &str,
+        discussion: &str,
+    ) -> Result<Value, AssessmentError> {
         if read_token != self.read_token()? {
             return Err(error::StaleReadToken::classified());
+        }
+        let mut selected = Vec::new();
+        let mut seen = HashSet::new();
+        for reference in changes {
+            let id = self.exact_change(reference)?;
+            if !seen.insert(id.clone()) {
+                return Err(error::DuplicateBatchItem::classified());
+            }
+            selected.push(id);
         }
         // Requested context supports active reasoning; patches can then receive
         // conclusions without waiting for the final complete discussion synthesis.
         let references = once("policy".to_owned())
-            .chain(self.contexts.keys().cloned())
             .chain(
+                self.contexts
+                    .iter()
+                    .filter(|(_, context)| {
+                        selected.is_empty() || seen.contains(&context.request.change_id)
+                    })
+                    .map(|(reference, _)| reference.clone()),
+            )
+            .chain(if selected.is_empty() {
                 self.inventory
                     .changes
                     .iter()
-                    .map(|change| format!("{}:patch", change.id)),
-            )
-            .chain(["discussion".to_owned()])
+                    .map(|change| format!("{}:patch", change.id))
+                    .collect::<Vec<_>>()
+            } else {
+                selected.iter().map(|id| format!("{id}:patch")).collect()
+            })
+            .chain(selected.is_empty().then(|| "discussion".to_owned()))
             .collect::<Vec<_>>();
         let mut staged: Self = serde_json::from_slice(&serde_json::to_vec(self)?)?;
         let mut response =

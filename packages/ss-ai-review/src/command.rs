@@ -219,6 +219,8 @@ enum Autoreapprove {
         input: WorkInput,
         #[arg(long)]
         read_token: String,
+        #[arg(long)]
+        change_id: Vec<String>,
     },
     /// Record concise grouped conclusions with native evidence bookkeeping.
     Conclude {
@@ -888,9 +890,17 @@ fn work(
                 )?,
             },
         ),
-        Autoreapprove::ReadNext { input, read_token } => {
-            (input, WorkAction::ReadNext { read_token })
-        }
+        Autoreapprove::ReadNext {
+            input,
+            read_token,
+            change_id,
+        } => (
+            input,
+            WorkAction::ReadNext {
+                read_token,
+                changes: change_id,
+            },
+        ),
         Autoreapprove::Conclude {
             input,
             conclusions_json,

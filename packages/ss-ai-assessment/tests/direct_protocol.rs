@@ -326,6 +326,83 @@ fn source_context_changes_local_token_and_invalidates_grouped_coverage() {
 }
 
 #[test]
+fn targeted_delivery_supports_partial_refusal_without_unrelated_reads() {
+    let mut assessment = fixture("discussion", 3);
+    assessment
+        .source_context_batch(
+            vec![ContextRequest {
+                change_id: "c2".into(),
+                side: SourceSide::New,
+                start_line: NonZeroUsize::new(1).unwrap(),
+                line_count: NonZeroUsize::new(1).unwrap(),
+            }],
+            "policy",
+            "discussion",
+        )
+        .unwrap();
+    let token = assessment.read_token().unwrap();
+    let before = serde_json::to_value(&assessment).unwrap();
+    for changes in [vec!["c4".into()], vec!["c2".into(), "c2".into()]] {
+        assert!(
+            assessment
+                .read_next_for(&token, &changes, "policy", "discussion")
+                .is_err()
+        );
+        assert_eq!(serde_json::to_value(&assessment).unwrap(), before);
+    }
+
+    let mut references = BTreeSet::new();
+    // This small selection fits comfortably within a few bounded responses.
+    for _ in 0..4 {
+        let response = assessment
+            .read_next_for(&token, &["c2".into()], "policy", "discussion")
+            .unwrap();
+        let items = response["items"].as_array().unwrap();
+        if items.is_empty() {
+            break;
+        }
+        for item in items {
+            references.insert(item["reference"].as_str().unwrap().to_owned());
+        }
+    }
+    assert!(references.contains("policy"));
+    assert!(references.contains("c2:patch"));
+    assert!(
+        references
+            .iter()
+            .any(|reference| reference.starts_with("c2:context:"))
+    );
+    assert_eq!(references.len(), 3);
+    assert!(
+        assessment
+            .synthesize(synthesis(&assessment), "policy", "discussion")
+            .is_err()
+    );
+    assessment
+        .conclude(
+            grouped(&assessment, &["c2"], Disposition::Significant),
+            "policy",
+            "discussion",
+        )
+        .unwrap();
+    assessment
+        .finish_partial(
+            "c2",
+            "The examined change requires review.",
+            "policy",
+            "discussion",
+        )
+        .unwrap();
+    assert_eq!(assessment.status(false), "needsReview");
+    let progress = assessment
+        .progress_with_evidence("policy", "discussion")
+        .unwrap();
+    assert_eq!(progress["judgedChangeCount"], 1);
+    assert_eq!(progress["deliveredRequiredDocumentCount"], 3);
+    assert_eq!(progress["requiredDocumentCount"], 6);
+}
+
+#[test]
 fn native_evidence_batches_handle_escaped_unicode_empty_documents_and_partial_significance() {
     let discussion = "\\\"😀\n".repeat(4_000);
     let mut assessment = fixture(&discussion, 2);

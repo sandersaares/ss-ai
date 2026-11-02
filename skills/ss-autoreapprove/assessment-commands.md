@@ -24,6 +24,7 @@ $scope = @('--state-path', '{{RUN}}', '--pull-request-id', '{{PR}}', '--snapshot
 
 ss-ai autoreapprove assessment @scope --after "{{AFTER}}" --compact --limit 100
 ss-ai autoreapprove read-next @scope --read-token "{{READ_TOKEN}}"
+ss-ai autoreapprove read-next @scope --read-token "{{READ_TOKEN}}" --change-id "{{CHANGE}}"
 ss-ai autoreapprove unit-read-plan @scope --reference discussion --after "{{AFTER}}" --limit 100
 ss-ai autoreapprove read-units @scope --reference discussion --after "{{AFTER}}" --count "{{COUNT}}" --read-token "{{READ_TOKEN}}"
 ss-ai autoreapprove source-context-batch @scope --batch-json '{{CONTEXT_JSON}}'
@@ -32,8 +33,10 @@ ss-ai autoreapprove source-context-batch @scope --batch-json '{{CONTEXT_JSON}}'
 Follow inventory `nextOffset`. `read-next` derives bounded batches and offsets,
 returning exact text, short change references, content digests, receipts, and
 continuation metadata.
-Continue delivery until required coverage is complete; `items: []` means no
-required text remains undelivered, not that semantic work is complete.
+Repeat `--change-id` to select specific changes and their requested context.
+Native code selects offsets even for targeted delivery. With a selection,
+`items: []` means that selection is delivered; without one, it means no required
+text remains undelivered. Neither means semantic work is complete.
 Do not combine separately bounded tool outputs.
 
 A context batch is an array such as

@@ -24,8 +24,12 @@ merge base, checkout, or previous automatic renewal.
 
 Use `read-next` with the current read token. Native code selects required
 documents, contiguous offsets, and batches within its serialized byte budget.
-Continue until every required document is delivered, retaining each returned
-page in context. For a long discussion needed for full synthesis, use
+To examine specific changes, repeat `--change-id` with their short references:
+native delivery selects their patches and requested context without reading
+unrelated changes. Record a supported conclusion as soon as its evidence is
+available; do not wait for unrelated evidence before refusing a significant
+change. For approval, continue until every required document is delivered,
+retaining each returned page in context. For a long discussion needed for full synthesis, use
 `unit-read-plan` to obtain bounded independent windows, then issue `read-units`
 calls for those windows together when they fit the available context. Continue
 any partial units and read their missing bindings. This lets native planning

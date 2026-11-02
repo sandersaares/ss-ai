@@ -2383,15 +2383,25 @@ fn partial_significant_result_reaches_guarded_notification_without_approval() {
         let (snapshot, prepared) = prepare(&root, &provider, false);
         let change = &prepared["changes"][0];
         let reference = change["reference"].as_str().unwrap();
-        let id = change["id"].as_str().unwrap();
-        read_evidence(&root, &provider, &snapshot, "policy", None, None);
-        read_evidence(
+        let batch = work(
             &root,
             &provider,
+            "read-next",
             &snapshot,
-            &format!("{id}:patch"),
-            None,
-            None,
+            &[
+                "--read-token".into(),
+                prepared["readToken"].as_str().unwrap().into(),
+                "--change-id".into(),
+                reference.into(),
+            ],
+        )
+        .unwrap();
+        assert!(
+            batch["items"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|item| item["reference"] == format!("{reference}:patch"))
         );
         let conclusions = json!({
             "stateToken": prepared["stateToken"],
