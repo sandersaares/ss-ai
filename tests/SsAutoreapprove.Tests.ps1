@@ -109,6 +109,16 @@ Describe 'Automatic reapproval repository scope instructions' {
         $script:Prompt | Should -Match 'continue through stages 3 and 4, including any required recovery, before\s+inspecting the next candidate'
         $script:Prompt | Should -Match 'Resume any previously inspected candidate\s+using its existing budget'
         $script:Prompt | Should -Match 'not to a separate pass over\s+all inspected candidates'
+        $script:Prompt | Should -Match 'Do not finish the run or report a final result while an assigned worker is\s+still active'
+        $script:Prompt | Should -Match 'Consume its completion and perform stage 4'
+    }
+
+    It 'distinguishes assessor timeouts from delayed observation and slow finalization' {
+        $script:Prompt | Should -Match 'Native full or partial completion freezes\s+assessment elapsed time'
+        $script:Prompt | Should -Match 'a parent observing a timely completed result\s+late must not label the assessor slow'
+        $script:Prompt | Should -Match '`publicationTimeout`\s+reports a slow finalizer'
+        $script:Recipes | Should -Match 'Preparation returns only `snapshotDigest`, `assessmentProtocol`, `state`, and\s+`progress`'
+        $script:Recipes | Should -Match 'Do not print the complete reservation'
     }
 
     It 'requires coverage repair instead of treating completion as a probe' {

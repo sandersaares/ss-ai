@@ -120,6 +120,29 @@ impl Clock for OffsetClock {
     }
 }
 
+/// Advances when provider freshness capture starts, without waiting or call-count scripts.
+struct FinalizationClock<'a> {
+    target_reads: &'a Cell<usize>,
+    initial_reads: usize,
+}
+
+impl Clock for FinalizationClock<'_> {
+    fn now(&self) -> Timestamp {
+        // Begin after a delayed parent return, then consume the publication window in capture.
+        let delay = Duration::from_mins(17);
+        let capture = if self.target_reads.get() > self.initial_reads {
+            Duration::from_mins(1)
+        } else {
+            Duration::ZERO
+        };
+        FixedClock.now() + delay + capture
+    }
+
+    fn wait(&self, _: Duration) -> Result<(), AppError> {
+        panic!("Finalization scenarios require no timed retry")
+    }
+}
+
 /// Keeps service writes private and selects real or exact recorded Git responses.
 struct Provider {
     number: u32,
@@ -983,7 +1006,7 @@ fn prepare(root: &Path, provider: &Provider, dry_run: bool) -> (String, Value) {
         .as_str()
         .unwrap()
         .to_owned();
-    let prepared = work(root, provider, "prepare", &snapshot, &[]).unwrap();
+    let prepared = prepare_inventory(root, provider, &snapshot);
 
     if prepared.get("requiredDocuments").is_some() {
         if provider.git_replies.is_some() {
@@ -1006,6 +1029,28 @@ fn prepare(root: &Path, provider: &Provider, dry_run: bool) -> (String, Value) {
     }
 
     (snapshot, prepared)
+}
+
+/// Preparation belongs to the scheduler; semantic fixtures obtain the worker inventory separately.
+fn prepare_inventory(root: &Path, provider: &Provider, snapshot: &str) -> Value {
+    let prepared = work(root, provider, "prepare", snapshot, &[]).unwrap();
+    if prepared.get("progress").is_none() {
+        return prepared;
+    }
+    assert_eq!(
+        prepared
+            .as_object()
+            .unwrap()
+            .keys()
+            .cloned()
+            .collect::<BTreeSet<_>>(),
+        ["snapshotDigest", "assessmentProtocol", "state", "progress"]
+            .map(str::to_owned)
+            .into_iter()
+            .collect()
+    );
+    assert_eq!(prepared["snapshotDigest"], snapshot);
+    work(root, provider, "assessment", snapshot, &[]).unwrap()
 }
 
 /// Binds each assessment or publication command to its PR and immutable snapshot.
@@ -1286,7 +1331,7 @@ fn draft_conversion_during_publication_is_removed() {
                     .as_str()
                     .unwrap()
                     .clone_into(&mut snapshot);
-                prepared = work(&root, &provider, "prepare", &snapshot, &[]).unwrap();
+                prepared = prepare_inventory(&root, &provider, &snapshot);
             }
             assess_as(&root, &provider, &snapshot, &prepared, disposition);
             provider.evidence.borrow_mut()["pullRequest"][if ado { "isDraft" } else { "draft" }] =
@@ -1344,7 +1389,7 @@ fn stale_preflight_recovery_reassesses_source_before_any_effect() {
                 ss_ai::classification(&refresh(&root, &provider).unwrap_err()),
                 "invalidState"
             );
-            assert_only_work_commands_changed(&root.join("run.json"), &unchanged, 1);
+            assert_eq!(fs::read(root.join("run.json")).unwrap(), unchanged);
             assert_eq!(provider.writes.get(), 0);
             if ado {
                 provider.ado_push();
@@ -1385,7 +1430,7 @@ fn stale_preflight_recovery_reassesses_source_before_any_effect() {
             for operation in ["prepare", "complete"] {
                 work(&root, &provider, operation, &snapshot, &[]).unwrap_err();
             }
-            let prepared = work(&root, &provider, "prepare", current, &[]).unwrap();
+            let prepared = prepare_inventory(&root, &provider, current);
             assert_eq!(prepared["oldCommit"], old);
             assert_eq!(prepared["newCommit"], changed);
             work(&root, &provider, "complete", current, &[]).unwrap_err();
@@ -1460,7 +1505,7 @@ fn stale_notification_recovery_exhausts_without_remote_writes() {
                     .as_str()
                     .unwrap()
                     .clone_into(&mut snapshot);
-                prepared = work(&root, &provider, "prepare", &snapshot, &[]).unwrap();
+                prepared = prepare_inventory(&root, &provider, &snapshot);
             }
             let result = invoke(&root, &provider, "results", &[]).unwrap();
             assert_eq!(result["state"], "partial");
@@ -1516,7 +1561,7 @@ fn repeated_observation_has_a_distinct_snapshot() {
         assert_eq!(refreshed["items"][0]["staleRecovery"]["attempts"], 1);
         assert_eq!(provider.writes.get(), 0);
 
-        let prepared = work(&root, &provider, "prepare", snapshot, &[]).unwrap();
+        let prepared = prepare_inventory(&root, &provider, snapshot);
         assess_as(&root, &provider, snapshot, &prepared, "significant");
         assert_eq!(
             ss_ai::classification(&notify(&root, &provider, &original).unwrap_err()),
@@ -1594,7 +1639,7 @@ fn stale_refresh_preserves_unknown_notice() {
         notify(&root, &provider, &snapshot).unwrap_err();
         let refreshed = refresh(&root, &provider).unwrap();
         let snapshot = refreshed["items"][0]["snapshotDigest"].as_str().unwrap();
-        let prepared = work(&root, &provider, "prepare", snapshot, &[]).unwrap();
+        let prepared = prepare_inventory(&root, &provider, snapshot);
         assess_as(&root, &provider, snapshot, &prepared, "significant");
         provider.fault.set("noticeUnknown");
         notify(&root, &provider, snapshot).unwrap_err();
@@ -2291,7 +2336,7 @@ fn compact_metadata_commands_expose_the_same_evidence_references() {
 }
 
 #[test]
-fn grouped_native_workflow_completes_without_notes_or_provider_effects() {
+fn grouped_native_workflow_completes_without_notes_and_finalizes_after_delay() {
     let _guard = PROCESS_TEST_LOCK
         .lock()
         .unwrap_or_else(PoisonError::into_inner);
@@ -2300,7 +2345,7 @@ fn grouped_native_workflow_completes_without_notes_or_provider_effects() {
         let scope = TempDir::new().unwrap();
         let root = scope.path().join("grouped-workflow");
         let provider = repository.provider(ado);
-        let (snapshot, prepared) = prepare(&root, &provider, true);
+        let (snapshot, prepared) = prepare(&root, &provider, false);
         let service_calls = provider.service_calls.get();
         let token = prepared["readToken"].as_str().unwrap();
         let documents = prepared["progress"]["requiredDocumentCount"]
@@ -2359,7 +2404,7 @@ fn grouped_native_workflow_completes_without_notes_or_provider_effects() {
             &["--synthesis-json".into(), synthesis.to_string()],
         )
         .unwrap();
-        assert_eq!(completed["status"], "wouldReapprove");
+        assert_eq!(completed["status"], "readyToReapprove");
         assert!(completed["assessmentDigest"].is_string());
         let results = invoke(&root, &provider, "results", &[]).unwrap();
         let budget = &results["items"][0]["assessmentBudget"];
@@ -2367,6 +2412,27 @@ fn grouped_native_workflow_completes_without_notes_or_provider_effects() {
         assert_eq!(budget["judgmentBatches"], 1);
         assert_eq!(provider.service_calls.get(), service_calls);
         assert_eq!(provider.writes.get(), 0);
+        let finalized = invoke_at(
+            &root,
+            &provider,
+            "publish",
+            &[
+                "--pull-request-id".into(),
+                provider.number.to_string(),
+                "--snapshot-digest".into(),
+                snapshot,
+                "--repository-url".into(),
+                provider.url().into(),
+                "--attribution".into(),
+                "[Copilot speaking]".into(),
+            ],
+            &OffsetClock(Duration::from_mins(17)),
+        )
+        .unwrap();
+        assert_eq!(finalized["items"][0]["status"], "reapproved");
+        assert_eq!(finalized["items"][0]["assessmentBudget"], *budget);
+        assert!(budget["completedAtMilliseconds"].is_number());
+        assert_eq!(provider.writes.get(), 1);
     }
 }
 
@@ -2440,8 +2506,27 @@ fn partial_significant_result_reaches_guarded_notification_without_approval() {
         );
         publish(&root, &provider, &snapshot).unwrap_err();
         assert_eq!(provider.writes.get(), 0);
-        let notice = notify(&root, &provider, &snapshot).unwrap();
+        let before = results["items"][0]["assessmentBudget"].clone();
+        let notice = invoke_at(
+            &root,
+            &provider,
+            "notify",
+            &[
+                "--pull-request-id".into(),
+                provider.number.to_string(),
+                "--snapshot-digest".into(),
+                snapshot.clone(),
+                "--repository-url".into(),
+                provider.url().into(),
+                "--attribution".into(),
+                "[Copilot speaking]".into(),
+            ],
+            &OffsetClock(Duration::from_mins(17)),
+        )
+        .unwrap();
         assert_eq!(notice["items"][0]["status"], "needsReview");
+        assert_eq!(notice["items"][0]["assessmentBudget"], before);
+        assert!(before["completedAtMilliseconds"].is_number());
         assert_eq!(provider.writes.get(), 1);
         let notice_path = host_journal(&scope.path().join("host-store").join("review-notices"));
         let stored: Value = serde_json::from_slice(&fs::read(notice_path).unwrap()).unwrap();
@@ -2478,7 +2563,7 @@ fn completed_assessment_metadata_does_not_consume_publication_reserve() {
         &provider,
         "assessment",
         &arguments,
-        &OffsetClock(Duration::from_mins(8)),
+        &OffsetClock(Duration::from_mins(17)),
     )
     .unwrap();
     assert_eq!(page["state"], "complete");
@@ -2497,7 +2582,7 @@ fn completed_assessment_metadata_does_not_consume_publication_reserve() {
             &provider,
             command,
             &metadata_arguments,
-            &OffsetClock(Duration::from_mins(8)),
+            &OffsetClock(Duration::from_mins(17)),
         )
         .unwrap();
     }
@@ -2511,60 +2596,147 @@ fn completed_assessment_metadata_does_not_consume_publication_reserve() {
 }
 
 #[test]
-fn expired_publication_budget_never_starts_an_approval() {
+fn delayed_parent_publishes_timely_completed_approval_without_assessor_timeout() {
     let _guard = PROCESS_TEST_LOCK
         .lock()
         .unwrap_or_else(PoisonError::into_inner);
     let repository = Sources::new();
-    let scope = TempDir::new().unwrap();
-    let root = scope.path().join("budget");
-    let provider = repository.provider(false);
-    let (snapshot, prepared) = prepare(&root, &provider, false);
-    assess(&root, &provider, &snapshot, &prepared);
-    let arguments = [
-        "--pull-request-id".into(),
-        provider.number.to_string(),
-        "--snapshot-digest".into(),
-        snapshot.clone(),
-        "--repository-url".into(),
-        provider.url().into(),
-        "--attribution".into(),
-        "[Copilot speaking]".into(),
-    ];
-    let clock = OffsetClock(Duration::from_mins(9));
-    let error = invoke_at(&root, &provider, "publish", &arguments, &clock).unwrap_err();
-    assert_eq!(ss_ai::classification(&error), "budgetExceeded");
-    assert_eq!(provider.writes.get(), 0);
-    publish(&root, &provider, &snapshot).unwrap_err();
-    assert_eq!(provider.writes.get(), 0);
+    for ado in [false, true] {
+        let scope = TempDir::new().unwrap();
+        let root = scope.path().join("delayed-approval");
+        let provider = repository.provider(ado);
+        let (snapshot, prepared) = prepare(&root, &provider, false);
+        assess(&root, &provider, &snapshot, &prepared);
+        let before = invoke(&root, &provider, "results", &[]).unwrap();
+        let arguments = [
+            "--pull-request-id".into(),
+            provider.number.to_string(),
+            "--snapshot-digest".into(),
+            snapshot,
+            "--repository-url".into(),
+            provider.url().into(),
+            "--attribution".into(),
+            "[Copilot speaking]".into(),
+        ];
+        let clock = OffsetClock(Duration::from_mins(17));
+        let result = invoke_at(&root, &provider, "publish", &arguments, &clock).unwrap();
+        assert_eq!(result["items"][0]["status"], "reapproved");
+        assert_eq!(
+            result["items"][0]["assessmentBudget"],
+            before["items"][0]["assessmentBudget"]
+        );
+        assert!(result["items"][0]["assessmentBudget"]["completedAtMilliseconds"].is_number());
+        assert_eq!(provider.writes.get(), 1);
+    }
 }
 
 #[test]
-fn expired_publication_budget_never_starts_a_review_notice() {
+fn delayed_parent_notifies_timely_completed_refusals_without_assessor_timeout() {
     let _guard = PROCESS_TEST_LOCK
         .lock()
         .unwrap_or_else(PoisonError::into_inner);
     let repository = Sources::new();
-    let scope = TempDir::new().unwrap();
-    let root = scope.path().join("budget-notice");
-    let provider = repository.provider(false);
-    let (snapshot, prepared) = prepare(&root, &provider, false);
-    assess_as(&root, &provider, &snapshot, &prepared, "significant");
-    let arguments = [
-        "--pull-request-id".into(),
-        provider.number.to_string(),
-        "--snapshot-digest".into(),
-        snapshot.clone(),
-        "--repository-url".into(),
-        provider.url().into(),
-        "--attribution".into(),
-        "[Copilot speaking]".into(),
-    ];
-    let clock = OffsetClock(Duration::from_mins(9));
-    let error = invoke_at(&root, &provider, "notify", &arguments, &clock).unwrap_err();
-    assert_eq!(ss_ai::classification(&error), "budgetExceeded");
-    notify(&root, &provider, &snapshot).unwrap_err();
-    assert_eq!(provider.writes.get(), 0);
+    for ado in [false, true] {
+        for disposition in ["significant", "uncertain"] {
+            let scope = TempDir::new().unwrap();
+            let root = scope.path().join("delayed-notice");
+            let provider = repository.provider(ado);
+            let (snapshot, prepared) = prepare(&root, &provider, false);
+            assess_as(&root, &provider, &snapshot, &prepared, disposition);
+            let before = invoke(&root, &provider, "results", &[]).unwrap();
+            let arguments = [
+                "--pull-request-id".into(),
+                provider.number.to_string(),
+                "--snapshot-digest".into(),
+                snapshot,
+                "--repository-url".into(),
+                provider.url().into(),
+                "--attribution".into(),
+                "[Copilot speaking]".into(),
+            ];
+            let clock = OffsetClock(Duration::from_mins(17));
+            let result = invoke_at(&root, &provider, "notify", &arguments, &clock).unwrap();
+            assert_eq!(
+                result["items"][0]["status"],
+                if disposition == "uncertain" {
+                    "failed"
+                } else {
+                    "needsReview"
+                }
+            );
+            assert!(result["items"][0]["reviewNotice"].is_object());
+            assert_eq!(
+                result["items"][0]["assessmentBudget"],
+                before["items"][0]["assessmentBudget"]
+            );
+            assert_eq!(provider.writes.get(), 1);
+        }
+    }
+}
+
+#[test]
+fn slow_finalization_preserves_assessor_timing_and_never_starts_an_effect() {
+    let _guard = PROCESS_TEST_LOCK
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner);
+    let repository = Sources::new();
+    for ado in [false, true] {
+        for notice in [false, true] {
+            let scope = TempDir::new().unwrap();
+            let root = scope.path().join("slow-finalizer");
+            let provider = repository.provider(ado);
+            let (snapshot, prepared) = prepare(&root, &provider, false);
+            assess_as(
+                &root,
+                &provider,
+                &snapshot,
+                &prepared,
+                if notice {
+                    "significant"
+                } else {
+                    "insignificant"
+                },
+            );
+            let before = invoke(&root, &provider, "results", &[]).unwrap();
+            let clock = FinalizationClock {
+                target_reads: &provider.target_reads,
+                initial_reads: provider.target_reads.get(),
+            };
+            let error = invoke_at(
+                &root,
+                &provider,
+                if notice { "notify" } else { "publish" },
+                &[
+                    "--pull-request-id".into(),
+                    provider.number.to_string(),
+                    "--snapshot-digest".into(),
+                    snapshot,
+                    "--repository-url".into(),
+                    provider.url().into(),
+                    "--attribution".into(),
+                    "[Copilot speaking]".into(),
+                ],
+                &clock,
+            )
+            .unwrap_err();
+            assert_eq!(ss_ai::classification(&error), "publicationTimeout");
+            assert_eq!(provider.writes.get(), 0);
+            let after = invoke(&root, &provider, "results", &[]).unwrap();
+            assert_eq!(
+                after["items"][0]["assessmentBudget"],
+                before["items"][0]["assessmentBudget"]
+            );
+            assert_eq!(after["items"][0]["assessmentBudget"]["exhausted"], false);
+            assert_eq!(
+                if notice {
+                    &after["items"][0]["error"]["kind"]
+                } else {
+                    &after["error"]["kind"]
+                },
+                "publicationTimeout"
+            );
+        }
+    }
 }
 
 #[test]
@@ -2610,18 +2782,43 @@ fn stale_refresh_retains_time_work_and_worker_budgets() {
     assess(&root, &provider, &snapshot, &prepared);
     let before = invoke(&root, &provider, "results", &[]).unwrap();
     let before_budget = &before["items"][0]["assessmentBudget"];
+    // A rejected refresh must not resume a completed assessor's clock.
+    refresh(&root, &provider).unwrap_err();
+    let unchanged = invoke(&root, &provider, "results", &[]).unwrap();
+    assert_eq!(unchanged["items"][0]["assessmentBudget"], *before_budget);
     provider.evidence.borrow_mut()["pullRequest"]["body"] = json!("New discussion evidence.");
     assert_eq!(
         publish(&root, &provider, &snapshot).unwrap()["items"][0]["status"],
         "staleDuringExecution"
     );
-    let refreshed = refresh(&root, &provider).unwrap();
+    let refreshed = invoke_at(
+        &root,
+        &provider,
+        "refresh",
+        &[
+            "--repository-url".into(),
+            provider.url().into(),
+            "--pull-request-id".into(),
+            provider.number.to_string(),
+        ],
+        &OffsetClock(Duration::from_mins(17)),
+    )
+    .unwrap();
     let after_budget = &refreshed["items"][0]["assessmentBudget"];
     assert_eq!(
         after_budget["startedAtMilliseconds"],
         before_budget["startedAtMilliseconds"]
     );
     assert_eq!(after_budget["workerReservations"], 1);
+    assert_eq!(
+        after_budget["observedElapsedMilliseconds"],
+        before_budget["observedElapsedMilliseconds"]
+    );
+    assert_eq!(
+        after_budget["excludedIdleMilliseconds"],
+        u64::try_from(Duration::from_mins(17).as_millis()).unwrap()
+    );
+    assert!(after_budget["completedAtMilliseconds"].is_null());
     assert!(
         after_budget["workCommands"].as_u64().unwrap()
             >= before_budget["workCommands"].as_u64().unwrap()
@@ -2955,7 +3152,8 @@ fn native_scale_canary_pages_and_recovers_oversized_unicode_batches() {
     .unwrap();
     assert_eq!(inspected["items"][0]["status"], "assessmentRequired");
     let snapshot = inspected["items"][0]["snapshotDigest"].as_str().unwrap();
-    let prepared = canary_work(&root, &provider, snapshot, "prepare", &[]).unwrap();
+    canary_work(&root, &provider, snapshot, "prepare", &[]).unwrap();
+    let prepared = canary_work(&root, &provider, snapshot, "assessment", &[]).unwrap();
     let read_token = prepared["readToken"].as_str().unwrap().to_owned();
     let (paths, initially_judged, initial_pages) = canary_pages(&root, &provider, snapshot);
     assert!(initially_judged.is_empty());
@@ -3256,7 +3454,7 @@ fn assert_successful_publication(
         assert!(result["items"][0]["publication"]["reviewId"].is_null());
     }
     let record: Value = serde_json::from_slice(&fs::read(root.join("run.json")).unwrap()).unwrap();
-    assert_eq!(record["schemaVersion"], 16);
+    assert_eq!(record["schemaVersion"], 17);
     assert!(!scope.join("host-store").join("publications").exists());
     // A later source push binds the next assessment to this ordinary approval.
     if ado {
@@ -4094,7 +4292,7 @@ fn source_patch_volume_and_captured_context_preserve_endpoint_scope() {
         first
     );
     let reference = first["reference"].as_str().unwrap();
-    let resumed = work(scope.path(), &provider, "prepare", &snapshot, &[]).unwrap();
+    let resumed = prepare_inventory(scope.path(), &provider, &snapshot);
     assert_eq!(resumed["nextContextReference"], reference);
     assert_eq!(resumed["requestedContextCount"], 1);
     let mut context = String::new();
@@ -4509,7 +4707,7 @@ fn newly_requested_context_requires_new_judgments_on_both_providers() {
         .unwrap();
         let reference = context["reference"].as_str().unwrap();
         read_evidence(scope.path(), &provider, &snapshot, reference, None, None);
-        let resumed = work(scope.path(), &provider, "prepare", &snapshot, &[]).unwrap();
+        let resumed = prepare_inventory(scope.path(), &provider, &snapshot);
         assert!(resumed["changes"][0]["decision"].is_null());
         assert!(resumed["cumulative"].is_null());
         work(scope.path(), &provider, "complete", &snapshot, &[]).unwrap_err();

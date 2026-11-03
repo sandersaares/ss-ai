@@ -791,6 +791,20 @@ impl Assessment {
         Ok(())
     }
 
+    /// Supplies scheduling preflight without exposing worker inventory or bindings.
+    pub fn preparation_summary(
+        &self,
+        policy: &str,
+        discussion: &str,
+    ) -> Result<Value, AssessmentError> {
+        Ok(json!({
+            "snapshotDigest": self.snapshot_digest,
+            "assessmentProtocol": self.protocol,
+            "state": if self.complete { "complete" } else { "in-progress" },
+            "progress": self.progress_with_evidence(policy, discussion)?,
+        }))
+    }
+
     /// Exposes a bounded page of source changes for assessment.
     pub fn summary(
         &self,

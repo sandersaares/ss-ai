@@ -164,11 +164,17 @@ measure comprehension, model requests, command calls, or elapsed time.
 Earlier run schemas require a fresh run and assessment. Existing files are left untouched.
 
 New runs expose an `assessmentBudget` per inspected candidate. It records
-native work commands and the latest observed clock time, not model requests
-or worker counts. Assessment work stops before the overall deadline to leave
-time for freshness checks and publication. Budget exhaustion or a backwards
+native work commands and the latest observed assessment clock time, not model requests
+or worker counts. `completedAtMilliseconds` freezes elapsed assessment time at
+native full or partial completion. `excludedIdleMilliseconds` records completed
+idle time excluded when stale recovery resumes assessment. Delayed parent
+observation alone never produces an assessor timeout. Assessment work leaves a
+separately bounded window for freshness checks and publication. Budget exhaustion or a backwards
 clock leaves work incomplete and cannot authorize approval or a needs-review
 notice. Notice-specific recovery remains available after the budget expires.
+Each publication or notification invocation checks fresh provider evidence
+within the reserved duration; `publicationTimeout` stops a slow finalizer before
+a new effect without exhausting a timely completed assessment.
 
 Discovery excludes drafts before checking commit recency. Drafts do not appear
 in the inventory, counts, or results. Inspection, refresh, or publication

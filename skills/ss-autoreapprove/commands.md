@@ -106,8 +106,11 @@ ss-ai autoreapprove source-context --state-path "{{RUN}}" --pull-request-id "{{P
 ss-ai autoreapprove source-context-batch --state-path "{{RUN}}" --pull-request-id "{{PR}}" --snapshot-digest "{{SNAPSHOT}}" --batch-json '{{BATCH_JSON}}'
 ```
 
-Preparation returns the selected context and the first bounded metadata page.
-Its `progress` provides preflight counts. `readToken` identifies immutable
+Preparation returns only `snapshotDigest`, `assessmentProtocol`, `state`, and
+`progress` with preflight counts. Do not print the complete reservation or
+retained run. Worker inventory, context bindings, digests, document reads, and
+tokens belong to `assessment`, not preparation.
+In assessment metadata, `readToken` identifies immutable
 evidence and registered context; `stateToken` identifies the current semantic
 assessment state. Independent evidence reads do not change it, but a judgment
 still requires the current evidence receipts. Reserve each worker with `start-worker` before
@@ -154,7 +157,9 @@ offset means no receipt, including for an empty document. Use this progress
 to find missing work, not to infer another worker's knowledge.
 `pendingChangeCount` and `nextChangeOffset` locate unjudged source.
 Reading assessment metadata after completion does not consume the assessment
-budget. Publication still checks the overall deadline and freshness.
+budget. Native completion freezes assessment time even if the parent observes
+the result late. Publication still checks freshness within its own bounded
+window; `publicationTimeout` diagnoses a slow finalizer, not a slow assessor.
 The compact inventory represents `old` and `new` as paths or null rather than
 side metadata. Required patch documents still contain complete source bindings
 and content classifications. Omit `--compact` when full side metadata is needed.

@@ -31,8 +31,8 @@ use ss_ai_assessment::{
     Note,
 };
 
-/// Provider-selected approval baselines require a fresh assessment contract.
-const RUN_SCHEMA: u32 = 16;
+/// Completion-bound timing requires an explicit retained assessment clock.
+const RUN_SCHEMA: u32 = 17;
 
 /// Durable metadata-only stage; recent candidates still require approval assessment.
 #[derive(Debug, Deserialize, Serialize)]
@@ -218,11 +218,14 @@ impl DiscoveryRecord {
         let mut previous = None;
         for entry in &self.inventory {
             entry.recovery.validate(&self.run_id)?;
-            if entry
-                .assessment_budget
-                .as_ref()
-                .is_some_and(|budget| !budget.valid())
-                || !self.assessment_budget_enabled && entry.assessment_budget.is_some()
+            if entry.assessment_budget.as_ref().is_some_and(|budget| {
+                !budget.valid(
+                    entry
+                        .assessment
+                        .as_ref()
+                        .is_some_and(|assessment| assessment.digest.is_some()),
+                )
+            }) || !self.assessment_budget_enabled && entry.assessment_budget.is_some()
                 || self.assessment_budget_enabled
                     && entry.assessment.is_some()
                     && entry.assessment_budget.is_none()
@@ -836,6 +839,7 @@ impl Diagnostic {
                 | "ambiguousWrite"
                 | "staleEvidence"
                 | "retryExhausted"
+                | "publicationTimeout"
                 | "scopeChanged"
                 | "rateLimited"
                 | "contention"
@@ -1089,7 +1093,7 @@ pub(crate) fn inspect(
             "Significance policy changed; start a fresh run",
         ));
     }
-    if entry.inspection.is_none() || recovery_directory.is_some() {
+    if entry.inspection.is_none() {
         assessment_budget_step(
             &mut run,
             index,
@@ -1132,6 +1136,16 @@ pub(crate) fn inspect(
         }
         if !entry.stale() && entry.recovery.error.is_none() {
             return Err(fail("invalidState", "Only stale evidence permits refresh"));
+        }
+        // Only authorized stale recovery resumes a completed assessment's clock.
+        if entry.inspection.is_some() {
+            assessment_budget_step(
+                &mut run,
+                index,
+                clock,
+                &journal,
+                BudgetPhase::StartInspection,
+            )?;
         }
         let entry = run
             .inventory
@@ -1314,7 +1328,8 @@ fn assessment_budget_step(
         .as_mut()
         .ok_or_else(|| fail("invalidState", "Missing assessment budget"))?;
     let status = match phase {
-        BudgetPhase::StartInspection | BudgetPhase::BeginWork => budget.begin_work(now),
+        BudgetPhase::StartInspection => budget.resume(now),
+        BudgetPhase::BeginWork => budget.begin_work(now),
         BudgetPhase::FinishWork => budget.finish_work(now),
         BudgetPhase::Publish => budget.before_publication(now),
     };
@@ -1640,7 +1655,7 @@ pub(crate) fn publish(
     let effect_deadline = entry
         .assessment_budget
         .as_ref()
-        .map(AssessmentBudget::effect_deadline);
+        .map(|budget| budget.effect_deadline(clock.now().as_millisecond()));
     let (snapshot, evidence) = entry.assessment_inputs()?;
     let assessment = entry
         .assessment
@@ -1715,11 +1730,6 @@ pub(crate) fn publish(
             let kind = classification(&error);
             if kind == "draft" {
                 return run.remove_draft(input.number, &journal);
-            }
-            if kind == "budgetExceeded"
-                && let Some(budget) = entry.assessment_budget.as_mut()
-            {
-                budget.before_publication(clock.now().as_millisecond());
             }
             let diagnostic = Diagnostic::from_error(&error);
             if kind == "staleEvidence" {
@@ -1865,7 +1875,7 @@ pub(crate) fn notify(
     let effect_deadline = entry
         .assessment_budget
         .as_ref()
-        .map(AssessmentBudget::effect_deadline);
+        .map(|budget| budget.effect_deadline(clock.now().as_millisecond()));
     let (snapshot, evidence) = entry.assessment_inputs()?;
     let assessment = entry
         .assessment
@@ -1921,11 +1931,6 @@ pub(crate) fn notify(
             finish_state(&mut run);
         }
         Err(error) => {
-            if classification(&error) == "budgetExceeded"
-                && let Some(budget) = entry.assessment_budget.as_mut()
-            {
-                budget.before_publication(clock.now().as_millisecond());
-            }
             if classification(&error) == "draft" {
                 if notices.has_attempt(&operation_run_id) {
                     return Err(fail(
@@ -2148,7 +2153,8 @@ pub(crate) fn work(
         WorkAction::JudgeBatch { .. } | WorkAction::Conclude { .. }
     );
     let result = match action {
-        WorkAction::Prepare => assessment.summary(0, 10, &run.policy.content, &discussion)?,
+        // The parent schedules work; inventory, bindings and tokens belong to the worker.
+        WorkAction::Prepare => assessment.preparation_summary(&run.policy.content, &discussion)?,
         WorkAction::StartWorker => {
             return Err(fail("invalidState", "Worker reservation was not handled"));
         }
@@ -2368,6 +2374,18 @@ pub(crate) fn work(
         }
     }
     assessment_budget_step(&mut run, index, clock, &journal, BudgetPhase::FinishWork)?;
+    let entry = run
+        .inventory
+        .get_mut(index)
+        .ok_or_else(|| fail("invalidState", "Missing assessment PR"))?;
+    if entry
+        .assessment
+        .as_ref()
+        .is_some_and(|assessment| assessment.digest.is_some())
+        && let Some(budget) = entry.assessment_budget.as_mut()
+    {
+        budget.complete();
+    }
     finish_state(&mut run);
     run.save(&journal)?;
     Ok(result)

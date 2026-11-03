@@ -89,6 +89,9 @@ There is no filename, size, or edit-category exemption.
 
 The orchestrator prepares the comparison and reserves a GPT 6.1 Sol assessment
 worker per eligible PR with explicit medium reasoning and regular context.
+Preparation returns only the snapshot binding, protocol, state, and preflight
+progress needed for scheduling. The worker obtains inventory pages, context
+bindings, digests, and read/state tokens through assessment metadata.
 The worker owns bounded evidence reads, judgments, and completion. It returns
 scalar results and a concise reason, not source or discussion text, and cannot
 publish. A host-required skill invocation routes an assigned worker directly
@@ -157,8 +160,19 @@ leaves explicit unfinished work. Legacy assessments cannot continue; a fresh
 assessment is required. Earlier run schemas require a fresh run and assessment;
 existing files are left untouched.
 
-After completion, metadata inspection does not consume the assessment budget.
-Publication still checks the overall deadline and current provider evidence.
+Timeouts diagnose slow assessment work, not delayed observation by the parent.
+Native full synthesis, full completion, and partial significant completion
+check elapsed time before persisting a completion timestamp. Timely completion
+freezes the assessment clock; later metadata inspection and publication do not
+consume that budget or retroactively label the assessor slow. An unfinished
+or genuinely over-budget assessment remains incomplete.
+
+The budget retains active elapsed time across stale recovery while excluding
+idle time after native completion. Publication and notification each start a
+separate window bounded by the reserved publication duration and still require
+current provider evidence and guarded publication. A preflight that exceeds
+that window returns `publicationTimeout` before any new effect, without
+changing the assessor's elapsed time or exhaustion diagnostic.
 Registering source context changes the local read token, not the snapshot; the
 same worker can obtain a new token and retry undelivered pages.
 
@@ -213,7 +227,7 @@ capture resumes through `inspect`. Independent PRs keep their own budgets.
 Refresh applies to staleness before a remote approval request; an approval request
 error is reported without automatic resend in that attempt.
 
-`discovery.rs` owns the schema-16 run, recovery record, and result metadata.
+`discovery.rs` owns the schema-17 run, recovery record, and result metadata.
 Earlier run schemas require a fresh run and assessment. Discovery discards draft PRs
 before recency checks, and inspection, refresh, or publication preflight removes
 a PR found to have become a draft. Notification staleness is recorded separately
