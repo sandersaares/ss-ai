@@ -116,6 +116,41 @@ fn grouped_conclusions_and_single_synthesis_require_no_discussion_notes_or_check
         .unwrap();
 }
 
+/// Notices explain blocking effects without exposing the retained discussion assessment.
+#[test]
+fn refusal_explanations_list_distinct_reasons_without_discussion_or_coverage_noise() {
+    let mut assessment = fixture("discussion", 2);
+    deliver_required(&mut assessment, "discussion");
+    let mut conclusions = grouped(&assessment, &["c1"], Disposition::Significant);
+    conclusions.groups[0].rationale =
+        "The new API removes the caller's cancellation control.".into();
+    conclusions.groups.push(ConclusionGroup {
+        changes: vec!["c2".into()],
+        disposition: Disposition::Uncertain,
+        rationale: "The retry loop may submit the same payment twice.\nIts success path no longer records completion.".into(),
+        evidence: Vec::new(),
+    });
+    assessment
+        .conclude(conclusions, "policy", "discussion")
+        .unwrap();
+    let mut reasoning = synthesis(&assessment);
+    reasoning.disposition = Disposition::Significant;
+    reasoning.rationale = "The new API removes the caller's cancellation control.".into();
+    reasoning.discussion = "Unrelated editorial changes need no further review.".into();
+    reasoning.unresolved_concerns = vec!["The failure path can leave a payment untracked.".into()];
+    assessment
+        .synthesize(reasoning, "policy", "discussion")
+        .unwrap();
+    let explanation = assessment.refusal_explanation().unwrap();
+    assert_eq!(
+        explanation,
+        "- The new API removes the caller's cancellation control.\n\n- The retry loop may submit the same payment twice.\n  Its success path no longer records completion.\n\n- The failure path can leave a payment untracked."
+    );
+    assert!(!explanation.contains("Material discussion"));
+    assert!(!explanation.contains("editorial"));
+    assert!(!explanation.contains("Partial assessment"));
+}
+
 #[test]
 fn concise_json_needs_no_empty_fields_or_agent_authored_bookkeeping() {
     let mut assessment = fixture("discussion", 1);
@@ -630,7 +665,11 @@ fn significant_partial_completion_requires_support_but_not_unrelated_coverage() 
     assert_eq!(assessment.status(true), "needsReview");
     assert_eq!(
         assessment.explanation().unwrap(),
-        "Partial assessment; unrelated changes may not have been examined. The examined change requires review."
+        "The examined change requires review."
+    );
+    assert_eq!(
+        assessment.refusal_explanation().unwrap(),
+        "- The examined change requires review."
     );
     let progress = assessment
         .progress_with_evidence("policy", "discussion")

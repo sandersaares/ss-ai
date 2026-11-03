@@ -150,6 +150,7 @@ struct Provider {
     repository: PathBuf,
     evidence: RefCell<Value>,
     writes: Cell<usize>,
+    reset_writes: Cell<usize>,
     service_calls: Cell<usize>,
     calls_at_approval: Cell<usize>,
     fetches: Cell<usize>,
@@ -186,6 +187,7 @@ impl Provider {
             repository: repository.to_owned(),
             evidence: RefCell::new(evidence),
             writes: Cell::new(0),
+            reset_writes: Cell::new(0),
             service_calls: Cell::new(0),
             calls_at_approval: Cell::new(0),
             fetches: Cell::new(0),
@@ -285,6 +287,36 @@ impl Provider {
             "2026-09-28T09:08:30Z"
         } else {
             "2026-09-28T09:05:00Z"
+        }
+    }
+
+    /// Simulates independent decisions arriving after the notice but before a pending reset.
+    fn after_notice(&self) {
+        match self.fault.get() {
+            "concurrentApproval" => {
+                if self.ado {
+                    self.ado_vote(10, 90, "2026-09-28T09:06:00Z");
+                } else {
+                    self.later("APPROVED");
+                }
+            }
+            "concurrentNegative" => {
+                if self.ado {
+                    self.ado_vote(-10, 90, "2026-09-28T09:06:00Z");
+                } else {
+                    self.later("CHANGES_REQUESTED");
+                }
+            }
+            "approvalHistoryDeleted" => {
+                assert!(self.ado);
+                self.evidence.borrow_mut()["threads"]
+                    .as_array_mut()
+                    .unwrap()
+                    .retain(|thread| {
+                        thread["properties"]["CodeReviewThreadType"]["$value"] != "VoteUpdate"
+                    });
+            }
+            _ => {}
         }
     }
 
@@ -485,6 +517,7 @@ impl Process for Provider {
                     .as_array_mut()
                     .unwrap()
                     .push(comment.clone());
+                self.after_notice();
             }
             if self.fault.get() == "noticeJournalFailure" {
                 self.fail_journal_save();
@@ -494,6 +527,53 @@ impl Process for Provider {
                     ProcessOutput::new(false, Vec::new(), b"connection lost".to_vec())
                 } else {
                     ProcessOutput::new(true, serde_json::to_vec(&comment).unwrap(), Vec::new())
+                },
+            );
+        }
+        if method == "PUT" && path.ends_with("/dismissals") {
+            self.reset_writes.set(self.reset_writes.get() + 1);
+            let request: Value = serde_json::from_slice(input).unwrap();
+            assert!(
+                request["message"]
+                    .as_str()
+                    .unwrap()
+                    .starts_with("[Copilot speaking]")
+            );
+            if self.fault.get() == "resetRefused" {
+                return Ok(ProcessOutput::new(
+                    false,
+                    b"HTTP/2.0 403 Forbidden\r\n\r\n{}".to_vec(),
+                    Vec::new(),
+                ));
+            }
+            let id = path.rsplit('/').nth(1).unwrap().parse::<u64>().unwrap();
+            let mut evidence = self.evidence.borrow_mut();
+            let review = evidence["reviews"]
+                .as_array_mut()
+                .unwrap()
+                .iter_mut()
+                .find(|review| review["id"] == id)
+                .unwrap();
+            assert_eq!(review["user"]["id"], 42);
+            if self.fault.get() != "resetUnknown" {
+                review["state"] = json!("DISMISSED");
+                let node_id = review["node_id"].clone();
+                for event in evidence["timeline"].as_array_mut().unwrap() {
+                    if event["id"] == node_id {
+                        event["state"] = json!("DISMISSED");
+                    }
+                }
+                evidence["timeline"].as_array_mut().unwrap().push(json!({
+                    "__typename": "ReviewDismissedEvent", "id": format!("reset-{id}"),
+                    "review": {"id": node_id}, "previousReviewState": "APPROVED",
+                    "createdAt": self.notice_time(), "pullRequestCommit": null
+                }));
+            }
+            return Ok(
+                if matches!(self.fault.get(), "resetUnknown" | "lostResetReply") {
+                    ProcessOutput::new(false, Vec::new(), b"connection lost".to_vec())
+                } else {
+                    ProcessOutput::new(true, b"{}".to_vec(), Vec::new())
                 },
             );
         }
@@ -696,6 +776,36 @@ impl Http for Provider {
                 serde_json::to_vec(&value).unwrap(),
             ))
         };
+        if method == "PUT"
+            && body.is_some_and(|body| serde_json::from_slice::<Value>(body).unwrap()["vote"] == 0)
+        {
+            self.reset_writes.set(self.reset_writes.get() + 1);
+            assert!(path.ends_with("/reviewers/10000000-0000-4000-8000-000000000001"));
+            let request: Value = serde_json::from_slice(body.unwrap()).unwrap();
+            assert_eq!(
+                request,
+                json!({"id": "10000000-0000-4000-8000-000000000001", "vote": 0})
+            );
+            if self.fault.get() == "resetRefused" {
+                return response(403, json!({}));
+            }
+            if self.fault.get() != "resetUnknown" {
+                self.ado_vote(
+                    0,
+                    100 + u32::try_from(self.reset_writes.get()).unwrap(),
+                    self.notice_time(),
+                );
+                // Keep fixture notice lookup independent of generated system event ordering.
+                let mut evidence = self.evidence.borrow_mut();
+                let threads = evidence["threads"].as_array_mut().unwrap();
+                let event = threads.pop().unwrap();
+                threads.insert(0, event);
+            }
+            if matches!(self.fault.get(), "resetUnknown" | "lostResetReply") {
+                return Err(io::Error::other("Lost reset reply").into());
+            }
+            return response(200, self.evidence.borrow()["reviewers"][0].clone());
+        }
         if method != "GET" {
             self.writes.set(self.writes.get() + 1);
             let request: Value = serde_json::from_slice(body.unwrap()).unwrap();
@@ -772,6 +882,7 @@ impl Http for Provider {
                     .as_array_mut()
                     .unwrap()
                     .push(thread.clone());
+                self.after_notice();
             }
             if self.fault.get() == "noticeJournalFailure" {
                 self.fail_journal_save();
@@ -1710,7 +1821,9 @@ fn needs_review_notices_short_circuit_and_expire_only_after_external_approval(
         };
         assert!(body.starts_with("[Copilot speaking]"));
         assert!(body.contains("<!-- ss-autoreapprove-needs-review "));
-        assert!(body.contains("separate new review"));
+        assert!(body.contains("## Automatic reapproval withheld\n\n### Reasons\n\n- "));
+        assert!(!body.contains("Material discussion:"));
+        assert_eq!(provider.reset_writes.get(), usize::from(ado));
         let fetches = provider.fetches.get();
         let retained = discover_inspect(&scope.path().join("retained"), &provider, false);
         assert_eq!(retained["items"][0]["status"], "needsReview");
@@ -1763,6 +1876,147 @@ fn needs_review_notices_short_circuit_and_expire_only_after_external_approval(
         let resumed = discover_inspect(&scope.path().join("resumed"), &provider, true);
         assert_eq!(resumed["items"][0]["status"], "assessmentRequired");
         assert_eq!(provider.writes.get(), 1);
+    }
+}
+
+/// Clears retained approvals without replacing independent later decisions or replaying writes.
+fn refusal_resets_only_captured_positive_approvals(repository: &Sources) {
+    for ado in [false, true] {
+        for fault in [
+            "",
+            "dryRun",
+            "lostResetReply",
+            "resetUnknown",
+            "resetRefused",
+            "concurrentApproval",
+            "concurrentNegative",
+            "approvalHistoryDeleted",
+        ] {
+            if !ado && fault == "approvalHistoryDeleted" {
+                continue;
+            }
+            let scope = TempDir::new().unwrap();
+            let root = scope.path().join("reset");
+            let provider = repository.provider(ado);
+            if !ado {
+                let mut evidence = provider.evidence.borrow_mut();
+                evidence["reviews"][1]["state"] = json!("APPROVED");
+                evidence["timeline"][1]["state"] = json!("APPROVED");
+                evidence["timeline"].as_array_mut().unwrap().remove(2);
+                evidence["policy"]["requireLastPushApproval"] = json!(true);
+                // Another account's positive decision is not part of this account's reset.
+                evidence["reviews"][0]["state"] = json!("APPROVED");
+                evidence["timeline"][0]["state"] = json!("APPROVED");
+            }
+            let (snapshot, prepared) = prepare(&root, &provider, fault == "dryRun");
+            assess_as(&root, &provider, &snapshot, &prepared, "significant");
+            provider.fault.set(fault);
+            let result = notify(&root, &provider, &snapshot);
+            if matches!(
+                fault,
+                "dryRun" | "resetUnknown" | "resetRefused" | "approvalHistoryDeleted"
+            ) {
+                result.unwrap_err();
+                notify(&root, &provider, &snapshot).unwrap_err();
+            } else {
+                assert!(result.unwrap()["items"][0]["reviewNotice"].is_object());
+                notify(&root, &provider, &snapshot).unwrap();
+            }
+            let should_reset = !matches!(fault, "dryRun" | "approvalHistoryDeleted")
+                && !(ado && matches!(fault, "concurrentApproval" | "concurrentNegative"));
+            assert_eq!(
+                provider.reset_writes.get(),
+                usize::from(should_reset),
+                "ADO={ado}: {fault}"
+            );
+            assert_eq!(
+                provider.writes.get(),
+                usize::from(fault != "dryRun"),
+                "Comments must not repeat: ADO={ado}: {fault}"
+            );
+            assert_refusal_reset_standing(&provider, fault);
+            if matches!(fault, "resetUnknown" | "resetRefused") {
+                // Removing the transport fault must not turn a previous write into retry permission.
+                provider.fault.set("");
+                notify(&root, &provider, &snapshot).unwrap_err();
+                assert_eq!(provider.reset_writes.get(), 1);
+                let run = invoke(&root, &provider, "results", &[]).unwrap();
+                assert_eq!(run["state"], "failed");
+                let path = host_journal(&scope.path().join("host-store/review-notices"));
+                let before = fs::read(&path).unwrap();
+                let mut incompatible: Value = serde_json::from_slice(&before).unwrap();
+                incompatible["schemaVersion"] = json!(1);
+                let incompatible = serde_json::to_vec(&incompatible).unwrap();
+                fs::write(&path, &incompatible).unwrap();
+                let calls = provider.service_calls.get();
+                assert_eq!(
+                    ss_ai::classification(&notify(&root, &provider, &snapshot).unwrap_err()),
+                    "invalidState"
+                );
+                assert_eq!(provider.service_calls.get(), calls);
+                assert_eq!(fs::read(&path).unwrap(), incompatible);
+                fs::write(&path, before).unwrap();
+                // Manual clearing settles a failed reset without replaying the refused request.
+                if ado {
+                    provider.ado_vote(0, 200, "2026-09-28T09:07:00Z");
+                } else {
+                    let mut evidence = provider.evidence.borrow_mut();
+                    evidence["reviews"][1]["state"] = json!("DISMISSED");
+                    evidence["timeline"][1]["state"] = json!("DISMISSED");
+                    evidence["timeline"].as_array_mut().unwrap().push(json!({
+                        "__typename": "ReviewDismissedEvent", "id": "manual-reset",
+                        "review": {"id": "review-2"}, "previousReviewState": "APPROVED",
+                        "createdAt": "2026-09-28T09:07:00Z", "pullRequestCommit": null
+                    }));
+                }
+                assert!(
+                    notify(&root, &provider, &snapshot).unwrap()["items"][0]["reviewNotice"]
+                        .is_object()
+                );
+                assert_eq!(provider.reset_writes.get(), 1);
+                assert_eq!(provider.writes.get(), 1);
+            }
+        }
+    }
+}
+
+/// Provider standing distinguishes a cleared old approval from a preserved independent decision.
+fn assert_refusal_reset_standing(provider: &Provider, fault: &str) {
+    let evidence = provider.evidence.borrow();
+    if provider.ado {
+        let expected = match fault {
+            "concurrentNegative" => -10,
+            "dryRun"
+            | "resetUnknown"
+            | "resetRefused"
+            | "concurrentApproval"
+            | "approvalHistoryDeleted" => 10,
+            _ => 0,
+        };
+        assert_eq!(evidence["reviewers"][0]["vote"], expected, "{fault}");
+    } else {
+        assert_eq!(
+            evidence["reviews"][0]["state"], "APPROVED",
+            "Other reviewers retain their approval"
+        );
+        assert_eq!(
+            evidence["reviews"][1]["state"],
+            if matches!(fault, "dryRun" | "resetUnknown" | "resetRefused") {
+                "APPROVED"
+            } else {
+                "DISMISSED"
+            }
+        );
+        if matches!(fault, "concurrentApproval" | "concurrentNegative") {
+            assert_eq!(
+                evidence["reviews"].as_array().unwrap().last().unwrap()["state"],
+                if fault == "concurrentApproval" {
+                    "APPROVED"
+                } else {
+                    "CHANGES_REQUESTED"
+                }
+            );
+        }
     }
 }
 
@@ -2530,12 +2784,10 @@ fn partial_significant_result_reaches_guarded_notification_without_approval() {
         assert_eq!(provider.writes.get(), 1);
         let notice_path = host_journal(&scope.path().join("host-store").join("review-notices"));
         let stored: Value = serde_json::from_slice(&fs::read(notice_path).unwrap()).unwrap();
-        assert!(
-            stored["attempts"][0]["body"]
-                .as_str()
-                .unwrap()
-                .contains("Partial assessment; unrelated changes may not have been examined.")
-        );
+        let body = stored["attempts"][0]["body"].as_str().unwrap();
+        assert!(body.contains("- The examined change materially alters the fixture contract."));
+        assert!(!body.contains("Partial assessment"));
+        assert!(!body.contains("unrelated changes"));
     }
 }
 
@@ -3613,6 +3865,7 @@ fn native_assessment_and_notice_boundaries() {
     let baseline = git(repository.path(), &["status", "--porcelain=v1"]);
     risk_judgments_and_uncertainty_prevent_publication(&repository);
     needs_review_notices_short_circuit_and_expire_only_after_external_approval(&repository);
+    refusal_resets_only_captured_positive_approvals(&repository);
     notice_dry_runs_refusals_and_uncertain_effects_do_not_duplicate_writes(&repository);
     notice_terminal_save_failures_preserve_original_recovery(&repository);
     uncertain_assessment_diagnostic_survives_notification_retry(&repository);
