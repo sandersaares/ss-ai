@@ -61,40 +61,6 @@ pub(crate) struct Store<'a> {
     record: Record,
 }
 
-/// Prior-format recovery binds an existing intent without interpreting old judgments.
-pub(crate) struct PreviousAttempt<'a> {
-    pub(crate) run_id: &'a str,
-    pub(crate) assessment_digest: &'a str,
-    pub(crate) policy_digest: &'a str,
-    pub(crate) anchor: &'a Anchor,
-    pub(crate) source_commit: &'a str,
-}
-
-/// Matches the complete attempt binding before any provider read.
-fn previous_attempt_index(record: &Record, input: &PreviousAttempt<'_>) -> Result<usize, AppError> {
-    let index = record
-        .attempts
-        .iter()
-        .position(|attempt| attempt.run_id == input.run_id)
-        .ok_or_else(|| fail("invalidState", "Previous run has no notice attempt"))?;
-    let attempt = record
-        .attempts
-        .get(index)
-        .ok_or_else(|| fail("invalidState", "Missing notice attempt"))?;
-    if attempt.state == State::Refused
-        || attempt.marker.assessment_digest != input.assessment_digest
-        || attempt.marker.policy_digest != input.policy_digest
-        || attempt.marker.anchor != *input.anchor
-        || attempt.marker.source_commit != input.source_commit
-    {
-        return Err(fail(
-            "invalidState",
-            "Previous notice attempt does not match the stored assessment",
-        ));
-    }
-    Ok(index)
-}
-
 #[derive(Debug, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct Record {
@@ -512,28 +478,6 @@ impl<'a> Store<'a> {
             .any(|attempt| attempt.run_id == run && attempt.state == State::Intent)
     }
 
-    /// Reads an owned earlier attempt without permitting a new notice.
-    pub(crate) fn recover_previous(
-        &mut self,
-        api: &mut Api<'_>,
-        target: &Target,
-        clock: &dyn Clock,
-        input: &PreviousAttempt<'_>,
-    ) -> Result<Notice, AppError> {
-        let index = previous_attempt_index(&self.record, input)?;
-        if api.identity()?.id.as_deref() != Some(&self.record.scope.account_id) {
-            return Err(fail("authentication", "Needs-review account changed"));
-        }
-        self.readback(api, target, clock, index).map_err(|error| {
-            crate::error::caused_by(
-                "ambiguousWrite",
-                "Previous needs-review comment could not be reconciled".to_owned(),
-                error.into_std_error(),
-            )
-            .into()
-        })
-    }
-
     /// Refreshes immutable evidence before a single comment POST and reconciles intent read-only.
     pub(crate) fn publish(
         &mut self,
@@ -725,10 +669,7 @@ mod tests {
     use serde_json::{Value, json};
     use uuid::Uuid;
 
-    use super::{
-        Attempt, Marker, PreviousAttempt, Record, State, matching_notice, notices,
-        previous_attempt_index,
-    };
+    use super::{Attempt, Marker, State, matching_notice, notices};
     use crate::ado_approval::Evidence as AdoEvidence;
     use crate::approval::{Decision, Evidence};
     use crate::clock::timestamp;
@@ -776,40 +717,7 @@ mod tests {
     }
 
     #[test]
-    fn previous_recovery_requires_the_matching_nonrefused_attempt() {
-        let marker = marker();
-        let run_id = Uuid::new_v4().to_string();
-        let input = PreviousAttempt {
-            run_id: &run_id,
-            assessment_digest: &marker.assessment_digest,
-            policy_digest: &marker.policy_digest,
-            anchor: &marker.anchor,
-            source_commit: &marker.source_commit,
-        };
-        let mut record = Record {
-            schema_version: 1,
-            scope: marker.scope.clone(),
-            attempts: vec![],
-        };
-        previous_attempt_index(&record, &input).unwrap_err();
-        record.attempts.push(Attempt {
-            run_id: run_id.clone(),
-            marker: marker.clone(),
-            body: "stored body".to_owned(),
-            state: State::Intent,
-        });
-        assert_eq!(previous_attempt_index(&record, &input).unwrap(), 0);
-        record.attempts[0].state = State::Verified;
-        assert_eq!(previous_attempt_index(&record, &input).unwrap(), 0);
-        record.attempts[0].state = State::Refused;
-        previous_attempt_index(&record, &input).unwrap_err();
-        record.attempts[0].state = State::Intent;
-        record.attempts[0].marker.assessment_digest = "e".repeat(64);
-        previous_attempt_index(&record, &input).unwrap_err();
-    }
-
-    #[test]
-    fn previous_readback_requires_one_exact_owned_comment_on_each_provider() {
+    fn readback_requires_one_exact_owned_comment_on_each_provider() {
         let marker = marker();
         let body = format!(
             "Notice\n\n<!-- ss-autoreapprove-needs-review {} -->",

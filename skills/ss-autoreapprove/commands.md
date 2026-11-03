@@ -311,11 +311,11 @@ draft; do not report or perform further work on that PR.
 `notify` accepts only a completed significant or uncertain live assessment. It refreshes
 source and decision evidence, posts an attributed
 standalone needs-review comment with a hidden marker, and verifies the owned
-comment. Repeating the original command reconciles the same intent without
-posting again, including for a previous schema-14 or schema-15 run. This recovery does not
-resume the previous assessment or change its run file. For that run, use the
-`recoveryOnly` response to report the recovered notice; do not call `results`
-on the previous run. Preserve an unknown comment attempt for reconciliation. Never call `notify` for
+comment. Repeating the original command with the same utility version and
+supported run schema reconciles the same intent without posting again.
+Incompatible schemas fail without modifying records or performing provider
+effects; do not recover them through a different-version utility.
+Preserve an unknown comment attempt for reconciliation. Never call `notify` for
 a dry run, an existing active marker, missing approval authority, or a tooling
 failure without a completed assessment. Uncertain assessments retain their
 failure diagnostic and partial run status after notification.

@@ -173,6 +173,9 @@ separate window bounded by the reserved publication duration and still require
 current provider evidence and guarded publication. A preflight that exceeds
 that window returns `publicationTimeout` before any new effect, without
 changing the assessor's elapsed time or exhaustion diagnostic.
+Finalization rejects a start earlier than the retained assessment observation;
+it measures its window from the actual invocation timestamp rather than moving
+a regressed clock forward.
 Registering source context changes the local read token, not the snapshot; the
 same worker can obtain a new token and retry undelivered pages.
 
@@ -264,8 +267,9 @@ of current approval eligibility, including after closure or draft conversion.
 It captures PR identity and complete discussion without requiring source refs
 or approval history. It ignores unrelated expired notices but
 retains the intended comment's scope, timestamp, exact-body, and uniqueness
-checks. A previous schema-14 or schema-15 run supports this readback without resuming its
-assessment or changing the run file.
+checks. Recovery uses the same utility version and supported run schema.
+Incompatible schemas fail before changing stored records or performing provider
+effects; read-only readback does not bypass the version policy.
 
 The final summary lists each in-range candidate as a linked PR number and title.
 It identifies current and retained needs-review decisions.

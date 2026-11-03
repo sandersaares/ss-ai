@@ -22,7 +22,6 @@ use crate::journal::{FileJournal, read_bytes};
 use crate::json::{boolean, field, identifier, required_optional, text};
 use crate::objects;
 use crate::publication::{self, Outcome, Receipt, Scope};
-use crate::renewal::Anchor;
 use crate::review_notice::{self, Notice};
 use crate::target::{Platform, Target};
 use crate::{Clock, Process};
@@ -49,7 +48,6 @@ struct DiscoveryRecord {
     tenant: Option<String>,
     policy: Policy,
     dry_run: bool,
-    #[serde(default, skip_serializing_if = "is_false")]
     assessment_budget_enabled: bool,
     enumeration_complete: bool,
     state: RunState,
@@ -83,7 +81,7 @@ struct Entry {
     inspection: Option<Inspection>,
     #[serde(deserialize_with = "required_optional")]
     assessment: Option<Assessment>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(deserialize_with = "required_optional")]
     assessment_budget: Option<AssessmentBudget>,
     #[serde(deserialize_with = "required_optional")]
     execution_error: Option<Diagnostic>,
@@ -156,15 +154,6 @@ enum RunState {
     Failed,
 }
 
-/// Omit the new flag when retaining a run created before budget enforcement.
-#[expect(
-    clippy::trivially_copy_pass_by_ref,
-    reason = "Serde calls serialization predicates with a shared reference"
-)]
-fn is_false(value: &bool) -> bool {
-    !value
-}
-
 /// Recency never turns malformed timestamp evidence into an old-PR exclusion.
 #[derive(Debug, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
@@ -199,6 +188,7 @@ impl DiscoveryRecord {
             || self.repository_id.trim().is_empty()
             || self.account_id.trim().is_empty()
             || self.utility_version.trim().is_empty()
+            || !self.assessment_budget_enabled
             || self.policy.content.trim().is_empty()
             || !Path::new(&self.policy.source_path).is_absolute()
             || digest(self.policy.content.as_bytes()) != self.policy.sha256
@@ -225,10 +215,7 @@ impl DiscoveryRecord {
                         .as_ref()
                         .is_some_and(|assessment| assessment.digest.is_some()),
                 )
-            }) || !self.assessment_budget_enabled && entry.assessment_budget.is_some()
-                || self.assessment_budget_enabled
-                    && entry.assessment.is_some()
-                    && entry.assessment_budget.is_none()
+            }) || entry.assessment.is_some() && entry.assessment_budget.is_none()
             {
                 return Err(fail("invalidState", "Invalid assessment budget record"));
             }
@@ -1312,9 +1299,6 @@ fn assessment_budget_step(
     journal: &FileJournal<'_>,
     phase: BudgetPhase,
 ) -> Result<(), AppError> {
-    if !run.assessment_budget_enabled {
-        return Ok(());
-    }
     let entry = run
         .inventory
         .get_mut(index)
@@ -1453,152 +1437,6 @@ pub(crate) struct PublishInput<'a> {
     pub(crate) tenant: Option<&'a str>,
 }
 
-/// Identity needed to read back a notice from a previous-format run.
-struct PreviousNotice {
-    schema_version: u32,
-    run_id: String,
-    operation_run_id: String,
-    scope: Scope,
-    snapshot: String,
-    assessment_digest: String,
-    policy_digest: String,
-    anchor: Anchor,
-    source_commit: String,
-    url: String,
-    title: String,
-}
-
-/// Checks only the stored bindings needed for notice recovery, not old judgments.
-fn previous_notice(document: &Value, input: &PublishInput<'_>) -> Result<PreviousNotice, AppError> {
-    let invalid = || {
-        fail(
-            "invalidState",
-            "Previous notice recovery binding is invalid",
-        )
-    };
-    let tenant = document.get("tenant").ok_or_else(invalid)?;
-    let schema_version = match field(document, "schemaVersion")?.as_u64() {
-        Some(14) => 14,
-        Some(15) => 15,
-        _ => return Err(invalid()),
-    };
-    if boolean(field(document, "dryRun")?)?
-        || text(field(document, "repositoryUrl")?)? != input.repository.web_url
-        || field(document, "platform")? != &serde_json::to_value(input.repository.platform)?
-        || tenant.as_str() != input.tenant
-        || !tenant.is_null() && tenant.as_str().is_none()
-    {
-        return Err(invalid());
-    }
-    let run_id = text(field(document, "runId")?)?;
-    if Uuid::parse_str(run_id).is_err() {
-        return Err(invalid());
-    }
-    let scope = Scope {
-        repository_id: text(field(document, "repositoryId")?)?.to_owned(),
-        account_id: text(field(document, "accountId")?)?.to_owned(),
-        pull_request_id: input.number.get(),
-    };
-    if scope.repository_id.trim().is_empty() || scope.account_id.trim().is_empty() {
-        return Err(invalid());
-    }
-    let entries = field(document, "inventory")?
-        .as_array()
-        .ok_or_else(invalid)?;
-    let mut ids = HashSet::new();
-    let mut entry = None;
-    for candidate in entries {
-        let id = field(candidate, "pullRequestId")?
-            .as_u64()
-            .and_then(|id| u32::try_from(id).ok())
-            .and_then(NonZeroU32::new)
-            .ok_or_else(invalid)?;
-        if !ids.insert(id) {
-            return Err(invalid());
-        }
-        if id == input.number {
-            entry = Some(candidate);
-        }
-    }
-    let entry = entry.ok_or_else(invalid)?;
-    let url = text(field(entry, "url")?)?;
-    let title = text(field(entry, "title")?)?;
-    if url != input.repository.candidate(input.number).web_url
-        || title.trim().is_empty()
-        || boolean(field(entry, "draft")?)?
-    {
-        return Err(invalid());
-    }
-    let recovery: Recovery = serde_json::from_value(field(entry, "recovery")?.clone())?;
-    recovery.validate(run_id)?;
-    let operation_run_id = recovery.attempt_ids.last().map_or(run_id, String::as_str);
-    let inspection = field(entry, "inspection")?;
-    let captured_at = text(field(inspection, "capturedAt")?)?;
-    timestamp(captured_at)?;
-    let snapshot = text(field(inspection, "snapshotDigest")?)?;
-    let evidence = field(inspection, "evidence")?;
-    let digest_input = if recovery.attempt_ids.is_empty() {
-        json!({"capturedAt": captured_at, "evidence": evidence})
-    } else {
-        json!({"capturedAt": captured_at, "evidence": evidence, "attemptId": operation_run_id})
-    };
-    if snapshot != input.snapshot || digest(&serde_json::to_vec(&digest_input)?) != snapshot {
-        return Err(invalid());
-    }
-    let evidence: Evidence = serde_json::from_value(evidence.clone())?;
-    evidence.validate_scope(&scope.repository_id, scope.pull_request_id)?;
-    if !matches!(
-        (&evidence, input.repository.platform),
-        (Evidence::GitHub(_), Platform::GitHub) | (Evidence::AzureDevOps(_), Platform::AzureDevOps)
-    ) {
-        return Err(invalid());
-    }
-    let decision = field(inspection, "decision")?;
-    if text(field(decision, "status")?)? != "assessmentRequired" {
-        return Err(invalid());
-    }
-    let anchor: Anchor = serde_json::from_value(field(decision, "anchor")?.clone())?;
-    let assessment = field(entry, "assessment")?;
-    let policy = field(document, "policy")?;
-    let policy_digest = text(field(policy, "sha256")?)?;
-    let inventory = field(assessment, "inventory")?;
-    let source_commit = text(field(inventory, "newCommit")?)?;
-    let assessment_digest = text(field(assessment, "assessmentDigest")?)?;
-    let observed_source = match &evidence {
-        Evidence::GitHub(GitHubEvidence::History { pull_request, .. }) => {
-            text(field(field(pull_request, "head")?, "sha")?)?
-        }
-        Evidence::AzureDevOps(AdoEvidence::History { source_commit, .. }) => source_commit,
-        _ => return Err(invalid()),
-    };
-    if !boolean(field(assessment, "complete")?)?
-        || text(field(assessment, "snapshotDigest")?)? != snapshot
-        || text(field(assessment, "policyDigest")?)? != policy_digest
-        || text(field(inventory, "oldCommit")?)? != anchor.source_commit
-        || source_commit != observed_source
-        || digest(text(field(policy, "content")?)?.as_bytes()) != policy_digest
-        || assessment_digest.len() != 64
-        || !assessment_digest
-            .bytes()
-            .all(|byte| byte.is_ascii_hexdigit())
-    {
-        return Err(invalid());
-    }
-    Ok(PreviousNotice {
-        schema_version,
-        run_id: run_id.to_owned(),
-        operation_run_id: operation_run_id.to_owned(),
-        scope,
-        snapshot: snapshot.to_owned(),
-        assessment_digest: assessment_digest.to_owned(),
-        policy_digest: policy_digest.to_owned(),
-        anchor,
-        source_commit: source_commit.to_owned(),
-        url: url.to_owned(),
-        title: title.to_owned(),
-    })
-}
-
 /// Publishes once after validating the completed assessment and current evidence.
 pub(crate) fn publish(
     api: &mut Api<'_>,
@@ -1655,7 +1493,8 @@ pub(crate) fn publish(
     let effect_deadline = entry
         .assessment_budget
         .as_ref()
-        .map(|budget| budget.effect_deadline(clock.now().as_millisecond()));
+        .map(|budget| budget.effect_deadline(clock.now().as_millisecond()))
+        .transpose()?;
     let (snapshot, evidence) = entry.assessment_inputs()?;
     let assessment = entry
         .assessment
@@ -1760,63 +1599,6 @@ pub(crate) fn notify(
             "Needs-review publication requires attribution",
         ));
     }
-    let previous = {
-        let journal = FileJournal::open(input.path, clock)?;
-        let bytes = journal
-            .read_bytes()?
-            .ok_or_else(|| fail("invalidState", "Missing run"))?;
-        let document: Value = serde_json::from_slice(&bytes)?;
-        if matches!(
-            document.get("schemaVersion").and_then(Value::as_u64),
-            Some(14 | 15)
-        ) {
-            Some((previous_notice(&document, input)?, bytes))
-        } else {
-            None
-        }
-    };
-    if let Some((previous, original)) = previous {
-        let mut notices = review_notice::Store::open(
-            input.repository.platform,
-            input.directory,
-            &previous.scope,
-            clock,
-        )?;
-        // Host-before-run locking preserves the same attempt while provider reads run.
-        let journal = FileJournal::open(input.path, clock)?;
-        if journal.read_bytes()?.as_deref() != Some(original.as_slice()) {
-            return Err(fail("invalidState", "Previous run changed during recovery"));
-        }
-        let notice = notices.recover_previous(
-            api,
-            &input.repository.candidate(input.number),
-            clock,
-            &review_notice::PreviousAttempt {
-                run_id: &previous.operation_run_id,
-                assessment_digest: &previous.assessment_digest,
-                policy_digest: &previous.policy_digest,
-                anchor: &previous.anchor,
-                source_commit: &previous.source_commit,
-            },
-        )?;
-        return Ok(json!({
-            "schemaVersion": previous.schema_version,
-            "runId": previous.run_id,
-            "repositoryUrl": input.repository.web_url,
-            "state": "reconciled",
-            "recoveryOnly": true,
-            "items": [{
-                "pullRequestId": input.number,
-                "url": previous.url,
-                "title": previous.title,
-                "status": "needsReview",
-                "snapshotDigest": previous.snapshot,
-                "assessmentDigest": previous.assessment_digest,
-                "reviewNotice": notice
-            }],
-            "nextAfter": null
-        }));
-    }
     let (scope, run_id) = {
         let journal = FileJournal::open(input.path, clock)?;
         let run =
@@ -1875,7 +1657,8 @@ pub(crate) fn notify(
     let effect_deadline = entry
         .assessment_budget
         .as_ref()
-        .map(|budget| budget.effect_deadline(clock.now().as_millisecond()));
+        .map(|budget| budget.effect_deadline(clock.now().as_millisecond()))
+        .transpose()?;
     let (snapshot, evidence) = entry.assessment_inputs()?;
     let assessment = entry
         .assessment
@@ -2075,15 +1858,6 @@ pub(crate) fn work(
         if let Some(metadata) = metadata {
             return metadata.map_err(Into::into);
         }
-    }
-    if matches!(action, WorkAction::Prepare)
-        && entry.assessment.is_none()
-        && !run.assessment_budget_enabled
-    {
-        return Err(fail(
-            "invalidState",
-            "This run has no assessment budget; start a fresh bounded assessment",
-        ));
     }
     assessment_budget_step(&mut run, index, clock, &journal, BudgetPhase::BeginWork)?;
     if matches!(action, WorkAction::StartWorker) {
@@ -2438,122 +2212,4 @@ fn digest(bytes: &[u8]) -> String {
 
 fn utc(value: Timestamp) -> String {
     format!("{value:.9}")
-}
-
-#[cfg(test)]
-mod tests {
-    #![allow(
-        clippy::indexing_slicing,
-        reason = "Tests mutate bounded synthetic records"
-    )]
-
-    use std::num::NonZeroU32;
-    use std::path::Path;
-
-    use serde_json::{Value, json};
-
-    use super::{PublishInput, digest, previous_notice};
-    use crate::target::Target;
-
-    /// Builds only the previous-format fields used to bind notice recovery.
-    fn previous_run(target: &Target) -> Value {
-        let old = "a".repeat(40);
-        let new = "b".repeat(40);
-        let evidence = if target.platform == crate::target::Platform::GitHub {
-            json!({"platform": "gitHub", "observation": {
-                "scope": "history", "pullRequest": {"number": 1, "base": {"repo": {"id": 123}},
-                    "head": {"sha": new}},
-                "policy": {"requireLastPushApproval": false},
-                "reviews": [], "timeline": [], "comments": [], "reviewComments": []
-            }})
-        } else {
-            json!({"platform": "azureDevOps", "observation": {
-                "scope": "history", "pullRequest": {"pullRequestId": 1, "repository": {"id": "123"}},
-                "sourceCommit": new, "reviewers": [], "iterations": [], "threads": [],
-                "policies": [], "evaluations": []
-            }})
-        };
-        let captured = "2026-01-01T00:00:00Z";
-        let snapshot = digest(
-            &serde_json::to_vec(&json!({"capturedAt": captured, "evidence": evidence})).unwrap(),
-        );
-        let policy = "Synthetic policy";
-        let policy_digest = digest(policy.as_bytes());
-        json!({
-            "schemaVersion": 14, "runId": "70759fa1-3f53-4f78-81e3-49d5ab9be1d4",
-            "repositoryUrl": target.web_url, "repositoryId": "123", "platform": target.platform,
-            "accountId": "42", "tenant": null, "dryRun": false,
-            "policy": {"sha256": policy_digest, "content": policy},
-            "inventory": [{
-                "pullRequestId": 1, "url": target.candidate(NonZeroU32::MIN).web_url,
-                "title": "Synthetic PR", "draft": false,
-                "recovery": {"attemptIds": [], "stale": null, "error": null},
-                "inspection": {"capturedAt": captured, "snapshotDigest": snapshot, "evidence": evidence,
-                    "decision": {"status": "assessmentRequired", "anchor": {
-                        "reviewId": "event", "sourceCommit": old}}},
-                "assessment": {"complete": true, "assessmentDigest": "c".repeat(64),
-                    "policyDigest": policy_digest, "snapshotDigest": snapshot,
-                    "inventory": {"oldCommit": old, "newCommit": new}}
-            }]
-        })
-    }
-
-    #[test]
-    fn previous_notice_binds_both_provider_snapshots_without_reading_judgments() {
-        for url in [
-            "https://github.com/example/widgets",
-            "https://dev.azure.com/org/project/_git/repo",
-        ] {
-            let target = Target::repository(url).unwrap();
-            let run = previous_run(&target);
-            let snapshot = run["inventory"][0]["inspection"]["snapshotDigest"]
-                .as_str()
-                .unwrap();
-            let input = PublishInput {
-                path: Path::new("unused"),
-                number: NonZeroU32::MIN,
-                snapshot,
-                repository: &target,
-                attribution: "Attribution",
-                directory: Path::new("unused"),
-                tenant: None,
-            };
-            for version in [14, 15] {
-                let mut previous_run = run.clone();
-                previous_run["schemaVersion"] = json!(version);
-                let previous = previous_notice(&previous_run, &input).unwrap();
-                assert_eq!(previous.schema_version, version);
-                assert_eq!(previous.scope.repository_id, "123");
-                assert_eq!(previous.operation_run_id, previous.run_id);
-                assert_eq!(previous.snapshot, snapshot);
-            }
-
-            for (path, replacement) in [
-                ("/schemaVersion", json!(16)),
-                ("/dryRun", json!(true)),
-                ("/repositoryId", json!("other")),
-                ("/tenant", json!(12)),
-                ("/policy/content", json!("different policy")),
-                (
-                    "/inventory/0/inspection/evidence/observation/scope",
-                    json!("state"),
-                ),
-                ("/inventory/0/assessment/complete", json!(false)),
-                ("/inventory/0/assessment/snapshotDigest", json!("different")),
-                (
-                    "/inventory/0/assessment/inventory/oldCommit",
-                    json!("different"),
-                ),
-                (
-                    "/inventory/0/assessment/inventory/newCommit",
-                    json!("different"),
-                ),
-                ("/inventory/0/assessment/assessmentDigest", json!("bad")),
-            ] {
-                let mut changed = run.clone();
-                *changed.pointer_mut(path).unwrap() = replacement;
-                assert!(previous_notice(&changed, &input).is_err(), "{path}");
-            }
-        }
-    }
 }

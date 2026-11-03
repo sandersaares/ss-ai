@@ -17,9 +17,14 @@ publication remain in `ss-review`.
 ## Version compatibility
 
 Sessions and persisted workflow state belong to the utility version that creates
-them. Different versions of `ss-ai` do not need to read, resume, or migrate each
-other's sessions. Keep state validation strict rather than adding cross-version
-compatibility handling. Use the same utility version throughout a session.
+them. Use the same utility version throughout a session. Do not add or retain
+cross-version readers, migrations, or recovery paths. Read-only recovery,
+including readback of an uncertain remote effect, is not an exception.
+
+Readers reject incompatible schemas without changing the stored state or
+performing provider effects. Same-version interruption recovery retains its
+normal validation and authority boundaries; it does not authorize loading an
+incompatible record format.
 
 ## Reapproval discovery
 

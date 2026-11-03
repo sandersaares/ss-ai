@@ -3232,7 +3232,7 @@ fn native_scale_canary_pages_and_recovers_oversized_unicode_batches() {
 }
 
 #[test]
-fn legacy_run_without_assessment_refuses_new_work_without_mutation() {
+fn incomplete_budget_records_are_rejected_without_mutation() {
     let _guard = PROCESS_TEST_LOCK
         .lock()
         .unwrap_or_else(PoisonError::into_inner);
@@ -3243,23 +3243,45 @@ fn legacy_run_without_assessment_refuses_new_work_without_mutation() {
     let inspected = discover_inspect(&root, &provider, false);
     let snapshot = inspected["items"][0]["snapshotDigest"].as_str().unwrap();
     let path = root.join("run.json");
-    let mut record: Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
-    record
-        .as_object_mut()
-        .unwrap()
-        .remove("assessmentBudgetEnabled");
-    record["inventory"][0]
-        .as_object_mut()
-        .unwrap()
-        .remove("assessmentBudget");
-    fs::write(&path, serde_json::to_vec(&record).unwrap()).unwrap();
-    let before = fs::read(&path).unwrap();
-    assert_eq!(
-        ss_ai::classification(&work(&root, &provider, "prepare", snapshot, &[]).unwrap_err()),
-        "invalidState"
-    );
-    assert_eq!(fs::read(&path).unwrap(), before);
-    assert_eq!(provider.writes.get(), 0);
+    let original: Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+    // Missing current-schema fields cannot silently select an older unbounded workflow.
+    for (pointer, replacement) in [
+        ("/assessmentBudgetEnabled", None),
+        ("/assessmentBudgetEnabled", Some(json!(false))),
+        ("/inventory/0/assessmentBudget", None),
+        ("/inventory/0/assessmentBudget/workerReservations", None),
+        ("/inventory/0/assessmentBudget/evidencePages", None),
+        ("/inventory/0/assessmentBudget/deliveredTextBytes", None),
+        ("/inventory/0/assessmentBudget/readBatches", None),
+        ("/inventory/0/assessmentBudget/judgmentBatches", None),
+    ] {
+        let mut record = original.clone();
+        if let Some(value) = replacement {
+            *record.pointer_mut(pointer).unwrap() = value;
+        } else {
+            let (parent, field) = pointer.rsplit_once('/').unwrap();
+            record
+                .pointer_mut(parent)
+                .unwrap()
+                .as_object_mut()
+                .unwrap()
+                .remove(field);
+        }
+        let before = serde_json::to_vec(&record).unwrap();
+        fs::write(&path, &before).unwrap();
+        let calls = provider.service_calls.get();
+        assert_eq!(
+            ss_ai::classification(&invoke(&root, &provider, "results", &[]).unwrap_err()),
+            "invalidState"
+        );
+        assert_eq!(
+            ss_ai::classification(&work(&root, &provider, "prepare", snapshot, &[]).unwrap_err()),
+            "invalidState"
+        );
+        assert_eq!(fs::read(&path).unwrap(), before);
+        assert_eq!(provider.writes.get(), 0);
+        assert_eq!(provider.service_calls.get(), calls);
+    }
 }
 
 /// Previous-format runs remain untouched when their schema is unsupported.
@@ -3292,15 +3314,24 @@ fn legacy_records_require_a_fresh_run() {
     }
 }
 
-/// Previous-format notice attempts permit readback, not a new provider write.
+/// Incompatible runs cannot bypass version ownership through read-only notice recovery.
 #[test]
-fn previous_notice_recovery_reads_only_the_original_attempt() {
+fn incompatible_notice_recovery_preserves_records_without_provider_access() {
     let _guard = PROCESS_TEST_LOCK
         .lock()
         .unwrap_or_else(PoisonError::into_inner);
     let repository = Sources::new();
     for ado in [false, true] {
-        for (version, present) in [(14, false), (14, true), (15, false), (15, true)] {
+        for (version, present) in [
+            (14, false),
+            (14, true),
+            (15, false),
+            (15, true),
+            (16, false),
+            (16, true),
+            (18, false),
+            (18, true),
+        ] {
             let scope = TempDir::new().unwrap();
             let root = scope.path().join("run");
             let provider = repository.provider(ado);
@@ -3313,17 +3344,14 @@ fn previous_notice_recovery_reads_only_the_original_attempt() {
             );
             assert_eq!(provider.writes.get(), 1);
             let notice_path = host_journal(&scope.path().join("host-store").join("review-notices"));
-            let notice: Value = serde_json::from_slice(&fs::read(notice_path).unwrap()).unwrap();
+            let notice_before = fs::read(&notice_path).unwrap();
+            let notice: Value = serde_json::from_slice(&notice_before).unwrap();
             assert_eq!(notice["attempts"][0]["state"], "intent");
             let body = notice["attempts"][0]["body"].clone();
 
             let run_path = root.join("run.json");
             let mut record: Value = serde_json::from_slice(&fs::read(&run_path).unwrap()).unwrap();
             record["schemaVersion"] = json!(version);
-            record["inventory"][0]["assessment"]
-                .as_object_mut()
-                .unwrap()
-                .remove("partial");
             let before = serde_json::to_vec(&record).unwrap();
             fs::write(&run_path, &before).unwrap();
             provider.fault.set("");
@@ -3346,25 +3374,18 @@ fn previous_notice_recovery_reads_only_the_original_attempt() {
                             "created_at": at, "updated_at": at}));
                 }
             }
-            let result = notify(&root, &provider, &snapshot);
-            if present {
-                let result = result.unwrap();
-                assert_eq!(result["state"], "reconciled", "ADO={ado}: {result}");
-                assert_eq!(result["recoveryOnly"], true);
-                assert_eq!(result["schemaVersion"], version);
-                assert_eq!(result["items"][0]["status"], "needsReview");
-            } else {
-                assert_eq!(
-                    ss_ai::classification(&result.unwrap_err()),
-                    "ambiguousWrite"
-                );
-            }
+            let calls = provider.service_calls.get();
+            let error = notify(&root, &provider, &snapshot).unwrap_err();
+            assert_eq!(ss_ai::classification(&error), "invalidState");
+            assert!(error.to_string().contains("Unsupported discovery schema"));
+            assert_eq!(provider.service_calls.get(), calls);
             assert_eq!(
                 provider.writes.get(),
                 1,
                 "Recovery must not issue another write"
             );
             assert_eq!(fs::read(&run_path).unwrap(), before);
+            assert_eq!(fs::read(&notice_path).unwrap(), notice_before);
         }
     }
 }

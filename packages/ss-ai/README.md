@@ -577,9 +577,9 @@ not a timestamp embedded in JSON, controls expiry.
 
 Intent precedes the single comment request. `notify` recovery uses the original
 run and reconciles a unique owned comment without repeating the request.
-For a previous schema-14 or schema-15 run, this readback leaves the run file unchanged and
-does not resume its assessment. Its `notify` response reports
-`state: "reconciled"`, `recoveryOnly: true`, and the recovered `needsReview` item.
+Recovery requires the same utility version and supported run schema.
+Incompatible run schemas fail without modifying the run or notice journal or
+performing provider effects; read-only notice recovery is not an exception.
 An uncertain notice effect is not repeated. A definitive refusal
 requires a fresh run, while an accepted notice remains a conservative request
 for a separate review even if source changes during posting. Edited, malformed,

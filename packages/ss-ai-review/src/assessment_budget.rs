@@ -25,15 +25,10 @@ pub(crate) struct AssessmentBudget {
     completed_at_milliseconds: Option<i64>,
     excluded_idle_milliseconds: i64,
     work_commands: usize,
-    #[serde(default)]
     worker_reservations: usize,
-    #[serde(default)]
     evidence_pages: usize,
-    #[serde(default)]
     delivered_text_bytes: usize,
-    #[serde(default)]
     read_batches: usize,
-    #[serde(default)]
     judgment_batches: usize,
     exhaustion: Option<ExhaustionReason>,
 }
@@ -218,11 +213,20 @@ impl AssessmentBudget {
     }
 
     /// Bound fresh provider checks independently of time spent awaiting the parent.
-    pub(crate) fn effect_deadline(&self, now_milliseconds: i64) -> EffectDeadline {
-        EffectDeadline {
-            // A finalizer's clock must not precede the worker's retained observation.
-            started_at_milliseconds: now_milliseconds.max(self.last_observed_milliseconds),
+    pub(crate) fn effect_deadline(
+        &self,
+        now_milliseconds: i64,
+    ) -> Result<EffectDeadline, AppError> {
+        // Moving the start forward would extend the finalizer's actual time allowance.
+        if now_milliseconds < self.last_observed_milliseconds {
+            return Err(fail(
+                "publicationTimeout",
+                "Publication clock precedes the retained assessment observation; no new effect was attempted",
+            ));
         }
+        Ok(EffectDeadline {
+            started_at_milliseconds: now_milliseconds,
+        })
     }
 
     /// Count native-produced text pages, including replays, rather than model comprehension.
@@ -396,7 +400,7 @@ mod tests {
         budget.complete();
         // A delayed parent receives a fresh bounded finalization window, not a new assessment.
         let started = TOTAL_MILLISECONDS;
-        let deadline = budget.effect_deadline(started);
+        let deadline = budget.effect_deadline(started).unwrap();
         deadline
             .check(&TestClock(started + PUBLICATION_RESERVE_MILLISECONDS - 1))
             .unwrap();
@@ -410,6 +414,31 @@ mod tests {
         );
         assert!(!budget.exhausted());
         assert!(deadline.check(&TestClock(started - 1)).is_err());
+    }
+
+    #[test]
+    fn regressed_publication_start_cannot_extend_the_finalization_window() {
+        let mut budget = AssessmentBudget::new(0);
+        let completed = 2 * PUBLICATION_RESERVE_MILLISECONDS;
+        assert_eq!(budget.finish_work(completed), BudgetStatus::Available);
+        budget.complete();
+        let before = budget.diagnostics();
+
+        // A start before completion is rejected even if the clock catches up before the effect.
+        let error = budget
+            .effect_deadline(PUBLICATION_RESERVE_MILLISECONDS)
+            .err()
+            .unwrap();
+        assert_eq!(classification(&error), "publicationTimeout");
+        assert_eq!(budget.diagnostics(), before);
+
+        let deadline = budget.effect_deadline(completed).unwrap();
+        deadline.check(&TestClock(completed + 1)).unwrap();
+        assert!(
+            deadline
+                .check(&TestClock(completed + PUBLICATION_RESERVE_MILLISECONDS))
+                .is_err()
+        );
     }
 
     #[test]
