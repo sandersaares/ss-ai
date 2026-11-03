@@ -233,7 +233,7 @@ The producer and consumer validate the full record, including excluded PRs.
 
 | Record | Fields |
 | --- | --- |
-| Run | `schemaVersion: 15`; UUID `runId`; canonical `repositoryUrl`; nonempty string `repositoryId`, `accountId`, `utilityVersion`; `platform` (`gitHub` or `azureDevOps`); nullable string `tenant`; `policy`; Boolean `dryRun`, `enumerationComplete`; `state`; `inventory`; nullable `error` and positive integer `errorPullRequestId`. |
+| Run | `schemaVersion: 16`; UUID `runId`; canonical `repositoryUrl`; nonempty string `repositoryId`, `accountId`, `utilityVersion`; `platform` (`gitHub` or `azureDevOps`); nullable string `tenant`; `policy`; Boolean `dryRun`, `enumerationComplete`; `state`; `inventory`; nullable `error` and positive integer `errorPullRequestId`. |
 | Policy | Absolute UTF-8 `sourcePath`; nonempty UTF-8 `content`; lowercase hexadecimal `sha256` of the captured content bytes. |
 | Inventory entry | Unique positive integer `pullRequestId`; canonical `url`; nonempty `title`; `draft: false`; `recency`; `recovery`; nullable `inspection`, `assessment`, `executionError`, `publication`, and `reviewNotice`. Entries are in ascending PR order. |
 | Recovery | `attemptIds`: ordered distinct UUIDs, at most the recovery limit, excluding the run ID; nullable `stale` (`staleEvidence`) and `error` (`retryExhausted`, only at the limit). |
@@ -571,7 +571,7 @@ not a timestamp embedded in JSON, controls expiry.
 
 Intent precedes the single comment request. `notify` recovery uses the original
 run and reconciles a unique owned comment without repeating the request.
-For a previous schema-14 run, this readback leaves the run file unchanged and
+For a previous schema-14 or schema-15 run, this readback leaves the run file unchanged and
 does not resume its assessment. Its `notify` response reports
 `state: "reconciled"`, `recoveryOnly: true`, and the recovered `needsReview` item.
 An uncertain notice effect is not repeated. A definitive refusal

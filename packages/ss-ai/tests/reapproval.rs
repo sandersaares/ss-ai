@@ -2443,6 +2443,14 @@ fn partial_significant_result_reaches_guarded_notification_without_approval() {
         let notice = notify(&root, &provider, &snapshot).unwrap();
         assert_eq!(notice["items"][0]["status"], "needsReview");
         assert_eq!(provider.writes.get(), 1);
+        let notice_path = host_journal(&scope.path().join("host-store").join("review-notices"));
+        let stored: Value = serde_json::from_slice(&fs::read(notice_path).unwrap()).unwrap();
+        assert!(
+            stored["attempts"][0]["body"]
+                .as_str()
+                .unwrap()
+                .contains("Partial assessment; unrelated changes may not have been examined.")
+        );
     }
 }
 
@@ -3086,7 +3094,7 @@ fn legacy_records_require_a_fresh_run() {
     }
 }
 
-/// An original schema-14 notice attempt permits readback, not a new provider write.
+/// Previous-format notice attempts permit readback, not a new provider write.
 #[test]
 fn previous_notice_recovery_reads_only_the_original_attempt() {
     let _guard = PROCESS_TEST_LOCK
@@ -3094,7 +3102,7 @@ fn previous_notice_recovery_reads_only_the_original_attempt() {
         .unwrap_or_else(PoisonError::into_inner);
     let repository = Sources::new();
     for ado in [false, true] {
-        for present in [false, true] {
+        for (version, present) in [(14, false), (14, true), (15, false), (15, true)] {
             let scope = TempDir::new().unwrap();
             let root = scope.path().join("run");
             let provider = repository.provider(ado);
@@ -3113,7 +3121,11 @@ fn previous_notice_recovery_reads_only_the_original_attempt() {
 
             let run_path = root.join("run.json");
             let mut record: Value = serde_json::from_slice(&fs::read(&run_path).unwrap()).unwrap();
-            record["schemaVersion"] = json!(14);
+            record["schemaVersion"] = json!(version);
+            record["inventory"][0]["assessment"]
+                .as_object_mut()
+                .unwrap()
+                .remove("partial");
             let before = serde_json::to_vec(&record).unwrap();
             fs::write(&run_path, &before).unwrap();
             provider.fault.set("");
@@ -3141,6 +3153,7 @@ fn previous_notice_recovery_reads_only_the_original_attempt() {
                 let result = result.unwrap();
                 assert_eq!(result["state"], "reconciled", "ADO={ado}: {result}");
                 assert_eq!(result["recoveryOnly"], true);
+                assert_eq!(result["schemaVersion"], version);
                 assert_eq!(result["items"][0]["status"], "needsReview");
             } else {
                 assert_eq!(
@@ -3243,7 +3256,7 @@ fn assert_successful_publication(
         assert!(result["items"][0]["publication"]["reviewId"].is_null());
     }
     let record: Value = serde_json::from_slice(&fs::read(root.join("run.json")).unwrap()).unwrap();
-    assert_eq!(record["schemaVersion"], 15);
+    assert_eq!(record["schemaVersion"], 16);
     assert!(!scope.join("host-store").join("publications").exists());
     // A later source push binds the next assessment to this ordinary approval.
     if ado {

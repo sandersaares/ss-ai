@@ -307,7 +307,7 @@ draft; do not report or perform further work on that PR.
 source and decision evidence, posts an attributed
 standalone needs-review comment with a hidden marker, and verifies the owned
 comment. Repeating the original command reconciles the same intent without
-posting again, including for a previous schema-14 run. This recovery does not
+posting again, including for a previous schema-14 or schema-15 run. This recovery does not
 resume the previous assessment or change its run file. For that run, use the
 `recoveryOnly` response to report the recovered notice; do not call `results`
 on the previous run. Preserve an unknown comment attempt for reconciliation. Never call `notify` for

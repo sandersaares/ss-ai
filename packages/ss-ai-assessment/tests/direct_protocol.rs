@@ -630,7 +630,7 @@ fn significant_partial_completion_requires_support_but_not_unrelated_coverage() 
     assert_eq!(assessment.status(true), "needsReview");
     assert_eq!(
         assessment.explanation().unwrap(),
-        "The examined change requires review."
+        "Partial assessment; unrelated changes may not have been examined. The examined change requires review."
     );
     let progress = assessment
         .progress_with_evidence("policy", "discussion")
@@ -641,6 +641,112 @@ fn significant_partial_completion_requires_support_but_not_unrelated_coverage() 
     let reloaded: Assessment =
         serde_json::from_value(serde_json::to_value(&assessment).unwrap()).unwrap();
     reloaded
+        .validate("snapshot", "policy", "policy", "discussion")
+        .unwrap();
+}
+
+#[test]
+fn compact_patch_references_select_the_same_unit_windows_as_exact_references() {
+    let mut assessment = fixture("discussion", 1);
+    let exact = format!("{}:patch", assessment.inventory.changes[0].id);
+    let compact = "c1:patch";
+    let full_units = assessment.units_for(Some(&exact), 0, 100).unwrap();
+    assert_eq!(
+        assessment.units_for(Some(compact), 0, 100).unwrap(),
+        full_units
+    );
+    assert_eq!(
+        assessment.compact_units_for(Some(compact), 0, 100).unwrap(),
+        assessment.compact_units_for(Some(&exact), 0, 100).unwrap()
+    );
+    let plan = assessment
+        .unit_read_plan(compact, 0, 100, "policy", "discussion")
+        .unwrap();
+    assert_eq!(
+        plan,
+        assessment
+            .unit_read_plan(&exact, 0, 100, "policy", "discussion")
+            .unwrap()
+    );
+    let count = usize::try_from(plan["items"][0]["count"].as_u64().unwrap()).unwrap();
+    let delivered = assessment
+        .read_units(
+            compact,
+            0,
+            count,
+            assessment.read_token().unwrap(),
+            "policy",
+            "discussion",
+        )
+        .unwrap();
+    assert!(!delivered["items"].as_array().unwrap().is_empty());
+    assert!(assessment.units_for(Some("c2:patch"), 0, 100).is_err());
+    assert!(
+        assessment
+            .unit_read_plan("c2:patch", 0, 100, "policy", "discussion")
+            .is_err()
+    );
+}
+
+#[test]
+fn cumulative_concern_supplies_a_rationale_for_derived_uncertainty() {
+    let mut assessment = fixture("discussion", 1);
+    deliver_required(&mut assessment, "discussion");
+    assessment
+        .conclude(
+            grouped(&assessment, &["c1"], Disposition::Insignificant),
+            "policy",
+            "discussion",
+        )
+        .unwrap();
+    let mut cumulative = judgment("cumulative");
+    cumulative.rationale = "The combined behavior remains unresolved.".into();
+    cumulative.concerns.push("Review the interaction.".into());
+    assessment
+        .record("cumulative", cumulative, None, "policy", "discussion")
+        .unwrap();
+    assessment.finish("policy", "discussion").unwrap();
+    assert_eq!(assessment.disposition(), Some(Disposition::Uncertain));
+    assert_eq!(
+        assessment.rationale(),
+        Some("The combined behavior remains unresolved.")
+    );
+    assessment
+        .validate("snapshot", "policy", "policy", "discussion")
+        .unwrap();
+}
+
+#[test]
+fn adding_first_discussion_note_invalidates_prior_cumulative_reasoning() {
+    let mut assessment = fixture("discussion", 1);
+    deliver_required(&mut assessment, "discussion");
+    assessment
+        .conclude(
+            grouped(&assessment, &["c1"], Disposition::Insignificant),
+            "policy",
+            "discussion",
+        )
+        .unwrap();
+    assessment
+        .record(
+            "cumulative",
+            judgment("cumulative"),
+            None,
+            "policy",
+            "discussion",
+        )
+        .unwrap();
+    assessment
+        .note(
+            "discussion",
+            note("discussion"),
+            None,
+            "policy",
+            "discussion",
+        )
+        .unwrap();
+    assert_eq!(assessment.progress()["cumulativeJudgmentRecorded"], false);
+    assessment
         .validate("snapshot", "policy", "policy", "discussion")
         .unwrap();
 }

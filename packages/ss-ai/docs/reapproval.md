@@ -213,7 +213,7 @@ capture resumes through `inspect`. Independent PRs keep their own budgets.
 Refresh applies to staleness before a remote approval request; an approval request
 error is reported without automatic resend in that attempt.
 
-`discovery.rs` owns the schema-15 run, recovery record, and result metadata.
+`discovery.rs` owns the schema-16 run, recovery record, and result metadata.
 Earlier run schemas require a fresh run and assessment. Discovery discards draft PRs
 before recency checks, and inspection, refresh, or publication preflight removes
 a PR found to have become a draft. Notification staleness is recorded separately
@@ -250,7 +250,7 @@ of current approval eligibility, including after closure or draft conversion.
 It captures PR identity and complete discussion without requiring source refs
 or approval history. It ignores unrelated expired notices but
 retains the intended comment's scope, timestamp, exact-body, and uniqueness
-checks. A previous schema-14 run supports this readback without resuming its
+checks. A previous schema-14 or schema-15 run supports this readback without resuming its
 assessment or changing the run file.
 
 The final summary lists each in-range candidate as a linked PR number and title.

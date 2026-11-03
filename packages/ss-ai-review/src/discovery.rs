@@ -32,7 +32,7 @@ use ss_ai_assessment::{
 };
 
 /// Provider-selected approval baselines require a fresh assessment contract.
-const RUN_SCHEMA: u32 = 15;
+const RUN_SCHEMA: u32 = 16;
 
 /// Durable metadata-only stage; recent candidates still require approval assessment.
 #[derive(Debug, Deserialize, Serialize)]
@@ -1440,6 +1440,7 @@ pub(crate) struct PublishInput<'a> {
 
 /// Identity needed to read back a notice from a previous-format run.
 struct PreviousNotice {
+    schema_version: u32,
     run_id: String,
     operation_run_id: String,
     scope: Scope,
@@ -1461,8 +1462,12 @@ fn previous_notice(document: &Value, input: &PublishInput<'_>) -> Result<Previou
         )
     };
     let tenant = document.get("tenant").ok_or_else(invalid)?;
-    if field(document, "schemaVersion")? != &json!(14)
-        || boolean(field(document, "dryRun")?)?
+    let schema_version = match field(document, "schemaVersion")?.as_u64() {
+        Some(14) => 14,
+        Some(15) => 15,
+        _ => return Err(invalid()),
+    };
+    if boolean(field(document, "dryRun")?)?
         || text(field(document, "repositoryUrl")?)? != input.repository.web_url
         || field(document, "platform")? != &serde_json::to_value(input.repository.platform)?
         || tenant.as_str() != input.tenant
@@ -1565,6 +1570,7 @@ fn previous_notice(document: &Value, input: &PublishInput<'_>) -> Result<Previou
         return Err(invalid());
     }
     Ok(PreviousNotice {
+        schema_version,
         run_id: run_id.to_owned(),
         operation_run_id: operation_run_id.to_owned(),
         scope,
@@ -1750,7 +1756,10 @@ pub(crate) fn notify(
             .read_bytes()?
             .ok_or_else(|| fail("invalidState", "Missing run"))?;
         let document: Value = serde_json::from_slice(&bytes)?;
-        if document.get("schemaVersion") == Some(&json!(14)) {
+        if matches!(
+            document.get("schemaVersion").and_then(Value::as_u64),
+            Some(14 | 15)
+        ) {
             Some((previous_notice(&document, input)?, bytes))
         } else {
             None
@@ -1781,7 +1790,7 @@ pub(crate) fn notify(
             },
         )?;
         return Ok(json!({
-            "schemaVersion": 14,
+            "schemaVersion": previous.schema_version,
             "runId": previous.run_id,
             "repositoryUrl": input.repository.web_url,
             "state": "reconciled",
@@ -2491,13 +2500,18 @@ mod tests {
                 directory: Path::new("unused"),
                 tenant: None,
             };
-            let previous = previous_notice(&run, &input).unwrap();
-            assert_eq!(previous.scope.repository_id, "123");
-            assert_eq!(previous.operation_run_id, previous.run_id);
-            assert_eq!(previous.snapshot, snapshot);
+            for version in [14, 15] {
+                let mut previous_run = run.clone();
+                previous_run["schemaVersion"] = json!(version);
+                let previous = previous_notice(&previous_run, &input).unwrap();
+                assert_eq!(previous.schema_version, version);
+                assert_eq!(previous.scope.repository_id, "123");
+                assert_eq!(previous.operation_run_id, previous.run_id);
+                assert_eq!(previous.snapshot, snapshot);
+            }
 
             for (path, replacement) in [
-                ("/schemaVersion", json!(15)),
+                ("/schemaVersion", json!(16)),
                 ("/dryRun", json!(true)),
                 ("/repositoryId", json!("other")),
                 ("/tenant", json!(12)),

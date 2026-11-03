@@ -326,6 +326,7 @@ impl Assessment {
         &self,
         reference: &str,
     ) -> Result<Vec<&crate::units::EvidenceUnit>, AssessmentError> {
+        let reference = self.exact_reference(reference)?;
         if reference != "discussion"
             && !self
                 .source_evidence
@@ -647,6 +648,9 @@ impl Assessment {
                     .map(|bound| &bound.value),
             )
             .find(|judgment| judgment.disposition == disposition)
+            // An unresolved cumulative concern can derive uncertainty without
+            // any judgment having an explicit uncertain disposition.
+            .or(self.cumulative.as_ref())
             .map(|judgment| judgment.rationale.as_str())
     }
 
@@ -1243,7 +1247,9 @@ impl Assessment {
         let partial = PartialConclusion {
             change_id: change_id.to_owned(),
             judgment_digest: hash(judgment)?,
-            rationale: rationale.to_owned(),
+            rationale: format!(
+                "Partial assessment; unrelated changes may not have been examined. {rationale}"
+            ),
         };
         // Requested context is evidence the worker identified as necessary, even
         // when other unrequested changes do not need examination for refusal.
