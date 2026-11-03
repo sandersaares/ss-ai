@@ -241,7 +241,9 @@ from an uncertain assessment's diagnostic.
 A completed significant or uncertain assessment produces a standalone attributed comment
 through native `notify`. Its `<!-- ss-autoreapprove-needs-review {JSON} -->`
 marker binds the account, repository, PR, approval anchor, assessed source,
-policy, and assessment. A Markdown heading and reason list explain only why
+policy, and assessment. The heading `Reasons (nonexhaustive)` identifies a list
+that may omit other reasons because assessment can stop once refusal is justified.
+The reasons explain only why
 the existing approval cannot be renewed. The comment omits PR summaries,
 unrelated discussion, partial-coverage caveats, and execution diagnostics.
 Those diagnostics remain in native results and the final skill report.

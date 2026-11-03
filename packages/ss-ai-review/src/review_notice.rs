@@ -751,7 +751,7 @@ impl<'a> Store<'a> {
         };
         let document = serde_json::to_string(&marker)?.replace("-->", "\\u002d\\u002d>");
         let body = format!(
-            "{}\n\n## Automatic reapproval withheld\n\n### Reasons\n\n{}\n\n{MARKER}{document} -->",
+            "{}\n\n## Automatic reapproval withheld\n\n### Reasons (nonexhaustive)\n\n{}\n\n{MARKER}{document} -->",
             input.attribution, input.explanation
         );
         if Marker::parse(&body)?.as_ref() != Some(&marker) {

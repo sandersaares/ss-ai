@@ -1821,7 +1821,7 @@ fn needs_review_notices_short_circuit_and_expire_only_after_external_approval(
         };
         assert!(body.starts_with("[Copilot speaking]"));
         assert!(body.contains("<!-- ss-autoreapprove-needs-review "));
-        assert!(body.contains("## Automatic reapproval withheld\n\n### Reasons\n\n- "));
+        assert!(body.contains("## Automatic reapproval withheld\n\n### Reasons (nonexhaustive)\n\n- "));
         assert!(!body.contains("Material discussion:"));
         assert_eq!(provider.reset_writes.get(), usize::from(ado));
         let fetches = provider.fetches.get();
