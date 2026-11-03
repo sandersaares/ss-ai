@@ -196,6 +196,8 @@ dispatch, including replacements, obtain a new native worker reservation.
 Reservations measure authorized dispatch attempts, not confirmed worker starts.
 
 Wait for the worker and verify its completion and digest using native `results`.
+Do not finish the run or report a final result while an assigned worker is
+still active. Consume its completion and perform stage 4 before ending the run.
 A delivered tool result is not command success. A stopped or interrupted
 worker leaves unfinished work, not permission. If the worker exits prematurely,
 confirm it has ended before a replacement starts; use the same assignment,
@@ -205,7 +207,15 @@ recover unfinished work. A completed significant or uncertain assessment follows
 stage 4. A previous-format assessment cannot continue; start a fresh assessment.
 
 The persisted per-PR budget includes inspection and assessment and reserves
-time for freshness and publication. A `budgetExceeded` result is incomplete,
+time for freshness and publication. Native full or partial completion freezes
+assessment elapsed time. Timeouts identify slow assessment work that may need
+worker or tooling improvements; a parent observing a timely completed result
+late must not label the assessor slow. Use the native completion record rather
+than the time at which the parent reads the worker's report. Stale recovery
+retains active assessment time but excludes idle time after completion.
+Finalization has a separate bounded freshness window; `publicationTimeout`
+reports a slow finalizer without changing the assessor's timing diagnostic.
+A `budgetExceeded` result is incomplete,
 never a semantic refusal. An evidence-backed partial significant refusal
 retains its partial-coverage status and cannot authorize approval. It is not
 a substitute for unavailable evidence or substantive uncertainty.
@@ -320,12 +330,15 @@ times, repeated bytes, or budget usage from these figures. Report those metrics
 as unavailable when not measured.
 
 When `assessmentBudget` is present, report its native work-command count,
-limit, last observed elapsed time, exhaustion diagnostic, and reserved publication
+limit, last observed elapsed time, completion timestamp, excluded completed-idle
+time, exhaustion diagnostic, and reserved publication
 time, worker reservations versus their limit, evidence pages and text bytes
 produced, and read and judgment batch counts. These counts include repeated
 pages and cannot establish what the model received or understood. Unique and
 repeated evidence bytes are unavailable. The last observation is not a
-measurement of the current time or of an individual phase. Model request and
+measurement of the current time or of an individual phase. After completion,
+it remains the assessment's elapsed time, not the parent's observation delay.
+Model request and
 actual worker counts are unavailable unless the orchestration environment
 supplies them. A `budgetExceeded` diagnostic or an
 exhausted budget leaves the assessment incomplete: do not approve or post a

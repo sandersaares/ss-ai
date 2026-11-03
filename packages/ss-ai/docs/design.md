@@ -17,9 +17,14 @@ publication remain in `ss-review`.
 ## Version compatibility
 
 Sessions and persisted workflow state belong to the utility version that creates
-them. Different versions of `ss-ai` do not need to read, resume, or migrate each
-other's sessions. Keep state validation strict rather than adding cross-version
-compatibility handling. Use the same utility version throughout a session.
+them. Use the same utility version throughout a session. Do not add or retain
+cross-version readers, migrations, or recovery paths. Read-only recovery,
+including readback of an uncertain remote effect, is not an exception.
+
+Readers reject incompatible schemas without changing the stored state or
+performing provider effects. Same-version interruption recovery retains its
+normal validation and authority boundaries; it does not authorize loading an
+incompatible record format.
 
 ## Reapproval discovery
 
@@ -149,6 +154,13 @@ Complete delivery cannot prove comprehension. A cumulative set that exceeds
 regular-context examination remains explicitly incomplete. The retained per-PR
 budget bounds elapsed time, native commands, and worker reservations across
 interruptions and stale recovery, leaving time for freshness and publication.
+Timeouts identify slow assessment work so maintainers can improve workers or
+tooling. Native full or partial completion freezes the assessment's elapsed
+time. A parent noticing a timely result late does not make the assessor slow,
+invalidate its completed judgment, or produce an assessment timeout.
+Completed idle time does not consume a later stale-recovery assessment's
+remaining budget. Each finalization attempt has its own bounded freshness
+window; a slow finalizer reports a publication timeout, not an assessor timeout.
 An examined significant change can complete a partial refusal with explicit
 partial coverage and all requested context delivered. Unexamined evidence
 cannot itself become significance, and partial completion never permits approval.
@@ -180,8 +192,9 @@ Staleness before any attempted remote effect permits two recovery attempts per
 PR after the initial attempt. Native refresh reacquires complete current evidence
 and authority, discards obsolete judgments, and requires a fresh isolated
 assessment when eligible. Repeated movement produces explicit retry exhaustion.
-The budget survives interruption and applies to inspection, assessment, approval,
-and notice preflight failures. A failed approval request does not trigger an
+The assessment budget survives interruption and applies to inspection and assessment.
+Approval and notice preflight still require fresh authority and source evidence
+within their finalization window. A failed approval request does not trigger an
 automatic retry in the same attempt.
 
 ## Git comparisons

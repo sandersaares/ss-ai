@@ -109,6 +109,27 @@ Describe 'Automatic reapproval repository scope instructions' {
         $script:Prompt | Should -Match 'continue through stages 3 and 4, including any required recovery, before\s+inspecting the next candidate'
         $script:Prompt | Should -Match 'Resume any previously inspected candidate\s+using its existing budget'
         $script:Prompt | Should -Match 'not to a separate pass over\s+all inspected candidates'
+        $script:Prompt | Should -Match 'Do not finish the run or report a final result while an assigned worker is\s+still active'
+        $script:Prompt | Should -Match 'Consume its completion and perform stage 4'
+    }
+
+    It 'distinguishes assessor timeouts from delayed observation and slow finalization' {
+        $script:Prompt | Should -Match 'Native full or partial completion freezes\s+assessment elapsed time'
+        $script:Prompt | Should -Match 'a parent observing a timely completed result\s+late must not label the assessor slow'
+        $script:Prompt | Should -Match '`publicationTimeout`\s+reports a slow finalizer'
+        $script:Recipes | Should -Match 'Preparation returns only `snapshotDigest`, `assessmentProtocol`, `state`, and\s+`progress`'
+        $script:Recipes | Should -Match 'Do not print the complete reservation'
+    }
+
+    It 'keeps read-only recovery within the workflow-state version policy' {
+        $repo = Split-Path -Parent $PSScriptRoot
+        $guide = Get-Content -LiteralPath (Join-Path $repo 'AGENTS.md') -Raw
+        $design = Get-Content -LiteralPath (Join-Path $repo 'packages\ss-ai\docs\design.md') -Raw
+        $guide | Should -Match 'design\.md#version-compatibility'
+        $guide | Should -Match 'Read-only recovery is not an exception'
+        $design | Should -Match 'Do not add or retain\s+cross-version readers, migrations, or recovery paths'
+        $script:Recipes | Should -Match 'Incompatible schemas fail without modifying records or performing provider\s+effects'
+        $script:Recipes | Should -Not -Match 'recoveryOnly|schema-14|schema-15'
     }
 
     It 'requires coverage repair instead of treating completion as a probe' {
@@ -218,7 +239,7 @@ Describe 'Automatic reapproval repository scope instructions' {
         $script:Prompt | Should -Match 'an approval by the authenticated account strictly after'
         $script:Prompt | Should -Match 'Never reassess an active marker'
         $script:Prompt | Should -Match 'Dry runs report the decision without posting a marker'
-        $script:Recipes | Should -Match 'Repeating the original command reconciles the same intent without\s+posting again'
+        $script:Recipes | Should -Match 'Repeating the original command with the same utility version and\s+supported run schema reconciles the same intent without posting again'
     }
 
     It 'recovers stale evidence with fresh assessments and a retained bounded budget' {

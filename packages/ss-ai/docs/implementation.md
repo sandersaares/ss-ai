@@ -110,3 +110,10 @@ reload boundaries. Replacements invalidate transitive dependent records. The
 cumulative judgment binds final judgments, discussion, and any recorded obligations;
 read receipts establish delivery only. The review run persists time, work, and
 worker reservations before work so recovery cannot renew those budgets.
+The review budget persists native completion time and excluded completed-idle
+time. All semantic completion commands share the final work-time check and
+freeze the clock only after that check succeeds. Authorized stale refresh
+resumes the remaining active budget. Finalization takes a separate deadline
+from its invocation time and checks it at the existing pre-effect boundary,
+so delayed parent observation cannot corrupt assessor timing or bypass
+freshness checks.
