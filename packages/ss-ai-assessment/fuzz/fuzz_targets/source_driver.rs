@@ -8,8 +8,8 @@
 use std::num::NonZeroUsize;
 
 use ss_ai_assessment::{
-    Assessment, Change, Content, ContextRequest, Disposition, Inventory, Judgment, Note, Side,
-    SourceSide, change_id,
+    Assessment, Change, ConclusionGroup, Content, ContextRequest, Disposition, FinalSynthesis,
+    GroupedConclusions, Inventory, Judgment, Note, Side, SourceSide, change_id,
 };
 use ss_ai_git::validate_patch;
 
@@ -27,7 +27,7 @@ pub(crate) fn exercise(input: &[u8]) -> bool {
         return false;
     };
     // Independent discussion input reaches unit segmentation even when the patch is malformed.
-    if let Ok(mut discussion) = Assessment::new(
+    if let Ok(mut discussion) = Assessment::new_direct(
         Inventory {
             old_commit: "a".repeat(40),
             new_commit: "b".repeat(40),
@@ -46,7 +46,6 @@ pub(crate) fn exercise(input: &[u8]) -> bool {
                 &mut discussion,
                 usize::from(*operation),
                 usize::from(*operation).saturating_add(1),
-                true,
                 text,
             );
             discussion.validate("snapshot", "policy", "", text).unwrap();
@@ -93,14 +92,15 @@ pub(crate) fn exercise(input: &[u8]) -> bool {
             new,
         }],
     };
-    let Ok(mut assessment) = Assessment::new(inventory, &[patch.into()], "snapshot", "policy", "")
+    let Ok(mut assessment) =
+        Assessment::new_direct(inventory, &[patch.into()], "snapshot", "policy", "")
     else {
         return false;
     };
     let mut patch_offset = 0;
     let mut completed = false;
-    for (index, operation) in input.iter().take(MAX_OPERATIONS).enumerate() {
-        // The selector includes invalid calls and checkpoints while preserving the seed operations.
+    for (index, operation) in old_text.as_bytes().iter().take(MAX_OPERATIONS).enumerate() {
+        // Restrict selectors to the first field so line endings do not alter operation order.
         match operation % 16 {
             0 => {
                 let read = assessment.read(
@@ -178,7 +178,7 @@ pub(crate) fn exercise(input: &[u8]) -> bool {
                 } else {
                     index.saturating_add(1)
                 };
-                unit_operation(&mut assessment, index, limit, operation & 16 != 0, "");
+                unit_operation(&mut assessment, index, limit, "");
             }
             9 => {
                 let _checkpoint = assessment.checkpoint();
@@ -199,6 +199,46 @@ pub(crate) fn exercise(input: &[u8]) -> bool {
                 );
                 let _read = assessment.read("discussion-note", 0, MAX_INPUT_BYTES, "", "");
             }
+            11 => {
+                let token = assessment.read_token().unwrap();
+                let _delivery = assessment.read_next(&token, "", "");
+            }
+            12 => {
+                let _conclusions = assessment.conclude(
+                    GroupedConclusions {
+                        state_token: assessment.state_token().unwrap(),
+                        groups: vec![ConclusionGroup {
+                            changes: vec!["c1".into()],
+                            disposition: Disposition::Significant,
+                            rationale: "Synthetic group".into(),
+                            evidence: Vec::new(),
+                        }],
+                    },
+                    "",
+                    "",
+                );
+            }
+            13 => {
+                completed |= assessment
+                    .synthesize(
+                        FinalSynthesis {
+                            state_token: assessment.state_token().unwrap(),
+                            disposition: Disposition::Significant,
+                            rationale: "Synthetic combined effects".into(),
+                            discussion: "Synthetic material discussion".into(),
+                            unresolved_concerns: Vec::new(),
+                            evidence: Vec::new(),
+                        },
+                        "",
+                        "",
+                    )
+                    .is_ok();
+            }
+            14 => {
+                completed |= assessment
+                    .finish_partial("c1", "Synthetic refusal", "", "")
+                    .is_ok();
+            }
             _ => {
                 let _read = assessment.read(&format!("{id}:patch"), index, 1, "", "");
             }
@@ -211,16 +251,15 @@ pub(crate) fn exercise(input: &[u8]) -> bool {
     completed
 }
 
-/// Generated unit work mixes partial delivery, idempotent notes, replacement, and paging.
-fn unit_operation(
-    assessment: &mut Assessment,
-    selector: usize,
-    limit: usize,
-    concern: bool,
-    discussion: &str,
-) {
+/// Generated unit reads exercise partial delivery and binding pagination.
+fn unit_operation(assessment: &mut Assessment, selector: usize, limit: usize, discussion: &str) {
     let _policy = assessment.read("policy", 0, 1, "", discussion);
-    let count = usize::try_from(assessment.progress()["unitCount"].as_u64().unwrap()).unwrap();
+    let count = usize::try_from(
+        assessment.progress()["preflightEstimate"]["transportFragmentCount"]
+            .as_u64()
+            .unwrap(),
+    )
+    .unwrap();
     assert!(count > 0);
     let page = assessment.units(selector % count, 1).unwrap();
     let unit = &page["items"][0];
@@ -236,31 +275,6 @@ fn unit_operation(
     }
     let _binding = assessment.read(
         unit["bindingReference"].as_str().unwrap(),
-        0,
-        limit,
-        "",
-        discussion,
-    );
-    let previous = unit["noteDigest"].as_str();
-    let _note = assessment.note(
-        unit["unit"]["id"].as_str().unwrap(),
-        Note {
-            observations: format!("Synthetic {selector}"),
-            interfaces: "Synthetic invariant".into(),
-            concerns: if concern {
-                vec!["Synthetic concern".into()]
-            } else {
-                Vec::new()
-            },
-            interactions: Vec::new(),
-            evidence: vec![reference.into()],
-        },
-        previous,
-        "",
-        discussion,
-    );
-    let _read = assessment.read(
-        unit["noteReference"].as_str().unwrap(),
         0,
         limit,
         "",

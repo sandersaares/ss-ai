@@ -7,8 +7,12 @@
     reason = "Internal record types define closed, validated workflow schemas"
 )]
 
-pub use assessment::{Assessment, Disposition, Judgment};
+pub use assessment::{
+    Assessment, BatchJudgmentItem, BatchJudgmentRequest, BatchReadItem, BatchReadRequest,
+    Disposition, Judgment,
+};
 pub use checkpoint::Note;
+pub use conclusions::{ConclusionGroup, FinalSynthesis, GroupedConclusions};
 pub use error::AssessmentError;
 pub use objects::{Change, Content, Inventory, Side, change_id, commit};
 pub use source::{ContextRequest, SourceSide};
@@ -26,6 +30,7 @@ where
 
 mod assessment;
 mod checkpoint;
+mod conclusions;
 mod error;
 mod objects;
 mod source;

@@ -12,8 +12,8 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 use ss_ai_assessment::{
-    Assessment, Change, Content, ContextRequest, Disposition, Inventory, Judgment, Note, Side,
-    SourceSide, change_id,
+    Assessment, BatchJudgmentRequest, BatchReadRequest, Change, Content, ContextRequest,
+    Disposition, Inventory, Judgment, Note, Side, SourceSide, change_id,
 };
 use ss_ai_runtime::{FileTransaction, SystemClock, fail, read_bytes};
 
@@ -28,6 +28,9 @@ struct Arguments {
     fixture_path: Option<PathBuf>,
     #[arg(long)]
     policy_path: Option<PathBuf>,
+    /// Typed batch request; this never contains or edits retained workflow state.
+    #[arg(long)]
+    batch_json: Option<String>,
     #[arg(long)]
     reference: Option<String>,
     #[arg(long)]
@@ -137,12 +140,18 @@ fn main() -> Result<(), AppError> {
         .delivered_bytes
         .saturating_add(output.len())
         .saturating_add(1);
-    state.delivered_characters = state.delivered_characters.saturating_add(
-        value
-            .get("text")
+    let text_characters = |page: &Value| {
+        page.get("text")
             .and_then(Value::as_str)
-            .map_or(0, |text| text.chars().count()),
+            .map_or(0, |text| text.chars().count())
+    };
+    let delivered_characters = value.get("items").and_then(Value::as_array).map_or_else(
+        || text_characters(&value),
+        |items| items.iter().map(text_characters).sum(),
     );
+    state.delivered_characters = state
+        .delivered_characters
+        .saturating_add(delivered_characters);
     transaction.write_bytes(&serde_json::to_vec(&state)?)?;
     println!("{output}");
     Ok(())
@@ -171,6 +180,18 @@ fn execute(arguments: &Arguments, state: &mut State) -> Result<Value, AppError> 
             required(arguments.reference.as_deref())?,
             arguments.offset,
             arguments.limit.get(),
+            policy,
+            discussion,
+        )?,
+        "read-batch" => assessment.read_batch(
+            serde_json::from_str::<BatchReadRequest>(required(arguments.batch_json.as_deref())?)?,
+            policy,
+            discussion,
+        )?,
+        "judge-batch" => assessment.record_batch(
+            serde_json::from_str::<BatchJudgmentRequest>(required(
+                arguments.batch_json.as_deref(),
+            )?)?,
             policy,
             discussion,
         )?,
@@ -210,7 +231,7 @@ fn execute(arguments: &Arguments, state: &mut State) -> Result<Value, AppError> 
             json!({"status":assessment.status(true), "assessmentDigest":assessment.digest, "rationale":assessment.rationale()})
         }
         "results" => json!({"status":assessment.status(true), "assessmentDigest":assessment.digest,
-            "rationale":assessment.rationale(), "progress":assessment.progress(),
+            "rationale":assessment.rationale(), "progress":assessment.progress_with_evidence(policy, discussion)?,
             "responses":state.responses, "deliveredBytes":state.delivered_bytes, "deliveredCharacters":state.delivered_characters}),
         _ => return Err(fail("invalidInput", "Unknown synthetic operation")),
     };
@@ -281,7 +302,8 @@ fn initialize(arguments: &Arguments, clock: &SystemClock) -> Result<State, AppEr
         changes,
         complete: true,
     };
-    let assessment = Assessment::new(inventory, &patches, &snapshot, &policy_digest, &discussion)?;
+    let assessment =
+        Assessment::new_direct(inventory, &patches, &snapshot, &policy_digest, &discussion)?;
     Ok(State {
         schema_version: 1,
         snapshot,
