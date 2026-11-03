@@ -247,6 +247,9 @@ The reasons explain only why
 the existing approval cannot be renewed. The comment omits PR summaries,
 unrelated discussion, partial-coverage caveats, and execution diagnostics.
 Those diagnostics remain in native results and the final skill report.
+The complete UTF-8 comment, including its escaped marker, fits a conservative
+16 KiB publication budget. It keeps whole reasons when possible and shortens
+an individually oversized reason; the assessment retains the full explanation.
 After verifying the comment, notification clears the authenticated account's
 captured positive decisions: GitHub dismisses retained `APPROVED` reviews by
 immutable review ID, and ADO resets a positive reviewer vote to zero. Already
@@ -295,9 +298,13 @@ ADO rereads account vote history to preserve a later independent approval,
 including one with unchanged vote strength. Changed history without a provably
 later approval remains an explicit failure, not permission to skip the reset.
 It preserves withdrawals, negative
-votes, and reviewer removal. Its API has no atomic prior-vote condition, so a
+votes, and reviewer removal, including decisions visible in history captured
+after an earlier positive reviewer read. Its API has no atomic prior-vote condition, so a
 human decision can still race with the reset request. Closed or draft PR recovery
-reads existing effects without initiating resets.
+reads existing effects without initiating resets. An approval that still needs
+clearing leaves notification incomplete; closure or draft conversion alone
+cannot verify a reset. Reopening permits a pending reset but never replays an
+uncertain or refused request.
 
 The final summary lists each in-range candidate as a linked PR number and title.
 It identifies current and retained needs-review decisions.
