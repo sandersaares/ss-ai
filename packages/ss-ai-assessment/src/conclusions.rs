@@ -6,7 +6,9 @@ use std::iter::once;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
-use crate::assessment::{RESPONSE_BYTES, check_response, compact_batch_page, hash};
+use crate::assessment::{
+    DISCUSSION_SEPARATOR, RESPONSE_BYTES, check_response, compact_batch_page, hash,
+};
 use crate::error::{self, AssessmentError};
 use crate::{Assessment, BatchJudgmentItem, BatchJudgmentRequest, Disposition, Judgment};
 
@@ -203,7 +205,7 @@ impl Assessment {
         evidence.sort();
         evidence.dedup();
         let mut rationale = format!(
-            "{}\n\nMaterial discussion: {}",
+            "{}{DISCUSSION_SEPARATOR}{}",
             synthesis.rationale, synthesis.discussion
         );
         if !synthesis.unresolved_concerns.is_empty() {

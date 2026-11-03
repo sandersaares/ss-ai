@@ -77,6 +77,12 @@ solely because evidence supports both a group and the cumulative assessment.
 After full coverage, use `synthesize` once with the current state token,
 independent cumulative outcome and rationale, material discussion and its
 disposition, and any unresolved concerns. Omit optional empty fields.
+For a significant or uncertain outcome, write the rationale as concise,
+specific reasons why the existing approval cannot be renewed. Explain each
+blocking behavior and its impact, without summarizing the PR, unrelated edits,
+or assessment procedure. Keep discussion assessment in `discussion`, not the
+decision rationale. Never add coverage caveats or workflow diagnostics to a
+refusal rationale; native progress reports coverage separately.
 There are no mandatory discussion notes, check enumeration, empty checks,
 or separate cumulative-record and completion calls. Native code binds all final
 change conclusions and exact evidence, validates coverage, and completes

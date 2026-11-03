@@ -55,6 +55,42 @@ struct ApprovalPolicy {
 }
 
 impl Evidence {
+    /// Replays observed account decisions without requiring current PR eligibility.
+    pub(crate) fn reset_superseded(
+        &self,
+        account: &str,
+        current_vote: i64,
+        now: Timestamp,
+    ) -> Result<bool, AppError> {
+        let Self::History {
+            threads,
+            iterations,
+            ..
+        } = self
+        else {
+            return Err(fail(
+                "invalidState",
+                "Approval reset requires captured ADO history",
+            ));
+        };
+        // Resetting never grants approval: reuse authority replay with no freshness-policy requirement.
+        let decision = decide_history(
+            &ordered_events(threads, now)?,
+            iterations,
+            &ApprovalPolicy::default(),
+            account,
+            Some(current_vote),
+            false,
+        )?;
+        Ok(
+            matches!(decision, Decision::Ineligible { reason } if matches!(
+                reason.as_str(),
+                "negativeDecision" | "approvalWithdrawn" | "reviewerRemoved"
+                    | "pendingHumanReview" | "approvalByOtherActor"
+            )),
+        )
+    }
+
     /// Exposes authenticated positive event times for notice expiry and result reporting.
     pub(crate) fn approval_events(
         &self,
