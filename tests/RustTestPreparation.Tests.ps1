@@ -609,6 +609,49 @@ Describe 'Rust preparation boundary' {
 }
 
 Describe 'Cargo child environment' {
+    It 'forwards progress and partial diagnostics before requesting more data' {
+        $state = @{ outputSeen = $false; outputReads = 0; errorReads = 0 }
+        $diagnostics = [IO.StringWriter]::new()
+        $emptyOutput = [IO.StreamReader]::new([IO.MemoryStream]::new())
+        $output = [pscustomobject]@{ State = $state; Empty = $emptyOutput }
+        $output | Add-Member ScriptMethod ReadLineAsync {
+            $this.State.outputReads++
+            if ($this.State.outputReads -eq 1) {
+                return [Threading.Tasks.Task]::FromResult([string] 'progress')
+            }
+            if (-not $this.State.outputSeen) {
+                throw 'Progress was not forwarded before the next read.'
+            }
+            return $this.Empty.ReadLineAsync()
+        }
+        $errorStream = [pscustomobject]@{ State = $state; Diagnostics = $diagnostics }
+        $errorStream | Add-Member ScriptMethod ReadAsync {
+            param($Buffer, $Offset, $Count)
+            $this.State.errorReads++
+            if ($this.State.errorReads -eq 1) {
+                'partial diagnostic'.CopyTo(0, $Buffer, $Offset, 'partial diagnostic'.Length)
+                return [Threading.Tasks.Task]::FromResult('partial diagnostic'.Length)
+            }
+            if ($this.Diagnostics.ToString() -cne 'partial diagnostic') {
+                throw 'Diagnostics were not forwarded before the next read.'
+            }
+            return [Threading.Tasks.Task]::FromResult(0)
+        }
+
+        $originalError = [Console]::Error
+        try {
+            [Console]::SetError($diagnostics)
+            Write-RustTestCargoOutput -StandardOutput $output -StandardError $errorStream |
+                ForEach-Object { $_ | Should -Be 'progress'; $state.outputSeen = $true }
+            $state.outputSeen | Should -BeTrue
+            $diagnostics.ToString() | Should -Be 'partial diagnostic'
+        } finally {
+            [Console]::SetError($originalError)
+            $diagnostics.Dispose()
+            $emptyOutput.Dispose()
+        }
+    }
+
     It 'forwards child output, diagnostics and exit code <ExitCode>' -ForEach @(
         @{ ExitCode = 0 }, @{ ExitCode = 17 }
     ) {

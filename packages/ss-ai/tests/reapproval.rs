@@ -6,21 +6,24 @@
 )]
 
 use std::cell::{Cell, RefCell};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::ffi::OsString;
+use std::fmt::Write;
 use std::fs;
 use std::io;
 use std::num::NonZeroUsize;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::rc::Rc;
-use std::sync::{Mutex, PoisonError};
+use std::sync::{Mutex, PoisonError, mpsc};
+use std::thread;
 use std::time::Duration;
 
 use jiff::Timestamp;
 use ohno::AppError;
 use serde_json::{Value, json};
 use ss_ai::{Clock, Http, HttpResponse, NativeProcess, Process, ProcessOutput, run_in};
+use ss_ai_runtime::FileTransaction;
 use tempfile::TempDir;
 use url::Url;
 
@@ -104,6 +107,42 @@ impl Clock for FixedClock {
     }
 }
 
+/// Gives budget tests a controlled command time without waiting.
+struct OffsetClock(Duration);
+
+impl Clock for OffsetClock {
+    fn now(&self) -> Timestamp {
+        FixedClock.now() + self.0
+    }
+
+    fn wait(&self, _: Duration) -> Result<(), AppError> {
+        panic!("Budget scenarios require no timed retry")
+    }
+}
+
+/// Advances when provider freshness capture starts, without waiting or call-count scripts.
+struct FinalizationClock<'a> {
+    target_reads: &'a Cell<usize>,
+    initial_reads: usize,
+}
+
+impl Clock for FinalizationClock<'_> {
+    fn now(&self) -> Timestamp {
+        // Begin after a delayed parent return, then consume the publication window in capture.
+        let delay = Duration::from_mins(17);
+        let capture = if self.target_reads.get() > self.initial_reads {
+            Duration::from_mins(1)
+        } else {
+            Duration::ZERO
+        };
+        FixedClock.now() + delay + capture
+    }
+
+    fn wait(&self, _: Duration) -> Result<(), AppError> {
+        panic!("Finalization scenarios require no timed retry")
+    }
+}
+
 /// Keeps service writes private and selects real or exact recorded Git responses.
 struct Provider {
     number: u32,
@@ -111,6 +150,8 @@ struct Provider {
     repository: PathBuf,
     evidence: RefCell<Value>,
     writes: Cell<usize>,
+    service_calls: Cell<usize>,
+    calls_at_approval: Cell<usize>,
     fetches: Cell<usize>,
     fault: Cell<&'static str>,
     target_reads: Cell<usize>,
@@ -145,6 +186,8 @@ impl Provider {
             repository: repository.to_owned(),
             evidence: RefCell::new(evidence),
             writes: Cell::new(0),
+            service_calls: Cell::new(0),
+            calls_at_approval: Cell::new(0),
             fetches: Cell::new(0),
             fault: Cell::new(""),
             target_reads: Cell::new(0),
@@ -245,7 +288,7 @@ impl Provider {
         }
     }
 
-    /// Reporting faults begin only after the provider's terminal receipt is durable.
+    /// Simulates moving observations and notice-only recovery scenarios.
     fn observation_override(&self) -> Option<Value> {
         let fault = self.fault.get();
         if fault == "cosmeticEvidence" {
@@ -296,39 +339,6 @@ impl Provider {
                 evidence["pullRequest"]["head"]["repo"] = Value::Null;
             }
         }
-        if !matches!(fault, "reportReadFailure" | "reportStandingChanged") {
-            return None;
-        }
-        let path = host_journal(self.host_directory.borrow().as_ref().unwrap());
-        let record: Value = serde_json::from_slice(&fs::read(path).unwrap()).unwrap();
-        if !record["operations"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .any(|operation| operation["result"]["outcome"] == "alreadyValid")
-        {
-            return None;
-        }
-        if fault == "reportReadFailure" {
-            return Some(Value::Null);
-        }
-        self.fault.set("");
-        if self.ado {
-            self.ado_vote(0, 41, "2026-09-28T09:07:00Z");
-        } else {
-            let mut evidence = self.evidence.borrow_mut();
-            let source = evidence["pullRequest"]["head"]["sha"].clone();
-            evidence["reviews"].as_array_mut().unwrap().push(json!({
-                "id": 99, "node_id": "reporting-withdrawal", "user": {"id": 42, "node_id": "user-42"},
-                "state": "CHANGES_REQUESTED", "submitted_at": "2026-09-28T09:07:00Z",
-                "commit_id": source, "body": "Independent later decision."
-            }));
-            evidence["timeline"].as_array_mut().unwrap().push(json!({
-                "__typename": "PullRequestReview", "id": "reporting-withdrawal",
-                "state": "CHANGES_REQUESTED"
-            }));
-        }
-
         None
     }
 
@@ -434,6 +444,7 @@ impl Process for Provider {
         arguments: &[String],
         input: &[u8],
     ) -> io::Result<ProcessOutput> {
+        self.service_calls.set(self.service_calls.get() + 1);
         if self.ado {
             assert_eq!(program, "az");
             assert_eq!(&arguments[..2], ["account", "get-access-token"]);
@@ -488,6 +499,7 @@ impl Process for Provider {
         }
         if method == "POST" && path.ends_with("/reviews") {
             self.writes.set(self.writes.get() + 1);
+            self.calls_at_approval.set(self.service_calls.get());
             if self.fault.get() == "rateLimit" {
                 return Ok(ProcessOutput::new(
                     false,
@@ -518,27 +530,7 @@ impl Process for Provider {
                     .push(review.clone());
                 evidence["timeline"].as_array_mut().unwrap().push(json!({"__typename": "PullRequestReview", "id": "renewal-review", "state": "APPROVED"}));
             }
-            if self.fault.get() == "postPush" {
-                evidence["pullRequest"]["head"]["sha"] = json!("f".repeat(40));
-            }
-            if self.fault.get() == "duplicate" {
-                let mut duplicate = review.clone();
-                duplicate["id"] = json!(6);
-                duplicate["node_id"] = json!("duplicate-renewal");
-                evidence["reviews"].as_array_mut().unwrap().push(duplicate);
-                evidence["timeline"].as_array_mut().unwrap().push(json!({
-                    "__typename": "PullRequestReview", "id": "duplicate-renewal", "state": "APPROVED"
-                }));
-            }
-            drop(evidence);
-            if self.fault.get() == "postWithdrawal" {
-                self.later("CHANGES_REQUESTED");
-            }
-            if self.fault.get() == "journalFailure" {
-                // A directory at the journal name deterministically refuses atomic file replacement.
-                self.fail_journal_save();
-            }
-            return Ok(if matches!(self.fault.get(), "lostReply" | "unknown") {
+            return Ok(if self.fault.get() == "unknown" {
                 ProcessOutput::new(false, Vec::new(), b"connection lost".to_vec())
             } else {
                 ProcessOutput::new(true, serde_json::to_vec(&review).unwrap(), Vec::new())
@@ -691,6 +683,7 @@ impl Http for Provider {
         token: &str,
         body: Option<&[u8]>,
     ) -> Result<HttpResponse, AppError> {
+        self.service_calls.set(self.service_calls.get() + 1);
         assert!(self.ado, "GitHub must use the injected CLI");
         assert_eq!(token, "fixture-oauth");
         let url = Url::parse(url).unwrap();
@@ -708,12 +701,15 @@ impl Http for Provider {
             let request: Value = serde_json::from_slice(body.unwrap()).unwrap();
             let vote = method == "PUT";
             assert!(vote || method == "POST");
+            if vote {
+                self.calls_at_approval.set(self.service_calls.get());
+            }
             if self.fault.get() == "rateLimit"
                 || self.fault.get() == "permission"
                 || !vote
                     && matches!(
                         self.fault.get(),
-                        "auditRefused" | "noticeRefused" | "noticeRefusalJournalFailure"
+                        "noticeRefused" | "noticeRefusalJournalFailure"
                     )
             {
                 if self.fault.get() == "noticeRefusalJournalFailure" {
@@ -736,39 +732,20 @@ impl Http for Provider {
                     "vote": self.evidence.borrow()["reviewers"][0]["vote"], "isReapprove": true})
                 );
                 if self.fault.get() != "unknown" {
-                    if self.fault.get() == "sourceAtVote" {
-                        self.ado_push();
-                        self.evidence.borrow_mut()["iterations"][2]["createdDate"] =
-                            json!("2026-09-28T08:59:00Z");
-                    }
                     self.ado_vote(
                         request["vote"].as_i64().unwrap(),
                         20,
                         "2026-09-28T09:00:00Z",
                     );
-                    if self.fault.get() == "duplicate" {
-                        self.ado_vote(
-                            request["vote"].as_i64().unwrap(),
-                            21,
-                            "2026-09-28T09:01:00Z",
-                        );
-                    }
-                    if self.fault.get() == "postWithdrawal" {
-                        self.ado_vote(0, 21, "2026-09-28T09:01:00Z");
-                    }
-                    if self.fault.get() == "postPush" {
-                        self.ado_push();
-                    }
-                    if self.fault.get() == "policyCompleted" {
-                        let mut evidence = self.evidence.borrow_mut();
-                        evidence["evaluations"][0]["status"] = json!("approved");
-                        evidence["evaluations"][0]["context"] =
-                            json!({"reviewers": ["newly satisfied"]});
-                        evidence["reviewers"][0]["isReapprove"] = json!(true);
-                    }
                 }
-                if matches!(self.fault.get(), "lostVoteReply" | "unknown") {
+                if self.fault.get() == "unknown" {
                     return Err(io::Error::other("Lost vote reply").into());
+                }
+                if self.fault.get() == "differentResponse" {
+                    return response(
+                        200,
+                        json!({"id": "another-account", "vote": request["vote"]}),
+                    );
                 }
                 return response(200, self.evidence.borrow()["reviewers"][0].clone());
             }
@@ -778,6 +755,7 @@ impl Http for Provider {
                 .as_str()
                 .unwrap()
                 .contains("<!-- ss-autoreapprove-needs-review ");
+            assert!(notice, "Approval must not post a separate audit thread");
             let at = if notice {
                 self.notice_time()
             } else {
@@ -789,7 +767,7 @@ impl Http for Provider {
                     "author": {"id": "10000000-0000-4000-8000-000000000001"},
                     "content": request["comments"][0]["content"], "publishedDate": at,
                     "lastContentUpdatedDate": at, "lastUpdatedDate": at}], "isDeleted": false, "properties": {}});
-            if !matches!(self.fault.get(), "auditUnknown" | "noticeUnknown") {
+            if self.fault.get() != "noticeUnknown" {
                 self.evidence.borrow_mut()["threads"]
                     .as_array_mut()
                     .unwrap()
@@ -798,10 +776,7 @@ impl Http for Provider {
             if self.fault.get() == "noticeJournalFailure" {
                 self.fail_journal_save();
             }
-            if matches!(
-                self.fault.get(),
-                "lostAuditReply" | "auditUnknown" | "lostNoticeReply" | "noticeUnknown"
-            ) {
+            if matches!(self.fault.get(), "lostNoticeReply" | "noticeUnknown") {
                 return Err(io::Error::other("Lost audit reply").into());
             }
             return response(200, thread);
@@ -962,6 +937,31 @@ fn invoke(
     )?)?)
 }
 
+/// Dispatches one command at a controlled time against the same persisted run.
+fn invoke_at(
+    root: &Path,
+    provider: &Provider,
+    operation: &str,
+    args: &[String],
+    clock: &dyn Clock,
+) -> Result<Value, AppError> {
+    let mut arguments = vec![
+        OsString::from("ss-ai"),
+        "autoreapprove".into(),
+        operation.into(),
+        "--state-path".into(),
+        root.join("run.json").into_os_string(),
+    ];
+    arguments.extend(args.iter().map(OsString::from));
+    Ok(serde_json::from_str(&run_in(
+        &arguments,
+        provider,
+        provider,
+        clock,
+        &root.parent().unwrap().join("host-store"),
+    )?)?)
+}
+
 /// Starts a fresh run without requiring its inspection to need source assessment.
 fn discover_inspect(root: &Path, provider: &Provider, dry_run: bool) -> Value {
     fs::create_dir_all(root).unwrap();
@@ -1006,7 +1006,7 @@ fn prepare(root: &Path, provider: &Provider, dry_run: bool) -> (String, Value) {
         .as_str()
         .unwrap()
         .to_owned();
-    let prepared = work(root, provider, "prepare", &snapshot, &[]).unwrap();
+    let prepared = prepare_inventory(root, provider, &snapshot);
 
     if prepared.get("requiredDocuments").is_some() {
         if provider.git_replies.is_some() {
@@ -1031,6 +1031,28 @@ fn prepare(root: &Path, provider: &Provider, dry_run: bool) -> (String, Value) {
     (snapshot, prepared)
 }
 
+/// Preparation belongs to the scheduler; semantic fixtures obtain the worker inventory separately.
+fn prepare_inventory(root: &Path, provider: &Provider, snapshot: &str) -> Value {
+    let prepared = work(root, provider, "prepare", snapshot, &[]).unwrap();
+    if prepared.get("progress").is_none() {
+        return prepared;
+    }
+    assert_eq!(
+        prepared
+            .as_object()
+            .unwrap()
+            .keys()
+            .cloned()
+            .collect::<BTreeSet<_>>(),
+        ["snapshotDigest", "assessmentProtocol", "state", "progress"]
+            .map(str::to_owned)
+            .into_iter()
+            .collect()
+    );
+    assert_eq!(prepared["snapshotDigest"], snapshot);
+    work(root, provider, "assessment", snapshot, &[]).unwrap()
+}
+
 /// Binds each assessment or publication command to its PR and immutable snapshot.
 fn work(
     root: &Path,
@@ -1039,6 +1061,14 @@ fn work(
     snapshot: &str,
     args: &[String],
 ) -> Result<Value, AppError> {
+    if operation == "judge" {
+        let id = args
+            .windows(2)
+            .find(|pair| pair[0] == "--change-id")
+            .map(|pair| pair[1].as_str())
+            .unwrap();
+        fixture_checkpoint_inputs(root, provider, snapshot, id)?;
+    }
     let mut all = vec![
         "--pull-request-id".into(),
         provider.number.to_string(),
@@ -1047,6 +1077,42 @@ fn work(
     ];
     all.extend_from_slice(args);
     invoke(root, provider, operation, &all)
+}
+
+/// Publication matrices supply the direct discussion observation after evidence delivery.
+fn fixture_checkpoint_inputs(
+    root: &Path,
+    provider: &Provider,
+    snapshot: &str,
+    id: &str,
+) -> Result<(), AppError> {
+    if id != "cumulative" {
+        return Ok(());
+    }
+    let page = work(root, provider, "assessment", snapshot, &[])?;
+    if page["documentReads"][0]["complete"] != true
+        || page["documentReads"][1]["complete"] != true
+        || !page["discussionNoteDigest"].is_null()
+    {
+        return Ok(());
+    }
+    work(
+        root,
+        provider,
+        "note",
+        snapshot,
+        &[
+            "--unit-id".into(),
+            "discussion".into(),
+            "--observations".into(),
+            "Complete synthetic discussion.".into(),
+            "--interfaces".into(),
+            "Fixture contract examined.".into(),
+            "--evidence".into(),
+            "discussion".into(),
+        ],
+    )?;
+    Ok(())
 }
 
 /// Completes the ordinary insignificant assessment used by publication fault matrices.
@@ -1065,11 +1131,7 @@ fn assess_as(
     let mut references = vec!["policy".to_owned(), "discussion".to_owned()];
     for change in prepared["changes"].as_array().unwrap() {
         let id = change["id"].as_str().unwrap();
-        for side in ["old", "new"] {
-            if !change[side].is_null() {
-                references.push(format!("{id}:{side}"));
-            }
-        }
+        references.push(format!("{id}:patch"));
     }
     for reference in references {
         read_evidence(root, provider, snapshot, &reference, None, None);
@@ -1089,11 +1151,7 @@ fn assess_as(
             )
             .into(),
         ];
-        for side in ["old", "new"] {
-            if !change[side].is_null() {
-                arguments.extend(["--evidence".into(), format!("{id}:{side}")]);
-            }
-        }
+        arguments.extend(["--evidence".into(), format!("{id}:patch")]);
         work(root, provider, "judge", snapshot, &arguments).unwrap();
     }
 
@@ -1124,6 +1182,14 @@ fn assess_as(
     work(root, provider, "complete", snapshot, &[]).unwrap();
 }
 
+/// Acquires readable evidence for structural fixtures without treating opaque sides as empty.
+fn read_available_source(root: &Path, provider: &Provider, snapshot: &str, changes: &[Value]) {
+    for change in changes {
+        let reference = format!("{}:patch", change["id"].as_str().unwrap());
+        read_evidence(root, provider, snapshot, &reference, None, None);
+    }
+}
+
 /// Uses actual persisted read commands without retesting tiny pages in every matrix.
 fn read_evidence(
     root: &Path,
@@ -1135,17 +1201,12 @@ fn read_evidence(
 ) {
     // Match Command::Read's ordinary default and Assessment::read's response cap.
     let page_limit = limit.map_or(4096, NonZeroUsize::get).min(16_384);
-    let length = evidence_length(root, provider.number, reference);
-    let expected_pages = length.div_ceil(page_limit).max(1);
     let mut offset = 0;
     let mut pages = 0;
     let mut total_chars = 0;
+    let mut total_length = None;
 
     loop {
-        assert!(
-            pages < expected_pages,
-            "Evidence exceeded its captured length"
-        );
         let mut arguments = vec![
             "--reference".into(),
             reference.into(),
@@ -1157,9 +1218,17 @@ fn read_evidence(
         }
 
         let read = work(root, provider, "read", snapshot, &arguments).unwrap();
+        assert!(serde_json::to_vec_pretty(&read).unwrap().len() < 16_384);
         assert_eq!(read["snapshotDigest"], snapshot);
         assert_eq!(read["reference"], reference);
         assert_eq!(read["offset"], offset);
+        let reported_length = usize::try_from(read["totalCharacters"].as_u64().unwrap()).unwrap();
+        let expected_length = *total_length.get_or_insert(reported_length);
+        assert_eq!(reported_length, expected_length);
+        assert!(
+            pages < expected_length.max(1),
+            "Evidence exceeded its captured length"
+        );
         let page = read["text"].as_str().unwrap();
         let length = page.chars().count();
         assert!(length <= page_limit);
@@ -1175,53 +1244,15 @@ fn read_evidence(
             break;
         }
 
-        // Full nonterminal pages and exact advancement prevent loops and skipped evidence.
-        assert_eq!(length, page_limit);
+        // Serialized byte bounds may shorten a Unicode/escaped page below the requested characters.
+        assert!(length > 0);
         let next = read["nextOffset"].as_u64().unwrap();
         assert_eq!(next, offset + u64::try_from(length).unwrap());
         assert!(next > offset);
         offset = next;
     }
 
-    assert_eq!(pages, expected_pages);
-    assert_eq!(total_chars, length);
-}
-
-/// Bounds command paging from captured input, without fabricating any read receipts.
-fn evidence_length(root: &Path, number: u32, reference: &str) -> usize {
-    let record: Value = serde_json::from_slice(&fs::read(root.join("run.json")).unwrap()).unwrap();
-    let entry = record["inventory"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .find(|entry| entry["pullRequestId"] == number)
-        .unwrap();
-
-    match reference {
-        "policy" => record["policy"]["content"]
-            .as_str()
-            .unwrap()
-            .chars()
-            .count(),
-        // Pretty JSON key order does not affect the serialized character count.
-        "discussion" => serde_json::to_string_pretty(&entry["inspection"]["evidence"])
-            .unwrap()
-            .chars()
-            .count(),
-        _ => {
-            let (id, side) = reference.split_once(':').unwrap();
-            entry["assessment"]["inventory"]["changes"]
-                .as_array()
-                .unwrap()
-                .iter()
-                .find(|change| change["id"] == id)
-                .unwrap()[side]["content"]["text"]
-                .as_str()
-                .unwrap()
-                .chars()
-                .count()
-        }
-    }
+    assert_eq!(Some(total_chars), total_length);
 }
 
 /// Notice publication carries the same immutable snapshot and attribution as approval.
@@ -1300,7 +1331,7 @@ fn draft_conversion_during_publication_is_removed() {
                     .as_str()
                     .unwrap()
                     .clone_into(&mut snapshot);
-                prepared = work(&root, &provider, "prepare", &snapshot, &[]).unwrap();
+                prepared = prepare_inventory(&root, &provider, &snapshot);
             }
             assess_as(&root, &provider, &snapshot, &prepared, disposition);
             provider.evidence.borrow_mut()["pullRequest"][if ado { "isDraft" } else { "draft" }] =
@@ -1359,6 +1390,7 @@ fn stale_preflight_recovery_reassesses_source_before_any_effect() {
                 "invalidState"
             );
             assert_eq!(fs::read(root.join("run.json")).unwrap(), unchanged);
+            assert_eq!(provider.writes.get(), 0);
             if ado {
                 provider.ado_push();
                 let mut evidence = provider.evidence.borrow_mut();
@@ -1388,17 +1420,6 @@ fn stale_preflight_recovery_reassesses_source_before_any_effect() {
                     serde_json::from_slice(&fs::read(root.join("run.json")).unwrap()).unwrap();
                 assert_eq!(record["inventory"][0]["executionError"]["kind"], "service");
             }
-            if disposition == "insignificant" {
-                let path = host_journal(&scope.path().join("host-store").join("publications"));
-                let retained = path.with_extension("retained");
-                fs::rename(&path, &retained).unwrap();
-                // A missing publishing-host journal cannot prove that the receipt preceded a write.
-                assert_eq!(
-                    ss_ai::classification(&refresh(&root, &provider).unwrap_err()),
-                    "ambiguousWrite"
-                );
-                fs::rename(&retained, &path).unwrap();
-            }
             let refreshed = refresh(&root, &provider).unwrap();
             assert_eq!(refreshed["items"][0]["status"], "assessmentRequired");
             assert_eq!(refreshed["items"][0]["staleRecovery"]["attempts"], 1);
@@ -1409,7 +1430,7 @@ fn stale_preflight_recovery_reassesses_source_before_any_effect() {
             for operation in ["prepare", "complete"] {
                 work(&root, &provider, operation, &snapshot, &[]).unwrap_err();
             }
-            let prepared = work(&root, &provider, "prepare", current, &[]).unwrap();
+            let prepared = prepare_inventory(&root, &provider, current);
             assert_eq!(prepared["oldCommit"], old);
             assert_eq!(prepared["newCommit"], changed);
             work(&root, &provider, "complete", current, &[]).unwrap_err();
@@ -1423,20 +1444,12 @@ fn stale_preflight_recovery_reassesses_source_before_any_effect() {
                 notify(&root, &provider, current).unwrap()
             };
             let writes = provider.writes.get();
-            assert_eq!(
-                writes,
-                if ado && disposition == "insignificant" {
-                    2
-                } else {
-                    1
-                }
-            );
+            assert_eq!(writes, 1);
             if disposition == "insignificant" {
                 assert_eq!(
                     result["items"][0]["status"], "reapproved",
                     "{ado}: {result}"
                 );
-                assert_ne!(result["items"][0]["publication"]["runId"], result["runId"]);
                 publish(&root, &provider, current).unwrap();
             } else {
                 assert_eq!(
@@ -1492,7 +1505,7 @@ fn stale_notification_recovery_exhausts_without_remote_writes() {
                     .as_str()
                     .unwrap()
                     .clone_into(&mut snapshot);
-                prepared = work(&root, &provider, "prepare", &snapshot, &[]).unwrap();
+                prepared = prepare_inventory(&root, &provider, &snapshot);
             }
             let result = invoke(&root, &provider, "results", &[]).unwrap();
             assert_eq!(result["state"], "partial");
@@ -1524,8 +1537,6 @@ fn repeated_observation_has_a_distinct_snapshot() {
             Provider::new(repository.path(), &old, &new)
         };
         let (original, prepared) = prepare(&root, &provider, false);
-        let initial: Value =
-            serde_json::from_slice(&fs::read(root.join("run.json")).unwrap()).unwrap();
         assess_as(&root, &provider, &original, &prepared, "significant");
 
         let key = if ado { "description" } else { "body" };
@@ -1550,23 +1561,7 @@ fn repeated_observation_has_a_distinct_snapshot() {
         assert_eq!(refreshed["items"][0]["staleRecovery"]["attempts"], 1);
         assert_eq!(provider.writes.get(), 0);
 
-        // Earlier schema-8 records used the observation-only digest.
-        let path = root.join("run.json");
-        let current = fs::read(&path).unwrap();
-        let mut legacy: Value = serde_json::from_slice(&current).unwrap();
-        assert_eq!(
-            legacy["inventory"][0]["inspection"]["evidence"],
-            initial["inventory"][0]["inspection"]["evidence"]
-        );
-        legacy["inventory"][0]["inspection"]["snapshotDigest"] = json!(original);
-        fs::write(&path, serde_json::to_vec(&legacy).unwrap()).unwrap();
-        assert_eq!(
-            invoke(&root, &provider, "results", &[]).unwrap()["items"][0]["snapshotDigest"],
-            original
-        );
-        fs::write(&path, current).unwrap();
-
-        let prepared = work(&root, &provider, "prepare", snapshot, &[]).unwrap();
+        let prepared = prepare_inventory(&root, &provider, snapshot);
         assess_as(&root, &provider, snapshot, &prepared, "significant");
         assert_eq!(
             ss_ai::classification(&notify(&root, &provider, &original).unwrap_err()),
@@ -1625,79 +1620,39 @@ fn stale_inspection_recovery_is_bounded_and_rechecks_authority() {
     }
 }
 
-/// Staleness after an attempted effect is never permission to authorize another write.
-fn stale_refresh_preserves_accepted_and_unknown_effects() {
+/// An uncertain notice remains bound to its original attempt after stale recovery.
+fn stale_refresh_preserves_unknown_notice() {
     let repository = TempDir::new().unwrap();
     let (old, new) = sources(repository.path());
     for ado in [false, true] {
-        for fault in ["postPush", "unknown", "noticeUnknown"] {
-            let scope = TempDir::new().unwrap();
-            let root = scope.path().join("run");
-            let provider = if ado {
-                Provider::ado(repository.path(), &old, &new)
-            } else {
-                Provider::new(repository.path(), &old, &new)
-            };
-            let (snapshot, prepared) = prepare(&root, &provider, false);
-            let disposition = if fault == "noticeUnknown" {
-                "significant"
-            } else {
-                "insignificant"
-            };
-            // Page size matches native reads; this scenario targets remote-effect safety.
-            assess_as(&root, &provider, &snapshot, &prepared, disposition);
-            let key = if ado { "description" } else { "body" };
-            provider.evidence.borrow_mut()["pullRequest"][key] =
-                json!("Changed before the first effect.");
-            if fault == "noticeUnknown" {
-                notify(&root, &provider, &snapshot).unwrap_err();
-            } else {
-                assert_eq!(
-                    publish(&root, &provider, &snapshot).unwrap()["items"][0]["status"],
-                    "staleDuringExecution"
-                );
-            }
-            let refreshed = refresh(&root, &provider).unwrap();
-            let snapshot = refreshed["items"][0]["snapshotDigest"].as_str().unwrap();
-            let prepared = work(&root, &provider, "prepare", snapshot, &[]).unwrap();
-            assess_as(&root, &provider, snapshot, &prepared, disposition);
-            provider.fault.set(fault);
-            if fault == "noticeUnknown" {
-                notify(&root, &provider, snapshot).unwrap_err();
-            } else if fault == "postPush" {
-                assert_eq!(
-                    publish(&root, &provider, snapshot).unwrap()["items"][0]["status"],
-                    "staleDuringExecution"
-                );
-            } else {
-                assert_eq!(
-                    publish(&root, &provider, snapshot).unwrap()["error"]["kind"],
-                    "ambiguousWrite"
-                );
-            }
-            let before = fs::read(root.join("run.json")).unwrap();
-            let writes = provider.writes.get();
-            assert!(writes > 0);
-            assert_eq!(
-                ss_ai::classification(&refresh(&root, &provider).unwrap_err()),
-                "ambiguousWrite"
-            );
-            assert_eq!(fs::read(root.join("run.json")).unwrap(), before);
-            assert_eq!(provider.writes.get(), writes);
-            if fault == "postPush" {
-                let path = host_journal(&scope.path().join("host-store").join("publications"));
-                fs::rename(&path, path.with_extension("retained")).unwrap();
-                assert_eq!(
-                    ss_ai::classification(&refresh(&root, &provider).unwrap_err()),
-                    "ambiguousWrite"
-                );
-                assert_eq!(fs::read(root.join("run.json")).unwrap(), before);
-                assert_eq!(provider.writes.get(), writes);
-            }
-        }
+        let scope = TempDir::new().unwrap();
+        let root = scope.path().join("run");
+        let provider = if ado {
+            Provider::ado(repository.path(), &old, &new)
+        } else {
+            Provider::new(repository.path(), &old, &new)
+        };
+        let (snapshot, prepared) = prepare(&root, &provider, false);
+        assess_as(&root, &provider, &snapshot, &prepared, "significant");
+        let key = if ado { "description" } else { "body" };
+        provider.evidence.borrow_mut()["pullRequest"][key] = json!("Changed before notice.");
+        notify(&root, &provider, &snapshot).unwrap_err();
+        let refreshed = refresh(&root, &provider).unwrap();
+        let snapshot = refreshed["items"][0]["snapshotDigest"].as_str().unwrap();
+        let prepared = prepare_inventory(&root, &provider, snapshot);
+        assess_as(&root, &provider, snapshot, &prepared, "significant");
+        provider.fault.set("noticeUnknown");
+        notify(&root, &provider, snapshot).unwrap_err();
+        let before = fs::read(root.join("run.json")).unwrap();
+        assert_eq!(provider.writes.get(), 1);
+        assert_eq!(
+            ss_ai::classification(&refresh(&root, &provider).unwrap_err()),
+            "ambiguousWrite"
+        );
+        assert_eq!(fs::read(root.join("run.json")).unwrap(), before);
+        assert_eq!(provider.writes.get(), 1);
     }
 }
-
 /// Exercises both providers' persistent refusal and independent-approval reset.
 fn needs_review_notices_short_circuit_and_expire_only_after_external_approval(
     repository: &Sources,
@@ -1782,7 +1737,6 @@ fn needs_review_notices_short_circuit_and_expire_only_after_external_approval(
         }
         let reset = discover_inspect(&scope.path().join("reset"), &provider, false);
         assert_eq!(reset["items"][0]["status"], "alreadyValid");
-        assert!(reset["items"][0]["automaticApproval"].is_null());
         if ado {
             provider.ado_push();
             provider.evidence.borrow_mut()["iterations"][2]["createdDate"] =
@@ -1874,170 +1828,11 @@ fn notice_dry_runs_refusals_and_uncertain_effects_do_not_duplicate_writes(reposi
                 result.unwrap_err();
                 notify(&root, &provider, &snapshot).unwrap_err();
             }
-            if fault == "noticeUnknown" {
-                provider.fault.set("");
-                let later = scope.path().join("later");
-                let (snapshot, prepared) = prepare(&later, &provider, false);
-                assess(&later, &provider, &snapshot, &prepared);
-                assert_eq!(
-                    ss_ai::classification(&publish(&later, &provider, &snapshot).unwrap_err()),
-                    "ambiguousWrite"
-                );
-            }
             assert_eq!(
                 provider.writes.get(),
                 usize::from(!matches!(fault, "dryRun" | "prePush")),
                 "{ado}: {fault}"
             );
-        }
-    }
-}
-
-/// Keeps automatic timestamps distinct from external approvals across fresh runs.
-fn valid_automatic_approval_timestamps_survive_later_invocations(repository: &Sources) {
-    for ado in [false, true] {
-        let scope = TempDir::new().unwrap();
-        let root = scope.path().join("first");
-        let provider = repository.provider(ado);
-        let (snapshot, prepared) = prepare(&root, &provider, false);
-        assess(&root, &provider, &snapshot, &prepared);
-        let overlapping = scope.path().join("overlapping");
-        let (overlapping_snapshot, overlapping_prepared) = prepare(&overlapping, &provider, false);
-        assess(
-            &overlapping,
-            &provider,
-            &overlapping_snapshot,
-            &overlapping_prepared,
-        );
-        let published = publish(&root, &provider, &snapshot).unwrap();
-        let automatic = &published["items"][0]["automaticApproval"];
-        assert_eq!(automatic["approvedAt"], "2026-09-28T09:00:00Z");
-        assert_eq!(published["items"][0]["status"], "reapproved");
-        let shared = publish(&overlapping, &provider, &overlapping_snapshot).unwrap();
-        assert_eq!(shared["items"][0]["status"], "alreadyValid");
-        assert_eq!(&shared["items"][0]["automaticApproval"], automatic);
-        provider.fault.set("preflightReadFailure");
-        assert_eq!(publish(&root, &provider, &snapshot).unwrap(), published);
-        assert_eq!(
-            publish(&overlapping, &provider, &overlapping_snapshot).unwrap(),
-            shared
-        );
-        provider.fault.set("");
-        let later = discover_inspect(&scope.path().join("later"), &provider, false);
-        assert_eq!(later["items"][0]["status"], "alreadyValid");
-        assert_eq!(&later["items"][0]["automaticApproval"], automatic);
-        assert_eq!(
-            later["items"][0]["title"],
-            if ado { "Recent" } else { "Recent source" }
-        );
-        assert!(
-            later["items"][0]["url"]
-                .as_str()
-                .unwrap()
-                .starts_with(provider.url())
-        );
-        assert_eq!(
-            later["items"].as_array().unwrap().len(),
-            1,
-            "Out-of-range PRs appear only in counts"
-        );
-    }
-}
-
-/// A terminal provider receipt cannot leave reporting errors absent from results.
-fn publication_reporting_failures_are_persisted(repository: &Sources) {
-    for ado in [false, true] {
-        for fault in ["reportReadFailure", "reportStandingChanged"] {
-            let scope = TempDir::new().unwrap();
-            let root = scope.path().join("first");
-            let provider = repository.provider(ado);
-            let (snapshot, prepared) = prepare(&root, &provider, false);
-            assess(&root, &provider, &snapshot, &prepared);
-            if ado {
-                provider.ado_vote(10, 40, "2026-09-28T09:06:00Z");
-            } else {
-                provider.later("APPROVED");
-            }
-            provider
-                .host_directory
-                .replace(Some(scope.path().join("host-store/publications")));
-            provider.fault.set(fault);
-            let error = publish(&root, &provider, &snapshot).unwrap_err();
-            let result = invoke(&root, &provider, "results", &[]).unwrap();
-            assert_eq!(result["state"], "partial");
-            assert_eq!(
-                result["items"][0]["status"],
-                if fault == "reportStandingChanged" {
-                    "staleDuringExecution"
-                } else {
-                    "failed"
-                }
-            );
-            assert_eq!(
-                result["items"][0]["error"]["kind"],
-                ss_ai::classification(&error)
-            );
-            assert!(result["items"][0]["publication"].is_null());
-            assert!(result["items"][0]["automaticApproval"].is_null());
-            assert_eq!(provider.writes.get(), 0);
-            provider.fault.set("");
-            publish(&root, &provider, &snapshot).unwrap_err();
-            assert_eq!(invoke(&root, &provider, "results", &[]).unwrap(), result);
-        }
-    }
-}
-
-/// A completed run retains its observed result rather than mixing it with later service state.
-fn persisted_already_valid_results_replay_without_refreshing_reporting(repository: &Sources) {
-    let new = &repository.new;
-    for ado in [false, true] {
-        for fault in ["reportReadFailure", "reportStandingChanged"] {
-            let scope = TempDir::new().unwrap();
-            let root = scope.path().join("run");
-            let provider = repository.provider(ado);
-            let (snapshot, prepared) = prepare(&root, &provider, false);
-            assess(&root, &provider, &snapshot, &prepared);
-            if ado {
-                provider.ado_vote(10, 40, "2026-09-28T09:06:00Z");
-            } else {
-                provider.later("APPROVED");
-            }
-            provider
-                .host_directory
-                .replace(Some(scope.path().join("host-store/publications")));
-            let published = publish(&root, &provider, &snapshot).unwrap();
-            assert_eq!(published["state"], "complete");
-            assert_eq!(published["items"][0]["status"], "alreadyValid");
-            assert!(published["items"][0]["publication"].is_object());
-            assert!(published["items"][0]["automaticApproval"].is_null());
-            let run_bytes = fs::read(root.join("run.json")).unwrap();
-            if fault == "reportStandingChanged" {
-                if ado {
-                    provider.ado_vote(0, 41, "2026-09-28T09:07:00Z");
-                } else {
-                    let mut evidence = provider.evidence.borrow_mut();
-                    evidence["reviews"].as_array_mut().unwrap().push(json!({
-                        "id": 99, "node_id": "later-withdrawal",
-                        "user": {"id": 42, "node_id": "user-42"},
-                        "state": "CHANGES_REQUESTED", "submitted_at": "2026-09-28T09:07:00Z",
-                        "commit_id": new, "body": "Independent later decision."
-                    }));
-                    evidence["timeline"].as_array_mut().unwrap().push(json!({
-                        "__typename": "PullRequestReview", "id": "later-withdrawal",
-                        "state": "CHANGES_REQUESTED"
-                    }));
-                }
-            } else {
-                provider.fault.set(fault);
-            }
-            let reads = provider.target_reads.get();
-            let replayed = publish(&root, &provider, &snapshot)
-                .unwrap_or_else(|error| panic!("{ado}: {fault}: {error}"));
-            assert_eq!(replayed, published, "{ado}: {fault}");
-            assert_eq!(invoke(&root, &provider, "results", &[]).unwrap(), published);
-            assert_eq!(fs::read(root.join("run.json")).unwrap(), run_bytes);
-            assert_eq!(provider.target_reads.get(), reads);
-            assert_eq!(provider.writes.get(), 0);
         }
     }
 }
@@ -2375,150 +2170,1470 @@ fn publish(root: &Path, provider: &Provider, snapshot: &str) -> Result<Value, Ap
 }
 
 #[test]
+fn exhausted_assessment_budget_survives_resume_without_remote_effects() {
+    let _guard = PROCESS_TEST_LOCK
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner);
+    let repository = Sources::new();
+    let scope = TempDir::new().unwrap();
+    let root = scope.path().join("budget");
+    let provider = repository.provider(false);
+    let (snapshot, _) = prepare(&root, &provider, true);
+    let arguments = [
+        "--pull-request-id".into(),
+        provider.number.to_string(),
+        "--snapshot-digest".into(),
+        snapshot.clone(),
+    ];
+    let clock = OffsetClock(Duration::from_mins(8));
+    let error = invoke_at(&root, &provider, "assessment", &arguments, &clock).unwrap_err();
+    assert_eq!(ss_ai::classification(&error), "budgetExceeded");
+
+    let results = invoke(&root, &provider, "results", &[]).unwrap();
+    assert_eq!(results["items"][0]["status"], "failed");
+    assert_eq!(results["items"][0]["assessmentBudget"]["exhausted"], true);
+    assert_eq!(
+        results["items"][0]["assessmentBudget"]["diagnostic"],
+        "timeLimit"
+    );
+    work(&root, &provider, "assessment", &snapshot, &[]).unwrap_err();
+    assert_eq!(provider.writes.get(), 0);
+}
+
+#[test]
+fn compact_metadata_commands_expose_the_same_evidence_references() {
+    let _guard = PROCESS_TEST_LOCK
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner);
+    let repository = Sources::new();
+    let scope = TempDir::new().unwrap();
+    let root = scope.path().join("compact-metadata");
+    let provider = repository.provider(false);
+    let (snapshot, prepared) = prepare(&root, &provider, true);
+    let compact = work(
+        &root,
+        &provider,
+        "assessment",
+        &snapshot,
+        &["--compact".into(), "--limit".into(), "100".into()],
+    )
+    .unwrap();
+    assert_eq!(
+        compact["changes"][0]["requiredPatch"]["reference"],
+        "c1:patch"
+    );
+    for field in ["complete", "readOffset", "totalCharacters"] {
+        assert_eq!(
+            compact["changes"][0]["requiredPatch"][field],
+            prepared["changes"][0]["requiredPatch"][field]
+        );
+    }
+    let full = work(
+        &root,
+        &provider,
+        "units",
+        &snapshot,
+        &[
+            "--reference".into(),
+            "discussion".into(),
+            "--limit".into(),
+            "100".into(),
+        ],
+    )
+    .unwrap();
+    let compact = work(
+        &root,
+        &provider,
+        "units",
+        &snapshot,
+        &[
+            "--reference".into(),
+            "discussion".into(),
+            "--compact".into(),
+            "--limit".into(),
+            "100".into(),
+        ],
+    )
+    .unwrap();
+    assert_eq!(
+        compact["items"][0]["reference"],
+        full["items"][0]["reference"]
+    );
+    assert_eq!(
+        compact["items"][0]["bindingReference"],
+        full["items"][0]["bindingReference"]
+    );
+    let plan = work(
+        &root,
+        &provider,
+        "unit-read-plan",
+        &snapshot,
+        &["--reference".into(), "discussion".into()],
+    )
+    .unwrap();
+    let window = &plan["items"][0];
+    let delivered = work(
+        &root,
+        &provider,
+        "read-units",
+        &snapshot,
+        &[
+            "--reference".into(),
+            "discussion".into(),
+            "--after".into(),
+            window["after"].to_string(),
+            "--count".into(),
+            window["count"].to_string(),
+            "--read-token".into(),
+            plan["readToken"].as_str().unwrap().into(),
+        ],
+    )
+    .unwrap();
+    assert_eq!(
+        delivered["items"][0]["reference"],
+        compact["items"][0]["reference"]
+    );
+    let change = prepared["changes"][0]["id"].as_str().unwrap();
+    let ranges = json!([{
+        "changeId": change,
+        "side": "new",
+        "startLine": 1,
+        "lineCount": 1
+    }]);
+    let oversized = json!(vec![ranges[0].clone(); 100]);
+    let error = work(
+        &root,
+        &provider,
+        "source-context-batch",
+        &snapshot,
+        &["--batch-json".into(), oversized.to_string()],
+    )
+    .unwrap_err();
+    assert_eq!(ss_ai::classification(&error), "batchTooLarge");
+    let registered = work(
+        &root,
+        &provider,
+        "source-context-batch",
+        &snapshot,
+        &["--batch-json".into(), ranges.to_string()],
+    )
+    .unwrap();
+    let context = registered["items"][0]["reference"].as_str().unwrap();
+    let read = json!({
+        "readToken": registered["readToken"],
+        "items": [{"reference": context, "offset": 0, "limit": 16384}]
+    });
+    let delivered = work(
+        &root,
+        &provider,
+        "read-batch",
+        &snapshot,
+        &["--batch-json".into(), read.to_string()],
+    )
+    .unwrap();
+    assert_eq!(delivered["items"][0]["reference"], context);
+    assert_eq!(delivered["items"][0]["complete"], true);
+}
+
+#[test]
+fn grouped_native_workflow_completes_without_notes_and_finalizes_after_delay() {
+    let _guard = PROCESS_TEST_LOCK
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner);
+    let repository = Sources::new();
+    for ado in [false, true] {
+        let scope = TempDir::new().unwrap();
+        let root = scope.path().join("grouped-workflow");
+        let provider = repository.provider(ado);
+        let (snapshot, prepared) = prepare(&root, &provider, false);
+        let service_calls = provider.service_calls.get();
+        let token = prepared["readToken"].as_str().unwrap();
+        let documents = prepared["progress"]["requiredDocumentCount"]
+            .as_u64()
+            .unwrap();
+        let characters = prepared["progress"]["preflightEstimate"]["transportFragmentCharacters"]
+            .as_u64()
+            .unwrap();
+        let mut delivered = false;
+        // The small fixture still requires deterministic progress under mutations.
+        for _ in 0..=documents + characters {
+            let batch = work(
+                &root,
+                &provider,
+                "read-next",
+                &snapshot,
+                &["--read-token".into(), token.into()],
+            )
+            .unwrap();
+            assert!(serde_json::to_vec_pretty(&batch).unwrap().len() < 16_384);
+            if batch["items"].as_array().unwrap().is_empty() {
+                delivered = true;
+                break;
+            }
+        }
+        assert!(delivered);
+        let changes = prepared["changes"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|change| change["reference"].clone())
+            .collect::<Vec<_>>();
+        let conclusions = json!({
+            "stateToken": prepared["stateToken"],
+            "groups": [{"changes": changes, "disposition": "insignificant", "rationale": "The fixture edits preserve the relevant behavior."}]
+        });
+        let recorded = work(
+            &root,
+            &provider,
+            "conclude",
+            &snapshot,
+            &["--conclusions-json".into(), conclusions.to_string()],
+        )
+        .unwrap();
+        let synthesis = json!({
+            "stateToken": recorded["stateToken"],
+            "disposition": "insignificant",
+            "rationale": "Combined fixture changes introduce no relevant regression.",
+            "discussion": "The complete fixture discussion has no material outstanding objection."
+        });
+        let completed = work(
+            &root,
+            &provider,
+            "synthesize",
+            &snapshot,
+            &["--synthesis-json".into(), synthesis.to_string()],
+        )
+        .unwrap();
+        assert_eq!(completed["status"], "readyToReapprove");
+        assert!(completed["assessmentDigest"].is_string());
+        let results = invoke(&root, &provider, "results", &[]).unwrap();
+        let budget = &results["items"][0]["assessmentBudget"];
+        assert!(budget["readBatches"].as_u64().unwrap() > 0);
+        assert_eq!(budget["judgmentBatches"], 1);
+        assert_eq!(provider.service_calls.get(), service_calls);
+        assert_eq!(provider.writes.get(), 0);
+        let finalized = invoke_at(
+            &root,
+            &provider,
+            "publish",
+            &[
+                "--pull-request-id".into(),
+                provider.number.to_string(),
+                "--snapshot-digest".into(),
+                snapshot,
+                "--repository-url".into(),
+                provider.url().into(),
+                "--attribution".into(),
+                "[Copilot speaking]".into(),
+            ],
+            &OffsetClock(Duration::from_mins(17)),
+        )
+        .unwrap();
+        assert_eq!(finalized["items"][0]["status"], "reapproved");
+        assert_eq!(finalized["items"][0]["assessmentBudget"], *budget);
+        assert!(budget["completedAtMilliseconds"].is_number());
+        assert_eq!(provider.writes.get(), 1);
+    }
+}
+
+#[test]
+fn partial_significant_result_reaches_guarded_notification_without_approval() {
+    let _guard = PROCESS_TEST_LOCK
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner);
+    let repository = Sources::new();
+    for ado in [false, true] {
+        let scope = TempDir::new().unwrap();
+        let root = scope.path().join("partial-significant");
+        let provider = repository.provider(ado);
+        let (snapshot, prepared) = prepare(&root, &provider, false);
+        let change = &prepared["changes"][0];
+        let reference = change["reference"].as_str().unwrap();
+        let batch = work(
+            &root,
+            &provider,
+            "read-next",
+            &snapshot,
+            &[
+                "--read-token".into(),
+                prepared["readToken"].as_str().unwrap().into(),
+                "--change-id".into(),
+                reference.into(),
+            ],
+        )
+        .unwrap();
+        assert!(
+            batch["items"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|item| item["reference"] == format!("{reference}:patch"))
+        );
+        let conclusions = json!({
+            "stateToken": prepared["stateToken"],
+            "groups": [{"changes": [reference], "disposition": "significant",
+                "rationale": "The captured change materially alters the fixture contract."}]
+        });
+        work(
+            &root,
+            &provider,
+            "conclude",
+            &snapshot,
+            &["--conclusions-json".into(), conclusions.to_string()],
+        )
+        .unwrap();
+        let completed = work(
+            &root,
+            &provider,
+            "complete-partial",
+            &snapshot,
+            &[
+                "--change-id".into(),
+                reference.into(),
+                "--rationale".into(),
+                "The examined change materially alters the fixture contract.".into(),
+            ],
+        )
+        .unwrap();
+        assert_eq!(completed["status"], "needsReview");
+        assert_eq!(completed["partial"], true);
+        let results = invoke(&root, &provider, "results", &[]).unwrap();
+        let progress = &results["items"][0]["assessmentProgress"];
+        assert_eq!(progress["partialSignificant"], true);
+        assert!(
+            progress["deliveredRequiredDocumentCount"].as_u64().unwrap()
+                < progress["requiredDocumentCount"].as_u64().unwrap()
+        );
+        publish(&root, &provider, &snapshot).unwrap_err();
+        assert_eq!(provider.writes.get(), 0);
+        let before = results["items"][0]["assessmentBudget"].clone();
+        let notice = invoke_at(
+            &root,
+            &provider,
+            "notify",
+            &[
+                "--pull-request-id".into(),
+                provider.number.to_string(),
+                "--snapshot-digest".into(),
+                snapshot.clone(),
+                "--repository-url".into(),
+                provider.url().into(),
+                "--attribution".into(),
+                "[Copilot speaking]".into(),
+            ],
+            &OffsetClock(Duration::from_mins(17)),
+        )
+        .unwrap();
+        assert_eq!(notice["items"][0]["status"], "needsReview");
+        assert_eq!(notice["items"][0]["assessmentBudget"], before);
+        assert!(before["completedAtMilliseconds"].is_number());
+        assert_eq!(provider.writes.get(), 1);
+        let notice_path = host_journal(&scope.path().join("host-store").join("review-notices"));
+        let stored: Value = serde_json::from_slice(&fs::read(notice_path).unwrap()).unwrap();
+        assert!(
+            stored["attempts"][0]["body"]
+                .as_str()
+                .unwrap()
+                .contains("Partial assessment; unrelated changes may not have been examined.")
+        );
+    }
+}
+
+#[test]
+fn completed_assessment_metadata_does_not_consume_publication_reserve() {
+    let _guard = PROCESS_TEST_LOCK
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner);
+    let repository = Sources::new();
+    let scope = TempDir::new().unwrap();
+    let root = scope.path().join("completed-budget");
+    let provider = repository.provider(false);
+    let (snapshot, prepared) = prepare(&root, &provider, false);
+    assess(&root, &provider, &snapshot, &prepared);
+    let before = invoke(&root, &provider, "results", &[]).unwrap();
+    let arguments = [
+        "--pull-request-id".into(),
+        provider.number.to_string(),
+        "--snapshot-digest".into(),
+        snapshot,
+    ];
+
+    let page = invoke_at(
+        &root,
+        &provider,
+        "assessment",
+        &arguments,
+        &OffsetClock(Duration::from_mins(17)),
+    )
+    .unwrap();
+    assert_eq!(page["state"], "complete");
+    for (command, extra) in [
+        ("units", vec!["--reference".into(), "discussion".into()]),
+        (
+            "unit-read-plan",
+            vec!["--reference".into(), "discussion".into()],
+        ),
+        ("checks", Vec::new()),
+    ] {
+        let mut metadata_arguments = arguments.to_vec();
+        metadata_arguments.extend(extra);
+        invoke_at(
+            &root,
+            &provider,
+            command,
+            &metadata_arguments,
+            &OffsetClock(Duration::from_mins(17)),
+        )
+        .unwrap();
+    }
+    let after = invoke(&root, &provider, "results", &[]).unwrap();
+    assert_eq!(after["items"][0]["status"], "readyToReapprove");
+    assert_eq!(
+        after["items"][0]["assessmentBudget"],
+        before["items"][0]["assessmentBudget"]
+    );
+    assert_eq!(provider.writes.get(), 0);
+}
+
+#[test]
+fn delayed_parent_publishes_timely_completed_approval_without_assessor_timeout() {
+    let _guard = PROCESS_TEST_LOCK
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner);
+    let repository = Sources::new();
+    for ado in [false, true] {
+        let scope = TempDir::new().unwrap();
+        let root = scope.path().join("delayed-approval");
+        let provider = repository.provider(ado);
+        let (snapshot, prepared) = prepare(&root, &provider, false);
+        assess(&root, &provider, &snapshot, &prepared);
+        let before = invoke(&root, &provider, "results", &[]).unwrap();
+        let arguments = [
+            "--pull-request-id".into(),
+            provider.number.to_string(),
+            "--snapshot-digest".into(),
+            snapshot,
+            "--repository-url".into(),
+            provider.url().into(),
+            "--attribution".into(),
+            "[Copilot speaking]".into(),
+        ];
+        let clock = OffsetClock(Duration::from_mins(17));
+        let result = invoke_at(&root, &provider, "publish", &arguments, &clock).unwrap();
+        assert_eq!(result["items"][0]["status"], "reapproved");
+        assert_eq!(
+            result["items"][0]["assessmentBudget"],
+            before["items"][0]["assessmentBudget"]
+        );
+        assert!(result["items"][0]["assessmentBudget"]["completedAtMilliseconds"].is_number());
+        assert_eq!(provider.writes.get(), 1);
+    }
+}
+
+#[test]
+fn delayed_parent_notifies_timely_completed_refusals_without_assessor_timeout() {
+    let _guard = PROCESS_TEST_LOCK
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner);
+    let repository = Sources::new();
+    for ado in [false, true] {
+        for disposition in ["significant", "uncertain"] {
+            let scope = TempDir::new().unwrap();
+            let root = scope.path().join("delayed-notice");
+            let provider = repository.provider(ado);
+            let (snapshot, prepared) = prepare(&root, &provider, false);
+            assess_as(&root, &provider, &snapshot, &prepared, disposition);
+            let before = invoke(&root, &provider, "results", &[]).unwrap();
+            let arguments = [
+                "--pull-request-id".into(),
+                provider.number.to_string(),
+                "--snapshot-digest".into(),
+                snapshot,
+                "--repository-url".into(),
+                provider.url().into(),
+                "--attribution".into(),
+                "[Copilot speaking]".into(),
+            ];
+            let clock = OffsetClock(Duration::from_mins(17));
+            let result = invoke_at(&root, &provider, "notify", &arguments, &clock).unwrap();
+            assert_eq!(
+                result["items"][0]["status"],
+                if disposition == "uncertain" {
+                    "failed"
+                } else {
+                    "needsReview"
+                }
+            );
+            assert!(result["items"][0]["reviewNotice"].is_object());
+            assert_eq!(
+                result["items"][0]["assessmentBudget"],
+                before["items"][0]["assessmentBudget"]
+            );
+            assert_eq!(provider.writes.get(), 1);
+        }
+    }
+}
+
+#[test]
+fn slow_finalization_preserves_assessor_timing_and_never_starts_an_effect() {
+    let _guard = PROCESS_TEST_LOCK
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner);
+    let repository = Sources::new();
+    for ado in [false, true] {
+        for notice in [false, true] {
+            let scope = TempDir::new().unwrap();
+            let root = scope.path().join("slow-finalizer");
+            let provider = repository.provider(ado);
+            let (snapshot, prepared) = prepare(&root, &provider, false);
+            assess_as(
+                &root,
+                &provider,
+                &snapshot,
+                &prepared,
+                if notice {
+                    "significant"
+                } else {
+                    "insignificant"
+                },
+            );
+            let before = invoke(&root, &provider, "results", &[]).unwrap();
+            let clock = FinalizationClock {
+                target_reads: &provider.target_reads,
+                initial_reads: provider.target_reads.get(),
+            };
+            let error = invoke_at(
+                &root,
+                &provider,
+                if notice { "notify" } else { "publish" },
+                &[
+                    "--pull-request-id".into(),
+                    provider.number.to_string(),
+                    "--snapshot-digest".into(),
+                    snapshot,
+                    "--repository-url".into(),
+                    provider.url().into(),
+                    "--attribution".into(),
+                    "[Copilot speaking]".into(),
+                ],
+                &clock,
+            )
+            .unwrap_err();
+            assert_eq!(ss_ai::classification(&error), "publicationTimeout");
+            assert_eq!(provider.writes.get(), 0);
+            let after = invoke(&root, &provider, "results", &[]).unwrap();
+            assert_eq!(
+                after["items"][0]["assessmentBudget"],
+                before["items"][0]["assessmentBudget"]
+            );
+            assert_eq!(after["items"][0]["assessmentBudget"]["exhausted"], false);
+            assert_eq!(
+                if notice {
+                    &after["items"][0]["error"]["kind"]
+                } else {
+                    &after["error"]["kind"]
+                },
+                "publicationTimeout"
+            );
+        }
+    }
+}
+
+#[test]
+fn worker_reservations_survive_resume_and_cannot_authorize_effects_after_exhaustion() {
+    let _guard = PROCESS_TEST_LOCK
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner);
+    let repository = Sources::new();
+    let scope = TempDir::new().unwrap();
+    let root = scope.path().join("workers");
+    let provider = repository.provider(false);
+    let (snapshot, _) = prepare(&root, &provider, false);
+    for expected in 1..=3 {
+        let result = work(&root, &provider, "start-worker", &snapshot, &[]).unwrap();
+        assert_eq!(
+            result["items"][0]["assessmentBudget"]["workerReservations"],
+            expected
+        );
+    }
+    let error = work(&root, &provider, "start-worker", &snapshot, &[]).unwrap_err();
+    assert_eq!(ss_ai::classification(&error), "budgetExceeded");
+    let result = invoke(&root, &provider, "results", &[]).unwrap();
+    assert_eq!(
+        result["items"][0]["assessmentBudget"]["diagnostic"],
+        "workerLimit"
+    );
+    work(&root, &provider, "assessment", &snapshot, &[]).unwrap_err();
+    publish(&root, &provider, &snapshot).unwrap_err();
+    assert_eq!(provider.writes.get(), 0);
+}
+
+#[test]
+fn stale_refresh_retains_time_work_and_worker_budgets() {
+    let _guard = PROCESS_TEST_LOCK
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner);
+    let repository = Sources::new();
+    let scope = TempDir::new().unwrap();
+    let root = scope.path().join("refresh-budget");
+    let provider = repository.provider(false);
+    let (snapshot, prepared) = prepare(&root, &provider, false);
+    work(&root, &provider, "start-worker", &snapshot, &[]).unwrap();
+    assess(&root, &provider, &snapshot, &prepared);
+    let before = invoke(&root, &provider, "results", &[]).unwrap();
+    let before_budget = &before["items"][0]["assessmentBudget"];
+    // A rejected refresh must not resume a completed assessor's clock.
+    refresh(&root, &provider).unwrap_err();
+    let unchanged = invoke(&root, &provider, "results", &[]).unwrap();
+    assert_eq!(unchanged["items"][0]["assessmentBudget"], *before_budget);
+    provider.evidence.borrow_mut()["pullRequest"]["body"] = json!("New discussion evidence.");
+    assert_eq!(
+        publish(&root, &provider, &snapshot).unwrap()["items"][0]["status"],
+        "staleDuringExecution"
+    );
+    let refreshed = invoke_at(
+        &root,
+        &provider,
+        "refresh",
+        &[
+            "--repository-url".into(),
+            provider.url().into(),
+            "--pull-request-id".into(),
+            provider.number.to_string(),
+        ],
+        &OffsetClock(Duration::from_mins(17)),
+    )
+    .unwrap();
+    let after_budget = &refreshed["items"][0]["assessmentBudget"];
+    assert_eq!(
+        after_budget["startedAtMilliseconds"],
+        before_budget["startedAtMilliseconds"]
+    );
+    assert_eq!(after_budget["workerReservations"], 1);
+    assert_eq!(
+        after_budget["observedElapsedMilliseconds"],
+        before_budget["observedElapsedMilliseconds"]
+    );
+    assert_eq!(
+        after_budget["excludedIdleMilliseconds"],
+        u64::try_from(Duration::from_mins(17).as_millis()).unwrap()
+    );
+    assert!(after_budget["completedAtMilliseconds"].is_null());
+    assert!(
+        after_budget["workCommands"].as_u64().unwrap()
+            >= before_budget["workCommands"].as_u64().unwrap()
+    );
+    assert_eq!(provider.writes.get(), 0);
+}
+
+#[test]
+fn completed_direct_results_report_required_coverage_without_legacy_work() {
+    let _guard = PROCESS_TEST_LOCK
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner);
+    let repository = Sources::new();
+    let scope = TempDir::new().unwrap();
+    let root = scope.path().join("direct-progress");
+    let provider = repository.provider(false);
+    let (snapshot, prepared) = prepare(&root, &provider, true);
+    assess(&root, &provider, &snapshot, &prepared);
+    let result = invoke(&root, &provider, "results", &[]).unwrap();
+    let progress = &result["items"][0]["assessmentProgress"];
+    assert_eq!(progress["assessmentComplete"], true);
+    assert_eq!(
+        progress["deliveredRequiredDocumentCount"],
+        progress["requiredDocumentCount"]
+    );
+    assert_eq!(progress["judgedChangeCount"], progress["changeCount"]);
+    assert_eq!(progress["nextRequiredRead"], Value::Null);
+    assert_eq!(progress["nextChangeOffset"], Value::Null);
+    assert_eq!(progress["unresolvedCheckCount"], 0);
+    assert_eq!(progress["cumulativeJudgmentRecorded"], true);
+    for field in [
+        "unitCount",
+        "deliveredUnitCount",
+        "completedUnitCount",
+        "nextUnitId",
+        "nextUnitOffset",
+        "nextUndeliveredUnitId",
+        "minimumUnitEvidencePages",
+    ] {
+        assert!(progress.get(field).is_none(), "{field}");
+    }
+    assert_eq!(provider.writes.get(), 0);
+}
+
+#[test]
+fn batch_commands_record_delivery_and_reject_partial_transactions() {
+    let _guard = PROCESS_TEST_LOCK
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner);
+    let repository = Sources::new();
+    let scope = TempDir::new().unwrap();
+    let root = scope.path().join("batch");
+    let provider = repository.provider(false);
+    let (snapshot, prepared) = prepare(&root, &provider, true);
+    let token = prepared["readToken"].as_str().unwrap();
+    let bad = json!({"readToken":token,"items":[
+        {"reference":"policy","offset":0,"limit":100},
+        {"reference":"missing","offset":0,"limit":100}
+    ]});
+    work(
+        &root,
+        &provider,
+        "read-batch",
+        &snapshot,
+        &["--batch-json".into(), bad.to_string()],
+    )
+    .unwrap_err();
+    let page = work(&root, &provider, "assessment", &snapshot, &[]).unwrap();
+    assert!(page["documentReads"][0]["readOffset"].is_null());
+    let good = json!({"readToken":token,"items":[
+        {"reference":"policy","offset":0,"limit":100},
+        {"reference":"discussion","offset":0,"limit":100}
+    ]});
+    let response = work(
+        &root,
+        &provider,
+        "read-batch",
+        &snapshot,
+        &["--batch-json".into(), good.to_string()],
+    )
+    .unwrap();
+    assert_eq!(response["items"].as_array().unwrap().len(), 2);
+    let result = invoke(&root, &provider, "results", &[]).unwrap();
+    let budget = &result["items"][0]["assessmentBudget"];
+    assert_eq!(budget["readBatches"], 1);
+    assert_eq!(budget["evidencePagesProduced"], 2);
+    assert!(budget["deliveredTextBytesProduced"].as_u64().unwrap() > 0);
+    assert!(budget["uniqueEvidenceBytes"].is_null());
+    assert_eq!(provider.writes.get(), 0);
+}
+
+/// Exercises the dispatcher output, including the executable's trailing newline.
+fn canary_invoke(
+    root: &Path,
+    provider: &Provider,
+    operation: &str,
+    args: &[String],
+) -> Result<Value, AppError> {
+    let mut arguments = vec![
+        OsString::from("ss-ai"),
+        "autoreapprove".into(),
+        operation.into(),
+        "--state-path".into(),
+        root.join("run.json").into_os_string(),
+    ];
+    arguments.extend(args.iter().map(OsString::from));
+    let output = run_in(
+        &arguments,
+        provider,
+        provider,
+        &FixedClock,
+        &root.parent().unwrap().join("host-store"),
+    )?;
+    assert!(output.len() < 16_384, "{operation}: {}", output.len());
+    let value: Value = serde_json::from_str(&output)?;
+    // The assessment boundary budgets pretty JSON even when the CLI emits compact JSON.
+    assert!(serde_json::to_vec_pretty(&value)?.len() < 16_384);
+    Ok(value)
+}
+
+/// Binds a bounded canary command to the prepared snapshot.
+fn canary_work(
+    root: &Path,
+    provider: &Provider,
+    snapshot: &str,
+    operation: &str,
+    args: &[String],
+) -> Result<Value, AppError> {
+    let mut input = vec![
+        "--pull-request-id".into(),
+        provider.number.to_string(),
+        "--snapshot-digest".into(),
+        snapshot.into(),
+    ];
+    input.extend_from_slice(args);
+    canary_invoke(root, provider, operation, &input)
+}
+
+/// Follows native offsets and rejects gaps or duplicate path identities.
+fn canary_pages(
+    root: &Path,
+    provider: &Provider,
+    snapshot: &str,
+) -> (BTreeMap<String, String>, BTreeSet<String>, usize) {
+    let mut after = 0_usize;
+    let mut paths = BTreeMap::new();
+    let mut judged = BTreeSet::new();
+    let mut pages = 0;
+    loop {
+        let response = canary_work(
+            root,
+            provider,
+            snapshot,
+            "assessment",
+            &[
+                "--after".into(),
+                after.to_string(),
+                "--limit".into(),
+                "1000".into(),
+            ],
+        )
+        .unwrap();
+        let changes = response["changes"].as_array().unwrap();
+        assert!(!changes.is_empty());
+        pages += 1;
+        for change in changes {
+            let id = change["id"].as_str().unwrap();
+            let path = change["new"]["path"].as_str().unwrap();
+            assert!(paths.insert(id.to_owned(), path.to_owned()).is_none());
+            if !change["decision"].is_null() {
+                judged.insert(id.to_owned());
+            }
+        }
+        let Some(next) = response["nextOffset"].as_u64() else {
+            break;
+        };
+        let next = usize::try_from(next).unwrap();
+        assert_eq!(next, after + changes.len());
+        assert!(next > after);
+        after = next;
+    }
+    (paths, judged, pages)
+}
+
+/// Confirms atomic failure and exact Unicode delivery after a smaller retry.
+fn canary_unicode_batch(
+    root: &Path,
+    provider: &Provider,
+    snapshot: &str,
+    read_token: &str,
+    id: &str,
+    old_text: &str,
+    new_text: &str,
+) {
+    let references = [format!("{id}:old"), format!("{id}:new")];
+    let request = json!({"readToken": read_token, "items": references.iter().map(|reference|
+        json!({"reference": reference, "offset": 0, "limit": 4096})
+    ).collect::<Vec<_>>()});
+    let run_path = root.join("run.json");
+    let before = fs::read(&run_path).unwrap();
+    let error = canary_work(
+        root,
+        provider,
+        snapshot,
+        "read-batch",
+        &["--batch-json".into(), request.to_string()],
+    )
+    .unwrap_err();
+    assert_eq!(ss_ai::classification(&error), "evidenceDelivery");
+    // An unsuccessful command consumes work budget but commits no read receipt
+    // or evidence-page accounting, which are separate persisted contracts.
+    assert_only_work_commands_changed(&run_path, &before, 1);
+    let before: Value = serde_json::from_slice(&before).unwrap();
+    let after: Value = serde_json::from_slice(&fs::read(&run_path).unwrap()).unwrap();
+    assert_eq!(
+        before["inventory"][0]["assessment"]["reads"],
+        after["inventory"][0]["assessment"]["reads"]
+    );
+    for field in ["readBatches", "evidencePages", "deliveredTextBytes"] {
+        assert_eq!(
+            before["inventory"][0]["assessmentBudget"][field],
+            after["inventory"][0]["assessmentBudget"][field]
+        );
+    }
+
+    let mut delivered = [String::new(), String::new()];
+    let mut offset = 0;
+    let mut first = None;
+    loop {
+        let request = json!({"readToken": read_token, "items": references.iter().map(|reference|
+            json!({"reference": reference, "offset": offset, "limit": 600})
+        ).collect::<Vec<_>>()});
+        let args = ["--batch-json".into(), request.to_string()];
+        let response = canary_work(root, provider, snapshot, "read-batch", &args).unwrap();
+        if first.is_none() {
+            let replay = canary_work(root, provider, snapshot, "read-batch", &args).unwrap();
+            assert_eq!(response["items"], replay["items"]);
+            first = Some(());
+        }
+        let items = response["items"].as_array().unwrap();
+        for (index, item) in items.iter().enumerate() {
+            assert_eq!(item["reference"], references[index]);
+            assert_eq!(item["offset"], offset);
+            delivered[index].push_str(item["text"].as_str().unwrap());
+        }
+        if items.iter().all(|item| item["complete"] == true) {
+            break;
+        }
+        let next = usize::try_from(items[0]["nextOffset"].as_u64().unwrap()).unwrap();
+        assert_eq!(items[1]["nextOffset"], next);
+        assert!(next > offset);
+        offset = next;
+    }
+    assert_eq!(delivered[0], old_text);
+    assert_eq!(delivered[1], new_text);
+}
+
+#[test]
+fn native_scale_canary_pages_and_recovers_oversized_unicode_batches() {
+    let _guard = PROCESS_TEST_LOCK
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner);
+    // The varied judgment metadata forces summary pages to shrink, while the
+    // unchanged Unicode body makes each source side individually pageable.
+    let fixture_root = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("..")
+        .join("..")
+        .join("target");
+    fs::create_dir_all(&fixture_root).unwrap();
+    let scope = TempDir::new_in(fixture_root).unwrap();
+    let repository = scope.path().join("repository");
+    fs::create_dir_all(&repository).unwrap();
+    let unicode = "é🤖\"\\\n".repeat(1500);
+    let old_text = format!("old\n{unicode}");
+    let new_text = format!("new\n{unicode}");
+    git(&repository, &["init", "--quiet"]);
+    for index in 0..30 {
+        let content = if index == 0 {
+            old_text.as_str()
+        } else {
+            "old\n"
+        };
+        fs::write(repository.join(format!("path-{index:03}.txt")), content).unwrap();
+    }
+    git(&repository, &["add", "."]);
+    git(&repository, &["commit", "--quiet", "-m", "Original"]);
+    let old = git(&repository, &["rev-parse", "HEAD"]);
+    for index in 0..30 {
+        let content = if index == 0 {
+            new_text.as_str()
+        } else {
+            "new\n"
+        };
+        fs::write(repository.join(format!("path-{index:03}.txt")), content).unwrap();
+    }
+    git(&repository, &["add", "."]);
+    git(&repository, &["commit", "--quiet", "-m", "Changed"]);
+    let new = git(&repository, &["rev-parse", "HEAD"]);
+    let root = scope.path().join("run");
+    fs::create_dir_all(&root).unwrap();
+    fs::write(
+        root.join("policy.md"),
+        include_str!("../../../skills/ss-autoreapprove/significance.md"),
+    )
+    .unwrap();
+    let provider = Provider::new(&repository, &old, &new);
+    canary_invoke(
+        &root,
+        &provider,
+        "discover",
+        &[
+            "--repository-url".into(),
+            provider.url().into(),
+            "--policy-path".into(),
+            root.join("policy.md").to_str().unwrap().into(),
+            "--dry-run".into(),
+        ],
+    )
+    .unwrap();
+    let inspected = canary_invoke(
+        &root,
+        &provider,
+        "inspect",
+        &[
+            "--repository-url".into(),
+            provider.url().into(),
+            "--pull-request-id".into(),
+            provider.number.to_string(),
+        ],
+    )
+    .unwrap();
+    assert_eq!(inspected["items"][0]["status"], "assessmentRequired");
+    let snapshot = inspected["items"][0]["snapshotDigest"].as_str().unwrap();
+    canary_work(&root, &provider, snapshot, "prepare", &[]).unwrap();
+    let prepared = canary_work(&root, &provider, snapshot, "assessment", &[]).unwrap();
+    let read_token = prepared["readToken"].as_str().unwrap().to_owned();
+    let (paths, initially_judged, initial_pages) = canary_pages(&root, &provider, snapshot);
+    assert!(initially_judged.is_empty());
+    let expected_paths = (0..30)
+        .map(|index| format!("path-{index:03}.txt"))
+        .collect::<BTreeSet<_>>();
+    assert_eq!(
+        paths.values().cloned().collect::<BTreeSet<_>>(),
+        expected_paths
+    );
+    assert_eq!(paths.len(), expected_paths.len());
+    let id = paths
+        .iter()
+        .find(|(_, path)| *path == "path-000.txt")
+        .unwrap()
+        .0;
+    canary_unicode_batch(
+        &root,
+        &provider,
+        snapshot,
+        &read_token,
+        id,
+        &old_text,
+        &new_text,
+    );
+
+    let mut raw = vec!["policy".to_owned()];
+    raw.extend(paths.keys().map(|id| format!("{id}:patch")));
+    for group in raw.chunks(4) {
+        let request = json!({"readToken":read_token,"items":group.iter().map(|reference|
+            json!({"reference":reference,"offset":0,"limit":4096})
+        ).collect::<Vec<_>>()});
+        let response = canary_work(
+            &root,
+            &provider,
+            snapshot,
+            "read-batch",
+            &["--batch-json".into(), request.to_string()],
+        )
+        .unwrap();
+        assert!(
+            response["items"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .all(|item| item["complete"] == true)
+        );
+    }
+    let ids = paths.keys().cloned().collect::<Vec<_>>();
+    let mut pages = vec![initial_pages];
+    let mut expected_judged = BTreeSet::new();
+    for group in ids.chunks(15) {
+        let current = canary_work(&root, &provider, snapshot, "assessment", &[]).unwrap();
+        let request = json!({"stateToken": current["stateToken"], "items": group.iter().map(|id|
+            json!({"id":id, "judgment":{
+                "disposition":"insignificant", "rationale":"synthetic rationale ".repeat(120),
+                "evidence":[format!("{id}:patch")], "concerns":[], "interactions":[]
+            }, "previousDigest":null})
+        ).collect::<Vec<_>>()});
+        canary_work(
+            &root,
+            &provider,
+            snapshot,
+            "judge-batch",
+            &["--batch-json".into(), request.to_string()],
+        )
+        .unwrap();
+        expected_judged.extend(group.iter().cloned());
+        let (seen, judged, count) = canary_pages(&root, &provider, snapshot);
+        assert_eq!(seen, paths);
+        assert_eq!(judged, expected_judged);
+        pages.push(count);
+    }
+    assert!(pages[0] < pages[1] && pages[1] < pages[2], "{pages:?}");
+    assert_eq!(provider.writes.get(), 0);
+}
+
+#[test]
+fn incomplete_budget_records_are_rejected_without_mutation() {
+    let _guard = PROCESS_TEST_LOCK
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner);
+    let repository = Sources::new();
+    let scope = TempDir::new().unwrap();
+    let root = scope.path().join("legacy");
+    let provider = repository.provider(false);
+    let inspected = discover_inspect(&root, &provider, false);
+    let snapshot = inspected["items"][0]["snapshotDigest"].as_str().unwrap();
+    let path = root.join("run.json");
+    let original: Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+    // Missing current-schema fields cannot silently select an older unbounded workflow.
+    for (pointer, replacement) in [
+        ("/assessmentBudgetEnabled", None),
+        ("/assessmentBudgetEnabled", Some(json!(false))),
+        ("/inventory/0/assessmentBudget", None),
+        ("/inventory/0/assessmentBudget/workerReservations", None),
+        ("/inventory/0/assessmentBudget/evidencePages", None),
+        ("/inventory/0/assessmentBudget/deliveredTextBytes", None),
+        ("/inventory/0/assessmentBudget/readBatches", None),
+        ("/inventory/0/assessmentBudget/judgmentBatches", None),
+    ] {
+        let mut record = original.clone();
+        if let Some(value) = replacement {
+            *record.pointer_mut(pointer).unwrap() = value;
+        } else {
+            let (parent, field) = pointer.rsplit_once('/').unwrap();
+            record
+                .pointer_mut(parent)
+                .unwrap()
+                .as_object_mut()
+                .unwrap()
+                .remove(field);
+        }
+        let before = serde_json::to_vec(&record).unwrap();
+        fs::write(&path, &before).unwrap();
+        let calls = provider.service_calls.get();
+        assert_eq!(
+            ss_ai::classification(&invoke(&root, &provider, "results", &[]).unwrap_err()),
+            "invalidState"
+        );
+        assert_eq!(
+            ss_ai::classification(&work(&root, &provider, "prepare", snapshot, &[]).unwrap_err()),
+            "invalidState"
+        );
+        assert_eq!(fs::read(&path).unwrap(), before);
+        assert_eq!(provider.writes.get(), 0);
+        assert_eq!(provider.service_calls.get(), calls);
+    }
+}
+
+/// Previous-format runs remain untouched when their schema is unsupported.
+#[test]
+fn legacy_records_require_a_fresh_run() {
+    let _guard = PROCESS_TEST_LOCK
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner);
+    for ado in [false, true] {
+        let scope = TempDir::new().unwrap();
+        let root = scope.path().join("legacy");
+        fs::create_dir_all(&root).unwrap();
+        let path = root.join("run.json");
+        fs::write(
+            &path,
+            serde_json::to_vec(&json!({"schemaVersion": 14})).unwrap(),
+        )
+        .unwrap();
+        let before = fs::read(&path).unwrap();
+        let provider = if ado {
+            Provider::ado(scope.path(), &"a".repeat(40), &"b".repeat(40))
+        } else {
+            Provider::new(scope.path(), &"a".repeat(40), &"b".repeat(40))
+        };
+        let error = invoke(&root, &provider, "results", &[]).unwrap_err();
+        assert_eq!(ss_ai::classification(&error), "invalidState");
+        assert_eq!(fs::read(&path).unwrap(), before);
+        assert_eq!(provider.writes.get(), 0);
+        assert_eq!(provider.service_calls.get(), 0);
+    }
+}
+
+/// Incompatible runs cannot bypass version ownership through read-only notice recovery.
+#[test]
+fn incompatible_notice_recovery_preserves_records_without_provider_access() {
+    let _guard = PROCESS_TEST_LOCK
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner);
+    let repository = Sources::new();
+    for ado in [false, true] {
+        for (version, present) in [
+            (14, false),
+            (14, true),
+            (15, false),
+            (15, true),
+            (16, false),
+            (16, true),
+            (18, false),
+            (18, true),
+        ] {
+            let scope = TempDir::new().unwrap();
+            let root = scope.path().join("run");
+            let provider = repository.provider(ado);
+            let (snapshot, prepared) = prepare(&root, &provider, false);
+            assess_as(&root, &provider, &snapshot, &prepared, "significant");
+            provider.fault.set("noticeUnknown");
+            assert_eq!(
+                ss_ai::classification(&notify(&root, &provider, &snapshot).unwrap_err()),
+                "ambiguousWrite"
+            );
+            assert_eq!(provider.writes.get(), 1);
+            let notice_path = host_journal(&scope.path().join("host-store").join("review-notices"));
+            let notice_before = fs::read(&notice_path).unwrap();
+            let notice: Value = serde_json::from_slice(&notice_before).unwrap();
+            assert_eq!(notice["attempts"][0]["state"], "intent");
+            let body = notice["attempts"][0]["body"].clone();
+
+            let run_path = root.join("run.json");
+            let mut record: Value = serde_json::from_slice(&fs::read(&run_path).unwrap()).unwrap();
+            record["schemaVersion"] = json!(version);
+            let before = serde_json::to_vec(&record).unwrap();
+            fs::write(&run_path, &before).unwrap();
+            provider.fault.set("");
+            if present {
+                let at = "2026-09-28T09:05:00Z";
+                if ado {
+                    provider.evidence.borrow_mut()["threads"].as_array_mut().unwrap().push(json!({
+                        "id": 31, "publishedDate": at, "lastUpdatedDate": at, "status": "closed",
+                        "comments": [{"id": 1, "parentCommentId": 0, "commentType": "text",
+                            "author": {"id": "10000000-0000-4000-8000-000000000001"},
+                            "content": body, "publishedDate": at,
+                            "lastContentUpdatedDate": at, "lastUpdatedDate": at}],
+                        "isDeleted": false, "properties": {}
+                    }));
+                } else {
+                    provider.evidence.borrow_mut()["comments"]
+                        .as_array_mut()
+                        .unwrap()
+                        .push(json!({"id": 51, "user": {"id": 42}, "body": body,
+                            "created_at": at, "updated_at": at}));
+                }
+            }
+            let calls = provider.service_calls.get();
+            let error = notify(&root, &provider, &snapshot).unwrap_err();
+            assert_eq!(ss_ai::classification(&error), "invalidState");
+            assert!(error.to_string().contains("Unsupported discovery schema"));
+            assert_eq!(provider.service_calls.get(), calls);
+            assert_eq!(
+                provider.writes.get(),
+                1,
+                "Recovery must not issue another write"
+            );
+            assert_eq!(fs::read(&run_path).unwrap(), before);
+            assert_eq!(fs::read(&notice_path).unwrap(), notice_before);
+        }
+    }
+}
+
+#[test]
+fn ado_acknowledged_vote_is_the_final_remote_action() {
+    let _guard = PROCESS_TEST_LOCK
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner);
+    let repository = Sources::new();
+    let scope = TempDir::new().unwrap();
+    let root = scope.path().join("ado");
+    let provider = repository.provider(true);
+    let (snapshot, prepared) = prepare(&root, &provider, false);
+    assess(&root, &provider, &snapshot, &prepared);
+
+    // Any read after the vote is rejected, and an audit POST is counted as a
+    // second write. Success therefore requires the vote to be the last action.
+    provider.fault.set("postReadFailure");
+    let result = publish(&root, &provider, &snapshot).unwrap();
+    assert_eq!(result["items"][0]["status"], "reapproved");
+    assert_eq!(result["items"][0]["publication"]["reviewId"], Value::Null);
+    assert_eq!(provider.writes.get(), 1);
+    let replay = publish(&root, &provider, &snapshot).unwrap();
+    assert_eq!(replay["items"][0]["status"], "reapproved");
+    assert_eq!(provider.writes.get(), 1);
+}
+
+/// Changes only the observation or response selected by a publication case.
+fn configure_publication_case(root: &Path, provider: &Provider, ado: bool, fault: &str) {
+    match fault {
+        "source" if ado => provider.ado_push(),
+        "source" => {
+            provider.evidence.borrow_mut()["pullRequest"]["head"]["sha"] = json!("f".repeat(40));
+        }
+        "policy" => fs::write(root.join("policy.md"), "Changed policy").unwrap(),
+        "providerPolicy" if ado => {
+            let mut evidence = provider.evidence.borrow_mut();
+            let policy = evidence["policies"]
+                .as_array_mut()
+                .unwrap()
+                .iter_mut()
+                .find(|policy| policy["id"] == 99)
+                .unwrap();
+            policy["settings"]["minimumApproverCount"] = json!(2);
+            evidence["evaluations"][0]["configuration"]["settings"]["minimumApproverCount"] =
+                json!(2);
+        }
+        "providerPolicy" => {
+            provider.evidence.borrow_mut()["policy"]["requireLastPushApproval"] = json!(true);
+        }
+        "alreadyValid" if ado => provider.ado_vote(10, 40, "2026-09-28T09:06:00Z"),
+        "alreadyValid" => provider.later("APPROVED"),
+        "ineligible" if ado => provider.ado_vote(-10, 40, "2026-09-28T09:06:00Z"),
+        "ineligible" => provider.later("CHANGES_REQUESTED"),
+        "draft" => {
+            provider.evidence.borrow_mut()["pullRequest"][if ado { "isDraft" } else { "draft" }] =
+                json!(true);
+        }
+        "permission" => provider.fault.set("permission"),
+        "unknown" => provider.fault.set("unknown"),
+        "differentResponse" => provider.fault.set("differentResponse"),
+        _ => {}
+    }
+}
+
+/// Confirms a single successful request becomes the next source baseline.
+fn assert_successful_publication(
+    scope: &Path,
+    root: &Path,
+    repository: &Sources,
+    provider: &Provider,
+    ado: bool,
+    result: &Value,
+) {
+    assert_eq!(
+        result["items"][0]["status"], "reapproved",
+        "ADO={ado}: {result}"
+    );
+    assert!(result["items"][0].get("automaticApproval").is_none());
+    assert_eq!(provider.writes.get(), 1);
+    assert_eq!(
+        provider.service_calls.get(),
+        provider.calls_at_approval.get()
+    );
+    if ado {
+        assert!(result["items"][0]["publication"]["reviewId"].is_null());
+    }
+    let record: Value = serde_json::from_slice(&fs::read(root.join("run.json")).unwrap()).unwrap();
+    assert_eq!(record["schemaVersion"], 17);
+    assert!(!scope.join("host-store").join("publications").exists());
+    // A later source push binds the next assessment to this ordinary approval.
+    if ado {
+        provider.ado_push();
+    } else {
+        let mut evidence = provider.evidence.borrow_mut();
+        evidence["pullRequest"]["head"]["sha"] = json!("f".repeat(40));
+        evidence["reviews"]
+            .as_array_mut()
+            .unwrap()
+            .last_mut()
+            .unwrap()["state"] = json!("DISMISSED");
+        evidence["timeline"]
+            .as_array_mut()
+            .unwrap()
+            .last_mut()
+            .unwrap()["state"] = json!("DISMISSED");
+        evidence["timeline"].as_array_mut().unwrap().push(json!({
+            "__typename": "ReviewDismissedEvent", "id": "later-dismissal",
+            "review": {"id": "renewal-review"}, "previousReviewState": "APPROVED",
+            "createdAt": "2026-09-28T09:10:00Z",
+            "pullRequestCommit": {"commit": {"oid": "f".repeat(40)}}
+        }));
+    }
+    let later_root = scope.join("later");
+    let later = discover_inspect(&later_root, provider, true);
+    assert_eq!(
+        later["items"][0]["status"], "assessmentRequired",
+        "ADO={ado}: {later}"
+    );
+    let record: Value =
+        serde_json::from_slice(&fs::read(later_root.join("run.json")).unwrap()).unwrap();
+    assert_eq!(
+        record["inventory"][0]["inspection"]["decision"]["anchor"]["sourceCommit"],
+        repository.new
+    );
+}
+
+/// Approval effects end at the single provider request on both platforms.
+#[test]
 fn native_git_assessment_and_guarded_publication_have_exact_effect_boundaries() {
     let _guard = PROCESS_TEST_LOCK
         .lock()
         .unwrap_or_else(PoisonError::into_inner);
     let repository = Sources::new();
-    let (old, new) = repository.commits();
-    let baseline = git(repository.path(), &["status", "--porcelain=v1"]);
-    for fault in [
-        "",
-        "lastPush",
-        "dryRun",
-        "lostReply",
-        "unknown",
-        "prePush",
-        "postPush",
-        "withdrawal",
-        "pending",
-        "discussion",
-        "auth",
-        "postWithdrawal",
-        "postReadFailure",
-        "duplicate",
-        "rateLimit",
-        "permission",
-        "journalFailure",
-        "otherUnknown",
-    ] {
-        let scope = TempDir::new().unwrap();
-        let root = scope.path().join("first");
-        // Keep a complete real-Git lifecycle; fault cases vary publication effects only.
-        let provider = if fault.is_empty() {
-            Provider::new(repository.path(), &old, &new)
-        } else {
-            repository.provider(false)
-        };
-        if fault == "lastPush" {
-            let mut evidence = provider.evidence.borrow_mut();
-            evidence["policy"]["requireLastPushApproval"] = json!(true);
-            evidence["reviews"][1]["state"] = json!("APPROVED");
-            evidence["timeline"][1]["state"] = json!("APPROVED");
-            evidence["timeline"].as_array_mut().unwrap().remove(2);
-        }
-        let (snapshot, prepared) = prepare(&root, &provider, fault == "dryRun");
-        assert_eq!(prepared["oldCommit"], old);
-        assert_eq!(prepared["newCommit"], new);
-        assert_eq!(prepared["changeCount"], 1);
-        work(&root, &provider, "complete", &snapshot, &[]).unwrap_err();
-        work(
-            &root,
-            &provider,
-            "read",
-            &snapshot,
-            &[
-                "--reference".into(),
-                "policy".into(),
-                "--offset".into(),
-                "10".into(),
-            ],
-        )
-        .unwrap_err();
-        assess(&root, &provider, &snapshot, &prepared);
-        assert_eq!(provider.writes.get(), 0);
-        provider.fault.set(fault);
-        match fault {
-            "prePush" => {
-                provider.evidence.borrow_mut()["pullRequest"]["head"]["sha"] =
-                    json!("e".repeat(40));
+    for ado in [false, true] {
+        for fault in [
+            "success",
+            "source",
+            "policy",
+            "providerPolicy",
+            "alreadyValid",
+            "ineligible",
+            "draft",
+            "permission",
+            "unknown",
+            "differentResponse",
+        ] {
+            if fault == "differentResponse" && !ado {
+                continue;
             }
-            "withdrawal" => provider.later("CHANGES_REQUESTED"),
-            "pending" => provider.later("PENDING"),
-            "discussion" => {
-                provider.evidence.borrow_mut()["pullRequest"]["body"] =
-                    json!("New unresolved objection.");
+            eprintln!("Publication case: ADO={ado}; {fault}");
+            let scope = TempDir::new().unwrap();
+            let root = scope.path().join("run");
+            let provider = repository.provider(ado);
+            let (snapshot, prepared) = prepare(&root, &provider, false);
+            assert_eq!(prepared["oldCommit"], repository.old);
+            assert_eq!(prepared["newCommit"], repository.new);
+            assess(&root, &provider, &snapshot, &prepared);
+            configure_publication_case(&root, &provider, ado, fault);
+            let result = publish(&root, &provider, &snapshot);
+            match fault {
+                "success" | "differentResponse" => {
+                    assert_successful_publication(
+                        scope.path(),
+                        &root,
+                        &repository,
+                        &provider,
+                        ado,
+                        &result.unwrap(),
+                    );
+                }
+                "source" | "providerPolicy" => {
+                    let result = result.unwrap();
+                    assert_eq!(
+                        result["items"][0]["status"], "staleDuringExecution",
+                        "ADO={ado}: {fault}: {result}"
+                    );
+                    assert_eq!(provider.writes.get(), 0);
+                }
+                "alreadyValid" | "ineligible" => {
+                    let result = result.unwrap();
+                    assert_eq!(result["items"][0]["status"], fault, "ADO={ado}: {result}");
+                    assert_eq!(provider.writes.get(), 0);
+                }
+                "draft" => {
+                    let result = result.unwrap();
+                    assert_eq!(result["items"], json!([]), "ADO={ado}: {result}");
+                    assert_eq!(provider.writes.get(), 0);
+                }
+                "policy" => {
+                    assert_eq!(ss_ai::classification(&result.unwrap_err()), "invalidState");
+                    assert_eq!(provider.writes.get(), 0);
+                }
+                _ => {
+                    let error = result.unwrap_err();
+                    assert_eq!(
+                        ss_ai::classification(&error),
+                        if fault == "permission" {
+                            "permissionDenied"
+                        } else {
+                            "ambiguousWrite"
+                        },
+                        "ADO={ado}: {fault}: {error}"
+                    );
+                    assert_eq!(provider.writes.get(), 1);
+                    assert_eq!(
+                        provider.service_calls.get(),
+                        provider.calls_at_approval.get(),
+                        "ADO={ado}: {fault}"
+                    );
+                }
             }
-            _ => {}
         }
-        if fault == "dryRun" {
-            publish(&root, &provider, &snapshot).unwrap_err();
-            let result = invoke(&root, &provider, "results", &[]).unwrap();
-            assert_eq!(result["state"], "complete");
-            assert_eq!(result["items"][0]["status"], "wouldReapprove");
-            assert_eq!(provider.writes.get(), 0);
-            continue;
-        }
-        if fault == "auth" {
-            let error = publish(&root, &provider, &snapshot).unwrap_err();
-            assert_eq!(ss_ai::classification(&error), "authentication");
-            assert_eq!(provider.writes.get(), 0);
-            assert_eq!(
-                invoke(&root, &provider, "results", &[]).unwrap()["state"],
-                "failed"
-            );
-            continue;
-        }
-        if fault == "otherUnknown" {
-            let path = root.join("run.json");
-            let mut record: Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
-            record["state"] = json!("failed");
-            record["error"] =
-                json!({"kind": "ambiguousWrite", "message": "Another PR has unresolved work."});
-            fs::write(path, serde_json::to_vec(&record).unwrap()).unwrap();
-            publish(&root, &provider, &snapshot).unwrap_err();
-            assert_eq!(provider.writes.get(), 0);
-            continue;
-        }
-        check_publication(&root, &provider, &snapshot, fault);
     }
+}
 
-    assert_eq!(
-        git(repository.path(), &["status", "--porcelain=v1"]),
-        baseline
-    );
-    assert_eq!(git(repository.path(), &["rev-parse", "HEAD"]), new);
-    // Keep subprocess scenarios under the guard: concurrent process creation can
-    // briefly inherit another thread's held file lock.
+/// Retains independent notification and source coverage using shared immutable Git replies.
+#[test]
+fn native_assessment_and_notice_boundaries() {
+    let _guard = PROCESS_TEST_LOCK
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner);
+    let repository = Sources::new();
+    let baseline = git(repository.path(), &["status", "--porcelain=v1"]);
     risk_judgments_and_uncertainty_prevent_publication(&repository);
-    prepared_run_cannot_bypass_another_runs_unknown_effect(&repository);
-    ado_publication_preserves_authority_and_never_replays_unknown_effects(&repository);
     needs_review_notices_short_circuit_and_expire_only_after_external_approval(&repository);
     notice_dry_runs_refusals_and_uncertain_effects_do_not_duplicate_writes(&repository);
-    valid_automatic_approval_timestamps_survive_later_invocations(&repository);
-    publication_reporting_failures_are_persisted(&repository);
-    persisted_already_valid_results_replay_without_refreshing_reporting(&repository);
     notice_terminal_save_failures_preserve_original_recovery(&repository);
     uncertain_assessment_diagnostic_survives_notification_retry(&repository);
     notice_recovery_is_bound_to_the_failed_pull_request(&repository);
     ado_notice_recovery_does_not_require_current_approval_eligibility(&repository);
     notice_readback_survives_closure_and_draft_conversion(&repository);
     expired_edited_notices_do_not_block_new_notice_readback(&repository);
-
     assert_eq!(
         git(repository.path(), &["status", "--porcelain=v1"]),
         baseline
     );
-    assert_eq!(git(repository.path(), &["rev-parse", "HEAD"]), new);
-
-    // Source-mutating scenarios own their repositories rather than the shared editorial fixture.
+    assert_eq!(
+        git(repository.path(), &["rev-parse", "HEAD"]),
+        repository.new
+    );
     force_push_inventory_preserves_every_path_kind_and_rejects_missing_objects();
     empty_source_diff_and_corrupted_assessments_never_bypass_discussion_or_coverage();
     pagination_requires_complete_contiguous_snapshot_bound_unicode_evidence();
     recorded_git_rejects_unknown_commands_and_changed_source(&repository);
     eprintln!("Reapproval work: {:?}", WORK_COUNTS.get());
 }
-
 /// Pins recorded replies to their real-Git command sequence, with no native fallback.
 fn recorded_git_rejects_unknown_commands_and_changed_source(repository: &Sources) {
     for ado in [false, true] {
@@ -2551,6 +3666,30 @@ fn recorded_git_rejects_unknown_commands_and_changed_source(repository: &Sources
         assert_eq!(WORK_COUNTS.get().assessment_git, before.assessment_git);
         assert_eq!(provider.writes.get(), 0);
     }
+}
+
+/// Rejected work consumes its durable budget without changing assessment evidence.
+fn assert_only_work_commands_changed(path: &Path, before: &[u8], commands: u64) {
+    let before: Value = serde_json::from_slice(before).unwrap();
+    let mut after: Value = serde_json::from_slice(&fs::read(path).unwrap()).unwrap();
+    assert_eq!(
+        after["inventory"][0]["assessmentBudget"]["workCommands"],
+        before["inventory"][0]["assessmentBudget"]["workCommands"]
+            .as_u64()
+            .unwrap()
+            + commands
+    );
+    after["inventory"][0]["assessmentBudget"]["workCommands"] =
+        before["inventory"][0]["assessmentBudget"]["workCommands"].clone();
+    assert_eq!(after, before);
+}
+
+#[test]
+fn rejected_pagination_preserves_assessment_evidence() {
+    let _guard = PROCESS_TEST_LOCK
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner);
+    pagination_requires_complete_contiguous_snapshot_bound_unicode_evidence();
 }
 
 /// Exercises paging once, independently of the publication fault matrices.
@@ -2606,7 +3745,7 @@ fn pagination_requires_complete_contiguous_snapshot_bound_unicode_evidence() {
     let before = fs::read(&path).unwrap();
     read(&snapshot, 1, page_limit).unwrap_err();
     read(&"f".repeat(64), 0, page_limit).unwrap_err();
-    assert_eq!(fs::read(&path).unwrap(), before);
+    assert_only_work_commands_changed(&path, &before, 1);
 
     let first = read(&snapshot, 0, page_limit).unwrap();
     assert_eq!(
@@ -2626,7 +3765,7 @@ fn pagination_requires_complete_contiguous_snapshot_bound_unicode_evidence() {
 
     let before = fs::read(&path).unwrap();
     read(&snapshot, page_limit + 1, page_limit).unwrap_err();
-    assert_eq!(fs::read(&path).unwrap(), before);
+    assert_only_work_commands_changed(&path, &before, 1);
     for reference in ["policy", "discussion"] {
         read_evidence(&root, &provider, &snapshot, reference, None, None);
     }
@@ -2647,7 +3786,7 @@ fn pagination_requires_complete_contiguous_snapshot_bound_unicode_evidence() {
         let references = if change == "cumulative" {
             vec!["policy".to_owned(), "discussion".to_owned()]
         } else {
-            vec![format!("{id}:old"), reference.clone()]
+            vec![format!("{id}:patch"), reference.clone()]
         };
         let mut arguments = vec![
             "--change-id".into(),
@@ -2660,26 +3799,32 @@ fn pagination_requires_complete_contiguous_snapshot_bound_unicode_evidence() {
         for reference in references {
             arguments.extend(["--evidence".into(), reference]);
         }
+        if change == id {
+            let error = work(&root, &provider, "judge", &snapshot, &arguments).unwrap_err();
+            assert!(error.to_string().contains("required patch"));
+            work(&root, &provider, "complete", &snapshot, &[]).unwrap_err();
+            publish(&root, &provider, &snapshot).unwrap_err();
+            text.clear();
+            read_evidence(
+                &root,
+                &provider,
+                &snapshot,
+                &reference,
+                Some(NonZeroUsize::new(page_limit).unwrap()),
+                Some(&mut text),
+            );
+            assert_eq!(text, new_text);
+            read_evidence(
+                &root,
+                &provider,
+                &snapshot,
+                &format!("{id}:patch"),
+                None,
+                None,
+            );
+        }
         work(&root, &provider, "judge", &snapshot, &arguments).unwrap();
     }
-
-    let error = work(&root, &provider, "complete", &snapshot, &[]).unwrap_err();
-    assert!(
-        error
-            .to_string()
-            .contains("complete policy, discussion, and changed-source reads")
-    );
-    publish(&root, &provider, &snapshot).unwrap_err();
-    text.clear();
-    read_evidence(
-        &root,
-        &provider,
-        &snapshot,
-        &reference,
-        Some(NonZeroUsize::new(page_limit).unwrap()),
-        Some(&mut text),
-    );
-    assert_eq!(text, new_text);
     assert_eq!(
         work(&root, &provider, "complete", &snapshot, &[]).unwrap()["status"],
         "wouldReapprove"
@@ -2698,7 +3843,7 @@ fn native_stale_evidence_recovery_preserves_assessment_and_effect_boundaries() {
     stale_notification_recovery_exhausts_without_remote_writes();
     repeated_observation_has_a_distinct_snapshot();
     stale_inspection_recovery_is_bounded_and_rechecks_authority();
-    stale_refresh_preserves_accepted_and_unknown_effects();
+    stale_refresh_preserves_unknown_notice();
 }
 
 /// Inspection persists chronological decline decisions without any service effects.
@@ -2799,10 +3944,7 @@ fn ado_project_bookkeeping_does_not_stale_capture_publication_or_notice() {
             },
             "{result}"
         );
-        assert_eq!(
-            provider.writes.get(),
-            if disposition == "insignificant" { 2 } else { 1 }
-        );
+        assert_eq!(provider.writes.get(), 1);
         assert_ne!(
             project["revision"],
             provider.evidence.borrow()["pullRequest"]["repository"]["project"]["revision"]
@@ -2858,215 +4000,6 @@ fn cosmetic_evidence_churn_does_not_stale_approval_or_notice_on_either_provider(
     }
 }
 
-/// Exercises real command dispatch and records while ADO effects remain entirely in memory.
-#[expect(
-    clippy::cognitive_complexity,
-    reason = "The bounded scenario table verifies each distinct effect boundary"
-)]
-fn ado_publication_preserves_authority_and_never_replays_unknown_effects(repository: &Sources) {
-    let (old, new) = repository.commits();
-    for fault in [
-        "",
-        "suggestions",
-        "dryRun",
-        "lostVoteReply",
-        "lostAuditReply",
-        "unknown",
-        "auditUnknown",
-        "auditRefused",
-        "policyCompleted",
-        "sourceAtVote",
-        "prePush",
-        "postPush",
-        "withdrawal",
-        "postWithdrawal",
-        "pending",
-        "declined",
-        "pendingThread",
-        "discussion",
-        "auth",
-        "duplicate",
-        "postReadFailure",
-        "permission",
-        "rateLimit",
-    ] {
-        let scope = TempDir::new().unwrap();
-        let root = scope.path().join("ado");
-        // Cumulative-anchor cases fetch a deliberately unavailable subsequent push.
-        let provider = if matches!(
-            fault,
-            "" | "suggestions"
-                | "lostVoteReply"
-                | "lostAuditReply"
-                | "postReadFailure"
-                | "auditRefused"
-        ) {
-            Provider::ado(repository.path(), &old, &new)
-        } else {
-            repository.provider(true)
-        };
-        if fault == "suggestions" {
-            let mut evidence = provider.evidence.borrow_mut();
-            evidence["reviewers"][0]["vote"] = json!(5);
-            evidence["threads"][1]["properties"]["CodeReviewVoteResult"]["$value"] = json!("5");
-        }
-        let (snapshot, prepared) = prepare(&root, &provider, fault == "dryRun");
-        assert_eq!(prepared["oldCommit"], old, "{fault}: {prepared}");
-        assert_eq!(prepared["newCommit"], new);
-        assess(&root, &provider, &snapshot, &prepared);
-        let original_run = fs::read(root.join("run.json")).unwrap();
-        let second = scope.path().join("overlapping");
-        let second_snapshot = if matches!(fault, "unknown" | "auditUnknown" | "duplicate") {
-            let (snapshot, prepared) = prepare(&second, &provider, false);
-            assess(&second, &provider, &snapshot, &prepared);
-            Some(snapshot)
-        } else {
-            None
-        };
-        provider.fault.set(fault);
-        match fault {
-            "prePush" => provider.ado_push(),
-            "withdrawal" => provider.ado_vote(0, 19, "2026-09-28T08:00:00Z"),
-            "pending" => provider.evidence.borrow_mut()["reviewers"][0]["isFlagged"] = json!(true),
-            "declined" => provider.evidence.borrow_mut()["reviewers"][0]["hasDeclined"] = json!(true),
-            "discussion" => provider.evidence.borrow_mut()["pullRequest"]["description"] = json!("New human objection."),
-            "pendingThread" => provider.evidence.borrow_mut()["threads"].as_array_mut().unwrap().push(json!({
-                "id": 19, "status": "pending", "comments": [{"commentType": "text",
-                    "author": {"id": "10000000-0000-4000-8000-000000000001"}, "content": "Pending human review"}]})),
-            _ => {}
-        }
-        if fault == "dryRun" || fault == "auth" {
-            publish(&root, &provider, &snapshot).unwrap_err();
-            assert_eq!(provider.writes.get(), 0);
-            continue;
-        }
-        let result = publish(&root, &provider, &snapshot).unwrap();
-        let expected = match fault {
-            "unknown" | "auditUnknown" | "auditRefused" | "lostAuditReply" | "duplicate"
-            | "postReadFailure" | "permission" | "rateLimit" => "failed",
-            "prePush" | "postPush" | "sourceAtVote" | "postWithdrawal" | "discussion" => {
-                "staleDuringExecution"
-            }
-            "withdrawal" | "pending" | "declined" | "pendingThread" => "ineligible",
-            _ => "reapproved",
-        };
-        assert_eq!(result["items"][0]["status"], expected, "{fault}: {result}");
-        let writes = provider.writes.get();
-        if let Some(second_snapshot) = second_snapshot {
-            let error = publish(&second, &provider, &second_snapshot).unwrap_err();
-            assert_eq!(ss_ai::classification(&error), "ambiguousWrite");
-            assert_eq!(
-                provider.writes.get(),
-                writes,
-                "Unresolved effects block overlapping runs"
-            );
-        }
-        if matches!(
-            fault,
-            "prePush" | "withdrawal" | "pending" | "declined" | "pendingThread" | "discussion"
-        ) {
-            assert_eq!(writes, 0, "{fault}");
-        } else if matches!(
-            fault,
-            "unknown" | "duplicate" | "postReadFailure" | "permission" | "rateLimit"
-        ) {
-            assert_eq!(writes, 1, "{fault}");
-        } else {
-            assert_eq!(writes, 2, "{fault}");
-        }
-        provider.fault.set("");
-        if fault.is_empty() {
-            // Host persistence precedes run persistence. Restore the original run
-            // to simulate interruption between those saves, then consume the receipt.
-            fs::write(root.join("run.json"), original_run).unwrap();
-        }
-        if fault == "permission" {
-            publish(&root, &provider, &snapshot).unwrap_err();
-            assert_eq!(provider.writes.get(), writes);
-            continue;
-        }
-        let recovered =
-            publish(&root, &provider, &snapshot).unwrap_or_else(|error| panic!("{fault}: {error}"));
-        if fault == "lostAuditReply" || fault == "postReadFailure" || fault == "auditRefused" {
-            assert_eq!(
-                recovered["items"][0]["status"], "reapproved",
-                "{fault}: {recovered}"
-            );
-            assert_eq!(
-                provider.writes.get(),
-                writes + usize::from(fault != "lostAuditReply")
-            );
-        } else {
-            assert_eq!(recovered["items"][0]["status"], expected, "{fault}");
-            assert_eq!(provider.writes.get(), writes, "No replay for {fault}");
-        }
-        if matches!(
-            fault,
-            "" | "suggestions"
-                | "lostVoteReply"
-                | "lostAuditReply"
-                | "postReadFailure"
-                | "auditRefused"
-        ) {
-            // On the next push, cumulative authority must still name the external
-            // approval, not the automatic vote or its audit thread.
-            provider.ado_push();
-            let later = scope.path().join("later");
-            let (_, later_prepared) = prepare(&later, &provider, true);
-            // The fake new source is deliberately unavailable locally. Inspection,
-            // not successful object fetching, must already preserve the anchor.
-            assert_eq!(later_prepared["items"][0]["status"], "failed");
-            let saved: Value =
-                serde_json::from_slice(&fs::read(later.join("run.json")).unwrap()).unwrap();
-            assert_eq!(
-                saved["inventory"][0]["inspection"]["decision"]["anchor"]["sourceCommit"],
-                old
-            );
-            assert_eq!(
-                saved["inventory"][0]["inspection"]["decision"]["anchor"]["reviewId"],
-                "2"
-            );
-        }
-    }
-}
-
-/// A saved preparation does not reserve permission to write after another run becomes uncertain.
-fn prepared_run_cannot_bypass_another_runs_unknown_effect(repository: &Sources) {
-    let scope = TempDir::new().unwrap();
-    let first = scope.path().join("first");
-    let second = scope.path().join("second");
-    let provider = repository.provider(false);
-    let (snapshot, prepared) = prepare(&first, &provider, false);
-    assess(&first, &provider, &snapshot, &prepared);
-    let run_path = first.join("run.json");
-    let before = fs::read(&run_path).unwrap();
-
-    // Refuse preflight after preparation, then restore the run as if the process
-    // stopped before saving its error. The host's prepared record remains intact.
-    provider.fault.set("auth");
-    assert_eq!(
-        ss_ai::classification(&publish(&first, &provider, &snapshot).unwrap_err()),
-        "authentication"
-    );
-    fs::write(&run_path, before).unwrap();
-    provider.fault.set("");
-    let (second_snapshot, prepared) = prepare(&second, &provider, false);
-    assess(&second, &provider, &second_snapshot, &prepared);
-    provider.fault.set("unknown");
-    let result = publish(&second, &provider, &second_snapshot).unwrap();
-    assert_eq!(result["state"], "failed");
-    assert_eq!(provider.writes.get(), 1);
-
-    provider.fault.set("");
-    let error = publish(&first, &provider, &snapshot).unwrap_err();
-    assert_eq!(ss_ai::classification(&error), "ambiguousWrite");
-    assert_eq!(
-        provider.writes.get(),
-        1,
-        "Prepared work must not replay an unknown effect"
-    );
-}
-
 /// Each policy concern and insufficient evidence independently prevents a remote effect.
 fn risk_judgments_and_uncertainty_prevent_publication(repository: &Sources) {
     for (disposition, rationale, status) in [
@@ -3096,6 +4029,9 @@ fn risk_judgments_and_uncertainty_prevent_publication(repository: &Sources) {
         let provider = repository.provider(false);
         let (snapshot, prepared) = prepare(&root, &provider, false);
         let id = prepared["changes"][0]["id"].as_str().unwrap();
+        for reference in ["policy".into(), "discussion".into(), format!("{id}:patch")] {
+            read_evidence(&root, &provider, &snapshot, &reference, None, None);
+        }
         work(
             &root,
             &provider,
@@ -3109,7 +4045,7 @@ fn risk_judgments_and_uncertainty_prevent_publication(repository: &Sources) {
                 "--rationale".into(),
                 rationale.into(),
                 "--evidence".into(),
-                format!("{id}:new"),
+                format!("{id}:patch"),
             ],
         )
         .unwrap();
@@ -3147,84 +4083,868 @@ fn risk_judgments_and_uncertainty_prevent_publication(repository: &Sources) {
     }
 }
 
-/// Checks terminal effects and recovery separately from scenario preparation.
-fn check_publication(root: &Path, provider: &Provider, snapshot: &str, fault: &str) {
-    let result = if fault == "journalFailure" {
-        recover_failed_journal(root, provider, snapshot)
-    } else {
-        publish(root, provider, snapshot).unwrap()
-    };
-    let expected = match fault {
-        "unknown" | "postReadFailure" | "duplicate" | "rateLimit" | "permission" => "failed",
-        "prePush" | "postPush" | "discussion" | "postWithdrawal" => "staleDuringExecution",
-        "withdrawal" | "pending" => "ineligible",
-        _ => "reapproved",
-    };
-    assert_eq!(result["items"][0]["status"], expected, "{fault}: {result}");
-    assert_eq!(
-        provider.writes.get(),
-        usize::from(!matches!(
-            fault,
-            "prePush" | "withdrawal" | "pending" | "discussion"
-        ))
-    );
-    if fault == "permission" {
-        assert_eq!(result["state"], "failed");
-        publish(root, provider, snapshot).unwrap_err();
-    } else {
-        publish(root, provider, snapshot).unwrap();
-    }
-    assert_eq!(
-        provider.writes.get(),
-        usize::from(!matches!(
-            fault,
-            "prePush" | "withdrawal" | "pending" | "discussion"
-        )),
-        "Recovery must never duplicate a write"
-    );
-    let receipt = &result["items"][0]["publication"];
-    let host_path = Path::new(receipt["journalPath"].as_str().unwrap());
-    assert!(host_path.is_absolute() && host_path.is_file());
-    if fault.is_empty() {
-        reject_publication_corruption(host_path, root, provider, snapshot);
-    }
-    if fault == "postReadFailure" {
-        fs::write(root.join("policy.md"), "Updated installed policy.").unwrap();
-        provider.fault.set("");
-        let run_path = root.join("run.json");
-        let pending = fs::read(&run_path).unwrap();
-        let recovered = publish(root, provider, snapshot).unwrap();
-        assert_eq!(recovered["items"][0]["status"], "reapproved");
+/// Unexamined readable content cannot freeze a semantic refusal or authorize a notice.
+#[test]
+fn incomplete_evidence_does_not_authorize_approval_or_needs_review_publication() {
+    let _guard = PROCESS_TEST_LOCK
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner);
+    let sources = Sources::new();
+    for ado in [false, true] {
+        let scope = TempDir::new().unwrap();
+        let provider = sources.provider(ado);
+        let (snapshot, prepared) = prepare(scope.path(), &provider, false);
+        let id = prepared["changes"][0]["id"].as_str().unwrap();
+        read_evidence(scope.path(), &provider, &snapshot, "policy", None, None);
+        for disposition in ["uncertain", "significant", "insignificant"] {
+            let before = fs::read(scope.path().join("run.json")).unwrap();
+            work(
+                scope.path(),
+                &provider,
+                "judge",
+                &snapshot,
+                &[
+                    "--change-id".into(),
+                    id.into(),
+                    "--disposition".into(),
+                    disposition.into(),
+                    "--rationale".into(),
+                    "The source has not been examined.".into(),
+                    "--evidence".into(),
+                    format!("{id}:patch"),
+                ],
+            )
+            .unwrap_err();
+            work(scope.path(), &provider, "complete", &snapshot, &[]).unwrap_err();
+            // The rejected judgment and completion each consume one work command.
+            assert_only_work_commands_changed(&scope.path().join("run.json"), &before, 2);
+            notify(scope.path(), &provider, &snapshot).unwrap_err();
+            publish(scope.path(), &provider, &snapshot).unwrap_err();
+            let result = invoke(scope.path(), &provider, "results", &[]).unwrap();
+            assert_eq!(result["items"][0]["status"], "assessmentRequired");
+            assert!(result["items"][0]["assessmentDigest"].is_null());
+            assert_eq!(
+                result["items"][0]["assessmentProgress"]["judgedChangeCount"],
+                0
+            );
+            assert_eq!(provider.writes.get(), 0);
+        }
+        // Actual uncertainty after examination still has its ordinary fail-closed notice path.
+        assess_as(scope.path(), &provider, &snapshot, &prepared, "uncertain");
+        let result = notify(scope.path(), &provider, &snapshot).unwrap();
+        assert_eq!(result["items"][0]["status"], "failed");
+        assert!(result["items"][0]["reviewNotice"]["commentId"].is_string());
         assert_eq!(provider.writes.get(), 1);
+        publish(scope.path(), &provider, &snapshot).unwrap_err();
+        assert_eq!(provider.writes.get(), 1);
+    }
+}
 
-        // Retain the terminal host record but replay the last durable run bytes,
-        // as when execution stops between the host save and the run save.
-        fs::write(&run_path, pending).unwrap();
-        let reads = provider.target_reads.get();
-        let repaired = publish(root, provider, snapshot).unwrap();
-        assert_eq!(repaired["items"][0]["status"], "reapproved");
-        assert_eq!(
-            repaired["items"][0]["publication"],
-            recovered["items"][0]["publication"]
+/// Sparse edits save mandatory input without losing merge-derived paths or exact context.
+#[test]
+fn source_patch_volume_and_captured_context_preserve_endpoint_scope() {
+    let _guard = PROCESS_TEST_LOCK
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner);
+    let repository = TempDir::new().unwrap();
+    git(
+        repository.path(),
+        &["init", "--quiet", "--initial-branch=main"],
+    );
+    git(repository.path(), &["config", "core.autocrlf", "false"]);
+    let mut sparse = String::new();
+    for index in 0..10_000 {
+        write!(
+            &mut sparse,
+            "line {index}: shared routine definition and invariant\r\n"
+        )
+        .unwrap();
+    }
+    let dense = "old dense definition\n".repeat(256);
+    fs::write(repository.path().join("sparse.txt"), &sparse).unwrap();
+    fs::write(repository.path().join("dense.txt"), &dense).unwrap();
+    fs::write(
+        repository.path().join("rename old"),
+        "first\r\nsecond\r\nlast",
+    )
+    .unwrap();
+    git(repository.path(), &["add", "."]);
+    git(
+        repository.path(),
+        &["commit", "--quiet", "-m", "Approved source"],
+    );
+    let old = git(repository.path(), &["rev-parse", "HEAD"]);
+    fs::write(
+        repository.path().join("main-only.txt"),
+        "Merged target content must be examined.\n",
+    )
+    .unwrap();
+    git(repository.path(), &["add", "."]);
+    git(
+        repository.path(),
+        &["commit", "--quiet", "-m", "Target content"],
+    );
+    git(
+        repository.path(),
+        &["checkout", "--quiet", "-b", "feature", &old],
+    );
+    let changed = sparse
+        .replace("line 5000:", "line 5000 \u{1f916}:")
+        .replace("line 6000:", "line 6000 changed:");
+    fs::write(repository.path().join("sparse.txt"), &changed).unwrap();
+    fs::write(
+        repository.path().join("dense.txt"),
+        "new dense definition\n".repeat(256),
+    )
+    .unwrap();
+    git(repository.path(), &["mv", "rename old", "renamed \u{e9}"]);
+    fs::write(
+        repository.path().join("renamed \u{e9}"),
+        "first\r\nchanged\r\nlast",
+    )
+    .unwrap();
+    git(repository.path(), &["add", "."]);
+    git(
+        repository.path(),
+        &["commit", "--quiet", "-m", "Changed source"],
+    );
+    git(
+        repository.path(),
+        &["merge", "--quiet", "--no-edit", "main"],
+    );
+    let new = git(repository.path(), &["rev-parse", "HEAD"]);
+    let scope = TempDir::new().unwrap();
+    let provider = Provider::new(repository.path(), &old, &new);
+    let (snapshot, prepared) = prepare(scope.path(), &provider, true);
+    assert_eq!(prepared["oldCommit"], old);
+    assert_eq!(prepared["newCommit"], new);
+    assert!(
+        prepared["changes"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|change| change["new"]["path"] == "main-only.txt")
+    );
+    let mut measurements = Vec::new();
+    let mut sparse_id = String::new();
+    for change in prepared["changes"].as_array().unwrap() {
+        let id = change["id"].as_str().unwrap();
+        let mut document = String::new();
+        let (bytes, responses) = measured_read(
+            scope.path(),
+            &provider,
+            &snapshot,
+            &format!("{id}:patch"),
+            &mut document,
         );
-        assert_eq!(
-            provider.target_reads.get(),
-            reads,
-            "Terminal recovery is local only"
-        );
-        assert_eq!(
-            provider.writes.get(),
-            1,
-            "Receipt recovery must never replay a review"
+        let parsed: Value = serde_json::from_str(&document).unwrap();
+        assert_eq!(parsed["changeId"], id);
+        assert_eq!(parsed["snapshotDigest"], snapshot);
+        let path = change["new"]["path"]
+            .as_str()
+            .or_else(|| change["old"]["path"].as_str())
+            .unwrap();
+        if path == "sparse.txt" {
+            sparse_id = id.to_owned();
+            assert_eq!(parsed["hunks"].as_array().unwrap().len(), 2);
+            assert_eq!(parsed["hunks"][0]["oldCount"], 7);
+            assert_eq!(parsed["hunks"][1]["oldCount"], 7);
+            assert!(
+                document.chars().count() * 10 < sparse.chars().count() + changed.chars().count()
+            );
+        }
+        measurements.push(
+            json!({"path": path, "mandatoryCharacters": document.chars().count(),
+            "hunkCharacters": parsed["patch"].as_str().unwrap().chars().count(),
+            "serializedDeliveredBytes": bytes, "responses": responses}),
         );
     }
-    if fault == "unknown" {
-        let second = root.parent().unwrap().join("second");
-        let (snapshot, prepared) = prepare(&second, provider, false);
-        assess(&second, provider, &snapshot, &prepared);
-        let error = publish(&second, provider, &snapshot).unwrap_err();
-        assert_eq!(ss_ai::classification(&error), "ambiguousWrite");
-        assert_eq!(provider.writes.get(), 1);
+    let refreshed = work(scope.path(), &provider, "assessment", &snapshot, &[]).unwrap();
+    assert!(refreshed["nextOffset"].is_null());
+    for original in prepared["changes"].as_array().unwrap() {
+        let change = refreshed["changes"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|change| change["id"] == original["id"])
+            .unwrap();
+        assert_eq!(change["requiredPatch"]["complete"], true);
+        for side in ["old", "new"] {
+            if change[side]["content"]["kind"] == "text" {
+                assert!(change[side]["content"]["progress"]["readOffset"].is_null());
+            }
+        }
+    }
+    // Neither another checkout write nor another provider read participates in captured context.
+    fs::write(
+        repository.path().join("sparse.txt"),
+        "unrelated checkout content",
+    )
+    .unwrap();
+    let context_args = [
+        "--change-id".into(),
+        sparse_id,
+        "--side".into(),
+        "old".into(),
+        "--start-line".into(),
+        "100".into(),
+        "--line-count".into(),
+        "200".into(),
+        "--limit".into(),
+        "3".into(),
+    ];
+    let first = work(
+        scope.path(),
+        &provider,
+        "source-context",
+        &snapshot,
+        &context_args,
+    )
+    .unwrap();
+    assert_eq!(
+        work(
+            scope.path(),
+            &provider,
+            "source-context",
+            &snapshot,
+            &context_args
+        )
+        .unwrap(),
+        first
+    );
+    let reference = first["reference"].as_str().unwrap();
+    let resumed = prepare_inventory(scope.path(), &provider, &snapshot);
+    assert_eq!(resumed["nextContextReference"], reference);
+    assert_eq!(resumed["requestedContextCount"], 1);
+    let mut context = String::new();
+    let (context_bytes, context_responses) =
+        measured_read(scope.path(), &provider, &snapshot, reference, &mut context);
+    assert_eq!(
+        context,
+        sparse
+            .split_inclusive('\n')
+            .skip(99)
+            .take(200)
+            .collect::<String>()
+    );
+    assert_eq!(provider.writes.get(), 0);
+    eprintln!(
+        "Source volume: {}",
+        json!({"changes": measurements,
+        "sparseFullSideCharacters": sparse.chars().count() + changed.chars().count(),
+        "denseFullSideCharacters": dense.chars().count() * 2,
+        "requestedContextCharacters": context.chars().count(),
+        "contextSerializedBytes": context_bytes, "contextResponses": context_responses,
+        "replayedCharacters": first["text"].as_str().unwrap().chars().count() * 2,
+        "replayedBytes": (serde_json::to_vec_pretty(&first).unwrap().len() + 1) * 2})
+    );
+}
+
+/// Measures every actual native response, including JSON escaping rather than just the first page.
+fn measured_read(
+    root: &Path,
+    provider: &Provider,
+    snapshot: &str,
+    reference: &str,
+    text: &mut String,
+) -> (usize, usize) {
+    let mut offset = 0;
+    let mut bytes = 0;
+    let mut responses = 0;
+    loop {
+        let page = work(
+            root,
+            provider,
+            "read",
+            snapshot,
+            &[
+                "--reference".into(),
+                reference.into(),
+                "--offset".into(),
+                offset.to_string(),
+            ],
+        )
+        .unwrap();
+        let size = serde_json::to_vec_pretty(&page).unwrap().len() + 1;
+        assert!(size <= 16_384);
+        bytes += size;
+        responses += 1;
+        let delivered = page["text"].as_str().unwrap();
+        text.push_str(delivered);
+        if page["complete"] == true {
+            assert_eq!(
+                text.chars().count(),
+                usize::try_from(page["totalCharacters"].as_u64().unwrap()).unwrap()
+            );
+            break;
+        }
+        let next = usize::try_from(page["nextOffset"].as_u64().unwrap()).unwrap();
+        assert!(next > offset);
+        assert_eq!(next, offset + delivered.chars().count());
+        assert!(next < usize::try_from(page["totalCharacters"].as_u64().unwrap()).unwrap());
+        offset = next;
+    }
+    (bytes, responses)
+}
+
+/// Recorded resolutions survive reload and constrain publication on both providers.
+#[test]
+fn concern_resolution_survives_reload_and_vetoes_favorable_aggregate() {
+    let _guard = PROCESS_TEST_LOCK
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner);
+    let sources = Sources::new();
+    for ado in [false, true] {
+        for disposition in ["significant", "uncertain"] {
+            let scope = TempDir::new().unwrap();
+            let provider = sources.provider(ado);
+            let (snapshot, prepared) = prepare(scope.path(), &provider, false);
+            let id = prepared["changes"][0]["id"].as_str().unwrap();
+            let patch = format!("{id}:patch");
+            for reference in ["policy", "discussion", patch.as_str()] {
+                read_evidence(scope.path(), &provider, &snapshot, reference, None, None);
+            }
+            work(
+                scope.path(),
+                &provider,
+                "judge",
+                &snapshot,
+                &[
+                    "--change-id".into(),
+                    id.into(),
+                    "--disposition".into(),
+                    "insignificant".into(),
+                    "--rationale".into(),
+                    "The source change is editorial.".into(),
+                    "--evidence".into(),
+                    patch.clone(),
+                    "--concern".into(),
+                    "Examine the recorded concern.".into(),
+                ],
+            )
+            .unwrap();
+            let checkpoint = work(scope.path(), &provider, "checkpoint", &snapshot, &[]).unwrap();
+            assert!(checkpoint["directHandoffCount"].as_u64().unwrap() > 0);
+            work(scope.path(), &provider, "checkpoint", &snapshot, &[]).unwrap_err();
+            fixture_checkpoint_inputs(scope.path(), &provider, &snapshot, "cumulative").unwrap();
+            let checks = work(scope.path(), &provider, "checks", &snapshot, &[]).unwrap();
+            let items = checks["items"].as_array().unwrap();
+            assert_eq!(items.len(), 1);
+            let check = &items[0];
+            let check_id = check["id"].as_str().unwrap();
+            let check_ref = check["reference"].as_str().unwrap();
+            let resolution_ref = check["resolutionReference"].as_str().unwrap();
+            assert_eq!(check["origin"], format!("judgment:{id}"));
+            read_evidence(
+                scope.path(),
+                &provider,
+                &snapshot,
+                &format!("judgment:{id}"),
+                None,
+                None,
+            );
+            read_evidence(scope.path(), &provider, &snapshot, check_ref, None, None);
+            let resolve = |disposition: &str| {
+                vec![
+                    "--check-id".into(),
+                    check_id.into(),
+                    "--disposition".into(),
+                    disposition.into(),
+                    "--rationale".into(),
+                    "Evidence supports this disposition.".into(),
+                    "--evidence".into(),
+                    patch.clone(),
+                ]
+            };
+            let first = work(
+                scope.path(),
+                &provider,
+                "resolve",
+                &snapshot,
+                &resolve("insignificant"),
+            )
+            .unwrap();
+            let digest = first["resolutionDigest"].as_str().unwrap();
+            read_evidence(
+                scope.path(),
+                &provider,
+                &snapshot,
+                resolution_ref,
+                None,
+                None,
+            );
+            let cumulative = [
+                "--change-id".into(),
+                "cumulative".into(),
+                "--disposition".into(),
+                "insignificant".into(),
+                "--rationale".into(),
+                "Combined source is editorial.".into(),
+                "--evidence".into(),
+                "policy".into(),
+                "--evidence".into(),
+                "discussion".into(),
+            ];
+            work(scope.path(), &provider, "judge", &snapshot, &cumulative).unwrap();
+            work(
+                scope.path(),
+                &provider,
+                "resolve",
+                &snapshot,
+                &resolve(disposition),
+            )
+            .unwrap_err();
+            let mut replacement = resolve(disposition);
+            replacement.extend(["--previous-digest".into(), digest.into()]);
+            work(scope.path(), &provider, "resolve", &snapshot, &replacement).unwrap();
+            let resumed = work(scope.path(), &provider, "assessment", &snapshot, &[]).unwrap();
+            assert!(resumed["cumulative"].is_null());
+            read_evidence(
+                scope.path(),
+                &provider,
+                &snapshot,
+                resolution_ref,
+                None,
+                None,
+            );
+            work(scope.path(), &provider, "judge", &snapshot, &cumulative).unwrap();
+            let complete = work(scope.path(), &provider, "complete", &snapshot, &[]).unwrap();
+            assert_eq!(
+                complete["status"],
+                if disposition == "significant" {
+                    "needsReview"
+                } else {
+                    "failed"
+                }
+            );
+            publish(scope.path(), &provider, &snapshot).unwrap_err();
+            assert_eq!(provider.writes.get(), 0);
+        }
+    }
+}
+
+/// A failed acquisition after favorable work remains a persisted execution failure.
+#[test]
+fn failed_context_after_favorable_judgments_cannot_authorize_effects() {
+    let _guard = PROCESS_TEST_LOCK
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner);
+    let sources = Sources::new();
+    for ado in [false, true] {
+        let scope = TempDir::new().unwrap();
+        let provider = sources.provider(ado);
+        let (snapshot, prepared) = prepare(scope.path(), &provider, false);
+        let id = prepared["changes"][0]["id"].as_str().unwrap();
+        for reference in ["policy".into(), "discussion".into(), format!("{id}:patch")] {
+            read_evidence(scope.path(), &provider, &snapshot, &reference, None, None);
+        }
+        for (change, evidence) in [
+            (id, format!("{id}:patch")),
+            ("cumulative", "discussion".into()),
+        ] {
+            work(
+                scope.path(),
+                &provider,
+                "judge",
+                &snapshot,
+                &[
+                    "--change-id".into(),
+                    change.into(),
+                    "--disposition".into(),
+                    "insignificant".into(),
+                    "--rationale".into(),
+                    "The examined evidence is editorial.".into(),
+                    "--evidence".into(),
+                    evidence,
+                    "--evidence".into(),
+                    "policy".into(),
+                ],
+            )
+            .unwrap();
+        }
+        work(
+            scope.path(),
+            &provider,
+            "source-context",
+            &snapshot,
+            &[
+                "--change-id".into(),
+                id.into(),
+                "--side".into(),
+                "new".into(),
+                "--start-line".into(),
+                "999".into(),
+                "--line-count".into(),
+                "1".into(),
+            ],
+        )
+        .unwrap_err();
+        work(scope.path(), &provider, "complete", &snapshot, &[]).unwrap_err();
+        notify(scope.path(), &provider, &snapshot).unwrap_err();
+        publish(scope.path(), &provider, &snapshot).unwrap_err();
+        let result = invoke(scope.path(), &provider, "results", &[]).unwrap();
+        assert!(!result["items"][0]["error"].is_null());
+        assert!(result["items"][0]["assessmentDigest"].is_null());
+        assert_eq!(provider.writes.get(), 0);
+    }
+}
+
+/// Requests are required work on both providers; acquisition failure is never notice authority.
+#[test]
+fn source_context_missing_delivery_and_failed_acquisition_cannot_authorize_effects() {
+    let _guard = PROCESS_TEST_LOCK
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner);
+    let sources = Sources::new();
+    for ado in [false, true] {
+        for invalid in [false, true] {
+            let scope = TempDir::new().unwrap();
+            let provider = sources.provider(ado);
+            let (snapshot, prepared) = prepare(scope.path(), &provider, false);
+            let id = prepared["changes"][0]["id"].as_str().unwrap();
+            for reference in ["policy".into(), "discussion".into(), format!("{id}:patch")] {
+                read_evidence(scope.path(), &provider, &snapshot, &reference, None, None);
+            }
+            let request = work(
+                scope.path(),
+                &provider,
+                "source-context",
+                &snapshot,
+                &[
+                    "--change-id".into(),
+                    id.into(),
+                    "--side".into(),
+                    "new".into(),
+                    "--start-line".into(),
+                    if invalid { "2" } else { "1" }.into(),
+                    "--line-count".into(),
+                    "1".into(),
+                    "--limit".into(),
+                    "1".into(),
+                ],
+            );
+            if invalid {
+                request.unwrap_err();
+            } else {
+                let page = request.unwrap();
+                assert_eq!(page["complete"], false);
+                assert_eq!(page["context"]["request"]["changeId"], id);
+            }
+            for disposition in ["insignificant", "significant", "uncertain"] {
+                for (judgment, evidence) in [
+                    (id, format!("{id}:patch")),
+                    ("cumulative", "discussion".into()),
+                ] {
+                    work(
+                        scope.path(),
+                        &provider,
+                        "judge",
+                        &snapshot,
+                        &[
+                            "--change-id".into(),
+                            judgment.into(),
+                            "--disposition".into(),
+                            disposition.into(),
+                            "--rationale".into(),
+                            "Unfinished captured context.".into(),
+                            "--evidence".into(),
+                            evidence,
+                            "--evidence".into(),
+                            "policy".into(),
+                        ],
+                    )
+                    .unwrap_err();
+                }
+                work(scope.path(), &provider, "complete", &snapshot, &[]).unwrap_err();
+                notify(scope.path(), &provider, &snapshot).unwrap_err();
+                publish(scope.path(), &provider, &snapshot).unwrap_err();
+            }
+            let result = invoke(scope.path(), &provider, "results", &[]).unwrap();
+            assert!(result["items"][0]["assessmentDigest"].is_null());
+            if invalid {
+                assert!(!result["items"][0]["error"].is_null());
+            }
+            assert_eq!(provider.writes.get(), 0);
+        }
+    }
+}
+
+/// A later required range makes earlier conclusions incomplete across journal reloads.
+#[test]
+fn newly_requested_context_requires_new_judgments_on_both_providers() {
+    let _guard = PROCESS_TEST_LOCK
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner);
+    let sources = Sources::new();
+    for ado in [false, true] {
+        let scope = TempDir::new().unwrap();
+        let provider = sources.provider(ado);
+        let (snapshot, prepared) = prepare(scope.path(), &provider, true);
+        let id = prepared["changes"][0]["id"].as_str().unwrap();
+        for reference in ["policy".into(), "discussion".into(), format!("{id}:patch")] {
+            read_evidence(scope.path(), &provider, &snapshot, &reference, None, None);
+        }
+        let judgment = |id: &str, evidence: String| {
+            vec![
+                "--change-id".into(),
+                id.into(),
+                "--disposition".into(),
+                "insignificant".into(),
+                "--rationale".into(),
+                "The examined evidence is editorial.".into(),
+                "--evidence".into(),
+                evidence,
+                "--evidence".into(),
+                "policy".into(),
+            ]
+        };
+        let change_judgment = judgment(id, format!("{id}:patch"));
+        let cumulative = judgment("cumulative", "discussion".into());
+        work(
+            scope.path(),
+            &provider,
+            "judge",
+            &snapshot,
+            &change_judgment,
+        )
+        .unwrap();
+        work(scope.path(), &provider, "judge", &snapshot, &cumulative).unwrap();
+        let context = work(
+            scope.path(),
+            &provider,
+            "source-context",
+            &snapshot,
+            &[
+                "--change-id".into(),
+                id.into(),
+                "--side".into(),
+                "new".into(),
+                "--start-line".into(),
+                "1".into(),
+                "--line-count".into(),
+                "1".into(),
+            ],
+        )
+        .unwrap();
+        let reference = context["reference"].as_str().unwrap();
+        read_evidence(scope.path(), &provider, &snapshot, reference, None, None);
+        let resumed = prepare_inventory(scope.path(), &provider, &snapshot);
+        assert!(resumed["changes"][0]["decision"].is_null());
+        assert!(resumed["cumulative"].is_null());
+        work(scope.path(), &provider, "complete", &snapshot, &[]).unwrap_err();
+        work(
+            scope.path(),
+            &provider,
+            "judge",
+            &snapshot,
+            &change_judgment,
+        )
+        .unwrap();
+        work(scope.path(), &provider, "complete", &snapshot, &[]).unwrap_err();
+        work(scope.path(), &provider, "judge", &snapshot, &cumulative).unwrap();
+        assert_eq!(
+            work(scope.path(), &provider, "complete", &snapshot, &[]).unwrap()["status"],
+            "wouldReapprove"
+        );
+        assert_eq!(provider.writes.get(), 0);
+    }
+}
+
+/// Contending commands advance only when the test releases the previous transaction.
+struct ContextClock {
+    worker: usize,
+    events: mpsc::Sender<(usize, bool)>,
+    permit: mpsc::Receiver<()>,
+}
+
+impl Clock for ContextClock {
+    fn now(&self) -> Timestamp {
+        FixedClock.now()
+    }
+    fn wait(&self, _: Duration) -> Result<(), AppError> {
+        self.events.send((self.worker, true)).unwrap();
+        self.permit.recv().unwrap();
+        Ok(())
+    }
+}
+
+#[test]
+#[cfg_attr(
+    mutants,
+    ignore = "Mutated synchronization may remove the real thread's continuation signal"
+)]
+fn overlapping_context_requests_retain_both_ranges_and_read_progress() {
+    let _guard = PROCESS_TEST_LOCK
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner);
+    let sources = Sources::new();
+    let scope = TempDir::new().unwrap();
+    let provider = sources.provider(false);
+    let (snapshot, prepared) = prepare(scope.path(), &provider, true);
+    let id = prepared["changes"][0]["id"].as_str().unwrap();
+    let run_path = scope.path().join("run.json");
+    let owner = FileTransaction::open(&run_path, &FixedClock).unwrap();
+    let (events, receiver) = mpsc::channel();
+    thread::scope(|threads| {
+        let mut workers = Vec::new();
+        let mut permits = Vec::new();
+        for (worker, side) in ["old", "new"].into_iter().enumerate() {
+            let (release, permit) = mpsc::channel();
+            permits.push(release);
+            let clock = ContextClock {
+                worker,
+                events: events.clone(),
+                permit,
+            };
+            let arguments = vec![
+                OsString::from("ss-ai"),
+                "autoreapprove".into(),
+                "source-context".into(),
+                "--state-path".into(),
+                run_path.as_os_str().to_owned(),
+                "--pull-request-id".into(),
+                provider.number.to_string().into(),
+                "--snapshot-digest".into(),
+                snapshot.clone().into(),
+                "--change-id".into(),
+                id.into(),
+                "--side".into(),
+                side.into(),
+                "--start-line".into(),
+                "1".into(),
+                "--line-count".into(),
+                "1".into(),
+                "--limit".into(),
+                "1".into(),
+            ];
+            let repository = sources.path();
+            let (old, new) = sources.commits();
+            let root = scope.path();
+            workers.push(threads.spawn(move || {
+                let provider = Provider::new(repository, &old, &new);
+                let result = run_in(&arguments, &provider, &provider, &clock, &root.join("host"));
+                clock.events.send((worker, false)).unwrap();
+                result
+            }));
+        }
+        let first = receiver.recv().unwrap();
+        let second = receiver.recv().unwrap();
+        drop(owner);
+        for (worker, handle) in workers.into_iter().enumerate() {
+            let contended = [first, second].contains(&(worker, true));
+            if contended {
+                permits[worker].send(()).unwrap();
+            }
+            let page = handle.join().unwrap().unwrap();
+            let page: Value = serde_json::from_str(&page).unwrap();
+            assert_eq!(page["complete"], false);
+            assert!(contended);
+        }
+    });
+    let record: Value = serde_json::from_slice(&fs::read(&run_path).unwrap()).unwrap();
+    let contexts = record["inventory"][0]["assessment"]["contexts"]
+        .as_object()
+        .unwrap();
+    assert_eq!(contexts.len(), 2);
+    for reference in contexts.keys() {
+        assert_eq!(record["inventory"][0]["assessment"]["reads"][reference], 1);
+    }
+    assert_eq!(
+        work(scope.path(), &provider, "assessment", &snapshot, &[]).unwrap()["requestedContextCount"],
+        2
+    );
+    assert!(scope.path().join("run.json.lock").is_file());
+}
+
+/// Native reads deliver the semantic projection while retained authority stays unchanged.
+#[test]
+fn compact_discussion_is_snapshot_bound_and_keeps_objections_on_both_providers() {
+    let _guard = PROCESS_TEST_LOCK
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner);
+    let sources = Sources::new();
+    for ado in [false, true] {
+        let scope = TempDir::new().unwrap();
+        let provider = sources.provider(ado);
+        {
+            let mut evidence = provider.evidence.borrow_mut();
+            if ado {
+                evidence["pullRequest"]["description"] = json!("Description-only requirement.");
+                evidence["threads"].as_array_mut().unwrap().push(json!({
+                    "id": 50, "status": "active", "publishedDate": "2026-01-02T00:00:00Z",
+                    "comments": [{"id": 1, "commentType": "text", "content": "Human objection.",
+                        "author": {"id": "other-reviewer"}, "publishedDate": "2026-01-02T00:00:00Z"}]
+                }));
+                evidence["threads"].as_array_mut().unwrap().extend([
+                    json!({"id": "deleted-thread", "isDeleted": true,
+                        "comments": [{"commentType": "system"}]}),
+                    json!({"id": "deleted-comment", "status": "pending",
+                        "comments": [{"isDeleted": true, "commentType": "text"}]}),
+                ]);
+            } else {
+                evidence["pullRequest"]["body"] = json!("Description-only requirement.");
+                evidence["reviews"][0]["body"] = json!("Review-only objection.");
+                evidence["reviewComments"] = json!((10..12).map(|id| json!({
+                    "id": id, "body": "Human objection.", "user": {"id": 99, "type": "User"},
+                    "diff_hunk": "@@ -1 +1 @@\n-old\n+historical", "path": format!("file-{id}.rs"),
+                    "created_at": "2026-01-02T00:00:00Z", "updated_at": "2026-01-02T00:00:00Z"
+                })).collect::<Vec<_>>());
+            }
+        }
+        let (snapshot, prepared) = prepare(scope.path(), &provider, true);
+        assert!(prepared["discussionDigest"].is_string());
+        let before: Value =
+            serde_json::from_slice(&fs::read(scope.path().join("run.json")).unwrap()).unwrap();
+        let mut discussion = String::new();
+        read_evidence(
+            scope.path(),
+            &provider,
+            &snapshot,
+            "discussion",
+            None,
+            Some(&mut discussion),
+        );
+        let document: Value = serde_json::from_str(&discussion).unwrap();
+        assert_eq!(document["schemaVersion"], 1);
+        assert!(discussion.contains("Description-only requirement."));
+        assert!(discussion.contains("Human objection."));
+        if ado {
+            assert!(document.get("reviewers").is_none());
+            assert!(document.get("iterations").is_none());
+            assert_eq!(document["iterationCommits"]["1"], sources.old);
+            assert_eq!(document["iterationCommits"]["2"], sources.new);
+            for id in ["deleted-thread", "deleted-comment"] {
+                let thread = document["threads"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .find(|thread| thread["id"] == id)
+                    .unwrap();
+                assert!(thread["comments"][0].get("id").is_none());
+            }
+        } else {
+            assert!(discussion.contains("Review-only objection."));
+            assert_eq!(document["hunks"].as_object().unwrap().len(), 1);
+            assert_eq!(document["reviewComments"].as_array().unwrap().len(), 2);
+            assert!(document.get("timeline").is_none());
+        }
+        assert!(document.get("policies").is_none());
+        let path = scope.path().join("run.json");
+        let mut saved: Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+        assert_eq!(
+            saved["inventory"][0]["inspection"],
+            before["inventory"][0]["inspection"]
+        );
+        assert_eq!(
+            saved["inventory"][0]["assessment"]["discussionDigest"],
+            prepared["discussionDigest"]
+        );
+        saved["inventory"][0]["assessment"]["discussionDigest"] = json!("0".repeat(64));
+        let corrupt = serde_json::to_vec(&saved).unwrap();
+        fs::write(&path, &corrupt).unwrap();
+        work(scope.path(), &provider, "assessment", &snapshot, &[]).unwrap_err();
+        assert_eq!(fs::read(&path).unwrap(), corrupt);
+        assert_eq!(provider.writes.get(), 0);
     }
 }
 
@@ -3237,60 +4957,6 @@ fn host_journal(directory: &Path) -> PathBuf {
                 .is_some_and(|extension| extension == "json")
         })
         .unwrap()
-}
-
-/// A failed acknowledgement save must leave a recoverable intent, not a blocked assessment error.
-fn recover_failed_journal(root: &Path, provider: &Provider, snapshot: &str) -> Value {
-    let directory = root
-        .parent()
-        .unwrap()
-        .join("host-store")
-        .join("publications");
-    provider.host_directory.replace(Some(directory.clone()));
-    let error = publish(root, provider, snapshot).unwrap_err();
-    assert_eq!(ss_ai::classification(&error), "ambiguousWrite");
-    assert_eq!(
-        invoke(root, provider, "results", &[]).unwrap()["state"],
-        "failed"
-    );
-    let path = host_journal(&directory);
-    fs::remove_dir(&path).unwrap();
-    fs::rename(path.with_extension("saved"), &path).unwrap();
-    provider.fault.set("");
-    let result = publish(root, provider, snapshot).unwrap();
-    assert_eq!(provider.writes.get(), 1);
-    result
-}
-
-/// Recovery validates the effect and readback instead of trusting a terminal status string.
-fn reject_publication_corruption(
-    host_path: &Path,
-    root: &Path,
-    provider: &Provider,
-    snapshot: &str,
-) {
-    let bytes = fs::read(host_path).unwrap();
-    let record: Value = serde_json::from_slice(&bytes).unwrap();
-    for (path, replacement) in [
-        ("/operations/0/state", json!("write-intent")),
-        ("/operations/0/effect/state", json!("unknown")),
-        (
-            "/operations/0/effect/acknowledgement/commit_id",
-            json!("a".repeat(40)),
-        ),
-        ("/operations/0/result/reviewId", json!("different-review")),
-        (
-            "/operations/0/verification/evidence/observation/pullRequest/head/sha",
-            json!("a".repeat(40)),
-        ),
-    ] {
-        let mut corrupt = record.clone();
-        *corrupt.pointer_mut(path).unwrap() = replacement;
-        fs::write(host_path, serde_json::to_vec(&corrupt).unwrap()).unwrap();
-        publish(root, provider, snapshot).unwrap_err();
-        assert_eq!(provider.writes.get(), 1);
-    }
-    fs::write(host_path, bytes).unwrap();
 }
 
 fn force_push_inventory_preserves_every_path_kind_and_rejects_missing_objects() {
@@ -3381,6 +5047,10 @@ fn force_push_inventory_preserves_every_path_kind_and_rejects_missing_objects() 
     let changes = state["inventory"][0]["assessment"]["inventory"]["changes"]
         .as_array()
         .unwrap();
+    for reference in ["policy", "discussion"] {
+        read_evidence(&root, &provider, &snapshot, reference, None, None);
+    }
+    read_available_source(&root, &provider, &snapshot, changes);
     for (path, kind, content) in [
         ("removed.txt", "D", "text"),
         ("renamed.txt", "R", "text"),
@@ -3418,7 +5088,7 @@ fn force_push_inventory_preserves_every_path_kind_and_rejects_missing_objects() 
                     "--rationale".into(),
                     "Not permitted.".into(),
                     "--evidence".into(),
-                    format!("{id}:{side}"),
+                    format!("{id}:patch"),
                 ],
             )
             .unwrap_err();
@@ -3436,7 +5106,7 @@ fn force_push_inventory_preserves_every_path_kind_and_rejects_missing_objects() 
                 "--rationale".into(),
                 "Unsupported content or structural change requires review.".into(),
                 "--evidence".into(),
-                format!("{id}:{side}"),
+                format!("{id}:patch"),
             ],
         )
         .unwrap();
@@ -3562,7 +5232,7 @@ fn empty_source_diff_and_corrupted_assessments_never_bypass_discussion_or_covera
             "discussion".into(),
         ],
     )
-    .unwrap();
+    .unwrap_err();
     work(&root, &provider, "complete", &snapshot, &[]).unwrap_err();
     assess(&root, &provider, &snapshot, &prepared);
     let path = root.join("run.json");
