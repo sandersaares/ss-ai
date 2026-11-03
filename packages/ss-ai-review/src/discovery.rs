@@ -26,10 +26,13 @@ use crate::renewal::Anchor;
 use crate::review_notice::{self, Notice};
 use crate::target::{Platform, Target};
 use crate::{Clock, Process};
-use ss_ai_assessment::{BatchJudgmentRequest, BatchReadRequest, ContextRequest, Note};
+use ss_ai_assessment::{
+    BatchJudgmentRequest, BatchReadRequest, ContextRequest, FinalSynthesis, GroupedConclusions,
+    Note,
+};
 
 /// Provider-selected approval baselines require a fresh assessment contract.
-const RUN_SCHEMA: u32 = 15;
+const RUN_SCHEMA: u32 = 16;
 
 /// Durable metadata-only stage; recent candidates still require approval assessment.
 #[derive(Debug, Deserialize, Serialize)]
@@ -1392,6 +1395,16 @@ pub(crate) enum WorkAction {
     ReadBatch {
         request: BatchReadRequest,
     },
+    ReadNext {
+        read_token: String,
+        changes: Vec<String>,
+    },
+    Conclude {
+        request: GroupedConclusions,
+    },
+    Synthesize {
+        synthesis: FinalSynthesis,
+    },
     JudgeBatch {
         request: BatchJudgmentRequest,
     },
@@ -1408,6 +1421,10 @@ pub(crate) enum WorkAction {
         previous_digest: Option<String>,
     },
     Complete,
+    CompletePartial {
+        change_id: String,
+        rationale: String,
+    },
 }
 
 /// Publication binds explicit caller scope to the same immutable run and assessment.
@@ -1423,6 +1440,7 @@ pub(crate) struct PublishInput<'a> {
 
 /// Identity needed to read back a notice from a previous-format run.
 struct PreviousNotice {
+    schema_version: u32,
     run_id: String,
     operation_run_id: String,
     scope: Scope,
@@ -1444,8 +1462,12 @@ fn previous_notice(document: &Value, input: &PublishInput<'_>) -> Result<Previou
         )
     };
     let tenant = document.get("tenant").ok_or_else(invalid)?;
-    if field(document, "schemaVersion")? != &json!(14)
-        || boolean(field(document, "dryRun")?)?
+    let schema_version = match field(document, "schemaVersion")?.as_u64() {
+        Some(14) => 14,
+        Some(15) => 15,
+        _ => return Err(invalid()),
+    };
+    if boolean(field(document, "dryRun")?)?
         || text(field(document, "repositoryUrl")?)? != input.repository.web_url
         || field(document, "platform")? != &serde_json::to_value(input.repository.platform)?
         || tenant.as_str() != input.tenant
@@ -1548,6 +1570,7 @@ fn previous_notice(document: &Value, input: &PublishInput<'_>) -> Result<Previou
         return Err(invalid());
     }
     Ok(PreviousNotice {
+        schema_version,
         run_id: run_id.to_owned(),
         operation_run_id: operation_run_id.to_owned(),
         scope,
@@ -1733,7 +1756,10 @@ pub(crate) fn notify(
             .read_bytes()?
             .ok_or_else(|| fail("invalidState", "Missing run"))?;
         let document: Value = serde_json::from_slice(&bytes)?;
-        if document.get("schemaVersion") == Some(&json!(14)) {
+        if matches!(
+            document.get("schemaVersion").and_then(Value::as_u64),
+            Some(14 | 15)
+        ) {
             Some((previous_notice(&document, input)?, bytes))
         } else {
             None
@@ -1764,7 +1790,7 @@ pub(crate) fn notify(
             },
         )?;
         return Ok(json!({
-            "schemaVersion": 14,
+            "schemaVersion": previous.schema_version,
             "runId": previous.run_id,
             "repositoryUrl": input.repository.web_url,
             "state": "reconciled",
@@ -2110,14 +2136,17 @@ pub(crate) fn work(
         .ok_or_else(|| fail("invalidState", "Prepare the source inventory first"))?;
     let read_batch = matches!(
         action,
-        WorkAction::ReadBatch { .. } | WorkAction::ReadUnits { .. }
+        WorkAction::ReadBatch { .. } | WorkAction::ReadUnits { .. } | WorkAction::ReadNext { .. }
     );
     let evidence_read = read_batch
         || matches!(
             action,
             WorkAction::Read { .. } | WorkAction::SourceContext { .. }
         );
-    let judgment_batch = matches!(action, WorkAction::JudgeBatch { .. });
+    let judgment_batch = matches!(
+        action,
+        WorkAction::JudgeBatch { .. } | WorkAction::Conclude { .. }
+    );
     let result = match action {
         WorkAction::Prepare => assessment.summary(0, 10, &run.policy.content, &discussion)?,
         WorkAction::StartWorker => {
@@ -2230,6 +2259,30 @@ pub(crate) fn work(
         WorkAction::JudgeBatch { request } => {
             assessment.record_batch(request, &run.policy.content, &discussion)?
         }
+        WorkAction::ReadNext {
+            read_token,
+            changes,
+        } => assessment.read_next_for(&read_token, &changes, &run.policy.content, &discussion)?,
+        WorkAction::Conclude { request } => {
+            assessment.conclude(request, &run.policy.content, &discussion)?
+        }
+        WorkAction::Synthesize { synthesis } => {
+            assessment.synthesize(synthesis, &run.policy.content, &discussion)?;
+            if assessment.status(run.dry_run) == "failed" {
+                entry.execution_error = Some(Diagnostic {
+                    kind: "service".to_owned(),
+                    message: "Source-change evaluation has unresolved substantive uncertainty; obtain a separate review".to_owned(),
+                });
+            }
+            json!({
+                "snapshotDigest": snapshot,
+                "assessmentDigest": assessment.digest,
+                "status": assessment.status(run.dry_run),
+                "disposition": assessment.disposition(),
+                "progress": assessment.progress_with_evidence(&run.policy.content, &discussion)?,
+                "error": entry.execution_error,
+            })
+        }
         WorkAction::SourceContext { request, limit } => {
             match assessment.source_context(request, limit.get(), &run.policy.content, &discussion)
             {
@@ -2296,6 +2349,14 @@ pub(crate) fn work(
             }
             json!({"snapshotDigest": snapshot, "status": assessment.status(run.dry_run),
                 "assessmentDigest": assessment.digest, "error": entry.execution_error})
+        }
+        WorkAction::CompletePartial {
+            change_id,
+            rationale,
+        } => {
+            assessment.finish_partial(&change_id, &rationale, &run.policy.content, &discussion)?;
+            json!({"snapshotDigest": snapshot, "status": assessment.status(run.dry_run),
+                "assessmentDigest": assessment.digest, "partial": true})
         }
     };
     if let Some(budget) = entry.assessment_budget.as_mut() {
@@ -2439,13 +2500,18 @@ mod tests {
                 directory: Path::new("unused"),
                 tenant: None,
             };
-            let previous = previous_notice(&run, &input).unwrap();
-            assert_eq!(previous.scope.repository_id, "123");
-            assert_eq!(previous.operation_run_id, previous.run_id);
-            assert_eq!(previous.snapshot, snapshot);
+            for version in [14, 15] {
+                let mut previous_run = run.clone();
+                previous_run["schemaVersion"] = json!(version);
+                let previous = previous_notice(&previous_run, &input).unwrap();
+                assert_eq!(previous.schema_version, version);
+                assert_eq!(previous.scope.repository_id, "123");
+                assert_eq!(previous.operation_run_id, previous.run_id);
+                assert_eq!(previous.snapshot, snapshot);
+            }
 
             for (path, replacement) in [
-                ("/schemaVersion", json!(15)),
+                ("/schemaVersion", json!(16)),
                 ("/dryRun", json!(true)),
                 ("/repositoryId", json!("other")),
                 ("/tenant", json!(12)),

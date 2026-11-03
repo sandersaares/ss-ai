@@ -120,6 +120,10 @@ impl Assessment {
         limit: usize,
         compact: bool,
     ) -> Result<Value, AssessmentError> {
+        let reference = reference
+            .map(|reference| self.exact_reference(reference))
+            .transpose()?;
+        let reference = reference.as_deref();
         if reference.is_some_and(|reference| {
             reference != "discussion"
                 && !self
@@ -180,9 +184,8 @@ impl Assessment {
         }
         let replacing = previous.is_some();
         let reference = "discussion-note".to_owned();
-        if replacing {
-            self.invalidate(&reference, policy, discussion)?;
-        }
+        // A newly added note also changes the dependencies of cumulative reasoning.
+        self.invalidate(&reference, policy, discussion)?;
         self.checkpoints.discussion = Some(bound);
         self.checkpoints.completed_work.insert(reference);
         if replacing {
@@ -328,14 +331,16 @@ impl Assessment {
                     checks,
                 )?;
             }
-            self.bind_aggregate_reference(
-                id,
-                "discussion-note",
-                &mut dependencies,
-                policy,
-                discussion,
-                checks,
-            )?;
+            if self.checkpoints.discussion.is_some() {
+                self.bind_aggregate_reference(
+                    id,
+                    "discussion-note",
+                    &mut dependencies,
+                    policy,
+                    discussion,
+                    checks,
+                )?;
+            }
             for check in checks.values() {
                 self.bind_aggregate_reference(
                     id,

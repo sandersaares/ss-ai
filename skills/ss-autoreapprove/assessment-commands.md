@@ -1,29 +1,16 @@
 # Worker command recipes
 
-The assignment supplies `RUN`, `PR`, and `SNAPSHOT`. Use named arguments and
-replace placeholders in the examples with the native values. Each example
-uses PowerShell:
-
-```powershell
-#Requires -Version 7.6
-
-Set-StrictMode -Version Latest
-$ErrorActionPreference = 'Stop'
-$PSNativeCommandUseErrorActionPreference = $true
-
-$scope = @('--state-path', '{{RUN}}', '--pull-request-id', '{{PR}}', '--snapshot-digest', '{{SNAPSHOT}}')
-```
+Use named arguments and native values. Each example uses PowerShell.
 
 | Placeholder | Value |
 | --- | --- |
 | `RUN`, `PR`, `SNAPSHOT` | Absolute run path, PR ID, and immutable snapshot digest supplied by the orchestrator. |
-| `AFTER`, `COUNT` | Returned window or pagination offset and count. Start an inventory or plan at offset zero. |
-| `REFERENCE`, `OFFSET` | Native evidence reference and returned Unicode scalar offset. |
-| `READ_TOKEN`, `STATE_TOKEN` | Latest native read or assessment token. |
-| `CHANGE`, `SIDE`, `START_LINE`, `LINE_COUNT` | Change ID, `old` or `new`, and captured-side line range. |
-| `BATCH_JSON` | JSON request assembled from native references and tokens. |
-| `DISPOSITION`, `RATIONALE`, `EVIDENCE` | Semantic disposition, explanation, and exact supporting reference. |
-| `OBSERVATIONS`, `INTERFACES`, `CHECK` | Discussion observation, relevant interfaces, and returned check ID. |
+| `AFTER` | Returned inventory offset; initially zero. |
+| `READ_TOKEN`, `STATE_TOKEN` | Latest native evidence or semantic-state token. |
+| `CHANGE` | Native short change reference from inventory, bound to this snapshot. |
+| `CONCLUSIONS_JSON`, `SYNTHESIS_JSON` | Semantic inputs with native references, as illustrated below. |
+| `CONTEXT_JSON` | Specific captured-source ranges as illustrated below. |
+| `RATIONALE` | Evidence-backed synthesis explaining a significant partial refusal. |
 
 # Stage 1: evidence
 
@@ -36,40 +23,38 @@ $PSNativeCommandUseErrorActionPreference = $true
 $scope = @('--state-path', '{{RUN}}', '--pull-request-id', '{{PR}}', '--snapshot-digest', '{{SNAPSHOT}}')
 
 ss-ai autoreapprove assessment @scope --after "{{AFTER}}" --compact --limit 100
-ss-ai autoreapprove read-batch @scope --batch-json '{{BATCH_JSON}}'
+ss-ai autoreapprove read-next @scope --read-token "{{READ_TOKEN}}"
+ss-ai autoreapprove read-next @scope --read-token "{{READ_TOKEN}}" --change-id "{{CHANGE}}"
 ss-ai autoreapprove unit-read-plan @scope --reference discussion --after "{{AFTER}}" --limit 100
 ss-ai autoreapprove read-units @scope --reference discussion --after "{{AFTER}}" --count "{{COUNT}}" --read-token "{{READ_TOKEN}}"
-ss-ai autoreapprove read @scope --reference "{{REFERENCE}}" --offset "{{OFFSET}}" --limit 16384
-ss-ai autoreapprove source-context @scope --change-id "{{CHANGE}}" --side "{{SIDE}}" --start-line "{{START_LINE}}" --line-count "{{LINE_COUNT}}" --limit 16384
-ss-ai autoreapprove source-context-batch @scope --batch-json '{{BATCH_JSON}}'
+ss-ai autoreapprove source-context-batch @scope --batch-json '{{CONTEXT_JSON}}'
 ```
 
-Follow `nextOffset` for every inventory and evidence page. A `read-batch`
-request has the shape
-`{"readToken":"TOKEN","items":[{"reference":"policy","offset":0,"limit":16384}]}`.
-Use distinct references. A mutable-record continuation also supplies its
-previous `contentDigest`. A plan returns independent unit windows and a read
-token; `read-units` returns their text and bindings. Read missing bindings and
-continue partial units. The unit ID is part of its `reference`. Batch reads omit
-progress; obtain it from `assessment` when needed. Do not combine separately
-bounded tool outputs.
+Follow inventory `nextOffset`. `read-next` derives bounded batches and offsets,
+returning exact text, short change references, content digests, receipts, and
+continuation metadata.
+Repeat `--change-id` to select specific changes and their requested context.
+Native code selects offsets even for targeted delivery. With a selection,
+`items: []` means that selection is delivered; without one, it means no required
+text remains undelivered. Neither means semantic work is complete.
+Do not combine separately bounded tool outputs.
 
-For several known context ranges, the batch registration request is an array
-such as `[{"changeId":"CHANGE","side":"new","startLine":1,"lineCount":20}]`.
-It returns each range's `reference` and `totalCharacters` and the final
-`readToken`; it does not deliver the text. Read every returned reference using
-`read-batch` and continue partial pages. Scope and tokens in a `read-batch`
-response apply to all its items. If registration reports `batchTooLarge`,
-retry the same ranges in smaller batches; no range from that request was registered.
+A context batch is an array such as
+`[{"changeId":"c1","side":"new","startLine":1,"lineCount":20}]`.
+Choose actual necessary ranges within the captured side's line count.
+Registration returns references and a new read token without delivering text.
+Use that token with `read-next` to deliver all registered ranges. A stale local
+token requires current assessment metadata and a retry, not a new snapshot.
 
-Use the captured side's line count to bound context requests. Registering
-context changes the read token and invalidates dependent judgments and
-observations. Read the returned range completely, then rebuild only affected
-records. A stale local read token requires a fresh `assessment` token and a
-retry at the same offsets, not a new worker or snapshot. A native command
-failure is not evidence or a completed assessment.
+For a long discussion, follow each plan page and issue the returned independent
+`read-units` windows together as separately bounded calls when they fit context.
+Read any missing bindings and continue partial units using their returned
+references. For deliberate rereads, use `read-batch` as described in
+[native commands](commands.md#stage-2-preparation-and-evidence).
+A partial mutable-record continuation supplies its previous content digest.
+Handle nonzero command exits explicitly; a failed command supplies no evidence.
 
-# Stage 2: judgments and completion
+# Stage 2: conclusions and completion
 
 ```powershell
 #Requires -Version 7.6
@@ -79,23 +64,26 @@ $ErrorActionPreference = 'Stop'
 $PSNativeCommandUseErrorActionPreference = $true
 $scope = @('--state-path', '{{RUN}}', '--pull-request-id', '{{PR}}', '--snapshot-digest', '{{SNAPSHOT}}')
 
-ss-ai autoreapprove judge-batch @scope --batch-json '{{BATCH_JSON}}'
-ss-ai autoreapprove note @scope --unit-id discussion --observations "{{OBSERVATIONS}}" --interfaces "{{INTERFACES}}" --evidence discussion
-ss-ai autoreapprove checks @scope --after "{{AFTER}}" --limit 100
-ss-ai autoreapprove read-batch @scope --batch-json '{{BATCH_JSON}}'
-ss-ai autoreapprove resolve @scope --check-id "{{CHECK}}" --disposition "{{DISPOSITION}}" --rationale "{{RATIONALE}}" --evidence "{{EVIDENCE}}"
-ss-ai autoreapprove judge @scope --change-id cumulative --disposition "{{DISPOSITION}}" --rationale "{{RATIONALE}}" --evidence policy --evidence discussion
-ss-ai autoreapprove complete @scope
+ss-ai autoreapprove conclude @scope --conclusions-json '{{CONCLUSIONS_JSON}}'
+ss-ai autoreapprove synthesize @scope --synthesis-json '{{SYNTHESIS_JSON}}'
+ss-ai autoreapprove complete-partial @scope --change-id "{{CHANGE}}" --rationale "{{RATIONALE}}"
 ```
 
-A judgment batch has the shape
-`{"stateToken":"TOKEN","items":[{"id":"CHANGE_ID","judgment":{"disposition":"insignificant","rationale":"Explanation","evidence":["CHANGE_ID:patch"],"concerns":[],"interactions":[]},"previousDigest":null}]}`.
-Each item names a different path. Replacements use the current decision digest;
-new judgments use null. To replace a note, resolution, or cumulative judgment,
-pass its current `--previous-digest`; omit that option for a new record.
+A grouped input has the shape
+`{"stateToken":"TOKEN","groups":[{"changes":["c1","c2"],"disposition":"insignificant","rationale":"Shared behavioral effect and significance."}]}`.
+Use only changes that actually share the explanation. Native code derives
+member evidence and conditional replacements. Optional `evidence` names exact
+additional native references, including `c1:patch` and returned context references.
+The response returns coverage and the next state token, not per-path paperwork.
 
-Repeat `--evidence` for each supporting reference, and repeat optional
-`--concern` and `--interaction` for concrete obligations. Read a check and its
-originating record before resolving it. Follow the assignment's completion
-requirements; a successful `complete` returns the assessment digest and
-decision. Do not publish, notify, or infer success from a failed command.
+Final synthesis has the shape
+`{"stateToken":"TOKEN","disposition":"insignificant","rationale":"Independent combined-change reasoning.","discussion":"Material objections and their disposition."}`.
+Optional `unresolvedConcerns` retains substantive concerns; any nonempty list
+prevents approval. Optional `evidence` cites additional exact evidence.
+Native validation and completion are atomic: missing delivery or change coverage
+leaves the synthesis unrecorded. No separate note, check, or complete call is required.
+
+Use `complete-partial` instead of final full synthesis only for a supported
+significant change. Its completion explicitly retains partial coverage and can
+never authorize renewal. Missing evidence is not significance. Return native
+status and digest; never publish, notify, or infer success from a failed command.

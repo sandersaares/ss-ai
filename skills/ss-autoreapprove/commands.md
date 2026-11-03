@@ -159,7 +159,7 @@ The compact inventory represents `old` and `new` as paths or null rather than
 side metadata. Required patch documents still contain complete source bindings
 and content classifications. Omit `--compact` when full side metadata is needed.
 Each change exposes `requiredPatch` with the same progress fields and `hunkCount`.
-Read the captured policy, discussion, and every required patch document. Evidence
+For approval, read the captured policy, discussion, and every required patch document. Evidence
 responses contain `text`, `totalCharacters`, `complete`, and `nextOffset`; consume contiguous
 pages until complete. A side without readable text cannot support an
 insignificant decision. Do not substitute an arbitrary checkout or target tip.
@@ -177,9 +177,8 @@ exact `context` binding. Continue through `read` using that reference and
 `requestedContextCount` and `nextContextReference` at assessment and change level
 to resume required context. Full `:old` / `:new` reads remain available as
 optional context. All offsets count Unicode scalar values, not UTF-8 bytes.
-Registering a new range removes that change's judgment, its dependents, the
-discussion observation, check dispositions, and the cumulative judgment. After
-reading the range, rebuild the missing records.
+Registering a new range removes affected conclusions and their dependents.
+After reading the range, rebuild the missing records.
 Invalid or unavailable requested context is a retained incomplete-evidence
 failure, never a reason to publish a needs-review notice. Finalized assessments
 allow replay of existing evidence but no new ranges.
@@ -202,9 +201,8 @@ Transport fragment counts describe the manifest, not unfinished unit work.
 
 ```powershell
 ss-ai autoreapprove units --state-path "{{RUN}}" --pull-request-id "{{PR}}" --snapshot-digest "{{SNAPSHOT}}" --after "{{AFTER}}" --limit "{{LIMIT}}" --reference "{{DOCUMENT}}"
-ss-ai autoreapprove note --state-path "{{RUN}}" --pull-request-id "{{PR}}" --snapshot-digest "{{SNAPSHOT}}" --unit-id "{{UNIT}}" --observations "{{OBSERVATIONS}}" --interfaces "{{INTERFACES}}" --evidence "{{REFERENCE}}" --concern "{{CONCERN}}" --interaction "{{INTERACTION}}" --previous-digest "{{PREVIOUS}}"
-ss-ai autoreapprove checks --state-path "{{RUN}}" --pull-request-id "{{PR}}" --snapshot-digest "{{SNAPSHOT}}" --after "{{AFTER}}" --limit "{{LIMIT}}"
-ss-ai autoreapprove resolve --state-path "{{RUN}}" --pull-request-id "{{PR}}" --snapshot-digest "{{SNAPSHOT}}" --check-id "{{CHECK}}" --disposition "{{DISPOSITION}}" --rationale "{{RATIONALE}}" --evidence "{{REFERENCE}}" --previous-digest "{{PREVIOUS}}"
+ss-ai autoreapprove read-next --state-path "{{RUN}}" --pull-request-id "{{PR}}" --snapshot-digest "{{SNAPSHOT}}" --read-token "{{READ_TOKEN}}"
+ss-ai autoreapprove read-next --state-path "{{RUN}}" --pull-request-id "{{PR}}" --snapshot-digest "{{SNAPSHOT}}" --read-token "{{READ_TOKEN}}" --change-id "{{CHANGE}}"
 ss-ai autoreapprove checkpoint --state-path "{{RUN}}" --pull-request-id "{{PR}}" --snapshot-digest "{{SNAPSHOT}}"
 ```
 
@@ -213,18 +211,16 @@ Additional placeholders:
 | Placeholder | Value |
 | --- | --- |
 | `DOCUMENT` | Optional original document filter, `discussion` or `CHANGE_ID:patch`; omit the option to enumerate every unit. Offsets apply to the selected list. |
-| `UNIT` | Native unit ID, or `discussion` for the final discussion aggregate. |
-| `OBSERVATIONS` | Concise behavioral observations, preserving relevant objections. |
-| `INTERFACES` | Relevant interfaces/invariants and their relationship to the evidence. |
-| `CONCERN`, `INTERACTION` | Explicit obligation to examine; repeat each option as needed, or omit it when there are none. |
-| `CHECK` | Native concern or interaction ID returned by `checks`. |
 
 Other placeholders retain their definitions above/below. Follow each returned
 `nextOffset`. Unit metadata gives exact ranges and bindings, but direct
-assessments need no unit notes. Record one `discussion` observation from the
-complete discussion and policy; include material concerns and interactions.
-All check resolutions require exact evidence, the originating semantic record,
-and the check itself. Replacements invalidate dependent records. `checkpoint`
+assessments need no unit or discussion notes. `read-next` derives bounded batches
+and continuation offsets for policy, discussion, patches, and requested context.
+Repeat `--change-id` to deliver policy and the selected changes' patches and
+context without waiting for unrelated documents. An empty selected batch means
+that selection is delivered, not that the whole assessment has coverage.
+Read every returned page; complete delivery does not prove comprehension.
+Replacements invalidate dependent records. `checkpoint`
 is for a context-pressure handoff after new semantic work, not for each batch.
 
 For a compact unit list, add `--compact`; each item retains its unit ID,
@@ -239,49 +235,33 @@ batches before registering context or retry with the new token.
 # Stage 3: judgments and completion
 
 ```powershell
-ss-ai autoreapprove judge --state-path "{{RUN}}" --pull-request-id "{{PR}}" --snapshot-digest "{{SNAPSHOT}}" --change-id "{{CHANGE}}" --disposition "{{DISPOSITION}}" --rationale "{{RATIONALE}}" --evidence "{{REFERENCE}}" --previous-digest "{{PREVIOUS}}"
-ss-ai autoreapprove judge-batch --state-path "{{RUN}}" --pull-request-id "{{PR}}" --snapshot-digest "{{SNAPSHOT}}" --batch-json '{{BATCH_JSON}}'
-ss-ai autoreapprove complete --state-path "{{RUN}}" --pull-request-id "{{PR}}" --snapshot-digest "{{SNAPSHOT}}"
+ss-ai autoreapprove conclude --state-path "{{RUN}}" --pull-request-id "{{PR}}" --snapshot-digest "{{SNAPSHOT}}" --conclusions-json '{{CONCLUSIONS_JSON}}'
+ss-ai autoreapprove synthesize --state-path "{{RUN}}" --pull-request-id "{{PR}}" --snapshot-digest "{{SNAPSHOT}}" --synthesis-json '{{SYNTHESIS_JSON}}'
+ss-ai autoreapprove complete-partial --state-path "{{RUN}}" --pull-request-id "{{PR}}" --snapshot-digest "{{SNAPSHOT}}" --change-id "{{CHANGE}}" --rationale "{{RATIONALE}}"
 ```
 
-A judgment batch has the shape
-`{"stateToken":"TOKEN","items":[{"id":"CHANGE_ID","judgment":{"disposition":"insignificant","rationale":"Evidence-based explanation","evidence":["CHANGE_ID:patch"],"concerns":[],"interactions":[]},"previousDigest":null}]}`.
-Each item names a distinct changed path; `cumulative` is not allowed in a
-batch. Use the latest `stateToken`. Each replacement needs its current
-`decisionDigest`; use null for a new judgment. The utility validates and
-commits the entire batch atomically and returns each digest, a new token, and
-progress. On a stale token or any invalid item no judgments are committed.
-Use the ordinary `judge` command for the independently reasoned cumulative
-judgment.
+| Placeholder | Value |
+| --- | --- |
+| `CONCLUSIONS_JSON` | Grouped semantic conclusions using native short references and the latest state token. |
+| `SYNTHESIS_JSON` | Independent final outcome, combined reasoning, material discussion, and optional unresolved concerns or additional evidence. |
+| `CHANGE`, `RATIONALE` | Examined significant change reference and evidence-backed partial-refusal synthesis. |
 
-Repeat `--evidence` for additional returned references. A change judgment must
-cite its `CHANGE_ID:patch`. The cumulative judgment must cite both `policy` and
-`discussion`. Repeat optional `--concern` and `--interaction` on a change judgment
-for explicit cumulative obligations. The cumulative judgment cannot introduce
-unchecked obligations; record them on the relevant unit or change first.
-Every change judgment requires complete policy, required patch,
-and applicable requested context reads, regardless of disposition. Cited optional
-evidence also requires complete delivery. A cumulative judgment binds all final
-path judgments, the discussion observation, every check and disposition, and
-all requested context. A replacement worker must read what it needs to reason
-independently rather than treating those bindings as comprehension.
-Opaque source can retain uncertainty, but
-unexamined readable content cannot become a completed semantic refusal.
-Omit `--previous-digest` for a new judgment; replacement requires
-the current digest from `assessment` and rejects conflicting updates.
-Missing work is not an empty successful assessment. Completion
-requires all readable evidence for every disposition: mandatory patches,
-requested ranges, policy, and discussion. Delivery, context, and
-worker limits cannot be hidden behind notes. Final source
-judgments, discussion observation, check dispositions, and an independent
-cumulative judgment are mandatory. Native delivery does not prove comprehension
-or that notes captured every implication. Delivery, context, and
-worker limits leave incomplete work; do not loop over the inventory to invent
-uncertain judgments. An `evidenceDelivery` diagnostic is a tooling failure,
-not a completed nonqualifying assessment.
-Completion
-returns `needsReview`, `failed`, `wouldReapprove`, or `readyToReapprove`;
-only the last permits publication.
+Use the input examples in [worker recipes](assessment-commands.md#stage-2-conclusions-and-completion).
+Native code expands each group's members into exact evidence-bound coverage and
+conditional replacements; it returns progress and the current state token.
+One final synthesis binds all final conclusions, complete discussion, policy,
+and requested context, validates coverage, and completes atomically. No separate
+note, check enumeration, empty checks, or per-path essays are required.
+Significant or uncertain members and unresolved concerns prevent renewal.
+A replacement worker must reacquire evidence needed for its own reasoning.
+
+Full synthesis requires all mandatory patches and requested ranges, policy,
+discussion, and every change conclusion. `complete-partial` instead permits
+only an examined significant refusal and explicitly retains incomplete coverage.
+It cannot disguise missing evidence as significance or authorize approval.
+Delivery, context, and worker limits remain incomplete work, not uncertainty.
+Completion returns `needsReview`, `failed`, `wouldReapprove`, or
+`readyToReapprove`; only the last permits publication.
 Completed significant or uncertain assessments in a live run require the orchestrator's native `notify` command;
 workers stop after completion and never publish. Dry runs do not notify.
 An uncertain evaluation returns `failed` with a diagnostic and keeps the run
@@ -327,7 +307,7 @@ draft; do not report or perform further work on that PR.
 source and decision evidence, posts an attributed
 standalone needs-review comment with a hidden marker, and verifies the owned
 comment. Repeating the original command reconciles the same intent without
-posting again, including for a previous schema-14 run. This recovery does not
+posting again, including for a previous schema-14 or schema-15 run. This recovery does not
 resume the previous assessment or change its run file. For that run, use the
 `recoveryOnly` response to report the recovered notice; do not call `results`
 on the previous run. Preserve an unknown comment attempt for reconciliation. Never call `notify` for

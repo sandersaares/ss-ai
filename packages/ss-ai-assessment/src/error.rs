@@ -33,6 +33,11 @@ classified_error!(
     "Missing cumulative rationale"
 );
 classified_error!(
+    MissingSignificantConclusion,
+    "invalidState",
+    "Partial completion requires a supported significant change judgment"
+);
+classified_error!(
     InvalidAssessmentBinding,
     "invalidState",
     "Assessment binding, context selection, or completion is invalid"
@@ -66,7 +71,7 @@ classified_error!(
 classified_error!(
     InvalidCheckpointNote,
     "invalidInput",
-    "Notes require bounded observations, interfaces, exact evidence, and explicit nonempty checks; cumulative judgments cannot introduce unexamined checks"
+    "Semantic records require nonempty observations and exact evidence; cumulative interactions belong in the final reasoning or unresolved concerns"
 );
 classified_error!(
     MissingExactEvidence,

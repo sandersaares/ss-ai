@@ -59,7 +59,9 @@ reviewed code. Typed, snapshot-bound judgments cover every change and the cumula
 result. Every judgment requires the policy, its complete operation/patch document,
 and all requested context for its change; the cumulative judgment requires
 complete policy, discussion, and requested-context reads.
-Every completed outcome requires all readable evidence, not just favorable outcomes.
+Every full synthesis requires all readable evidence, not just favorable outcomes.
+An examined significant change can instead complete an explicitly partial
+refusal; it never grants approval or claims examination of unrelated changes.
 The discussion document contains complete semantic discussion rather than the
 retained approval record. It preserves description and review bodies, comments,
 authorship, reply relationships, available thread state, and source locations.
@@ -76,7 +78,7 @@ readable sides remain available for deliberate context reads. Assessors request
 exact line ranges when hunks do not establish enclosing logic, interfaces,
 invariants, interactions, or an objection's relevance. Requested ranges become
 mandatory evidence. A newly registered range invalidates the affected change's
-judgment, its dependents, the discussion observation, all check dispositions,
+judgment, its dependents, any discussion observation and check dispositions,
 and the cumulative judgment. Repeating an existing request leaves
 records intact. Native coverage cannot prove
 that the assessor chose enough context; needed evidence outside the captured
@@ -89,7 +91,8 @@ The orchestrator prepares the comparison and reserves a GPT 6.1 Sol assessment
 worker per eligible PR with explicit medium reasoning and regular context.
 The worker owns bounded evidence reads, judgments, and completion. It returns
 scalar results and a concise reason, not source or discussion text, and cannot
-publish.
+publish. A host-required skill invocation routes an assigned worker directly
+to its assessment rather than starting another orchestrator.
 
 Evidence and metadata responses have a serialized UTF-8 byte budget, including
 JSON escaping and pretty formatting, so a character-count bound cannot hide
@@ -109,27 +112,40 @@ threads, and review bodies, groups interleaved replies by their retained parent,
 and splits oversized records or single lines without omission. Each unit retains
 its original reference, scalar ranges, content digests, and source/thread
 bindings. Sharing excerpt text never merges its referencing threads. The direct
-protocol delivers independently addressable pages in bounded atomic batches;
-transport fragments do not need individual semantic notes. A discussion
-observation retains material objections, and each changed-path record receives
-one final judgment. Atomic judgment batches bind each judgment to exact evidence.
+protocol delivers independently addressable pages in bounded atomic batches.
+`read-next` derives grouping and contiguous offsets from native receipts and
+actual serialized response sizes. Its change references match the short
+snapshot-scoped references in the inventory. A worker can select changes for
+targeted delivery without reading unrelated documents; native code still owns
+their continuation offsets. Transport fragments need no semantic notes.
+Workers submit concise grouped conclusions using native short change references.
+The snapshot and state token bind those references to exact inventory records.
+Native code derives member patch citations, requested-context dependencies,
+coverage, and conditional replacements rather than asking workers to copy them.
 
 The worker independently examines combined effects and relevant exact evidence.
-Every recorded concern or interaction requires a rationale and exact supporting
-evidence. Significant or uncertain members and check dispositions prevent a
-favorable cumulative judgment from authorizing renewal. Replacements invalidate
-dependent records through their bound digests.
+One final synthesis records the independent combined-change outcome, material
+discussion and its disposition, and unresolved substantive concerns.
+Native code binds all final member conclusions and exact evidence, validates
+coverage, and completes atomically. Significant or uncertain members and
+unresolved concerns prevent a favorable label from authorizing renewal.
+Replacements invalidate dependent records through their bound digests.
 
 Completion requires all required raw evidence and requested context, final
-change judgments, the discussion observation, check dispositions, and an
-independent cumulative judgment, including for an empty source inventory.
+change conclusions and an independent final synthesis, including for an empty
+source inventory. Discussion notes, check enumeration, empty checks, and
+per-path essays are not required.
 Native receipts prove delivery, not comprehension. A cumulative set that cannot
 be examined with its necessary evidence remains explicitly incomplete.
 
 Tool-output, context, and worker limits are incomplete evidence, not substantive
 uncertainty. They neither freeze a semantic refusal nor authorize a notice.
 Judgment recording rejects unread readable source for every disposition, and
-completion independently checks the same boundary. Actual semantic uncertainty
+completion independently checks the same boundary. Partial significant
+completion requires an evidence-backed significant change and every requested
+context range. Its native progress retains unexamined evidence and missing
+change conclusions; they cannot be interpreted as full coverage.
+Actual semantic uncertainty
 and intrinsically opaque source remain fail-closed review outcomes.
 
 A replacement worker uses the original run and snapshot and acquires the
@@ -197,7 +213,7 @@ capture resumes through `inspect`. Independent PRs keep their own budgets.
 Refresh applies to staleness before a remote approval request; an approval request
 error is reported without automatic resend in that attempt.
 
-`discovery.rs` owns the schema-15 run, recovery record, and result metadata.
+`discovery.rs` owns the schema-16 run, recovery record, and result metadata.
 Earlier run schemas require a fresh run and assessment. Discovery discards draft PRs
 before recency checks, and inspection, refresh, or publication preflight removes
 a PR found to have become a draft. Notification staleness is recorded separately
@@ -234,7 +250,7 @@ of current approval eligibility, including after closure or draft conversion.
 It captures PR identity and complete discussion without requiring source refs
 or approval history. It ignores unrelated expired notices but
 retains the intended comment's scope, timestamp, exact-body, and uniqueness
-checks. A previous schema-14 run supports this readback without resuming its
+checks. A previous schema-14 or schema-15 run supports this readback without resuming its
 assessment or changing the run file.
 
 The final summary lists each in-range candidate as a linked PR number and title.

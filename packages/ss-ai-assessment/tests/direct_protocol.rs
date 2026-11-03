@@ -9,6 +9,7 @@
     clippy::assertions_on_result_states,
     reason = "These assertions check whether the operation is accepted or rejected"
 )]
+use std::collections::BTreeSet;
 use std::num::NonZeroUsize;
 use std::panic::{RefUnwindSafe, UnwindSafe};
 
@@ -16,7 +17,8 @@ use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 use ss_ai_assessment::{
     Assessment, BatchJudgmentItem, BatchJudgmentRequest, BatchReadItem, BatchReadRequest, Change,
-    Content, ContextRequest, Disposition, Inventory, Judgment, Note, Side, SourceSide, change_id,
+    ConclusionGroup, Content, ContextRequest, Disposition, FinalSynthesis, GroupedConclusions,
+    Inventory, Judgment, Note, Side, SourceSide, change_id,
 };
 use static_assertions::assert_impl_all;
 
@@ -24,6 +26,488 @@ assert_impl_all!(BatchReadItem: UnwindSafe, RefUnwindSafe);
 assert_impl_all!(BatchReadRequest: UnwindSafe, RefUnwindSafe);
 assert_impl_all!(BatchJudgmentItem: UnwindSafe, RefUnwindSafe);
 assert_impl_all!(BatchJudgmentRequest: UnwindSafe, RefUnwindSafe);
+assert_impl_all!(GroupedConclusions: UnwindSafe, RefUnwindSafe);
+assert_impl_all!(FinalSynthesis: UnwindSafe, RefUnwindSafe);
+
+/// Deliver bounded native batches without deriving offsets in the worker.
+fn deliver_required(assessment: &mut Assessment, discussion: &str) -> u64 {
+    let token = assessment.read_token().unwrap();
+    let initial = assessment
+        .progress_with_evidence("policy", discussion)
+        .unwrap();
+    let remaining = initial["requiredDocumentCount"].as_u64().unwrap()
+        - initial["deliveredRequiredDocumentCount"].as_u64().unwrap();
+    let characters =
+        assessment.summary(0, 100, "policy", discussion).unwrap()["progress"]["preflightEstimate"]
+            ["transportFragmentCharacters"]
+            .as_u64()
+            .unwrap();
+    // Each nonempty batch must advance at least one scalar or an empty-document receipt.
+    for calls in 1..=remaining + characters + 1 {
+        let before = serde_json::to_value(&*assessment).unwrap()["reads"].clone();
+        let page = assessment.read_next(&token, "policy", discussion).unwrap();
+        assert!(serde_json::to_vec_pretty(&page).unwrap().len() < 16_384);
+        if page["items"].as_array().unwrap().is_empty() {
+            return calls;
+        }
+        let after = serde_json::to_value(&*assessment).unwrap()["reads"].clone();
+        assert_ne!(before, after);
+    }
+    panic!("Required evidence did not make bounded progress");
+}
+
+fn grouped(
+    assessment: &Assessment,
+    changes: &[&str],
+    disposition: Disposition,
+) -> GroupedConclusions {
+    GroupedConclusions {
+        state_token: assessment.state_token().unwrap(),
+        groups: vec![ConclusionGroup {
+            changes: changes
+                .iter()
+                .map(|reference| (*reference).to_owned())
+                .collect(),
+            disposition,
+            rationale: "The examined edits preserve the relevant behavior.".into(),
+            evidence: Vec::new(),
+        }],
+    }
+}
+
+fn synthesis(assessment: &Assessment) -> FinalSynthesis {
+    FinalSynthesis {
+        state_token: assessment.state_token().unwrap(),
+        disposition: Disposition::Insignificant,
+        rationale: "The combined changes preserve behavior and introduce no relevant regression."
+            .into(),
+        discussion: "The discussion presents no unresolved material objection.".into(),
+        unresolved_concerns: Vec::new(),
+        evidence: Vec::new(),
+    }
+}
+
+#[test]
+fn grouped_conclusions_and_single_synthesis_require_no_discussion_notes_or_checks() {
+    let mut assessment = fixture("discussion", 2);
+    let metadata = assessment.summary(0, 100, "policy", "discussion").unwrap();
+    assert_eq!(metadata["changes"][0]["reference"], "c1");
+    deliver_required(&mut assessment, "discussion");
+    let response = assessment
+        .conclude(
+            grouped(&assessment, &["c1", "c2"], Disposition::Insignificant),
+            "policy",
+            "discussion",
+        )
+        .unwrap();
+    assert_eq!(response["concludedChangeCount"], 2);
+    assert!(response.get("items").is_none());
+    assessment
+        .synthesize(synthesis(&assessment), "policy", "discussion")
+        .unwrap();
+    assert!(assessment.rationale().unwrap().contains("combined changes"));
+    assert_eq!(assessment.status(false), "readyToReapprove");
+    let persisted = serde_json::to_value(&assessment).unwrap();
+    assert!(persisted["checkpoints"]["discussion"].is_null());
+    assert_eq!(persisted["checkpoints"]["resolutions"], json!({}));
+    let reloaded: Assessment = serde_json::from_value(persisted).unwrap();
+    reloaded
+        .validate("snapshot", "policy", "policy", "discussion")
+        .unwrap();
+}
+
+#[test]
+fn concise_json_needs_no_empty_fields_or_agent_authored_bookkeeping() {
+    let mut assessment = fixture("discussion", 1);
+    deliver_required(&mut assessment, "discussion");
+    let request = serde_json::from_value(json!({
+        "stateToken": assessment.state_token().unwrap(),
+        "groups": [{"changes": ["c1"], "disposition": "insignificant", "rationale": "Behavior remains unchanged."}]
+    })).unwrap();
+    assessment
+        .conclude(request, "policy", "discussion")
+        .unwrap();
+    let final_reasoning = serde_json::from_value(json!({
+        "stateToken": assessment.state_token().unwrap(),
+        "disposition": "insignificant",
+        "rationale": "The combined changes preserve behavior.",
+        "discussion": "No material objection remains."
+    }))
+    .unwrap();
+    assessment
+        .synthesize(final_reasoning, "policy", "discussion")
+        .unwrap();
+    assert_eq!(assessment.status(false), "readyToReapprove");
+    assert!(
+        assessment
+            .conclude(
+                grouped(&assessment, &["c1"], Disposition::Significant),
+                "policy",
+                "discussion"
+            )
+            .is_err()
+    );
+}
+
+#[test]
+fn additional_evidence_and_conditional_replacements_are_native_and_fail_closed() {
+    let mut assessment = fixture("discussion", 2);
+    deliver_required(&mut assessment, "discussion");
+    let mut request = grouped(&assessment, &["c1", "c2"], Disposition::Insignificant);
+    request.groups[0].evidence.push("c1:new".into());
+    let before = serde_json::to_value(&assessment).unwrap();
+    assert!(
+        assessment
+            .conclude(request, "policy", "discussion")
+            .is_err()
+    );
+    assert_eq!(serde_json::to_value(&assessment).unwrap(), before);
+    read(&mut assessment, "c1:new", "policy", "discussion");
+    let stale = grouped(&assessment, &["c2"], Disposition::Insignificant);
+    assessment
+        .conclude(
+            grouped(&assessment, &["c1"], Disposition::Insignificant),
+            "policy",
+            "discussion",
+        )
+        .unwrap();
+    assert!(assessment.conclude(stale, "policy", "discussion").is_err());
+    let mut request = grouped(&assessment, &["c1", "c2"], Disposition::Insignificant);
+    request.groups[0].evidence.push("c1:new".into());
+    assessment
+        .conclude(request, "policy", "discussion")
+        .unwrap();
+    let mut final_reasoning = synthesis(&assessment);
+    final_reasoning.evidence.push("c2:new".into());
+    let before = serde_json::to_value(&assessment).unwrap();
+    assert!(
+        assessment
+            .synthesize(final_reasoning, "policy", "discussion")
+            .is_err()
+    );
+    assert_eq!(serde_json::to_value(&assessment).unwrap(), before);
+    assessment
+        .synthesize(synthesis(&assessment), "policy", "discussion")
+        .unwrap();
+}
+
+#[test]
+fn grouped_inputs_fail_atomically_for_missing_evidence_duplicates_and_stale_scope() {
+    let mut assessment = fixture("discussion", 2);
+    let before = serde_json::to_value(&assessment).unwrap();
+    assert!(
+        assessment
+            .conclude(
+                grouped(&assessment, &["c1", "c2"], Disposition::Significant),
+                "policy",
+                "discussion",
+            )
+            .is_err()
+    );
+    assert_eq!(serde_json::to_value(&assessment).unwrap(), before);
+    deliver_required(&mut assessment, "discussion");
+    for changes in [&["c1", "c1"][..], &["c1", "c99"][..], &["c01"][..]] {
+        let before = serde_json::to_value(&assessment).unwrap();
+        assert!(
+            assessment
+                .conclude(
+                    grouped(&assessment, changes, Disposition::Insignificant),
+                    "policy",
+                    "discussion"
+                )
+                .is_err()
+        );
+        assert_eq!(serde_json::to_value(&assessment).unwrap(), before);
+    }
+    let mut stale = grouped(&assessment, &["c1"], Disposition::Insignificant);
+    stale.state_token = fixture("another snapshot discussion", 2)
+        .state_token()
+        .unwrap();
+    assert!(assessment.conclude(stale, "policy", "discussion").is_err());
+    let failed = synthesis(&assessment);
+    assert!(
+        assessment
+            .synthesize(failed, "policy", "discussion")
+            .is_err()
+    );
+    assert_eq!(assessment.progress()["cumulativeJudgmentRecorded"], false);
+}
+
+#[test]
+fn final_synthesis_cannot_hide_significant_uncertain_or_unresolved_conclusions() {
+    for member in [
+        Disposition::Insignificant,
+        Disposition::Significant,
+        Disposition::Uncertain,
+    ] {
+        let mut assessment = fixture("discussion", 1);
+        deliver_required(&mut assessment, "discussion");
+        assessment
+            .conclude(
+                grouped(&assessment, &["c1"], member),
+                "policy",
+                "discussion",
+            )
+            .unwrap();
+        let mut final_reasoning = synthesis(&assessment);
+        if member == Disposition::Insignificant {
+            final_reasoning
+                .unresolved_concerns
+                .push("A relevant interaction remains uncertain.".into());
+        }
+        assessment
+            .synthesize(final_reasoning, "policy", "discussion")
+            .unwrap();
+        assert_ne!(assessment.status(false), "readyToReapprove");
+        assessment
+            .validate("snapshot", "policy", "policy", "discussion")
+            .unwrap();
+    }
+}
+
+#[test]
+fn source_context_changes_local_token_and_invalidates_grouped_coverage() {
+    let mut assessment = fixture("discussion", 2);
+    deliver_required(&mut assessment, "discussion");
+    assessment
+        .conclude(
+            grouped(&assessment, &["c1", "c2"], Disposition::Insignificant),
+            "policy",
+            "discussion",
+        )
+        .unwrap();
+    let stale = synthesis(&assessment);
+    let token = assessment.read_token().unwrap();
+    assessment
+        .source_context_batch(
+            vec![ContextRequest {
+                change_id: "c1".into(),
+                side: SourceSide::New,
+                start_line: NonZeroUsize::new(1).unwrap(),
+                line_count: NonZeroUsize::new(1).unwrap(),
+            }],
+            "policy",
+            "discussion",
+        )
+        .unwrap();
+    let before = serde_json::to_value(&assessment).unwrap();
+    assert!(
+        assessment
+            .read_next(&token, "policy", "discussion")
+            .is_err()
+    );
+    assert!(
+        assessment
+            .synthesize(stale, "policy", "discussion")
+            .is_err()
+    );
+    assert!(
+        assessment
+            .conclude(
+                grouped(&assessment, &["c1"], Disposition::Insignificant),
+                "policy",
+                "discussion"
+            )
+            .is_err()
+    );
+    assert_eq!(serde_json::to_value(&assessment).unwrap(), before);
+    deliver_required(&mut assessment, "discussion");
+    assessment
+        .conclude(
+            grouped(&assessment, &["c1"], Disposition::Insignificant),
+            "policy",
+            "discussion",
+        )
+        .unwrap();
+    assessment
+        .synthesize(synthesis(&assessment), "policy", "discussion")
+        .unwrap();
+    assert_eq!(assessment.status(false), "readyToReapprove");
+}
+
+#[test]
+fn targeted_delivery_supports_partial_refusal_without_unrelated_reads() {
+    let mut assessment = fixture("discussion", 3);
+    assessment
+        .source_context_batch(
+            vec![ContextRequest {
+                change_id: "c2".into(),
+                side: SourceSide::New,
+                start_line: NonZeroUsize::new(1).unwrap(),
+                line_count: NonZeroUsize::new(1).unwrap(),
+            }],
+            "policy",
+            "discussion",
+        )
+        .unwrap();
+    let token = assessment.read_token().unwrap();
+    let before = serde_json::to_value(&assessment).unwrap();
+    for changes in [vec!["c4".into()], vec!["c2".into(), "c2".into()]] {
+        assert!(
+            assessment
+                .read_next_for(&token, &changes, "policy", "discussion")
+                .is_err()
+        );
+        assert_eq!(serde_json::to_value(&assessment).unwrap(), before);
+    }
+
+    let mut references = BTreeSet::new();
+    // This small selection fits comfortably within a few bounded responses.
+    for _ in 0..4 {
+        let response = assessment
+            .read_next_for(&token, &["c2".into()], "policy", "discussion")
+            .unwrap();
+        let items = response["items"].as_array().unwrap();
+        if items.is_empty() {
+            break;
+        }
+        for item in items {
+            references.insert(item["reference"].as_str().unwrap().to_owned());
+        }
+    }
+    assert!(references.contains("policy"));
+    assert!(references.contains("c2:patch"));
+    assert!(
+        references
+            .iter()
+            .any(|reference| reference.starts_with("c2:context:"))
+    );
+    assert_eq!(references.len(), 3);
+    assert!(
+        assessment
+            .synthesize(synthesis(&assessment), "policy", "discussion")
+            .is_err()
+    );
+    assessment
+        .conclude(
+            grouped(&assessment, &["c2"], Disposition::Significant),
+            "policy",
+            "discussion",
+        )
+        .unwrap();
+    assessment
+        .finish_partial(
+            "c2",
+            "The examined change requires review.",
+            "policy",
+            "discussion",
+        )
+        .unwrap();
+    assert_eq!(assessment.status(false), "needsReview");
+    let progress = assessment
+        .progress_with_evidence("policy", "discussion")
+        .unwrap();
+    assert_eq!(progress["judgedChangeCount"], 1);
+    assert_eq!(progress["deliveredRequiredDocumentCount"], 3);
+    assert_eq!(progress["requiredDocumentCount"], 6);
+}
+
+#[test]
+fn native_evidence_batches_handle_escaped_unicode_empty_documents_and_partial_significance() {
+    let discussion = "\\\"😀\n".repeat(4_000);
+    let mut assessment = fixture(&discussion, 2);
+    deliver_required(&mut assessment, &discussion);
+    let progress = assessment
+        .progress_with_evidence("policy", &discussion)
+        .unwrap();
+    assert_eq!(
+        progress["requiredDocumentCount"],
+        progress["deliveredRequiredDocumentCount"]
+    );
+    let mut empty = fixture("", 0);
+    deliver_required(&mut empty, "");
+    empty.synthesize(synthesis(&empty), "policy", "").unwrap();
+    assert_eq!(empty.status(true), "wouldReapprove");
+    assessment
+        .conclude(
+            grouped(&assessment, &["c1"], Disposition::Significant),
+            "policy",
+            &discussion,
+        )
+        .unwrap();
+    assessment
+        .finish_partial(
+            "c1",
+            "The examined change requires review.",
+            "policy",
+            &discussion,
+        )
+        .unwrap();
+    assert_eq!(assessment.status(false), "needsReview");
+    assert_eq!(assessment.progress()["judgedChangeCount"], 1);
+    assert_eq!(assessment.progress()["partialSignificant"], true);
+    assessment
+        .validate("snapshot", "policy", "policy", &discussion)
+        .unwrap();
+}
+
+#[test]
+fn native_batch_limits_publish_only_delivered_receipts_and_compact_group_results() {
+    // This inventory exceeds both one evidence response and a per-member digest response.
+    let mut assessment = fixture("discussion", 100);
+    let first = assessment
+        .read_next(&assessment.read_token().unwrap(), "policy", "discussion")
+        .unwrap();
+    let pages = first["items"].as_array().unwrap();
+    assert!(pages.len() < assessment.inventory.changes.len());
+    let references = pages
+        .iter()
+        .map(|page| {
+            let reference = page["reference"].as_str().unwrap();
+            if let Some(number) = reference
+                .strip_prefix('c')
+                .and_then(|value| value.strip_suffix(":patch"))
+            {
+                let index = number.parse::<usize>().unwrap() - 1;
+                let id = &assessment.inventory.changes[index].id;
+                let document: Value = serde_json::from_str(page["text"].as_str().unwrap()).unwrap();
+                assert_eq!(document["changeId"], *id);
+                format!("{id}:patch")
+            } else {
+                reference.to_owned()
+            }
+        })
+        .collect::<BTreeSet<_>>();
+    let persisted = serde_json::to_value(&assessment).unwrap();
+    let receipts = persisted["reads"]
+        .as_object()
+        .unwrap()
+        .keys()
+        .cloned()
+        .collect::<BTreeSet<_>>();
+    assert_eq!(references, receipts);
+    // The small patches must travel in groups, rather than one model round
+    // trip per change; the extra call establishes that delivery is finished.
+    let remaining_calls = deliver_required(&mut assessment, "discussion");
+    assert!(remaining_calls < 16);
+    let references = (1..=assessment.inventory.changes.len())
+        .map(|index| format!("c{index}"))
+        .collect::<Vec<_>>();
+    let response = assessment
+        .conclude(
+            GroupedConclusions {
+                state_token: assessment.state_token().unwrap(),
+                groups: vec![ConclusionGroup {
+                    changes: references,
+                    disposition: Disposition::Insignificant,
+                    rationale: "The examined edits share the same behavioral effect.".into(),
+                    evidence: Vec::new(),
+                }],
+            },
+            "policy",
+            "discussion",
+        )
+        .unwrap();
+    assert_eq!(
+        response["concludedChangeCount"],
+        assessment.inventory.changes.len()
+    );
+    assert!(serde_json::to_vec_pretty(&response).unwrap().len() < 16_384);
+    assessment
+        .synthesize(synthesis(&assessment), "policy", "discussion")
+        .unwrap();
+    assert_eq!(assessment.status(false), "readyToReapprove");
+}
 
 fn fixture(discussion: &str, count: usize) -> Assessment {
     let mut changes = Vec::new();
@@ -104,6 +588,240 @@ fn request_read(assessment: &Assessment, items: Vec<BatchReadItem>) -> BatchRead
         read_token: assessment.read_token().unwrap(),
         items,
     }
+}
+
+#[test]
+fn significant_partial_completion_requires_support_but_not_unrelated_coverage() {
+    let mut assessment = fixture("discussion", 2);
+    let id = assessment.inventory.changes[0].id.clone();
+    assert!(
+        assessment
+            .finish_partial(&id, "A significant change.", "policy", "discussion")
+            .is_err()
+    );
+    read(&mut assessment, "policy", "policy", "discussion");
+    let mut significant = judgment(&id);
+    significant.disposition = Disposition::Significant;
+    assert!(
+        assessment
+            .record(&id, significant, None, "policy", "discussion")
+            .is_err()
+    );
+    read(
+        &mut assessment,
+        &format!("{id}:patch"),
+        "policy",
+        "discussion",
+    );
+    let mut significant = judgment(&id);
+    significant.disposition = Disposition::Significant;
+    assessment
+        .record(&id, significant, None, "policy", "discussion")
+        .unwrap();
+    assessment
+        .finish_partial(
+            &id,
+            "The examined change requires review.",
+            "policy",
+            "discussion",
+        )
+        .unwrap();
+    assert_eq!(assessment.status(false), "needsReview");
+    assert_eq!(assessment.status(true), "needsReview");
+    assert_eq!(
+        assessment.explanation().unwrap(),
+        "Partial assessment; unrelated changes may not have been examined. The examined change requires review."
+    );
+    let progress = assessment
+        .progress_with_evidence("policy", "discussion")
+        .unwrap();
+    assert_eq!(progress["partialSignificant"], true);
+    assert_eq!(progress["judgedChangeCount"], 1);
+    assert_eq!(progress["changeCount"], 2);
+    let reloaded: Assessment =
+        serde_json::from_value(serde_json::to_value(&assessment).unwrap()).unwrap();
+    reloaded
+        .validate("snapshot", "policy", "policy", "discussion")
+        .unwrap();
+}
+
+#[test]
+fn compact_patch_references_select_the_same_unit_windows_as_exact_references() {
+    let mut assessment = fixture("discussion", 1);
+    let exact = format!("{}:patch", assessment.inventory.changes[0].id);
+    let compact = "c1:patch";
+    let full_units = assessment.units_for(Some(&exact), 0, 100).unwrap();
+    assert_eq!(
+        assessment.units_for(Some(compact), 0, 100).unwrap(),
+        full_units
+    );
+    assert_eq!(
+        assessment.compact_units_for(Some(compact), 0, 100).unwrap(),
+        assessment.compact_units_for(Some(&exact), 0, 100).unwrap()
+    );
+    let plan = assessment
+        .unit_read_plan(compact, 0, 100, "policy", "discussion")
+        .unwrap();
+    assert_eq!(
+        plan,
+        assessment
+            .unit_read_plan(&exact, 0, 100, "policy", "discussion")
+            .unwrap()
+    );
+    let count = usize::try_from(plan["items"][0]["count"].as_u64().unwrap()).unwrap();
+    let delivered = assessment
+        .read_units(
+            compact,
+            0,
+            count,
+            assessment.read_token().unwrap(),
+            "policy",
+            "discussion",
+        )
+        .unwrap();
+    assert!(!delivered["items"].as_array().unwrap().is_empty());
+    assert!(assessment.units_for(Some("c2:patch"), 0, 100).is_err());
+    assert!(
+        assessment
+            .unit_read_plan("c2:patch", 0, 100, "policy", "discussion")
+            .is_err()
+    );
+}
+
+#[test]
+fn cumulative_concern_supplies_a_rationale_for_derived_uncertainty() {
+    let mut assessment = fixture("discussion", 1);
+    deliver_required(&mut assessment, "discussion");
+    assessment
+        .conclude(
+            grouped(&assessment, &["c1"], Disposition::Insignificant),
+            "policy",
+            "discussion",
+        )
+        .unwrap();
+    let mut cumulative = judgment("cumulative");
+    cumulative.rationale = "The combined behavior remains unresolved.".into();
+    cumulative.concerns.push("Review the interaction.".into());
+    assessment
+        .record("cumulative", cumulative, None, "policy", "discussion")
+        .unwrap();
+    assessment.finish("policy", "discussion").unwrap();
+    assert_eq!(assessment.disposition(), Some(Disposition::Uncertain));
+    assert_eq!(
+        assessment.rationale(),
+        Some("The combined behavior remains unresolved.")
+    );
+    assessment
+        .validate("snapshot", "policy", "policy", "discussion")
+        .unwrap();
+}
+
+#[test]
+fn adding_first_discussion_note_invalidates_prior_cumulative_reasoning() {
+    let mut assessment = fixture("discussion", 1);
+    deliver_required(&mut assessment, "discussion");
+    assessment
+        .conclude(
+            grouped(&assessment, &["c1"], Disposition::Insignificant),
+            "policy",
+            "discussion",
+        )
+        .unwrap();
+    assessment
+        .record(
+            "cumulative",
+            judgment("cumulative"),
+            None,
+            "policy",
+            "discussion",
+        )
+        .unwrap();
+    assessment
+        .note(
+            "discussion",
+            note("discussion"),
+            None,
+            "policy",
+            "discussion",
+        )
+        .unwrap();
+    assert_eq!(assessment.progress()["cumulativeJudgmentRecorded"], false);
+    assessment
+        .validate("snapshot", "policy", "policy", "discussion")
+        .unwrap();
+}
+
+#[test]
+fn partial_completion_rejects_uncertainty_and_unread_requested_context() {
+    let mut assessment = fixture("discussion", 2);
+    let id = assessment.inventory.changes[0].id.clone();
+    read(&mut assessment, "policy", "policy", "discussion");
+    read(
+        &mut assessment,
+        &format!("{id}:patch"),
+        "policy",
+        "discussion",
+    );
+    let mut uncertain = judgment(&id);
+    uncertain.disposition = Disposition::Uncertain;
+    assessment
+        .record(&id, uncertain, None, "policy", "discussion")
+        .unwrap();
+    assert!(
+        assessment
+            .finish_partial(
+                &id,
+                "Uncertainty is not significance.",
+                "policy",
+                "discussion"
+            )
+            .is_err()
+    );
+    let previous_digest = assessment.summary(0, 100, "policy", "discussion").unwrap()["changes"][0]
+        ["decisionDigest"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let mut significant = judgment(&id);
+    significant.disposition = Disposition::Significant;
+    assessment
+        .record(
+            &id,
+            significant,
+            Some(&previous_digest),
+            "policy",
+            "discussion",
+        )
+        .unwrap();
+    let other_id = assessment.inventory.changes[1].id.clone();
+    let context = assessment
+        .source_context(
+            ContextRequest {
+                change_id: other_id,
+                side: SourceSide::New,
+                start_line: NonZeroUsize::new(1).unwrap(),
+                line_count: NonZeroUsize::new(1).unwrap(),
+            },
+            1,
+            "policy",
+            "discussion",
+        )
+        .unwrap();
+    let reference = context["reference"].as_str().unwrap();
+    assert!(
+        assessment
+            .finish_partial(&id, "A significant change.", "policy", "discussion")
+            .is_err()
+    );
+    read(&mut assessment, reference, "policy", "discussion");
+    assessment
+        .finish_partial(
+            &id,
+            "The examined change requires review.",
+            "policy",
+            "discussion",
+        )
+        .unwrap();
 }
 
 #[test]
@@ -443,7 +1161,7 @@ fn incident_sized_inventories_need_fewer_pages_at_the_supported_limit() {
                         .as_array()
                         .unwrap()
                         .iter()
-                        .map(|change| change["id"].as_str().unwrap().to_owned()),
+                        .map(|change| change["reference"].as_str().unwrap().to_owned()),
                 );
                 match page["nextOffset"].as_u64() {
                     Some(next) => offset = usize::try_from(next).unwrap(),
@@ -473,20 +1191,21 @@ fn compact_inventory_preserves_required_work_and_path_identity() {
     let full_change = &full["changes"][0];
     let compact_change = &compact["changes"][0];
     for key in [
-        "id",
         "kind",
         "oldLineCount",
         "newLineCount",
         "contentAvailable",
-        "requiredPatch",
         "hunkCount",
         "requestedContextCount",
         "nextContextReference",
-        "decision",
-        "decisionDigest",
     ] {
         assert_eq!(compact_change[key], full_change[key]);
     }
+    assert_eq!(compact_change["reference"], "c1");
+    assert_eq!(compact_change["requiredPatch"]["reference"], "c1:patch");
+    assert!(compact_change.get("id").is_none());
+    assert!(compact_change.get("decision").is_none());
+    assert!(compact_change.get("decisionDigest").is_none());
     assert_eq!(compact_change["old"], full_change["old"]["path"]);
     assert_eq!(compact_change["new"], full_change["new"]["path"]);
     assert_eq!(compact_change["oldLineCount"], 1);
@@ -771,7 +1490,11 @@ fn digest_inputs(assessment: &Assessment, contract: &str) -> String {
     .map(field)
     .collect::<Vec<_>>();
     fields.push(serde_json::to_string(contract).unwrap());
-    fields.extend(["decisions", "cumulative"].into_iter().map(field));
+    fields.extend(
+        ["decisions", "cumulative", "partial"]
+            .into_iter()
+            .map(field),
+    );
     format!("[{}]", fields.join(","))
 }
 
