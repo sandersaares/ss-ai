@@ -1,0 +1,29 @@
+[package]
+name = "ss-ai-review-context"
+description = "Local pull request capture operations for review skills"
+version = "0.1.0"
+publish = false
+authors.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+include.workspace = true
+
+[package.metadata.docs.rs]
+all-features = true
+
+[dependencies]
+ohno = { workspace = true, features = ["app-err"] }
+regex-syntax = { workspace = true, features = ["unicode-case"] }
+serde = { workspace = true }
+# Preserve numeric token form until Int64-or-Double materialization.
+serde_json = { workspace = true, features = ["arbitrary_precision", "preserve_order", "raw_value"] }
+sha2 = { workspace = true }
+ss-ai-runtime = { workspace = true }
+
+[dev-dependencies]
+jiff = { workspace = true }
+
+[lints]
+workspace = true

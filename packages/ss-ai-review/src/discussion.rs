@@ -5,7 +5,7 @@ use std::num::NonZeroU64;
 
 use ohno::AppError;
 use serde::Serialize;
-use serde_json::{Map, Value};
+use serde_json::Value;
 use sha2::{Digest, Sha256};
 
 use crate::ado_approval::Evidence as AdoEvidence;
@@ -24,26 +24,29 @@ struct Document {
 }
 
 /// Provider-shaped locations preserve absent/null coordinates and historical context.
+///
+/// Ordered record maps keep dynamic objects sorted while the typed envelope keeps
+/// its declared serialization order, independently of context's JSON features.
 #[derive(Serialize)]
 #[serde(tag = "platform", rename_all = "camelCase")]
 enum Discussion {
     GitHub {
         #[serde(rename = "pullRequest")]
-        pull_request: Map<String, Value>,
-        reviews: Vec<Map<String, Value>>,
-        comments: Vec<Map<String, Value>>,
+        pull_request: BTreeMap<String, Value>,
+        reviews: Vec<BTreeMap<String, Value>>,
+        comments: Vec<BTreeMap<String, Value>>,
         #[serde(rename = "reviewComments")]
-        review_comments: Vec<Map<String, Value>>,
+        review_comments: Vec<BTreeMap<String, Value>>,
         hunks: BTreeMap<String, String>,
     },
     AzureDevOps {
         #[serde(rename = "pullRequest")]
-        pull_request: Map<String, Value>,
+        pull_request: BTreeMap<String, Value>,
         #[serde(rename = "sourceCommit")]
         source_commit: String,
         #[serde(rename = "iterationCommits")]
         iteration_commits: BTreeMap<String, String>,
-        threads: Vec<Map<String, Value>>,
+        threads: Vec<BTreeMap<String, Value>>,
     },
 }
 
@@ -90,7 +93,7 @@ fn github(
     let mut pull_request = project(pr, &["number", "title", "body", "user", "head"])?;
     identity(&mut pull_request, "user", &["id", "type"])?;
     if let Some(head) = pull_request.get_mut("head") {
-        *head = Value::Object(project(head, &["sha", "ref"])?);
+        *head = Value::Object(project(head, &["sha", "ref"])?.into_iter().collect());
     }
     let reviews = reviews
         .iter()
@@ -121,7 +124,7 @@ fn github(
 fn github_comments(
     comments: &[Value],
     hunks: &mut BTreeMap<String, String>,
-) -> Result<Vec<Map<String, Value>>, AppError> {
+) -> Result<Vec<BTreeMap<String, Value>>, AppError> {
     comments
         .iter()
         .map(|comment| {
@@ -229,7 +232,9 @@ fn ado(
                 projected.insert("comments".to_owned(), serde_json::to_value(comments)?);
             }
             if let Some(kind) = thread.pointer("/properties/CodeReviewThreadType") {
-                projected.insert("threadType".to_owned(), kind.clone());
+                let mut kind = kind.clone();
+                kind.sort_all_objects();
+                projected.insert("threadType".to_owned(), kind);
             }
             Ok(projected)
         })
@@ -260,7 +265,7 @@ fn ado_iterations(iterations: &[Value]) -> Result<BTreeMap<String, String>, AppE
 }
 
 /// Preserves human replies even when they share a thread with a service event.
-fn ado_comment(comment: &Value, deleted_thread: bool) -> Result<Map<String, Value>, AppError> {
+fn ado_comment(comment: &Value, deleted_thread: bool) -> Result<BTreeMap<String, Value>, AppError> {
     let deleted = deleted_thread || comment.get("isDeleted") == Some(&Value::Bool(true));
     // Provider tombstones can omit removed identifiers as well as their bodies.
     if !deleted {
@@ -296,7 +301,7 @@ fn ado_comment(comment: &Value, deleted_thread: bool) -> Result<Map<String, Valu
 }
 
 /// Keeps provider-shaped optional fields without inventing missing text or records.
-fn project(value: &Value, fields: &[&str]) -> Result<Map<String, Value>, AppError> {
+fn project(value: &Value, fields: &[&str]) -> Result<BTreeMap<String, Value>, AppError> {
     let object = value
         .as_object()
         .ok_or_else(|| fail("service", "Discussion record must be an object"))?;
@@ -308,16 +313,25 @@ fn project(value: &Value, fields: &[&str]) -> Result<Map<String, Value>, AppErro
     Ok(object
         .iter()
         .filter(|(name, _)| fields.contains(&name.as_str()))
-        .map(|(name, value)| (name.clone(), value.clone()))
+        .map(|(name, value)| {
+            // Copied nested locations are dynamic objects too, not opaque text.
+            let mut value = value.clone();
+            value.sort_all_objects();
+            (name.clone(), value)
+        })
         .collect())
 }
 
 /// Stable identity and provider type retain attribution without profile decoration.
-fn identity(record: &mut Map<String, Value>, name: &str, fields: &[&str]) -> Result<(), AppError> {
+fn identity(
+    record: &mut BTreeMap<String, Value>,
+    name: &str,
+    fields: &[&str],
+) -> Result<(), AppError> {
     if let Some(value) = record.get_mut(name)
         && !value.is_null()
     {
-        *value = Value::Object(project(value, fields)?);
+        *value = Value::Object(project(value, fields)?.into_iter().collect());
     }
     Ok(())
 }
@@ -386,6 +400,64 @@ mod tests {
     fn project(value: &Value) -> Value {
         let evidence: Evidence = serde_json::from_value(value.clone()).unwrap();
         serde_json::from_str(&render(&evidence).unwrap()).unwrap()
+    }
+
+    #[test]
+    fn discussion_bytes_keep_typed_envelopes_and_sorted_dynamic_records() {
+        let mut github = github();
+        github["observation"]["pullRequest"] = serde_json::from_str(
+            r#"{"user":{"type":"User","id":9},"number":1,"title":"Title","head":{"sha":"source","ref":"topic"},"body":"Body"}"#,
+        )
+        .unwrap();
+        github["observation"]["reviews"] = json!([]);
+        github["observation"]["comments"] = json!([]);
+        github["observation"]["reviewComments"] = serde_json::from_str(
+            r#"[{"user":{"type":"User","id":9},"id":1,"diff_hunk":"","body":"Comment"}]"#,
+        )
+        .unwrap();
+        let mut ado = ado();
+        ado["observation"]["pullRequest"] = serde_json::from_str(
+            r#"{"title":"Title","pullRequestId":1,"createdBy":{"isContainer":false,"id":"author"},"description":"Body"}"#,
+        )
+        .unwrap();
+        ado["observation"]["sourceCommit"] = json!("source");
+        ado["observation"]["iterations"] = json!([]);
+        ado["observation"]["threads"] = serde_json::from_str(
+            r#"[{"threadContext":{"rightFileStart":{"offset":1,"line":2},"filePath":"/a"},"properties":{"CodeReviewThreadType":{"$value":"VoteUpdate","$type":"System.String"}},"id":1,"comments":[{"parentCommentId":0,"id":1,"content":"Comment","author":{"isContainer":false,"id":"author"}}]}]"#,
+        )
+        .unwrap();
+        for (original, expected) in [
+            (
+                github,
+                concat!(
+                    "{\"schemaVersion\":1,\"platform\":\"gitHub\",",
+                    "\"pullRequest\":{\"body\":\"Body\",\"head\":{\"ref\":\"topic\",\"sha\":\"source\"},",
+                    "\"number\":1,\"title\":\"Title\",\"user\":{\"id\":9,\"type\":\"User\"}},",
+                    "\"reviews\":[],\"comments\":[],\"reviewComments\":[{\"body\":\"Comment\",",
+                    "\"hunkReference\":\"e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855\",",
+                    "\"id\":1,\"user\":{\"id\":9,\"type\":\"User\"}}],",
+                    "\"hunks\":{\"e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855\":\"\"}}"
+                ),
+            ),
+            (
+                ado,
+                concat!(
+                    "{\"schemaVersion\":1,\"platform\":\"azureDevOps\",",
+                    "\"pullRequest\":{\"createdBy\":{\"id\":\"author\",\"isContainer\":false},",
+                    "\"description\":\"Body\",\"pullRequestId\":1,\"title\":\"Title\"},",
+                    "\"sourceCommit\":\"source\",\"iterationCommits\":{},\"threads\":[{",
+                    "\"comments\":[{\"author\":{\"id\":\"author\",\"isContainer\":false},",
+                    "\"content\":\"Comment\",\"id\":1,\"parentCommentId\":0}],\"id\":1,",
+                    "\"threadContext\":{\"filePath\":\"/a\",\"rightFileStart\":{\"line\":2,\"offset\":1}},",
+                    "\"threadType\":{\"$type\":\"System.String\",\"$value\":\"VoteUpdate\"}}]}"
+                ),
+            ),
+        ] {
+            let evidence: Evidence = serde_json::from_value(original).unwrap();
+            let before = serde_json::to_string(&evidence).unwrap();
+            assert_eq!(render(&evidence).unwrap(), expected);
+            assert_eq!(serde_json::to_string(&evidence).unwrap(), before);
+        }
     }
 
     #[test]

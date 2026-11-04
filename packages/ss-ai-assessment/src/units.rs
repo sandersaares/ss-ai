@@ -2,7 +2,7 @@
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize};
 use serde_json::{Value, json};
 
 use crate::assessment::{document_digest, hash};
@@ -22,6 +22,7 @@ pub(crate) struct EvidenceUnit {
     pub(crate) parent: String,
     pub(crate) reference: String,
     pub(crate) ranges: Vec<EvidenceRange>,
+    #[serde(deserialize_with = "deserialize_bindings")]
     pub(crate) bindings: Vec<Value>,
     pub(crate) total_characters: usize,
     pub(crate) content_digest: String,
@@ -43,6 +44,17 @@ struct Segment {
     start_character: usize,
     identity: String,
     binding: Value,
+}
+
+/// Retained bindings use the same sorted objects as newly generated provenance.
+fn deserialize_bindings<'de, D: Deserializer<'de>>(
+    deserializer: D,
+) -> Result<Vec<Value>, D::Error> {
+    let mut bindings = Vec::<Value>::deserialize(deserializer)?;
+    for binding in &mut bindings {
+        binding.sort_all_objects();
+    }
+    Ok(bindings)
 }
 
 impl EvidenceUnit {
@@ -258,11 +270,14 @@ fn segments(document: &str, reference: &str) -> Result<Vec<Segment>, AssessmentE
                             .map_or_else(|| index.clone(), Value::to_string)
                     )
                 };
-                let binding = json!({
+                let mut binding = json!({
                     "collection": field,
                     "indexDigest": hash(index)?,
                     "identityDigest": hash(&identity)?
                 });
+                // Provenance bytes contribute to unit IDs and evidence documents;
+                // do not inherit insertion-order behavior from context captures.
+                binding.sort_all_objects();
                 boundaries.push((span.end, identity, binding));
             }
         }
@@ -529,7 +544,66 @@ mod tests {
 
     use serde_json::{Value, json};
 
-    use super::{ThreadRoots, document_digest, hash, partition, segments};
+    use super::{
+        EvidenceRange, EvidenceUnit, ThreadRoots, document_digest, hash, partition, segments,
+    };
+
+    #[test]
+    fn binding_bytes_are_sorted_without_reordering_typed_fields_or_input_text() {
+        let document = r#"{"comments":[{"id":1,"body":"😀"}],"pullRequest":{"body":"é"}}"#;
+        let units = partition("snapshot", "parent", "discussion", document).unwrap();
+        let first = units.first().unwrap();
+        assert_eq!(
+            serde_json::to_string(&first.bindings).unwrap(),
+            format!(
+                "[{{\"collection\":\"comments\",\"identityDigest\":\"{}\",\"indexDigest\":\"{}\"}}]",
+                hash(&"/comments/thread/1").unwrap(),
+                hash(&"0").unwrap()
+            )
+        );
+        let mut ranges = units
+            .iter()
+            .flat_map(|unit| &unit.ranges)
+            .collect::<Vec<_>>();
+        ranges.sort_by_key(|range| range.start_character);
+        assert_eq!(
+            ranges
+                .into_iter()
+                .flat_map(|range| document
+                    .chars()
+                    .skip(range.start_character)
+                    .take(range.end_character - range.start_character))
+                .collect::<String>(),
+            document
+        );
+        let range = EvidenceRange {
+            start_character: 0,
+            end_character: 1,
+            content_digest: "content".to_owned(),
+        };
+        assert_eq!(
+            hash(&range).unwrap(),
+            document_digest(r#"{"startCharacter":0,"endCharacter":1,"contentDigest":"content"}"#)
+        );
+        // Deserialization must also normalize retained provenance before it is
+        // served as an evidence document or included in a typed state hash.
+        let mut retained = serde_json::to_value(first).unwrap();
+        *retained
+            .get_mut("bindings")
+            .unwrap()
+            .as_array_mut()
+            .unwrap()
+            .first_mut()
+            .unwrap() = serde_json::from_str(
+            r#"{"indexDigest":"index","identityDigest":"identity","collection":"comments"}"#,
+        )
+        .unwrap();
+        let retained: EvidenceUnit = serde_json::from_value(retained).unwrap();
+        assert_eq!(
+            serde_json::to_string(&retained.bindings).unwrap(),
+            r#"[{"collection":"comments","identityDigest":"identity","indexDigest":"index"}]"#
+        );
+    }
 
     /// Reference the original lookup semantics independently of the indexed traversal.
     fn original_thread_identity(index: &str, value: &Value, records: &[Value]) -> Option<String> {
@@ -627,21 +701,20 @@ mod tests {
 
     #[test]
     fn unicode_manifests_keep_existing_ranges_and_digests() {
-        let discussion = json!({
-            "pullRequest": {"body": format!("😀\r\n{}", "é".repeat(4_200))},
-            "reviewComments": [
-                {"id": 1, "body": "first 😀"},
-                {"id": 2, "body": "other é"},
-                {"id": 3, "in_reply_to_id": 1, "body": "reply\r\n終"}
-            ],
-            "hunks": {"h": "@@ -1 +1 @@\n-é\n+😀\n"}
-        })
-        .to_string();
-        let patch = json!({
-            "patch": format!("@@ -1 +1 @@\n-é\n+😀\n@@ -3 +3 @@\n-{}\n+終\n", "a".repeat(4_200)),
-            "hunks": []
-        })
-        .to_string();
+        // Freeze the original input bytes independently of serde_json features;
+        // partitioning must still use the supplied text and its exact offsets.
+        let discussion = format!(
+            concat!(
+                r#"{{"hunks":{{"h":"@@ -1 +1 @@\n-é\n+😀\n"}},"pullRequest":{{"body":"😀\r\n{}"}},"#,
+                r#""reviewComments":[{{"body":"first 😀","id":1}},{{"body":"other é","id":2}},"#,
+                r#"{{"body":"reply\r\n終","id":3,"in_reply_to_id":1}}]}}"#
+            ),
+            "é".repeat(4_200)
+        );
+        let patch = format!(
+            r#"{{"hunks":[],"patch":"@@ -1 +1 @@\n-é\n+😀\n@@ -3 +3 @@\n-{}\n+終\n"}}"#,
+            "a".repeat(4_200)
+        );
         // These digests bind the established serialized units, ranges, and provenance.
         for (reference, document, expected) in [
             (

@@ -745,6 +745,12 @@ fn execute(
             api.register(&target, &identity)?
         }
     };
+    render_result(value)
+}
+
+/// Review results retain sorted dynamic objects without changing context output.
+fn render_result(mut value: Value) -> Result<String, AppError> {
+    value.sort_all_objects();
     Ok(serde_json::to_string(&value)?)
 }
 
@@ -1011,4 +1017,16 @@ fn work(
         process,
         clock,
     )
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn review_result_bytes_sort_nested_dynamic_objects() {
+        let value = serde_json::from_str(r#"{"z":[{"z":2,"a":1}],"a":0}"#).unwrap();
+        assert_eq!(
+            super::render_result(value).unwrap(),
+            r#"{"a":0,"z":[{"a":1,"z":2}]}"#
+        );
+    }
 }

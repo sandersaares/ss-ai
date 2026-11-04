@@ -252,7 +252,7 @@ pub(crate) fn capture(api: &mut Api<'_>, target: &Target) -> Result<Evidence, Ap
 fn observe(api: &mut Api<'_>, target: &Target) -> Result<Evidence, AppError> {
     let pr = project_pull_request(&api.transport.request(&target.pr_api(), "GET", None)?);
     if excluded(&pr)?.is_some() {
-        return Ok(Evidence::State { pull_request: pr });
+        return compact(&Evidence::State { pull_request: pr });
     }
     let source_commit = read_ref(api, target, text(field(&pr, "sourceRefName")?)?)?;
     let reviewers = unique_list(api, &format!("{}/reviewers", target.pr_api()), "id")?;
@@ -352,6 +352,31 @@ fn compact(evidence: &Evidence) -> Result<Evidence, AppError> {
                 // Evaluation replicas contribute only policy identity, settings and applicability.
                 *configuration =
                     project(&project_policy(configuration), &["id", "type", "settings"]);
+            }
+        }
+    }
+    // Retained provider objects use sorted keys even when context enables
+    // insertion-ordered JSON. Keep the evidence enum's typed field order intact.
+    match &mut evidence {
+        Evidence::State { pull_request } => pull_request.sort_all_objects(),
+        Evidence::History {
+            pull_request,
+            reviewers,
+            iterations,
+            threads,
+            policies,
+            evaluations,
+            ..
+        } => {
+            pull_request.sort_all_objects();
+            for value in reviewers
+                .iter_mut()
+                .chain(iterations)
+                .chain(threads)
+                .chain(policies)
+                .chain(evaluations)
+            {
+                value.sort_all_objects();
             }
         }
     }
@@ -1396,6 +1421,29 @@ mod tests {
             "threads": stage["threads"], "policies": stage["policies"],
             "evaluations": stage["evaluations"]
         })
+    }
+
+    #[test]
+    fn retained_dynamic_objects_have_feature_independent_bytes() {
+        let history: Evidence = serde_json::from_value(evidence(&fixture()["stages"][0])).unwrap();
+        let state = match &history {
+            Evidence::History { pull_request, .. } => Evidence::State {
+                pull_request: pull_request.clone(),
+            },
+            Evidence::State { .. } => unreachable!(),
+        };
+        for evidence in [state, history] {
+            let compact = super::compact(&evidence).unwrap();
+            let bytes = serde_json::to_string(&compact).unwrap();
+            // Sorting the entire typed evidence would incorrectly move scope.
+            assert!(bytes.starts_with("{\"scope\":"));
+            let value = serde_json::to_value(compact).unwrap();
+            for value in value.as_object().unwrap().values() {
+                let mut expected = value.clone();
+                expected.sort_all_objects();
+                assert_eq!(value.to_string(), expected.to_string());
+            }
+        }
     }
 
     fn decide(value: Value) -> Result<Decision, AppError> {

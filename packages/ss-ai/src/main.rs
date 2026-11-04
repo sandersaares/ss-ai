@@ -5,7 +5,9 @@ use std::io::{self, Write};
 use std::process::ExitCode;
 
 use ohno::AppError;
-use ss_ai::{NativeHttp, NativeProcess, SystemClock, classification, run, run_cargo, run_git};
+use ss_ai::{
+    NativeHttp, NativeProcess, SystemClock, classification, run, run_cargo, run_context, run_git,
+};
 
 /// Gives the installed executable the same allocator policy on both platforms.
 ///
@@ -41,6 +43,15 @@ fn execute() -> Result<(), AppError> {
             .chain(arguments.iter().skip(2));
         let process = NativeProcess::new(&env::current_dir()?);
         run_git(git_arguments, &process)?
+    } else if arguments
+        .get(1)
+        .is_some_and(|argument| argument == "context")
+    {
+        let context_arguments = arguments
+            .first()
+            .into_iter()
+            .chain(arguments.iter().skip(2));
+        run_context(context_arguments, &SystemClock::default())?
     } else {
         let process = NativeProcess::new(&env::current_dir()?);
         let http = NativeHttp::new()?;
