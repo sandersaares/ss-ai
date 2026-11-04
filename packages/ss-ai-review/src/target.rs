@@ -141,7 +141,9 @@ impl Target {
                 let host = parsed
                     .host_str()
                     .ok_or_else(|| fail("invalidInput", "URL requires a host"))?;
-                let organization = if host.eq_ignore_ascii_case("dev.azure.com") {
+                let organization = if host.eq_ignore_ascii_case("dev.azure.com")
+                    || host.eq_ignore_ascii_case("www.dev.azure.com")
+                {
                     if index < 2 {
                         return Err(fail("invalidInput", "Missing Azure DevOps organization"));
                     }
@@ -262,7 +264,11 @@ fn parse_url(url: &str) -> Result<Url, AppError> {
 fn platform(url: &Url) -> Result<Platform, AppError> {
     match url.host_str() {
         Some("github.com" | "www.github.com") => Ok(Platform::GitHub),
-        Some(host) if host == "dev.azure.com" || host.ends_with(".visualstudio.com") => {
+        Some(host)
+            if host == "dev.azure.com"
+                || host == "www.dev.azure.com"
+                || host.ends_with(".visualstudio.com") =>
+        {
             Ok(Platform::AzureDevOps)
         }
         _ => Err(fail(

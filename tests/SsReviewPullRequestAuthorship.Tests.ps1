@@ -96,6 +96,7 @@ BeforeAll {
             pullRequest           = [ordered]@{
                 id                      = 42
                 title                   = 'Test change'
+                description             = $null
                 reviewedSourceCommit    = 'aaa111'
                 reviewedMergeBaseCommit = 'bbb222'
             }

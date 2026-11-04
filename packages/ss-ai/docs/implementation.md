@@ -25,6 +25,11 @@ decisions and transaction boundaries. Assessment owns the independent source
 and judgment model, while review retains provider-backed authority decisions.
 Local context operations do not require provider transport and do not make
 review or authorship judgments.
+Capture creation composes the review provider adapters with the context
+producer. The producer retains the destination lock across collection and
+publishes the sidecar before the immutable capture, so readers never observe
+a capture without its initial decisions. Semantic decisions use the same
+sidecar lock and remain separate from provider evidence.
 Local finding operations use the same runtime transactions as PowerShell
 consumers, so hybrid runs preserve accepted updates and artifact history.
 Audit and projection operations share the captured-evidence serializer and

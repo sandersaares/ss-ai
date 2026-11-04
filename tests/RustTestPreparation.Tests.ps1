@@ -32,7 +32,7 @@ BeforeAll {
             return
         }
         if ($args[0] -eq 'metadata') {
-            return '{"workspace_members":["fixture"],"packages":[{"id":"fixture","targets":[{"name":"native","kind":["test"]},{"name":"git","kind":["test"]}]}]}'
+            return '{"workspace_members":["fixture"],"packages":[{"id":"fixture","targets":[{"name":"native","kind":["test"]},{"name":"capture_parity","kind":["test"]},{"name":"git","kind":["test"]}]}]}'
         }
 
         $target = $args[[array]::IndexOf($args, '--target-dir') + 1]
@@ -248,6 +248,7 @@ Describe 'Rust preparation boundary' {
         $script:CargoCalls[2] | Should -Contain 'git'
         $script:CargoCalls[2] | Should -Contain '--lib'
         $script:CargoCalls[2] | Should -Not -Contain 'native'
+        $script:CargoCalls[2] | Should -Not -Contain 'capture_parity'
         $script:CargoCalls[3] | Should -Contain '--doc'
     }
 
@@ -257,6 +258,22 @@ Describe 'Rust preparation boundary' {
         $prepared.status | Should -Be 'complete'
         $prepared.provider | Should -BeNullOrEmpty
         $script:ProviderBuilds | Should -Be 0
+    }
+
+    It 'prepares a provider for capture parity and excludes it when preparation fails' {
+        $prepared = New-RustTestPreparation -RepositoryRoot $fixture.root -PrerequisitePath $fixture.record -TestTarget capture_parity
+        $script:ProviderBuilds | Should -Be 1
+        $null = Read-RustTestPreparation -RepositoryRoot $fixture.root -PrerequisitePath $fixture.record -TestTarget capture_parity
+
+        $failed = @{ status = 'providerFailed'; providerFailure = 'fixture'; targetDirectory = 'unused' }
+        Mock Invoke-RustTestCargo {
+            $script:CargoCalls.Add(@($ArgumentList))
+            $global:LASTEXITCODE = 0
+        }
+        { Invoke-PreparedRustTests -Preparation $failed -PrerequisitePath $fixture.record -TestTarget capture_parity,git } |
+            Should -Throw '*execution failed*'
+        $script:CargoCalls[-1] | Should -Contain 'git'
+        $script:CargoCalls[-1] | Should -Not -Contain 'capture_parity'
     }
 
     It 'preserves selected targets and filters as separate Cargo arguments' {

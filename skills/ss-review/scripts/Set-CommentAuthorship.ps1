@@ -37,39 +37,20 @@ param(
 
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
+$PSNativeCommandUseErrorActionPreference = $true
+. "$PSScriptRoot\lib\NativeCaptureBridge.ps1"
 
-. "$PSScriptRoot\lib\JsonValue.ps1"
-. "$PSScriptRoot\lib\PullRequestIdentity.ps1"
-. "$PSScriptRoot\lib\PullRequestModel.ps1"
-. "$PSScriptRoot\lib\WorkflowData.ps1"
-
-if ($Classification -and $ClassificationPath) {
+if ($PSBoundParameters.ContainsKey('Classification') -and $PSBoundParameters.ContainsKey('ClassificationPath')) {
     throw 'Supply either -Classification or -ClassificationPath, not both.'
 }
-if (-not $Classification -and -not $ClassificationPath) {
+if (-not $PSBoundParameters.ContainsKey('Classification') -and -not $PSBoundParameters.ContainsKey('ClassificationPath')) {
     throw 'Supply the classifications with -Classification or -ClassificationPath.'
 }
 
-$classificationText = if ($ClassificationPath) {
-    (Read-PullRequestFileText -Path ((Resolve-PullRequestPath -Path $ClassificationPath)) -Encoding ([System.Text.Encoding]::UTF8))
-} else {
-    $Classification
-}
-
-$entries = ConvertFrom-JsonVerbatim -Text $classificationText
-if ($entries -isnot [object[]]) {
-    throw 'The classifications must be a JSON array of objects carrying threadId, commentId and kind.'
-}
-
-$lock = Open-WorkflowDataLock -Path "$Path.authorship.json"
-try {
-    $summary = Save-CommentAuthorship -Path $Path -SnapshotId $SnapshotId -Classification $entries
-} finally { $lock.Dispose() }
-
-[ordered]@{
-    contextPath           = Resolve-PullRequestPath -Path $Path
-    applied               = $summary['applied']
-    unchanged             = $summary['unchanged']
-    indeterminate         = $summary['indeterminate']
-    isComplete            = $summary['isComplete']
-} | ConvertTo-Json -Depth 32 -Compress
+$arguments = [Collections.Generic.List[string]]::new()
+$arguments.Add('set-authorship')
+$arguments.Add("--path=$Path")
+$arguments.Add("--snapshot-id=$SnapshotId")
+if ($PSBoundParameters.ContainsKey('Classification')) { $arguments.Add("--classification=$Classification") }
+if ($PSBoundParameters.ContainsKey('ClassificationPath')) { $arguments.Add("--classification-path=$ClassificationPath") }
+Invoke-NativeCaptureContext -Arguments $arguments.ToArray()

@@ -462,7 +462,7 @@ fn valid_cursor(value: &str) -> bool {
 }
 
 /// Resolves relative paths and dot segments without requiring the destination to exist.
-fn full_path(path: &Path) -> Result<PathBuf, AppError> {
+pub(crate) fn full_path(path: &Path) -> Result<PathBuf, AppError> {
     let mut result = PathBuf::new();
     for component in absolute(path)?.components() {
         match component {
@@ -477,7 +477,7 @@ fn full_path(path: &Path) -> Result<PathBuf, AppError> {
 }
 
 /// Ensures persistent paths can be represented losslessly in JSON.
-fn path_string(path: &Path) -> Result<&str, AppError> {
+pub(crate) fn path_string(path: &Path) -> Result<&str, AppError> {
     path.to_str()
         .ok_or_else(|| fail("invalidInput", "Path is not valid Unicode"))
 }

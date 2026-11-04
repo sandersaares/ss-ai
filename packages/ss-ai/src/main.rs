@@ -48,6 +48,14 @@ fn execute() -> Result<(), AppError> {
         .get(1)
         .is_some_and(|argument| argument == "context")
     {
+        if arguments
+            .get(2)
+            .is_some_and(|argument| argument == "create")
+        {
+            let process = NativeProcess::new(&env::current_dir()?);
+            let http = NativeHttp::new()?;
+            return write_output(&run(&arguments, &process, &http, &SystemClock::default())?);
+        }
         let context_arguments = arguments
             .first()
             .into_iter()
@@ -68,6 +76,11 @@ fn execute() -> Result<(), AppError> {
         let http = NativeHttp::new()?;
         run(&arguments, &process, &http, &SystemClock::default())?
     };
+    write_output(&output)
+}
+
+/// Writes one complete response after command execution succeeds.
+fn write_output(output: &str) -> Result<(), AppError> {
     let mut stdout = io::stdout().lock();
     stdout.write_all(output.as_bytes())?;
     stdout.write_all(b"\n")?;

@@ -1,0 +1,34 @@
+[package]
+name = "ss-ai-review-fuzz"
+description = "Bounded provider capture fuzz target for ss-ai-review"
+version = "0.1.0"
+publish = false
+authors.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+include.workspace = true
+
+[package.metadata]
+cargo-fuzz = true
+
+[package.metadata.docs.rs]
+all-features = true
+
+[dependencies]
+jiff = { workspace = true }
+libfuzzer-sys = { workspace = true, features = ["link_libfuzzer"] }
+ohno = { workspace = true }
+serde_json = { workspace = true }
+ss-ai-review = { workspace = true }
+
+[[bin]]
+name = "provider_capture"
+path = "fuzz_targets/provider_capture.rs"
+test = false
+doc = false
+bench = false
+
+[lints]
+workspace = true

@@ -46,6 +46,12 @@ fn dispatch(
         .get(1)
         .is_some_and(|argument| argument == "context")
     {
+        if arguments
+            .get(2)
+            .is_some_and(|argument| argument == "create")
+        {
+            return context::run_with_providers(local_arguments(arguments), clock, process, http);
+        }
         return context::run(local_arguments(arguments), clock);
     }
     if arguments

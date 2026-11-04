@@ -1,0 +1,51 @@
+{
+  "target": {
+    "platform": "gitHub",
+    "collectionUrl": null,
+    "organization": "octo",
+    "project": null,
+    "repository": "widget",
+    "pullRequestId": 7,
+    "webUrl": "https://github.com/octo/widget/pull/7"
+  },
+  "responses": {
+    "user": { "login": "runner", "id": 701, "node_id": "U_runner", "type": "User", "html_url": "https://github.com/runner" },
+    "pullRequest": {
+      "number": 7, "node_id": "PR_7", "title": "Unicode capture",
+      "body": "Review café — “design” 🤖", "state": "open", "merged": false,
+      "mergeable": true, "merge_commit_sha": "dddddddddddddddddddddddddddddddddddddddd", "draft": false,
+      "user": { "login": "author", "id": 601, "node_id": "U_author", "type": "User", "html_url": "https://github.com/author" },
+      "created_at": "2026-08-01T08:00:00Z", "mergeable_state": "clean",
+      "head": { "ref": "topic", "label": "octo:topic", "sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "repo": { "full_name": "octo/widget", "owner": { "login": "octo" } } },
+      "base": { "ref": "main", "label": "octo:main", "sha": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb", "repo": { "full_name": "octo/widget", "owner": { "login": "octo" } } }
+    },
+    "reviews": [],
+    "issueComments": [],
+    "requestedReviewers": { "users": [], "teams": [] },
+    "compare": { "status": "ahead", "merge_base_commit": { "sha": "cccccccccccccccccccccccccccccccccccccccc" } },
+    "reviewThreads": {
+      "data": { "repository": { "pullRequest": { "reviewThreads": {
+        "pageInfo": { "hasNextPage": false, "endCursor": null },
+        "nodes": [{
+          "id": "PRRT_1", "isResolved": false, "isOutdated": false, "isCollapsed": false,
+          "path": "src/café.rs", "line": 5, "originalLine": 5, "startLine": 4,
+          "originalStartLine": 4, "diffSide": "RIGHT", "startDiffSide": "RIGHT", "subjectType": "LINE",
+          "resolvedBy": null,
+          "comments": {
+            "pageInfo": { "hasNextPage": false, "endCursor": null },
+            "nodes": [{
+              "id": "PRRC_1", "databaseId": 900001, "url": "https://github.com/octo/widget/pull/7#discussion_PRRC_1",
+              "body": "Alpha — “gamma” 🤖 café", "createdAt": "2026-08-03T12:00:00Z",
+              "lastEditedAt": null, "replyTo": null, "state": "SUBMITTED",
+              "author": { "login": "reviewer", "__typename": "User", "id": "U_reviewer", "databaseId": 501, "url": "https://github.com/reviewer" },
+              "authorAssociation": "MEMBER", "minimizedReason": null
+            }]
+          }
+        }]
+      } } } }
+    },
+    "issueEdits": { "data": { "repository": { "pullRequest": { "comments": { "pageInfo": { "hasNextPage": false, "endCursor": null }, "nodes": [] } } } } },
+    "reviewEdits": { "data": { "repository": { "pullRequest": { "reviews": { "pageInfo": { "hasNextPage": false, "endCursor": null }, "nodes": [] } } } } },
+    "timeline": { "data": { "repository": { "pullRequest": { "timelineItems": { "pageInfo": { "hasNextPage": false, "endCursor": null }, "nodes": [] } } } } }
+  }
+}
