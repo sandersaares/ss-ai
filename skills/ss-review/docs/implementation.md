@@ -76,7 +76,7 @@ The mode never creates synthetic human verdicts or merge decisions. It stops on 
 
 ## Worker input boundary
 
-`Copy-ReviewInstructionSources.ps1` snapshots the skill's built-in focus areas
+`ss-ai workflow snapshot-instructions` snapshots the skill's built-in focus areas
 and recursively discovers `AGENTS.md` and `*.instructions.md` under the roots
 in `COPILOT_CUSTOM_INSTRUCTIONS_DIRS`. The comma-separated list accepts spaces
 inside paths, trims surrounding whitespace, ignores empty entries, and resolves
@@ -86,8 +86,10 @@ path identities ordinally, preserving distinct Unicode spellings without assumin
 filesystem case sensitivity from the operating system.
 
 The snapshot uses `skill/focus-areas.md` and `external/<root-identity>/<relative-path>`.
-Each root identity hashes its absolute configured path, keeping equally named files
-from distinct roots separate and binding cache provenance to the instruction owner.
+Each root identity hashes its absolute configured path, its resolved directory,
+and each selected file's relative path and resolved parent and file locations.
+This keeps equally named files from distinct origins separate and changes the
+identity when a link is retargeted to different guidance.
 The command returns the root-to-prefix mapping for reference expansion and learning.
 Directory links are traversed with ancestry-cycle detection, including installed
 `.github/instructions` links. Discovery excludes the current review's session-state
@@ -108,6 +110,9 @@ lock, so concurrent readers can proceed while snapshot and cache replacement wai
 Authorized repository sources are added separately before lookup. The generation recipe,
 discovery implementation, exact source paths, and source bytes participate in
 the cache key, so incompatible instruction provenance produces a miss.
+Selected repository sources use `review-repository/<root-identity>/<relative-path>`
+and the same origin identity. The returned mapping retains the selected spelling
+for reference expansion.
 Runtime scripts, report templates, and pinned npm manifests stay together in
 the skill tree so installed links and checkout-relative use share assets.
 
@@ -234,6 +239,17 @@ Reference expansion carries referring scopes recursively. The preparation agent
 assigns one writer per expanded target and merges every referring context,
 including later-discovered referrers and their effect on expanded descendants.
 Shared references retain distinct applicability contexts even when fetched only once.
+
+Source discovery publishes an identity for the exact snapshot, including any
+explicitly authorized repository instructions. Cache lookup checks that identity
+and returns a preparation identity. On a miss, the preparation command copies
+the snapshot into a generation-specific working directory before workers edit
+raw inputs. Workers keep using that directory, so an older attempt cannot write
+into a newer attempt's inputs. Publication checks the preparation and generation
+identities and source digest under the session operation lock, then stages the
+complete artifacts for replacement. A receipt binds the published bytes and
+cache key to that attempt; storage verifies the receipt rather than associating
+surviving artifacts with a later lookup.
 
 Categorization workers use the same versioned JSON map as final assembly.
 The schema and format reference live beside the preparation prompt. Source
@@ -658,9 +674,19 @@ The focus-area cache memoizes instruction expansion, not review results.
 
 Its key represents every input capable of changing the generated guidance:
 materialized instruction sources, their stable paths and contents, the
-generation recipe, common and focus-area data guides, format, schema, rendering tools and profile, the installed
-native utility's bytes, the cache schema, and the external-reference freshness policy. Review files, discussion, and session identity are excluded
-because they do not define the guidance corpus.
+generation recipe, common and focus-area data guides, format, schema, rendering
+tools and profile, the installed native generation implementation's build
+fingerprint, the cache schema, and the external-reference freshness policy.
+Review files, discussion, and session identity are excluded because they do not
+define the guidance corpus.
+
+The build fingerprint covers the native CLI, workflow, context, runtime and Git
+source trees used by generation, their manifests, the workspace manifest and
+lockfile, the review schemas, and the fingerprint build script. Paths and file
+bytes are hashed in deterministic order together with the build target and
+profile. Directory tracking includes added and removed inputs. This binds reuse
+to the implementation even for dirty or same-version builds without depending
+on the installed executable's path.
 
 The default generator profile identifies the model that verifies the final
 focus-area scope semantics. The generation recipe also records the preparatory models.
