@@ -25,6 +25,7 @@ param(
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 $PSNativeCommandUseErrorActionPreference = $true
+. "$PSScriptRoot/lib/NativeContextPath.ps1"
 
 # Match the query excerpt limit because parser errors can include captured evidence.
 function Get-NativeContextErrorExcerpt {
@@ -67,6 +68,9 @@ function Invoke-NativeContext {
 }
 
 $arguments = [Collections.Generic.List[string]]::new()
+$Path = Resolve-NativeContextFilePath -Path $Path
+$RequestPath = Resolve-NativeContextFilePath -Path $RequestPath
+$DiagnosticsPath = Resolve-NativeContextFilePath -Path $DiagnosticsPath
 foreach ($argument in @('prepare', "--path=$Path", "--request-path=$RequestPath",
     "--diagnostics-path=$DiagnosticsPath", "--query=$Query", "--scope=$Scope", "--page-size=$PageSize")) {
     $arguments.Add($argument)
@@ -77,7 +81,11 @@ foreach ($entry in @(
     @('Text', 'text'), @('TextPath', 'text-path'), @('ComparePath', 'compare-path')
 )) {
     if ($PSBoundParameters.ContainsKey($entry[0])) {
-        $arguments.Add("--$($entry[1])=$($PSBoundParameters[$entry[0]])")
+        $value = $PSBoundParameters[$entry[0]]
+        if ($entry[0] -in @('TextPath', 'ComparePath') -and -not [string]::IsNullOrEmpty($value)) {
+            $value = Resolve-NativeContextFilePath -Path $value
+        }
+        $arguments.Add("--$($entry[1])=$value")
     }
 }
 if ($PSBoundParameters.ContainsKey('Files') -and $Files.Count -eq 0) {

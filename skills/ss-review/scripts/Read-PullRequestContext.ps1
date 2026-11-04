@@ -29,6 +29,7 @@ param(
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 $PSNativeCommandUseErrorActionPreference = $true
+. "$PSScriptRoot/lib/NativeContextPath.ps1"
 
 # Match the query excerpt limit because parser errors can include captured evidence.
 function Get-NativeContextErrorExcerpt {
@@ -74,11 +75,13 @@ function Invoke-NativeContext {
 $arguments = [Collections.Generic.List[string]]::new()
 if ($PSCmdlet.ParameterSetName -eq 'Saved') {
     $arguments.Add('read-saved')
+    $RequestPath = Resolve-NativeContextFilePath -Path $RequestPath
     $arguments.Add("--request-path=$RequestPath")
     if ($Next) { $arguments.Add('--next') }
     if ($Restart) { $arguments.Add('--restart') }
 } else {
     $arguments.Add('read')
+    $Path = Resolve-NativeContextFilePath -Path $Path
     $arguments.Add("--path=$Path")
     $arguments.Add("--query=$Query")
     $arguments.Add("--scope=$Scope")
@@ -90,7 +93,13 @@ if ($PSCmdlet.ParameterSetName -eq 'Saved') {
         @('ComparePath', 'compare-path'), @('Cursor', 'cursor')
     )) {
         if ($PSBoundParameters.ContainsKey($entry[0])) {
-            $arguments.Add("--$($entry[1])=$($PSBoundParameters[$entry[0]])")
+            $value = $PSBoundParameters[$entry[0]]
+            # The native selector validator must still see blank file-list arguments.
+            if (($entry[0] -eq 'FilesPath' -and -not [string]::IsNullOrWhiteSpace($value)) -or
+                ($entry[0] -eq 'ComparePath' -and -not [string]::IsNullOrEmpty($value))) {
+                $value = Resolve-NativeContextFilePath -Path $value
+            }
+            $arguments.Add("--$($entry[1])=$value")
         }
     }
     if ($IndexOnly) { $arguments.Add('--index-only') }
