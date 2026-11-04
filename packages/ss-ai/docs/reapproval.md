@@ -241,8 +241,21 @@ from an uncertain assessment's diagnostic.
 A completed significant or uncertain assessment produces a standalone attributed comment
 through native `notify`. Its `<!-- ss-autoreapprove-needs-review {JSON} -->`
 marker binds the account, repository, PR, approval anchor, assessed source,
-policy, and assessment. The comment states that a separate new review is required.
-It does not cast a negative vote or modify existing discussion. Uncertainty keeps
+policy, and assessment. The heading `Reasons (nonexhaustive)` identifies a list
+that may omit other reasons because assessment can stop once refusal is justified.
+The reasons explain only why
+the existing approval cannot be renewed. The comment omits PR summaries,
+unrelated discussion, partial-coverage caveats, and execution diagnostics.
+Those diagnostics remain in native results and the final skill report.
+The complete UTF-8 comment, including its escaped marker, fits a conservative
+16 KiB publication budget. It keeps whole reasons when possible and shortens
+an individually oversized reason; the assessment retains the full explanation.
+After verifying the comment, notification clears the authenticated account's
+captured positive decisions: GitHub dismisses retained `APPROVED` reviews by
+immutable review ID, and ADO resets a positive reviewer vote to zero. Already
+dismissed reviews and nonpositive votes require no write.
+It does not cast a negative vote, change other reviewers, or modify existing
+discussion. Uncertainty keeps
 its explicit diagnostic and partial run status even after the notice is posted.
 
 Inspection recognizes only service-authenticated comments by the account and
@@ -270,6 +283,28 @@ retains the intended comment's scope, timestamp, exact-body, and uniqueness
 checks. Recovery uses the same utility version and supported run schema.
 Incompatible schemas fail before changing stored records or performing provider
 effects; read-only readback does not bypass the version policy.
+
+The schema-2 notice journal also retains each captured approval's `pending`,
+`intent`, `verified`, or `refused` reset state. The original captured evidence
+determines the immutable reset targets, including on reload. Comment readback
+precedes any reset. Each reset persists intent before a single provider request,
+then verifies standing. A pending reset may start during recovery; an uncertain
+or refused request is never resent. Readback can settle that intent after the
+account manually clears its approval. A failed reset leaves notification incomplete
+and blocks automatic approval publication through the shared journal lock.
+GitHub dismissal requires the service's review-dismissal permission; permission
+errors remain explicit, with the comment preserved.
+ADO rereads account vote history to preserve a later independent approval,
+including one with unchanged vote strength. Changed history without a provably
+later approval remains an explicit failure, not permission to skip the reset.
+It preserves withdrawals, negative
+votes, and reviewer removal, including decisions visible in history captured
+after an earlier positive reviewer read. Its API has no atomic prior-vote condition, so a
+human decision can still race with the reset request. Closed or draft PR recovery
+reads existing effects without initiating resets. An approval that still needs
+clearing leaves notification incomplete; closure or draft conversion alone
+cannot verify a reset. Reopening permits a pending reset but never replays an
+uncertain or refused request.
 
 The final summary lists each in-range candidate as a linked PR number and title.
 It identifies current and retained needs-review decisions.

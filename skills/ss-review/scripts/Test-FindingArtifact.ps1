@@ -52,6 +52,8 @@ if ($PSCmdlet.ParameterSetName -eq 'Identifiers') {
 }
 
 . "$PSScriptRoot\lib\NativeWorkflowBridge.ps1"
+$ManifestPath = $ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath($ManifestPath)
+$Path = $ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath($Path)
 $output = Invoke-NativeReviewWorkflow -Arguments @('validate-review-work', "--manifest-path=$ManifestPath", "--artifact-directory=$Path")
 $result = ConvertFrom-Json -InputObject $output -AsHashtable
 Write-Output $output

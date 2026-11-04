@@ -389,6 +389,12 @@ fn merge_preserves_locations_and_untouched_findings() {
     fs::write(&merged, serde_json::to_vec(&content("a.rs")).unwrap()).unwrap();
     let plan = directory.path("plan.json");
     fs::write(&plan, serde_json::to_vec(&json!({
+        "schemaVersion":1,"groups":[{"sourceFindingIds":["a-1","missing"],"findingPath":"merged.json"}]
+    })).unwrap()).unwrap();
+    let error = findings::consolidate(&reviewers, Some(&plan), &output, &clock).unwrap_err();
+    assert!(error.to_string().contains("missing"));
+    assert!(!output.exists());
+    fs::write(&plan, serde_json::to_vec(&json!({
         "schemaVersion":1,"groups":[{"sourceFindingIds":["a-1","b-1"],"findingPath":"merged.json"}]
     })).unwrap()).unwrap();
     assert!(findings::consolidate(&reviewers, Some(&plan), &output, &clock).is_err());
@@ -456,7 +462,8 @@ fn merge_preserves_locations_and_untouched_findings() {
         r#"{"schemaVersion":1,"clusters":[{"findingIds":["a-1","missing"]}]}"#,
     )
     .unwrap();
-    assert!(findings::validate_candidates(&candidates, &index, &clock).is_err());
+    let error = findings::validate_candidates(&candidates, &index, &clock).unwrap_err();
+    assert!(error.to_string().contains("missing"));
     fs::write(
         &candidates,
         r#"{"schemaVersion":1,"clusters":[],"clusters":[]}"#,
