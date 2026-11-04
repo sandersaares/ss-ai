@@ -80,7 +80,7 @@ $PSNativeCommandUseErrorActionPreference = $true
 . "$PSScriptRoot\lib\FindingMarkdown.ps1"
 . "$PSScriptRoot\lib\TrackerItem.ps1"
 
-if ($ContextPath -and $Destination -cne 'tracker') {
+if ($ContextPath -and $Destination -ne 'tracker') {
     throw "A captured discussion was supplied for the '$Destination' destination, which renders no links out of it. Render with -Destination tracker, or omit -ContextPath."
 }
 
@@ -121,6 +121,7 @@ if ($CombinedPath) { $request.combinedPath = Resolve-PullRequestPath -Path $Comb
 if ($AuditDocumentPath) { $request.auditDocumentPath = Resolve-PullRequestPath -Path $AuditDocumentPath }
 if ($null -ne $overview) { $request.overview = $overview }
 
+ConvertTo-NativeReviewRenderingRequest -Request $request
 $json = Invoke-NativeReviewWorkflowWithJson `
     -Arguments @('render-markdown-files') -PathOption 'request-path' -Value $request
 $result = ConvertFrom-JsonVerbatim -Text $json

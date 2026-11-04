@@ -18,6 +18,8 @@ pub(crate) const RESPONSE_BYTES: usize = 16_384;
 const TEXT_BYTES: usize = 12_288;
 /// Two handoffs permit three workers, including the initial worker.
 pub(crate) const DIRECT_HANDOFF_LIMIT: usize = 2;
+/// Separates decision prose from the native-appended discussion assessment.
+pub(crate) const DISCUSSION_SEPARATOR: &str = "\n\nMaterial discussion: ";
 
 /// Native selection keeps unrelated full-review guides and repository instructions out of assignments.
 const DOCUMENTS: [&str; 3] = [
@@ -32,6 +34,9 @@ const DIRECT_CONTRACT: &str = concat!(
     "each change and the cumulative comparison. Group changes with a shared ",
     "substantive conclusion; native bookkeeping binds every member to exact evidence. ",
     "The final synthesis covers combined effects, material discussion, and unresolved concerns. ",
+    "For significant or uncertain outcomes, rationale explains only why approval cannot be ",
+    "renewed, without PR summaries, coverage caveats, or workflow diagnostics. Keep the ",
+    "discussion assessment separate from the decision rationale. ",
     "The cumulative worker independently considers every final change conclusion ",
     "and material discussion. A resumed or new worker ",
     "reacquires the semantic records and exact evidence it needs. ",
@@ -654,6 +659,50 @@ impl Assessment {
             .map(|judgment| judgment.rationale.as_str())
     }
 
+    /// Renders only the reasons that prevent renewal, not a PR or discussion summary.
+    pub fn refusal_explanation(&self) -> Result<String, AssessmentError> {
+        if !self.needs_review() {
+            return Err(error::MissingCumulativeRationale::classified());
+        }
+        let mut reasons = Vec::new();
+        if let Some(partial) = &self.partial {
+            reasons.push(partial.rationale.as_str());
+        } else {
+            for judgment in self.cumulative.iter().chain(self.decisions.values()).chain(
+                self.checkpoints
+                    .resolutions
+                    .values()
+                    .map(|bound| &bound.value),
+            ) {
+                if judgment.disposition != Disposition::Insignificant {
+                    // Synthesis appends discussion for retained evidence, not for the notice.
+                    let rationale = judgment
+                        .rationale
+                        .split_once(DISCUSSION_SEPARATOR)
+                        .map_or(judgment.rationale.as_str(), |(reason, _)| reason);
+                    if !reasons.contains(&rationale) {
+                        reasons.push(rationale);
+                    }
+                }
+            }
+            if let Some(cumulative) = &self.cumulative {
+                for concern in &cumulative.concerns {
+                    if !reasons.contains(&concern.as_str()) {
+                        reasons.push(concern);
+                    }
+                }
+            }
+        }
+        if reasons.is_empty() {
+            return Err(error::MissingCumulativeRationale::classified());
+        }
+        Ok(reasons
+            .into_iter()
+            .map(|reason| format!("- {}", reason.trim().replace('\n', "\n  ")))
+            .collect::<Vec<_>>()
+            .join("\n\n"))
+    }
+
     /// Supplies the cumulative explanation for publication.
     pub fn explanation(&self) -> Result<&str, AssessmentError> {
         if let Some(partial) = &self.partial {
@@ -1261,9 +1310,7 @@ impl Assessment {
         let partial = PartialConclusion {
             change_id: change_id.to_owned(),
             judgment_digest: hash(judgment)?,
-            rationale: format!(
-                "Partial assessment; unrelated changes may not have been examined. {rationale}"
-            ),
+            rationale: rationale.to_owned(),
         };
         // Requested context is evidence the worker identified as necessary, even
         // when other unrequested changes do not need examination for refusal.

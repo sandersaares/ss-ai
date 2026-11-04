@@ -171,11 +171,21 @@ renewal unless changes introduce significant design changes, likely performance
 regressions, or likely correctness regressions; it does not restrict edit categories.
 
 A significant or uncertain live assessment produces an attributed standalone needs-review
-comment with a hidden marker. Future runs retain that decision without another
+comment with a hidden marker. The comment contains a readable list of reasons
+for withholding renewal, not a PR summary, coverage caveats, or workflow
+diagnostics. The utility then clears the account's captured positive approval:
+GitHub dismisses its retained approving reviews; ADO resets its positive vote
+to zero. Already-cleared approvals need no write. The utility does not cast
+negative votes or change another account's decisions. Independent later
+approvals supersede the refusal and remain intact. ADO cannot atomically
+condition a reset on the prior vote, so a concurrent human vote can race with
+the request. Reset failures remain explicit even when the comment exists.
+Future runs retain that decision without another
 source assessment or duplicate comment. A strictly later approval by the
 authenticated account expires older markers; another account cannot reset them.
 Uncertainty retains its explicit failure diagnostic;
-posting a notice does not turn the assessment into success. Dry runs never post notices.
+posting a notice does not turn the assessment into success. Dry runs never post notices
+or clear approvals.
 
 Every in-range candidate appears in the skill's final linked summary with its
 decision. Separate new reviews remain visible across invocations.
