@@ -22,7 +22,7 @@ use ss_ai_review_workflow::audit::{
     read_decisions, set_merge_approval, set_merge_approval_from_files, test_merge_approval,
 };
 use ss_ai_review_workflow::workflow_plan::DecisionValue;
-use ss_ai_runtime::{Clock, FileTransaction, SystemClock, caused_by, fail};
+use ss_ai_runtime::{Clock, FileTransaction, SystemClock, caused_by, classification, fail};
 
 /// Prevents a concurrent subprocess launch from temporarily inheriting a test's held lock.
 /// Poisoning does not compromise fixture data: the mutex protects only exclusion.
@@ -573,6 +573,13 @@ fn feedback_text_preserves_bom_encoded_prose() {
         add_feedback(&feedback, &artifact, "response", "F-1", &text_path, &clock).unwrap();
         assert_eq!(get_feedback(&feedback, "F-1", &clock).unwrap(), text);
     }
+    fs::write(&text_path, b"words \xff").unwrap();
+    let feedback = workspace.path("feedback-lossy.json");
+    add_feedback(&feedback, &artifact, "response", "F-1", &text_path, &clock).unwrap();
+    assert_eq!(
+        get_feedback(&feedback, "F-1", &clock).unwrap(),
+        "words \u{fffd}"
+    );
 }
 
 #[test]
@@ -600,6 +607,46 @@ fn bom_marked_audit_records_preserve_duplicate_key_validation() {
     for bytes in encoded(duplicate) {
         fs::write(&feedback, bytes).unwrap();
         assert!(get_feedback(&feedback, "F-1", &clock).is_err());
+    }
+}
+
+#[test]
+fn malformed_feedback_record_is_not_rewritten() {
+    let workspace = Workspace::new("malformed-feedback-encoding");
+    let artifact = workspace.put(
+        "findings.json",
+        &json!({"schemaVersion":1, "kind":"consolidated",
+            "findings":[finding("F-1","src/lib.rs")], "removed":[]}),
+    );
+    let feedback = workspace.path("feedback.json");
+    let text_path = workspace.path("text.txt");
+    fs::write(&text_path, "new feedback").unwrap();
+    let record = r#"{"schemaVersion":1,"feedback":[{"responseId":"response","findingId":"F-1","text":"Z"}]}"#;
+    let replacements: [(&[u8], &[u8]); 5] = [
+        (b"Z", &[0xff]),
+        (&[b'Z', 0], &[0x00, 0xd8]),
+        (&[0, b'Z'], &[0xd8, 0x00]),
+        (&[b'Z', 0, 0, 0], &[0x00, 0xd8, 0, 0]),
+        (&[0, 0, 0, b'Z'], &[0, 0, 0xd8, 0x00]),
+    ];
+    for (mut bytes, (needle, replacement)) in encoded(record).into_iter().zip(replacements) {
+        let offset = bytes
+            .windows(needle.len())
+            .position(|part| part == needle)
+            .unwrap();
+        bytes[offset..offset + needle.len()].copy_from_slice(replacement);
+        fs::write(&feedback, &bytes).unwrap();
+        let error = add_feedback(
+            &feedback,
+            &artifact,
+            "another",
+            "F-1",
+            &text_path,
+            &SystemClock::default(),
+        )
+        .unwrap_err();
+        assert_eq!(classification(&error), "invalidInput");
+        assert_eq!(fs::read(&feedback).unwrap(), bytes);
     }
 }
 

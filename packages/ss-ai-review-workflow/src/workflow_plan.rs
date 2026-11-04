@@ -8,7 +8,7 @@ use ohno::AppError;
 use serde::de::{Error as _, MapAccess, SeqAccess, Visitor};
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Number, Value};
-use ss_ai_review_context::decode_file_text;
+use ss_ai_review_context::decode_workflow_text;
 use ss_ai_runtime::{Clock, FileTransaction, caused_by, fail, read_bytes};
 
 /// Selects the schema and list in a workflow plan.
@@ -259,7 +259,7 @@ impl<'de> Deserialize<'de> for StrictValue {
 
 /// Parses JSON without discarding conflicting object keys.
 pub(crate) fn parse_json(bytes: &[u8]) -> Result<Value, AppError> {
-    let text = decode_file_text(bytes);
+    let text = decode_workflow_text(bytes)?;
     let StrictValue(value) = serde_json::from_str(&text)
         .map_err(|error| caused_by("invalidInput", "Invalid JSON", error))?;
     Ok(value)
@@ -487,7 +487,9 @@ fn write_plan(transaction: &FileTransaction<'_>, plan: &Plan) -> Result<(), AppE
 #[cfg(test)]
 #[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
-    use super::{PlanItem, PlanKind, parse_plan};
+    use ss_ai_runtime::classification;
+
+    use super::{PlanItem, PlanKind, parse_json, parse_plan};
 
     /// Builds the BOM-marked forms accepted by the shared PowerShell reader.
     fn encoded(text: &str) -> Vec<Vec<u8>> {
@@ -521,6 +523,40 @@ mod tests {
         }
         for bytes in encoded(duplicate) {
             parse_plan(PlanKind::Decisions, &bytes).unwrap_err();
+        }
+    }
+
+    #[test]
+    fn structured_json_rejects_malformed_unicode_without_replacement() {
+        let encoded = encoded(r#"{"text":"Z"}"#);
+        let replacements: [(&[u8], &[u8]); 5] = [
+            (b"Z", &[0xff]),
+            (&[b'Z', 0], &[0x00, 0xd8]),
+            (&[0, b'Z'], &[0xd8, 0x00]),
+            (&[b'Z', 0, 0, 0], &[0x00, 0xd8, 0, 0]),
+            (&[0, 0, 0, b'Z'], &[0, 0, 0xd8, 0x00]),
+        ];
+        for (mut bytes, (needle, replacement)) in encoded.into_iter().zip(replacements) {
+            let offset = bytes
+                .windows(needle.len())
+                .position(|part| part == needle)
+                .unwrap();
+            bytes
+                .get_mut(offset..offset + needle.len())
+                .unwrap()
+                .copy_from_slice(replacement);
+            let error = parse_json(&bytes).unwrap_err();
+            assert_eq!(classification(&error), "invalidInput");
+        }
+        for bytes in [
+            b"{\"text\":\"\xff\"}".to_vec(),
+            vec![0xff, 0xfe, 0x7b],
+            vec![0xfe, 0xff, 0x7b],
+            vec![0xff, 0xfe, 0, 0, 0x7b],
+            vec![0, 0, 0xfe, 0xff, 0x7b],
+        ] {
+            let error = parse_json(&bytes).unwrap_err();
+            assert_eq!(classification(&error), "invalidInput");
         }
     }
 

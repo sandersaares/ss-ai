@@ -137,20 +137,28 @@ fn parse(bytes: &[u8]) -> Result<Value, AppError> {
 ///
 /// Rejects malformed text and duplicate or ambiguous property names.
 pub fn parse_json(bytes: &[u8]) -> Result<Value, AppError> {
-    let text = if let Some(bytes) = bytes.strip_prefix(&[0xef, 0xbb, 0xbf]) {
-        decode_utf8(bytes)?
+    parse_text(&decode_workflow_text(bytes)?)
+}
+
+/// Decodes structured workflow data without replacing malformed characters.
+///
+/// # Errors
+///
+/// Rejects malformed Unicode input.
+pub fn decode_workflow_text(bytes: &[u8]) -> Result<String, AppError> {
+    if let Some(bytes) = bytes.strip_prefix(&[0xef, 0xbb, 0xbf]) {
+        decode_utf8(bytes)
     } else if let Some(bytes) = bytes.strip_prefix(&[0xff, 0xfe, 0x00, 0x00]) {
-        decode_utf32(bytes, true)?
+        decode_utf32(bytes, true)
     } else if let Some(bytes) = bytes.strip_prefix(&[0x00, 0x00, 0xfe, 0xff]) {
-        decode_utf32(bytes, false)?
+        decode_utf32(bytes, false)
     } else if let Some(bytes) = bytes.strip_prefix(&[0xff, 0xfe]) {
-        decode_utf16(bytes, true)?
+        decode_utf16(bytes, true)
     } else if let Some(bytes) = bytes.strip_prefix(&[0xfe, 0xff]) {
-        decode_utf16(bytes, false)?
+        decode_utf16(bytes, false)
     } else {
-        decode_utf8(bytes)?
-    };
-    parse_text(&text)
+        decode_utf8(bytes)
+    }
 }
 
 /// Rejects invalid UTF-8 rather than changing data before validation.
