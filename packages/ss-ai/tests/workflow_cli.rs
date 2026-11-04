@@ -33,6 +33,77 @@ fn plan_creation_runs_without_provider_tools() {
     assert_eq!(plan.get("updates"), Some(&serde_json::json!([])));
 }
 
+/// Decision plans use the same validated native authoring boundary.
+#[test]
+#[cfg_attr(miri, ignore = "requires a native subprocess")]
+fn decision_plan_creation_and_append_use_native_writer() {
+    let directory = Builder::new()
+        .prefix(".decision-plan-cli-")
+        .tempdir_in(env!("CARGO_MANIFEST_DIR"))
+        .unwrap();
+    let path = directory.path().join("decisions.json");
+    let item = directory.path().join("decision.json");
+    fs::write(&item, r#"{"findingId":"F1","decision":"needs-audit"}"#).unwrap();
+    for (command, extra) in [
+        ("plan-initialize", None),
+        ("plan-append", Some(item.as_path())),
+    ] {
+        let mut invocation = Command::new(env!("CARGO_BIN_EXE_ss-ai"));
+        invocation
+            .args(["workflow", command, "--kind", "decisions", "--path"])
+            .arg(&path);
+        if let Some(item) = extra {
+            invocation.arg("--item-path").arg(item);
+        }
+        let output = invocation.env("PATH", "").output().unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+    let plan: Value = serde_json::from_slice(&fs::read(path).unwrap()).unwrap();
+    assert_eq!(
+        plan.get("decisions")
+            .and_then(|decisions| decisions.get(0))
+            .and_then(|decision| decision.get("decision")),
+        Some(&Value::from("needs-audit"))
+    );
+}
+
+/// Publication adapters validate complete snapshots through the workflow command.
+#[test]
+#[cfg_attr(miri, ignore = "requires a native subprocess")]
+fn approved_snapshot_request_validates_at_cli_boundary() {
+    let directory = Builder::new()
+        .prefix(".approved-check-cli-")
+        .tempdir_in(env!("CARGO_MANIFEST_DIR"))
+        .unwrap();
+    let request = directory.path().join("request.json");
+    let approved = serde_json::json!({
+        "schemaVersion": 2, "target": null, "reviewedSourceCommit": null,
+        "reviewedMergeBaseCommit": null, "reviewedContextHash": null, "findings": []
+    });
+    fs::write(
+        &request,
+        serde_json::to_vec(&serde_json::json!({"approved": approved, "context": null})).unwrap(),
+    )
+    .unwrap();
+    let output = Command::new(env!("CARGO_BIN_EXE_ss-ai"))
+        .args(["workflow", "approved", "check-request", "--request-path"])
+        .arg(&request)
+        .env("PATH", "")
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let result: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(result.get("status"), Some(&Value::from("Valid")));
+}
+
 /// Empty plans are valid authoring state but not valid mutation requests.
 #[test]
 #[cfg_attr(miri, ignore = "requires a native subprocess")]

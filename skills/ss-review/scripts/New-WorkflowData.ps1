@@ -9,16 +9,6 @@ param(
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 $PSNativeCommandUseErrorActionPreference = $true
-# Decision plans belong to the audit family, which retains its PowerShell writer
-# until the audit and Markdown migration described in TODO.md, "Skill design".
-if ($Kind -ceq 'decisions') {
-    . "$PSScriptRoot\lib\JsonValue.ps1"
-    . "$PSScriptRoot\lib\PullRequestModel.ps1"
-    . "$PSScriptRoot\lib\WorkflowData.ps1"
-    New-WorkflowList -Kind $Kind -Path $Path
-    @{ status = 'Created'; path = (Resolve-PullRequestPath -Path $Path); kind = $Kind } | ConvertTo-Json -Compress
-    return
-}
 . "$PSScriptRoot\lib\NativeWorkflowBridge.ps1"
 $fullPath = $ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath($Path)
 Invoke-NativeReviewWorkflow -Arguments @('plan-initialize', "--kind=$Kind", "--path=$fullPath")

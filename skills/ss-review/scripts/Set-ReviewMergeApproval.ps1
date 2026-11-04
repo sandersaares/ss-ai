@@ -12,12 +12,14 @@ param(
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 $PSNativeCommandUseErrorActionPreference = $true
-. "$PSScriptRoot\lib\JsonValue.ps1"
-. "$PSScriptRoot\lib\PullRequestModel.ps1"
-. "$PSScriptRoot\lib\WorkflowData.ps1"
-. "$PSScriptRoot\lib\ReviewAuditState.ps1"
-$context = Read-PullRequestContextDocument -Path $ContextPath
-$previous = if ($CarryForward) { Read-PullRequestContextDocument -Path $PreviousContextPath } else { $null }
-$status = Set-ReviewMergeApproval -Path (Join-Path $OutputDirectory 'merge-approval.json') -Context $context `
-    -ApproveMerge ($Decision -ceq 'Approve') -PreviousContext $previous -CarryForward:$CarryForward
-@{ status = $status; sourceCommit = $context['pullRequest']['reviewedSourceCommit'] } | ConvertTo-Json -Compress
+. "$PSScriptRoot\lib\NativeWorkflowBridge.ps1"
+$path = $ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath((Join-Path $OutputDirectory 'merge-approval.json'))
+$context = $ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath($ContextPath)
+$arguments = @('audit-set-merge-approval', "--path=$path", "--context-path=$context")
+if ($CarryForward) {
+    $previous = $ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath($PreviousContextPath)
+    $arguments += @('--carry-forward', "--previous-context-path=$previous")
+} elseif ($Decision -ceq 'Approve') {
+    $arguments += '--approve'
+}
+Invoke-NativeReviewWorkflow -Arguments $arguments
