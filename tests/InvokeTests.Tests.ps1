@@ -58,14 +58,19 @@ BeforeAll {
 
 Describe 'prepared helper' {
     It 'receives the prebuilt test executable' {
-        $copy = $env:SS_AI_FINDING_TEST_EXECUTABLE
-        $source = Join-Path $PSScriptRoot 'finding-helper'
-        $copy | Should -Not -BeNullOrEmpty
-        Test-Path -LiteralPath $copy -PathType Leaf | Should -BeTrue
-        $copy | Should -Not -BeExactly $source
-        [IO.File]::ReadAllText($copy) | Should -BeExactly 'fixture'
-        [IO.File]::WriteAllText($source, 'replacement')
-        [IO.File]::ReadAllText($copy) | Should -BeExactly 'fixture'
+        foreach ($helper in @(
+            @{ copy = $env:SS_AI_FINDING_TEST_EXECUTABLE; source = 'finding_plans-helper' }
+            @{ copy = $env:SS_AI_AUDIT_TEST_EXECUTABLE; source = 'audit-helper' }
+        )) {
+            $copy = $helper.copy
+            $source = Join-Path $PSScriptRoot $helper.source
+            $copy | Should -Not -BeNullOrEmpty
+            Test-Path -LiteralPath $copy -PathType Leaf | Should -BeTrue
+            $copy | Should -Not -BeExactly $source
+            [IO.File]::ReadAllText($copy) | Should -BeExactly 'fixture'
+            [IO.File]::WriteAllText($source, 'replacement')
+            [IO.File]::ReadAllText($copy) | Should -BeExactly 'fixture'
+        }
     }
 }
 '@)
@@ -104,13 +109,16 @@ function cargo {
     }
     if ($args[0] -eq 'test' -and $args -contains 'finding_plans') {
         $global:LASTEXITCODE = 0
-        $executable = Join-Path '__ROOT__' 'finding-helper'
-        [IO.File]::WriteAllText($executable, 'fixture')
-        return (@{
-            reason = 'compiler-artifact'
-            target = @{ name = 'finding_plans' }
-            executable = $executable
-        } | ConvertTo-Json -Compress)
+        foreach ($target in @('finding_plans', 'audit')) {
+            $executable = Join-Path '__ROOT__' "$target-helper"
+            [IO.File]::WriteAllText($executable, 'fixture')
+            @{
+                reason = 'compiler-artifact'
+                target = @{ name = $target }
+                executable = $executable
+            } | ConvertTo-Json -Compress
+        }
+        return
     }
 
     $global:LASTEXITCODE = if ($args[0] -eq 'clippy') { __CLIPPY_EXIT__ } else { 0 }
@@ -220,6 +228,7 @@ Describe 'Repository test entry point' {
     It 'builds the native prerequisite for <Name>' -ForEach @(
         @{ Name = 'SsReviewFindingModel.Tests.ps1' }
         @{ Name = 'SsReviewFindingConsolidation.Tests.ps1' }
+        @{ Name = 'SsReviewReports.Tests.ps1' }
         @{ Name = 'SsReviewSelfReview.Tests.ps1' }
         @{ Name = 'SsReviewSharedFiles.Tests.ps1' }
         @{ Name = 'SsReviewWorkflowData.Tests.ps1' }

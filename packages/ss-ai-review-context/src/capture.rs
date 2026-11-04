@@ -403,7 +403,16 @@ fn valid_identifier(value: &Value) -> bool {
 
 /// Loads the encodings recognized by the shared PowerShell stream reader.
 fn parse_file(bytes: &[u8]) -> Result<Value, AppError> {
-    let text = if let Some(bytes) = bytes.strip_prefix(&[0xef, 0xbb, 0xbf]) {
+    parse_text(&decode_file_text(bytes))
+}
+
+/// Decodes text using the shared PowerShell stream reader's BOM handling.
+///
+/// UTF-8 is the default; a byte order mark selects UTF-8, UTF-16, or UTF-32.
+/// Malformed encoded sequences are replaced as in the PowerShell reader.
+#[must_use]
+pub fn decode_file_text(bytes: &[u8]) -> String {
+    if let Some(bytes) = bytes.strip_prefix(&[0xef, 0xbb, 0xbf]) {
         String::from_utf8_lossy(bytes).into_owned()
     } else if let Some(bytes) = bytes.strip_prefix(&[0xff, 0xfe, 0x00, 0x00]) {
         decode_utf32(bytes, true)
@@ -415,8 +424,7 @@ fn parse_file(bytes: &[u8]) -> Result<Value, AppError> {
         decode_utf16(bytes, false)
     } else {
         String::from_utf8_lossy(bytes).into_owned()
-    };
-    parse_text(&text)
+    }
 }
 
 /// Decodes UTF-16 using the stream reader's replacement behavior.

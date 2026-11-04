@@ -5,6 +5,7 @@ BeforeAll {
     . "$script:Scripts\lib\WorkflowData.ps1"
     . "$script:Scripts\lib\FindingModel.ps1"
     . "$script:Scripts\lib\ReviewWork.ps1"
+    . "$script:Scripts\lib\NativeWorkflowBridge.ps1"
     . "$script:Scripts\lib\ReviewAuditState.ps1"
     . "$script:Scripts\lib\FocusAreaPreparation.ps1"
     . "$script:Scripts\lib\FocusAreaExpansion.ps1"
@@ -471,6 +472,39 @@ Describe 'Human audit records' {
         { Add-ReviewAuditFeedback @feedbackArguments } | Should -Throw '*immutable*'
         $feedbackArguments.FindingId = 'missing'
         { Add-ReviewAuditFeedback @feedbackArguments } | Should -Throw
+    }
+
+    It 'returns timestamp-shaped feedback as the original string' {
+        $text = '2026-10-07T00:00:00Z'
+        Add-ReviewAuditFeedback -Path $script:FeedbackPath -FindingsPath $script:FindingsPath `
+            -ResponseId response-1 -FindingId $script:FindingId -Text $text
+
+        $feedback = Get-ReviewAuditFeedback -Path $script:FeedbackPath -FindingId $script:FindingId
+        $feedback | Should -BeOfType [string]
+        $feedback | Should -BeExactly $text
+    }
+
+    It 'stages audit inputs outside a read-only working directory' -Skip:$IsWindows {
+        $readOnly = Join-Path $script:Root 'read-only'
+        [IO.Directory]::CreateDirectory($readOnly) | Out-Null
+        $originalMode = [IO.File]::GetUnixFileMode($readOnly)
+        $readOnlyMode = [IO.UnixFileMode]::UserRead -bor [IO.UnixFileMode]::UserExecute
+        [IO.File]::SetUnixFileMode($readOnly, $readOnlyMode)
+        Push-Location -LiteralPath $readOnly
+        try {
+            { [IO.File]::WriteAllText((Join-Path $readOnly 'probe'), 'x') } | Should -Throw
+            Add-ReviewAuditFeedback -Path $script:FeedbackPath -FindingsPath $script:FindingsPath `
+                -ResponseId response-1 -FindingId $script:FindingId -Text 'Human response'
+            Set-ReviewMergeApproval -Path $script:ApprovalPath -Context $script:Context -ApproveMerge $true |
+                Should -Be 'Recorded'
+            Get-ReviewAuditFeedback -Path $script:FeedbackPath -FindingId $script:FindingId |
+                Should -BeExactly 'Human response'
+            Test-ReviewMergeApproval -Path $script:ApprovalPath -PullRequestUrl $script:Context.pullRequestUrl `
+                -SourceCommit ('a' * 40) | Should -BeTrue
+        } finally {
+            Pop-Location
+            [IO.File]::SetUnixFileMode($readOnly, $originalMode)
+        }
     }
 
     It 'loads accumulated feedback in the decision command rather than a shell-generated argument' {

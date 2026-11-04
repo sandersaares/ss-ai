@@ -896,17 +896,38 @@ function Resolve-PullRequestFindingAnchor {
         [System.Collections.IDictionary] $Diff
     )
 
+    $anchors = [System.Collections.Generic.List[object]]::new()
+    $firstFindingId = $null
+    foreach ($item in $Finding) {
+        if ($null -eq (Get-JsonProperty -Node $item -Name 'followUp')) {
+            if ($null -eq $firstFindingId) { $firstFindingId = [string] (Get-JsonProperty -Node $item -Name 'id') }
+            $anchors.Add((Get-JsonProperty -Node $item -Name 'anchor'))
+        }
+    }
+    $results = @()
+    if ($anchors.Count -gt 0) {
+        try {
+            $results = Resolve-PullRequestAnchorsInDiff -Anchor $anchors.ToArray() -Diff $Diff
+        } catch {
+            throw "Finding '$firstFindingId' cannot be anchored: $($_.Exception.Message)"
+        }
+    }
+    $index = 0
     $anchored = [System.Collections.Generic.List[object]]::new()
     foreach ($item in $Finding) {
         $findingId = [string] (Get-JsonProperty -Node $item -Name 'id')
 
         $anchor = $null
         if ($null -eq (Get-JsonProperty -Node $item -Name 'followUp')) {
-            try {
-                $anchor = Resolve-PullRequestAnchorInDiff -Anchor (Get-JsonProperty -Node $item -Name 'anchor') -Diff $Diff
-            } catch {
-                throw "Finding '$findingId' cannot be anchored: $($_.Exception.Message)"
+            $result = $results[$index]
+            $index++
+            if ($result.Contains('error')) {
+                throw "Finding '$findingId' cannot be anchored: $($result['error'])"
             }
+            if ($result.Contains('argumentError')) {
+                throw "Finding '$findingId' cannot be anchored: $($result['argumentError'])"
+            }
+            $anchor = $result['anchor']
         }
 
         $anchored.Add([ordered]@{

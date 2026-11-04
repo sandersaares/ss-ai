@@ -12,6 +12,7 @@ BeforeAll {
     . (Join-Path $script:LibraryRoot 'WorkflowData.ps1')
     . (Join-Path $script:LibraryRoot 'FindingModel.ps1')
     . (Join-Path $script:LibraryRoot 'GitDiff.ps1')
+    . (Join-Path $script:LibraryRoot 'NativeWorkflowBridge.ps1')
     . (Join-Path $script:LibraryRoot 'PullRequestAnchor.ps1')
     . (Join-Path $script:LibraryRoot 'PullRequestPlatform.ps1')
     . (Join-Path $script:LibraryRoot 'ReviewPublication.ps1')
@@ -513,6 +514,8 @@ index 1111111..2222222 100644
             target                = $script:Target
             authenticatedIdentity = [ordered]@{ uniqueName = 'runner' }
             pullRequest           = [ordered]@{
+                title                   = 'Review fixture'
+                description             = $null
                 reviewedSourceCommit    = $script:SourceCommit
                 reviewedMergeBaseCommit = $script:MergeBaseCommit
                 isDraft                 = $false
