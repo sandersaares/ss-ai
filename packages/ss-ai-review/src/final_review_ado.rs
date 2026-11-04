@@ -424,6 +424,18 @@ pub(crate) fn add(
     Ok(written)
 }
 
+/// Normalizes an omitted optional-reviewer flag for durable approval evidence.
+fn normalize_required_status(reviewer: &mut Value) -> Option<bool> {
+    let reviewer = reviewer.as_object_mut()?;
+    let required = match reviewer.get("isRequired") {
+        None => false,
+        Some(Value::Bool(required)) => *required,
+        Some(_) => return None,
+    };
+    reviewer.insert("isRequired".into(), Value::Bool(required));
+    Some(required)
+}
+
 /// Records approval while retaining an existing reviewer's required status.
 pub(crate) fn approve(transport: &mut Transport<'_>, target: &Target) -> Result<Value, AppError> {
     let target = resolve(transport, target)?;
@@ -445,13 +457,13 @@ pub(crate) fn approve(transport: &mut Transport<'_>, target: &Target) -> Result<
         }
     }
     let body = json!({"id": id, "vote": 10, "isRequired": required});
-    let response = transport.request(&format!("{path}/{}", escape(id)), "PUT", Some(&body))?;
+    let mut response = transport.request(&format!("{path}/{}", escape(id)), "PUT", Some(&body))?;
     if response
         .get("id")
         .and_then(|v| identifier(v).ok())
         .is_none_or(|s| !s.eq_ignore_ascii_case(id))
         || response.get("vote").and_then(Value::as_i64) != Some(10)
-        || response.get("isRequired").and_then(Value::as_bool) != Some(required)
+        || normalize_required_status(&mut response) != Some(required)
     {
         return Err(fail(
             "ambiguousWrite",
@@ -496,13 +508,13 @@ pub(crate) fn verify_approval(
         ));
     }
     let path = format!("{}/reviewers/{}", target.pr_api(), escape(&id));
-    let reviewer = transport.request(&path, "GET", None)?;
+    let mut reviewer = transport.request(&path, "GET", None)?;
     if reviewer
         .get("id")
         .and_then(|value| identifier(value).ok())
         .is_none_or(|current| !current.eq_ignore_ascii_case(&id))
         || reviewer.get("vote").and_then(Value::as_i64) != Some(10)
-        || reviewer.get("isRequired").and_then(Value::as_bool) != Some(required)
+        || normalize_required_status(&mut reviewer) != Some(required)
     {
         return Err(fail(
             "service",
@@ -1048,6 +1060,72 @@ mod tests {
     }
 
     #[test]
+    fn approval_normalizes_omitted_optional_status_in_receipt_and_readback() {
+        let reviewers = "proj/_apis/git/repositories/repo/pullRequests/7/reviewers";
+        let fixture = Fixture::new(vec![
+            ("GET", connection_url(), None, connection()),
+            ("GET", url(reviewers, ""), None, list(json!([]))),
+            (
+                "PUT",
+                url(&format!("{reviewers}/account"), ""),
+                Some(json!({"id":"account","vote":10,"isRequired":false})),
+                json!({"id":"account","vote":10}),
+            ),
+            ("GET", connection_url(), None, connection()),
+            (
+                "GET",
+                url(&format!("{reviewers}/account"), ""),
+                None,
+                json!({"id":"account","vote":10}),
+            ),
+        ]);
+        let target = target();
+        let mut transport = Transport::new(&target, None, &fixture, &fixture, &fixture);
+        let receipt = approve(&mut transport, &target).unwrap();
+        assert_eq!(receipt["isRequired"], false);
+        let readback = verify_approval(&mut transport, &target, &receipt).unwrap();
+        assert_eq!(readback["isRequired"], false);
+        fixture.done();
+    }
+
+    #[test]
+    fn approval_rejects_malformed_or_mismatched_required_status() {
+        let reviewers = "proj/_apis/git/repositories/repo/pullRequests/7/reviewers";
+        for (required, response) in [
+            (false, json!({"id":"account","vote":10,"isRequired":null})),
+            (
+                false,
+                json!({"id":"account","vote":10,"isRequired":"false"}),
+            ),
+            (false, json!({"id":"account","vote":10,"isRequired":true})),
+            (true, json!({"id":"account","vote":10})),
+        ] {
+            let fixture = Fixture::new(vec![
+                ("GET", connection_url(), None, connection()),
+                (
+                    "GET",
+                    url(reviewers, ""),
+                    None,
+                    list(json!([{"id":"account","isRequired":required}])),
+                ),
+                (
+                    "PUT",
+                    url(&format!("{reviewers}/account"), ""),
+                    Some(json!({"id":"account","vote":10,"isRequired":required})),
+                    response,
+                ),
+            ]);
+            let target = target();
+            let mut transport = Transport::new(&target, None, &fixture, &fixture, &fixture);
+            assert_eq!(
+                classification(&approve(&mut transport, &target).unwrap_err()),
+                "ambiguousWrite"
+            );
+            fixture.done();
+        }
+    }
+
+    #[test]
     fn missing_receipts_are_ambiguous_and_not_retried() {
         let pr = "proj/_apis/git/repositories/repo/pullRequests/7";
         let fixture = Fixture::new(vec![(
@@ -1250,6 +1328,8 @@ mod tests {
             json!({"id":"account","vote":0,"isRequired":true}),
             json!({"id":"account","vote":10,"isRequired":false}),
             json!({"id":"account","vote":10}),
+            json!({"id":"account","vote":10,"isRequired":null}),
+            json!({"id":"account","vote":10,"isRequired":"true"}),
         ] {
             let fixture = Fixture::new(vec![
                 ("GET", connection_url(), None, connection()),
@@ -1262,6 +1342,31 @@ mod tests {
             ]);
             let mut transport = Transport::new(&target, None, &fixture, &fixture, &fixture);
             assert!(verify_approval(&mut transport, &target, &receipt).is_err());
+            fixture.done();
+        }
+
+        let optional_receipt = json!({"id":"account","vote":10,"isRequired":false});
+        for readback in [
+            json!({"id":"account","vote":10,"isRequired":null}),
+            json!({"id":"account","vote":10,"isRequired":"false"}),
+            json!({"id":"account","vote":10,"isRequired":true}),
+        ] {
+            let fixture = Fixture::new(vec![
+                ("GET", connection_url(), None, connection()),
+                (
+                    "GET",
+                    url(&format!("{reviewers}/account"), ""),
+                    None,
+                    readback,
+                ),
+            ]);
+            let mut transport = Transport::new(&target, None, &fixture, &fixture, &fixture);
+            assert_eq!(
+                classification(
+                    &verify_approval(&mut transport, &target, &optional_receipt).unwrap_err()
+                ),
+                "service"
+            );
             fixture.done();
         }
 
