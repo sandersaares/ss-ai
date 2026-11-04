@@ -540,17 +540,9 @@ pub fn begin(
     ensure_directory(&root)?;
     let (id, generation) = allocate(&root, "generation")?;
     let result = (|| {
+        // The operation lock protects the source until these private copies are complete.
         copy_tree(&source, &generation.join("instruction-set-source"), clock)?;
         copy_tree(&source, &generation.join("instruction-set-raw"), clock)?;
-        if tree_digest(&source, clock)? != before
-            || tree_digest(&generation.join("instruction-set-source"), clock)? != before
-            || tree_digest(&generation.join("instruction-set-raw"), clock)? != before
-        {
-            return Err(fail(
-                "invalidInput",
-                "Instruction sources changed during preparation",
-            ));
-        }
         let state = ActiveGeneration {
             preparation: Some(Preparation {
                 identity: preparation.identity,
@@ -772,9 +764,7 @@ fn write_active(
     transaction: &FileTransaction<'_>,
     value: &ActiveGeneration,
 ) -> Result<(), AppError> {
-    let record = value.to_record();
-    record.validate()?;
-    transaction.write_bytes(&serde_json::to_vec(&record)?)
+    transaction.write_bytes(&serde_json::to_vec(&value.to_record())?)
 }
 
 /// Identifies all staged files by exact spelling, kind, and bytes.

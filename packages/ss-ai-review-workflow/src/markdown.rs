@@ -108,13 +108,14 @@ pub fn render(request: &Value) -> Result<Value, String> {
             )?))
         }
         "trackerItem" => {
-            let finding = TrackerFinding::new(required(request, "finding")?)?;
+            let finding = required(request, "finding")?;
+            validate_finding(finding)?;
             let context = context(request)?;
             let direct = direct_urls(request)?;
             if context.is_some() && direct.is_some() {
                 return Err("direct URLs cannot be combined with context".into());
             }
-            render_tracker_item(&finding, context, direct)
+            tracker_item_with_urls(finding, context, direct)
         }
         "findingRender" => {
             let finding = required(request, "finding")?;
@@ -611,24 +612,13 @@ fn tracker_item(finding: &Value, context: Option<&Value>) -> Result<Value, Strin
     tracker_item_with_urls(finding, context, None)
 }
 
-/// Holds a finding that has passed the tracker renderer's field checks.
-pub(crate) struct TrackerFinding<'a>(&'a Value);
-
-impl<'a> TrackerFinding<'a> {
-    /// Validates a finding before resolving its publication context.
-    pub(crate) fn new(finding: &'a Value) -> Result<Self, String> {
-        validate_finding(finding)?;
-        Ok(Self(finding))
-    }
-}
-
-/// Renders a checked finding for JSON dispatch or tracker planning.
+/// Validates and renders a borrowed finding for tracker planning.
 pub(crate) fn render_tracker_item(
-    finding: &TrackerFinding<'_>,
+    finding: &Value,
     context: Option<&Value>,
-    direct: Option<(&str, &str)>,
 ) -> Result<Value, String> {
-    tracker_item_with_urls(finding.0, context, direct)
+    validate_finding(finding)?;
+    tracker_item_with_urls(finding, context, None)
 }
 
 /// Uses resolved links when the caller already has provenance.

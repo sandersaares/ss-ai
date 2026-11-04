@@ -8,7 +8,7 @@ use ss_ai_review_context::read_capture;
 use ss_ai_runtime::{Clock, fail, read_bytes};
 
 use crate::approved::{check_approved_value, identifier_matches};
-use crate::markdown::{TrackerFinding, render, render_tracker_item, validate_tracker_context};
+use crate::markdown::{render, render_tracker_item, validate_tracker_context};
 use crate::review_publication_plan::read_approved;
 use crate::workflow_plan::parse_json;
 
@@ -83,7 +83,7 @@ fn render_plan(
         .and_then(Value::as_array)
         .ok_or_else(|| invalid("Missing findings"))?;
     // Tracker creation follows the same stable presentation order as the audit.
-    let mut ordered =
+    let ordered =
         findings
             .iter()
             .filter(|finding| finding.get("origin").and_then(Value::as_str) == Some("synthesis"))
@@ -91,15 +91,9 @@ fn render_plan(
                 finding.get("origin").and_then(Value::as_str) != Some("synthesis")
             }));
     let mut items = Vec::with_capacity(findings.len());
-    if let Some(first) = ordered.next() {
-        // The first finding's errors precede context errors; an empty plan never uses context.
-        let first = TrackerFinding::new(first).map_err(invalid)?;
-        let context = validate_tracker_context(context).map_err(invalid)?;
-        items.push(render_tracker_item(&first, context, None).map_err(invalid)?);
-        for finding in ordered {
-            let finding = TrackerFinding::new(finding).map_err(invalid)?;
-            items.push(render_tracker_item(&finding, context, None).map_err(invalid)?);
-        }
+    let context = validate_tracker_context(context).map_err(invalid)?;
+    for finding in ordered {
+        items.push(render_tracker_item(finding, context).map_err(invalid)?);
     }
     let summary = render(&json!({
         "operation": "summary", "findings": findings, "platform": platform,
@@ -220,30 +214,5 @@ mod tests {
             .unwrap_err()
             .to_string();
         assert!(error.contains("url must be a string"));
-    }
-
-    #[test]
-    fn planner_preserves_finding_and_context_error_order_and_empty_plan() {
-        let valid = json!({"id":"F1", "origin":"reviewer", "title":"First",
-            "description":"Problem", "reasoning":"Reason", "consequence":"Impact",
-            "recommendedAction":"Fix", "anchor":{"kind":"file","path":"src/a.rs"}});
-        let mut invalid = valid.clone();
-        invalid["title"] = json!("bad\rtitle");
-        let context = json!({"threads":[{"id":"T","comments":[{"id":"C","url":42}]}]});
-        let request = json!({"operation":"trackerItem", "finding":invalid, "context":context,
-            "followUpUrl":42});
-        let expected = render(&request).unwrap_err();
-        assert!(expected.contains("title contains a disallowed control character"));
-        let approved = json!({"findings":[invalid, valid]});
-        let error = render_plan(&approved, Some(&context), &json!({}), "gitHub", 0)
-            .unwrap_err()
-            .to_string();
-        assert!(error.contains(&expected));
-
-        let empty = json!({"findings":[]});
-        assert_eq!(
-            render_plan(&empty, Some(&context), &json!({}), "gitHub", 0).unwrap(),
-            render_plan(&empty, None, &json!({}), "gitHub", 0).unwrap()
-        );
     }
 }

@@ -225,12 +225,6 @@ struct ReviewerSource {
     id: String,
 }
 
-// Transparent error wrappers keep the existing classified diagnostics and cause
-// chains intact while allowing callers to distinguish these invariants.
-/// Marks rejected persisted artifact bytes while preserving their original cause.
-#[ohno::error]
-struct MalformedFindingArtifact;
-
 /// Identifies a merge reference absent from the source snapshot.
 #[ohno::error]
 struct UnknownMergeSource;
@@ -513,7 +507,7 @@ pub fn validate_artifact(value: &Value) -> Result<(), AppError> {
 fn parse_artifact(bytes: &[u8], path: &Path) -> Result<ValidatedArtifact, AppError> {
     let context = |error: AppError| -> AppError {
         let message = format!("Finding artifact '{}': {error}", path.display());
-        MalformedFindingArtifact::caused_by(caused_by("invalidInput", message, error)).into()
+        caused_by("invalidInput", message, error).into()
     };
     let value = parse_json(bytes).map_err(context)?;
     ValidatedArtifact::new(value).map_err(context)
@@ -1840,9 +1834,9 @@ mod artifact_tests {
     use ss_ai_runtime::{Failure, caused_by, classification};
 
     use super::{
-        ConflictingMergeSource, MalformedFindingArtifact, UnknownMergeSource, UnknownUpdateTarget,
-        ValidatedArtifact, make_record, parse_artifact, parse_json, resolve_merge_source,
-        validate_artifact, validated_content,
+        ConflictingMergeSource, UnknownMergeSource, UnknownUpdateTarget, ValidatedArtifact,
+        make_record, parse_artifact, parse_json, resolve_merge_source, validate_artifact,
+        validated_content,
     };
 
     /// Supplies authored content without adding defaults to the persisted input.
@@ -1914,7 +1908,6 @@ mod artifact_tests {
         };
         assert_eq!(classification(&error), "invalidInput");
         assert_eq!(error.to_string(), expected);
-        assert!(error.find_source::<MalformedFindingArtifact>().is_some());
         assert!(error.find_source::<Error>().is_some());
     }
 
@@ -1934,7 +1927,6 @@ mod artifact_tests {
         };
         assert_eq!(error.to_string(), expected);
         assert_eq!(classification(&error), "invalidInput");
-        assert!(error.find_source::<MalformedFindingArtifact>().is_some());
         assert!(error.find_source::<Failure>().is_some());
     }
 
