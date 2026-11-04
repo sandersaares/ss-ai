@@ -1697,9 +1697,7 @@ pub(crate) fn notify(
             anchor,
             source_commit: &assessment.inventory.new_commit,
             attribution: input.attribution,
-            explanation: assessment
-                .rationale()
-                .ok_or_else(|| fail("invalidState", "Missing significance rationale"))?,
+            explanation: &assessment.refusal_explanation()?,
             effect_deadline,
         },
     );
@@ -1728,7 +1726,7 @@ pub(crate) fn notify(
             {
                 crate::error::caused_by(
                     "ambiguousWrite",
-                    "Needs-review comment may exist; retain the original notify invocation for reconciliation".to_owned(),
+                    format!("Needs-review comment may exist and approval reset may be incomplete; retain the original notify invocation for reconciliation: {error}"),
                     error.into_std_error(),
                 ).into()
             } else {
