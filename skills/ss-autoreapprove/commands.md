@@ -309,10 +309,17 @@ Publication or notification can also return no item when preflight finds a
 draft; do not report or perform further work on that PR.
 
 `notify` accepts only a completed significant or uncertain live assessment. It refreshes
-source and decision evidence, posts an attributed
-standalone needs-review comment with a hidden marker, and verifies the owned
-comment. Repeating the original command with the same utility version and
+source and decision evidence, posts an attributed standalone Markdown comment
+containing only reasons for withholding reapproval, and verifies its hidden
+marker. It then dismisses captured account-owned GitHub approvals or resets
+the account's positive ADO vote to zero. Already-cleared approvals need no write.
+It preserves independent later approvals and nonpositive votes; ADO has no
+atomic vote-change precondition. Reset permission errors and unknown effects
+remain explicit failures even when the comment exists.
+Repeating the original command with the same utility version and
 supported run schema reconciles the same intent without posting again.
+Only a reset with no prior request may start during recovery; an uncertain
+or refused reset is never resent automatically.
 Incompatible schemas fail without modifying records or performing provider
 effects; do not recover them through a different-version utility.
 Preserve an unknown comment attempt for reconciliation. Never call `notify` for
