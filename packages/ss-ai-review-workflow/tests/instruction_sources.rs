@@ -147,6 +147,36 @@ fn snapshot_is_current(session: &Path, identity: &str) -> bool {
 }
 
 #[test]
+fn incompatible_session_records_prevent_snapshot_invalidation() {
+    for (name, incompatible) in [
+        ("generation-version", "focus-area-generation.json"),
+        ("source-version", "focus-area-source-identity.json"),
+    ] {
+        let workspace = Workspace::new(name);
+        let snapshot = workspace.snapshot(None).unwrap();
+        let session = workspace.0.join("session");
+        begin_preparation(&session);
+        let generation = session.join("focus-area-generation.json");
+        let source = session.join("focus-area-source-identity.json");
+        let path = session.join(incompatible);
+        let mut record: serde_json::Value =
+            serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+        record["schemaVersion"] = serde_json::json!(record["schemaVersion"].as_u64().unwrap() + 1);
+        fs::write(&path, serde_json::to_vec(&record).unwrap()).unwrap();
+        let before_generation = fs::read(&generation).unwrap();
+        let before_source = fs::read(&source).unwrap();
+        let guidance = Path::new(&snapshot.source_directory).join("skill/focus-areas.md");
+        let before_guidance = fs::read(&guidance).unwrap();
+
+        let error = workspace.snapshot(None).unwrap_err();
+        assert_eq!(classification(&error), "invalidInput");
+        assert_eq!(fs::read(generation).unwrap(), before_generation);
+        assert_eq!(fs::read(source).unwrap(), before_source);
+        assert_eq!(fs::read(guidance).unwrap(), before_guidance);
+    }
+}
+
+#[test]
 fn records_roots_and_exact_bytes_and_replaces_removed_sources() {
     let workspace = Workspace::new("bytes");
     let content = b"\xef\xbb\xbf# \xc3\xa4\r\n";

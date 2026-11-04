@@ -110,6 +110,7 @@ pub fn snapshot_instruction_sources(
         LockMode::Exclusive,
         clock,
     )?;
+    focus_area_generation::validate_session_records_locked(&session, clock)?;
     // Invalidate before checking other inputs, so a failed refresh cannot expose old preparation.
     let preparation = focus_area_generation::invalidate_locked(&session, clock);
     let snapshot = focus_area_generation::invalidate_snapshot_locked(&session, clock);
