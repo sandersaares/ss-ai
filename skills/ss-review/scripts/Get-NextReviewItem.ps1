@@ -8,10 +8,7 @@ param(
 
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
-
-. "$PSScriptRoot\lib\JsonValue.ps1"
-. "$PSScriptRoot\lib\PullRequestModel.ps1"
-. "$PSScriptRoot\lib\WorkflowData.ps1"
-. "$PSScriptRoot\lib\ReviewWork.ps1"
-
-Get-NextReviewWorkItem -QueuePath $QueuePath | ConvertTo-Json -Depth 32 -Compress
+$PSNativeCommandUseErrorActionPreference = $true
+. "$PSScriptRoot\lib\NativeWorkflowBridge.ps1"
+$QueuePath = $ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath($QueuePath)
+Invoke-NativeReviewWorkflow -Arguments @('next-review-item', "--queue-path=$QueuePath")

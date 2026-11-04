@@ -232,13 +232,12 @@
     },
     "coverageMeasurement": {
       "type": "object", "additionalProperties": false,
-      "required": ["schemaVersion", "mode", "processLaunches", "journalWrites", "schemaValidationMilliseconds", "elapsedMilliseconds"],
+      "required": ["schemaVersion", "mode", "processLaunches", "persistenceProcessLaunches", "elapsedMilliseconds"],
       "properties": {
-        "schemaVersion": { "const": 1 },
+        "schemaVersion": { "const": 2 },
         "mode": { "enum": ["PerFile", "Batch"] },
         "processLaunches": { "type": "integer", "minimum": 0 },
-        "journalWrites": { "type": "integer", "minimum": 0 },
-        "schemaValidationMilliseconds": { "type": "number", "minimum": 0 },
+        "persistenceProcessLaunches": { "type": "integer", "minimum": 0 },
         "elapsedMilliseconds": { "type": "number", "minimum": 0 }
       }
     },

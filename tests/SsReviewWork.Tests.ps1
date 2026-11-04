@@ -37,6 +37,19 @@ BeforeAll {
 
     function Invoke-WorkScript {
         param([string] $Name, [string[]] $ArgumentList)
+        if ($script:AlternatePaths) {
+            # Exercise PowerShell path syntax across the real process boundary.
+            for ($index = 0; $index -lt $ArgumentList.Count - 1; $index++) {
+                if ($ArgumentList[$index] -match '^-(?:.*Path|.*Directory|.*Root|SessionState)$') {
+                    $ArgumentList[$index + 1] = if ($IsWindows) {
+                        $ArgumentList[$index + 1].Replace('\', '/')
+                    } else {
+                        $ArgumentList[$index + 1].Replace('/', '\')
+                    }
+                    $index++
+                }
+            }
+        }
         $start = [Diagnostics.ProcessStartInfo]::new((Get-Process -Id $PID).Path)
         foreach ($argument in (@('-NoProfile', '-NonInteractive', '-File', (Join-Path $script:Scripts $Name)) + $ArgumentList)) {
             $start.ArgumentList.Add($argument)
@@ -83,6 +96,7 @@ Describe 'Review work initialization' {
     }
 
     BeforeEach {
+        $script:AlternatePaths = $false
         $script:Root = Join-Path $TestDrive ([guid]::NewGuid())
         $script:Areas = Join-Path $script:Root 'focus-areas'
         New-Item -ItemType Directory -Path $script:Areas -Force | Out-Null
@@ -513,7 +527,8 @@ Describe 'Review work initialization' {
         Assert-ReviewFileGroupQueueComplete -Path $worker.fileGroupQueuePath -Group $script:Groups
     }
 
-    It 'runs queue and finding commands with one JSON result and refuses premature completion' {
+    It 'runs queue and finding commands with alternate path separators and refuses premature completion' {
+        $script:AlternatePaths = $true
         $run = Invoke-WorkScript -Name 'New-ReviewWork.ps1' -ArgumentList @(
             '-InventoryPath', $script:Inventory, '-FileGroupsPath', $script:GroupedInventory, '-FocusAreaDirectory', $script:Areas, '-OutputDirectory', $script:Work
         )
@@ -554,6 +569,101 @@ Describe 'Review work initialization' {
         $run.exitCode | Should -Be 0
         (ConvertFrom-JsonVerbatim -Text $run.output).status | Should -Be 'complete'
         (Get-FindingArtifactValidation -Path $artifact -ExpectedReviewerId @($worker.reviewerId)).isValid | Should -BeTrue
+    }
+
+    It 'runs the complete native review workflow with PowerShell paths, inputs and findings' {
+        $script:AlternatePaths = $true
+        Remove-Item -LiteralPath (Join-Path $script:Areas 'z.md')
+        $publishedInventory = Join-Path $script:Root 'published-inventory.json'
+        $publishedGroups = Join-Path $script:Root 'published-groups.json'
+        $run = Invoke-WorkScript -Name 'Set-ReviewInput.ps1' -ArgumentList @(
+            '-Kind', 'Inventory', '-InputPath', $script:Inventory, '-Path', $publishedInventory
+        )
+        $run.exitCode | Should -Be 0 -Because $run.errors
+        $run = Invoke-WorkScript -Name 'Set-ReviewInput.ps1' -ArgumentList @(
+            '-Kind', 'Groups', '-InputPath', $script:GroupedInventory, '-Path', $publishedGroups, '-InventoryPath', $publishedInventory
+        )
+        $run.exitCode | Should -Be 0 -Because $run.errors
+        (Read-ReviewFileInventory -Path $publishedInventory).Count | Should -Be $script:Files.Count
+        (Read-ReviewFileGroups -Path $publishedGroups -FileInventory (Read-ReviewFileInventory -Path $publishedInventory)).Count |
+            Should -Be $script:Groups.Count
+
+        $run = Invoke-WorkScript -Name 'New-ReviewWork.ps1' -ArgumentList @(
+            '-InventoryPath', $publishedInventory, '-FileGroupsPath', $publishedGroups, '-FocusAreaDirectory', $script:Areas,
+            '-OutputDirectory', $script:Work, '-RepositoryRoot', $script:Root, '-ArtifactDirectory', $script:Findings
+        )
+        $run.exitCode | Should -Be 0 -Because $run.errors
+        $work = ConvertFrom-JsonVerbatim -Text $run.output
+        $manifest = Read-ReviewWorkManifest -Path $work.manifestPath
+        $manifest.reviewers.Count | Should -Be 1
+        $run = Invoke-WorkScript -Name 'Get-NextReviewItem.ps1' -ArgumentList @('-QueuePath', $work.focusAreaQueuePath)
+        $run.exitCode | Should -Be 0 -Because $run.errors
+        $reviewer = (ConvertFrom-JsonVerbatim -Text $run.output).item
+        $reviewer.reviewerId | Should -BeExactly $manifest.reviewers[0].reviewerId
+        $run = Invoke-WorkScript -Name 'Get-NextReviewItem.ps1' -ArgumentList @('-QueuePath', $work.focusAreaQueuePath)
+        $run.exitCode | Should -Be 0 -Because $run.errors
+        (ConvertFrom-JsonVerbatim -Text $run.output).exhausted | Should -BeTrue
+
+        $state = Join-Path $script:Root "session O'Brien"
+        [void] [IO.Directory]::CreateDirectory($state)
+        $scope = Join-Path $state 'scope.md'
+        [IO.File]::WriteAllText($scope, 'Review the complete inventory.')
+        [IO.File]::WriteAllText((Join-Path $state 'references.md'), 'No additional references.')
+        [IO.File]::WriteAllText((Join-Path $state 'content-overview.md'), 'Review the fixture.')
+        $run = Invoke-WorkScript -Name 'New-ReviewWorkerAssignment.ps1' -ArgumentList @(
+            '-Phase', 'review', '-SessionState', $state, '-ScopePath', $scope, '-ManifestPath', $work.manifestPath,
+            '-ReviewerId', $reviewer.reviewerId, '-OutputDirectory', (Join-Path $state 'attempt')
+        )
+        $run.exitCode | Should -Be 0 -Because $run.errors
+        $assignment = Read-WorkflowData -Kind workerAssignment -Path ((ConvertFrom-JsonVerbatim -Text $run.output).assignmentPath)
+        $assignment.resume | Should -BeTrue
+
+        $run = Invoke-WorkScript -Name 'Test-FindingArtifact.ps1' -ArgumentList @(
+            '-Path', $script:Findings, '-ManifestPath', $work.manifestPath
+        )
+        $run.exitCode | Should -Not -Be 0
+        $artifact = Read-FindingArtifact -Path $reviewer.artifactPath
+        $findingId = Add-FindingToArtifact -Document $artifact -Origin reviewer -Finding @{
+            title = 'Preserve data'; description = 'A concrete problem.'; reasoning = 'Evidence supports this.'
+            consequence = 'Data can be lost.'; recommendedAction = 'Retain data.'
+            anchor = @{ kind = 'file'; path = 'new [file].rs' }
+        }
+        Write-FindingArtifact -Path $reviewer.artifactPath -Document $artifact
+
+        foreach ($group in $script:Groups) {
+            $run = Invoke-WorkScript -Name 'Get-NextReviewItem.ps1' -ArgumentList @('-QueuePath', $reviewer.fileGroupQueuePath)
+            $run.exitCode | Should -Be 0 -Because $run.errors
+            $claim = ConvertFrom-JsonVerbatim -Text $run.output
+            $claim.item.groupId | Should -BeExactly $group.groupId
+            $draft = @{
+                schemaVersion = 1; snapshot = $claim.snapshot; groupId = $claim.item.groupId
+                assessments = @($claim.item.files | ForEach-Object {
+                    @{ groupId = $claim.item.groupId; path = $_.path; disposition = 'reviewed'; scope = ''; reason = '' }
+                })
+                findingIds = @(if ($group.groupId -eq $script:Groups[0].groupId) { $findingId })
+            }
+            $draftPath = Join-Path $state "$($group.groupId).json"
+            Write-WorkJson -Path $draftPath -Value $draft
+            $run = Invoke-WorkScript -Name 'Set-ReviewAssessmentBatch.ps1' -ArgumentList @(
+                '-QueuePath', $reviewer.fileGroupQueuePath, '-InventoryPath', $work.inventoryPath,
+                '-FileGroupsPath', $work.fileGroupsPath, '-ArtifactPath', $reviewer.artifactPath, '-BatchPath', $draftPath
+            )
+            $run.exitCode | Should -Be 0 -Because $run.errors
+            (ConvertFrom-JsonVerbatim -Text $run.output).groupId | Should -BeExactly $group.groupId
+        }
+        $run = Invoke-WorkScript -Name 'Complete-FindingArtifact.ps1' -ArgumentList @(
+            '-ArtifactPath', $reviewer.artifactPath, '-FileGroupQueuePath', $reviewer.fileGroupQueuePath
+        )
+        $run.exitCode | Should -Be 0 -Because $run.errors
+        $run = Invoke-WorkScript -Name 'Test-FindingArtifact.ps1' -ArgumentList @(
+            '-Path', $script:Findings, '-ManifestPath', $work.manifestPath
+        )
+        $run.exitCode | Should -Be 0 -Because $run.errors
+        (ConvertFrom-JsonVerbatim -Text $run.output).isValid | Should -BeTrue
+        $finished = Read-FindingArtifact -Path $reviewer.artifactPath
+        $finished.status | Should -BeExactly 'complete'
+        $finished.findings[0].id | Should -BeExactly $findingId
+        (Read-ReviewQueueDocument -Path $reviewer.fileGroupQueuePath).completedGroupIds.Count | Should -Be $script:Groups.Count
     }
 }
 

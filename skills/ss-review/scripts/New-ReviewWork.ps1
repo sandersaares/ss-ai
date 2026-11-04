@@ -20,12 +20,16 @@ param(
 
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
-
-. "$PSScriptRoot\lib\JsonValue.ps1"
-. "$PSScriptRoot\lib\PullRequestModel.ps1"
-. "$PSScriptRoot\lib\WorkflowData.ps1"
-. "$PSScriptRoot\lib\FindingModel.ps1"
-. "$PSScriptRoot\lib\ReviewWork.ps1"
-
-New-ReviewWork @PSBoundParameters |
-    ConvertTo-Json -Depth 32 -Compress
+$PSNativeCommandUseErrorActionPreference = $true
+. "$PSScriptRoot\lib\NativeWorkflowBridge.ps1"
+$InventoryPath = $ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath($InventoryPath)
+$FileGroupsPath = $ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath($FileGroupsPath)
+$FocusAreaDirectory = $ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath($FocusAreaDirectory)
+$OutputDirectory = $ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath($OutputDirectory)
+if ($RepositoryRoot) { $RepositoryRoot = $ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath($RepositoryRoot) }
+if ($ArtifactDirectory) { $ArtifactDirectory = $ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath($ArtifactDirectory) }
+$arguments = @('create-review-work', "--inventory-path=$InventoryPath", "--file-groups-path=$FileGroupsPath",
+    "--focus-area-directory=$FocusAreaDirectory", "--output-directory=$OutputDirectory")
+if ($RepositoryRoot) { $arguments += "--repository-root=$RepositoryRoot" }
+if ($ArtifactDirectory) { $arguments += "--artifact-directory=$ArtifactDirectory" }
+Invoke-NativeReviewWorkflow -Arguments $arguments
