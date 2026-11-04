@@ -261,7 +261,7 @@ fn native_staging_names_identify_a_blocked_transaction() {
     #[expect(clippy::create_dir, reason = "The test directory must be exclusive")]
     fs::create_dir(&directory.0).unwrap();
     let path = directory.0.join("reviewer.json");
-    fs::write(&path, b"old").unwrap();
+    write(&path, b"old").unwrap();
     let blocker = fs::OpenOptions::new()
         .read(true)
         .share_mode(FILE_SHARE_READ | FILE_SHARE_WRITE)
