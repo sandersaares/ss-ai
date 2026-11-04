@@ -1,4 +1,10 @@
-Your task is to generate a set of `focus-areas/*.md` files in session state, each file specifying a small set of related topics that another agent will later explore.
+Your task is to publish a set of `focus-areas/*.md` files in the review session, each file specifying a small set of related topics that another agent will later explore.
+
+`SESSION_STATE` is the real review session used for source discovery, cache
+operations, and published artifacts. On a cache miss, a native begin command
+returns a separate `PREPARATION_STATE` for one preparation attempt. Keep the
+returned identities and path together; all work in stages 2 and 3 uses that
+preparation directory until publication. Pass its exact path to nested workers.
 
 For nested subagents, pass explicit spawn arguments: GPT 6.1 Sol uses `model: "gpt-6.1-sol"` and GPT 6 Luna uses `model: "gpt-6-luna"`.
 
@@ -28,31 +34,45 @@ Metadata describes applicability, not an additional guideline to categorize sepa
 
 # Stage 1: materialize sources and restore cached artifacts
 
-Execute `pwsh-calls/copy-instruction-sources.md` before fetching or expanding any external reference. It replaces `instruction-set-source/` with a complete byte-preserving snapshot:
+Before fetching or expanding any external reference, select any authorized
+repository instructions as described below, then execute
+`pwsh-calls/copy-instruction-sources.md`. It publishes
+`instruction-set-source/` in the real session as a complete byte-preserving snapshot:
 
 * The skill's `focus-areas.md` under `skill/focus-areas.md`.
-* Every `AGENTS.md` and `*.instructions.md` recursively discovered under each root in `COPILOT_CUSTOM_INSTRUCTIONS_DIRS`, including linked instruction directories and hidden `.github/instructions/` trees, under `external/<root-identity>/` with original relative paths. The root identity is bound to the absolute configured path; keep the command's root mapping for resolving original local references and identifying instruction ownership.
+* Every `AGENTS.md` and `*.instructions.md` recursively discovered under each root in `COPILOT_CUSTOM_INSTRUCTIONS_DIRS`, including linked instruction directories and hidden `.github/instructions/` trees, under `external/<root-identity>/` with original relative paths. The root identity binds the configured path and resolved source locations; keep the command's root mapping for resolving original local references and identifying instruction ownership.
 
 The environment variable is a comma-separated directory list on every platform, not a platform PATH list. Surrounding whitespace and empty entries are ignored; relative entries resolve against the command's working directory. Repeated identical absolute roots are included once. There is no shell-variable or tilde expansion. An unset or empty list uses only the built-in focus areas. Existing empty roots are allowed; configured missing or unreadable roots and link cycles are errors, never grounds for silently reducing coverage. Do not require particular instruction filenames or fall back to a co-located instruction checkout.
 
 Discovery excludes the current review's session-state tree, including links into its descendants, so generated copies do not become user instruction sources on a later snapshot.
 
-ONLY IF EXPLICITLY AUTHORIZED (default no), also copy each repository instruction file (e.g. `AGENTS.md`) that governs the reviewed content to its repository-relative path under `instruction-set-source/review-repository/`. Explicitly configured external roots remain sources even if they overlap the reviewed repository; do not discover additional repository instructions implicitly.
-
-Use filesystem copy tools for authorized repository instructions as well. Do not read a source into context and write its contents back out: the cache key covers the exact bytes of every source, so incidental rewriting turns a reusable entry into a miss.
+ONLY IF EXPLICITLY AUTHORIZED (default no), identify each repository instruction
+file (e.g. `AGENTS.md`) that governs the reviewed content. Supply the reviewed
+repository root and every selected repository-relative path to the snapshot
+command, which copies them under `instruction-set-source/review-repository/<root-identity>/`
+within the same coordinated snapshot. The root identity binds the selected
+absolute path and resolved source locations. Retain the returned repository root mapping
+to resolve original local references. Explicitly configured external roots
+remain sources even if they overlap the reviewed repository; do not discover
+additional repository instructions implicitly. Never copy or edit files in the
+published source tree separately from that command.
 
 Treat each direct source as an indivisible verbatim input. Do not summarize, categorize, split, rename based on content, or otherwise transform it before the cache lookup. Topic extraction happens only after a cache miss.
 
 Do not include any other files. Instruction files governing reviewed content are included even when they are also within the review scope.
 
-Invoke the cache commands from the skill's `scripts/` directory, replacing both placeholders:
+Use these values in the cache recipes:
 
 * `SKILL_ROOT` is the directory containing this prompt.
 * `SESSION_STATE` is the absolute directory containing this review's artifacts.
 
-Run every cache command with `-NonInteractive`, so that a missing required parameter fails immediately instead of waiting for input that will never arrive.
-
-Execute the command in `pwsh-calls/restore-focus-area-cache.md`.
+Retain the snapshot's `sourceDirectory` and `snapshotIdentity`. The source-root
+mappings are all entries in `roots` and, when present, the separate
+`repositoryRoot` entry. Retain both for reference expansion and the parent
+handoff; `roots` alone does not include selected repository instructions.
+Execute `pwsh-calls/restore-focus-area-cache.md` with that exact source directory
+and snapshot identity. Retain the returned `preparationIdentity`; never adopt an
+identity from a later snapshot or restore.
 
 The command writes exactly one compact JSON object to standard output. Interpret its `status` field:
 
@@ -61,15 +81,37 @@ The command writes exactly one compact JSON object to standard output. Interpret
 
 On `Hit`, validate the restored artifacts by executing the command in `pwsh-calls/validate-focus-area-artifacts.md`.
 
-A successful command returns JSON with `status: "Valid"`. If validation fails, the command exits unsuccessfully and records the diagnostic as a cache miss with reason `ValidationFailed`; continue with Stage 2, which discards the restored artifacts. If validation succeeds, skip the remaining stages and return the restored focus areas and the discovery root mapping to the parent agent. The parent retains that mapping in its checkpoint for later instruction ownership and learning. The command checks artifact structure, not scope semantics. Scope verification happens before storage in Stage 3; the cache key includes this generation recipe and the source contents, and restoration preserves the verified artifacts byte-for-byte.
+A successful command returns JSON with `status: "Valid"`. If artifact validation
+fails for the current preparation identity, the command records a cache miss
+with reason `ValidationFailed`; continue with Stage 2 using the same restore
+identity. A stale identity or another failure stops this attempt; restart source
+discovery and restore rather than accepting another attempt's artifacts or
+diagnostics. If validation succeeds, skip the remaining stages and return the
+restored focus areas, the source-root mappings including `repositoryRoot` when present, and the exact retained
+`preparationIdentity` to the parent agent. The
+parent retains that mapping in its checkpoint for later instruction ownership
+and learning. The command checks artifact structure, not scope semantics.
+Scope verification happens before storage in Stage 3; the cache key includes
+this generation recipe and the source contents, and restoration preserves the
+verified artifacts byte-for-byte.
 
-On `status: "Miss"`, continue with the full workflow below. The default seven-day freshness window intentionally causes periodic misses so external references are refreshed. Use `-Refresh` only when the user explicitly requests regeneration.
+On `status: "Miss"`, continue with the full workflow below. The default seven-day freshness window intentionally causes periodic misses so external references are refreshed. Use `--refresh` only when the user explicitly requests regeneration.
 
 The restore result and `{{SESSION_STATE}}/focus-area-cache-diagnostics.json` report `userInstructionFileCount` alongside cache Hit/Miss. This counts discovered user-scoped files in the current snapshot, including zero when only built-in guidance is present, on both hits and misses. It excludes the built-in focus areas and separately authorized repository sources.
 
 # Stage 2: prepare expanded raw inputs
 
-First, remove any existing `instruction-set-raw/`, `focus-areas/`, and `focus-area-parts/` directories and any existing `focus-area-map.json`, `instruction-set-categories.md`, or `focus-area-expansion-status.json` files. Create a new empty `instruction-set-raw/` directory, then copy the materialized direct sources into it while preserving their stable relative paths.
+Execute `pwsh-calls/begin-focus-area-generation.md` using the real session and
+the exact `preparationIdentity` from restore. Retain its `generationId` and
+`sessionState` as `PREPARATION_STATE`. Begin creates isolated source and raw
+trees from the bound snapshot. Do not remove, copy over, or edit the real
+session's preparation files. If begin rejects the identity, stop this attempt
+and restart discovery and restore; never adopt the current identity from disk.
+
+All paths in the remaining preparation stages refer to `PREPARATION_STATE`
+unless explicitly identified as real-session paths. Pass this exact directory,
+the generation ID, and the relevant recipes to every nested worker; workers
+must not use the real session for generation writes.
 
 Before splitting or editing a raw source, read its frontmatter, file-wide scope, and any enclosing section's scope and retain that context for each chapter. Leave `instruction-set-source/` unchanged so original boundaries and declarations remain available for verification.
 
@@ -77,7 +119,7 @@ Before registering raw source spans, remove chapters that govern only the review
 
 The raw inputs may contain references to other files in the same repo or to external materials (e.g. statements like "Follow the guidelines at [Some API guidelines](https://example.com/some-api-guidelines)"). Materialize referenced guidance into `instruction-set-raw/`; the manifest records the local targets, so later workers do not fetch the links again.
 
-For each external reference found in `instruction-set-raw/`, instruct a subagent (GPT 6.1 Sol) to follow the reference and to extract any guidelines it finds into one or more categorized `instruction-set-raw/reference-name/*.md` files. Resolve local references relative to their original source file: reconstruct its path from the configured root and source-relative path using the discovery mapping, never this skill's checkout. Instruct the subagent to recurse into the guidelines to extract multiple layers of categorized guidelines that may exist, as well as to follow redirects and try API-based alternate access methods for web apps that do not render as basic HTML (e.g. Azure DevOps Wiki pages, which require API access to load content). Instruct the subagent to watch out for duplicates - if the same URL is reached via different paths, it should only be expanded once. Also have it watch out for pre-expanded content - some references may already contain embedded versions of other references, so title-based matching may also offer opportunities to deduplicate. Some references may also offer links to historical versions of themselves - only keep the latest version of content is multiple versions are offered.
+For each reference found in `instruction-set-raw/`, instruct a subagent (GPT 6.1 Sol) to follow the reference and to extract any guidelines it finds into one or more categorized `instruction-set-raw/reference-name/*.md` files. Pass the applicable source-root mapping (`roots` entry or `repositoryRoot`) to the worker. Resolve local references relative to their original source file: use the mapping's original path and the source path relative to its snapshot prefix, never this skill's checkout. Instruct the subagent to recurse into the guidelines to extract multiple layers of categorized guidelines that may exist, as well as to follow redirects and try API-based alternate access methods for web apps that do not render as basic HTML (e.g. Azure DevOps Wiki pages, which require API access to load content). Instruct the subagent to watch out for duplicates - if the same URL is reached via different paths, it should only be expanded once. Also have it watch out for pre-expanded content - some references may already contain embedded versions of other references, so title-based matching may also offer opportunities to deduplicate. Some references may also offer links to historical versions of themselves - only keep the latest version of content is multiple versions are offered.
 
 The preparation agent owns reference deduplication and scope merging. Collect known referrers before dispatch and assign only one writer to each expanded target. Pass that worker every known referring source path, section, and inherited scope declaration. Expansion workers report additional referring contexts or duplicate targets to the preparation agent instead of overwriting another worker's output.
 
@@ -93,7 +135,7 @@ The external references we expanded into `instruction-set-raw/` are not well cat
 
 Read `focus-area-format.md` and use its schema for every categorization handoff. Freeze the raw inputs after expansion, scope merging, and operational-chapter removal. Assign stable chapter IDs and complete raw line ranges before dispatch.
 
-Divide the chapters between categorization subagents (GPT 6.1 Sol). Each worker writes one `focus-area-parts/<worker-id>.json` using exactly the schema in `schemas/focus-area-map.schema.json`. Pass the format document, assigned chapter IDs and ranges, original source paths, enclosing scope declarations, complete frontmatter, and reference provenance; a detached chapter alone is insufficient. Workers contribute category assignments and scope judgments, not assembly code. Require detailed categories rather than over-summarization.
+Divide the chapters between categorization subagents (GPT 6.1 Sol). Each worker writes one `focus-area-parts/<worker-id>.json` under `PREPARATION_STATE` using exactly the schema in `schemas/focus-area-map.schema.json`. Pass the preparation directory, format document, assigned chapter IDs and ranges, original source paths, enclosing scope declarations, complete frontmatter, and reference provenance; a detached chapter alone is insufficient. Workers contribute category assignments and scope judgments, not assembly code. Require detailed categories rather than over-summarization.
 
 Workers append typed one-chapter drafts using `pwsh-calls/update-focus-area-map.md`. Validate each returned worker map with `pwsh-calls/validate-focus-area-map.md` before accepting it, and check its chapter IDs against the assignment. Repair malformed drafts at the producer; do not add aliases, defaults, or replacement patches. Use the same prepared Append command to combine validated maps into `focus-area-map.json`, retaining every assigned chapter exactly once. Use Regroup to resolve category collisions or merge similar categories without rewriting chapter metadata.
 
@@ -111,20 +153,37 @@ The assembler does not deduplicate. Preserve separate raw chapter contributions 
 
 ## Scope verification
 
-Before returning or caching generated artifacts, execute a subagent (GPT 6 Luna) to compare every generated guideline and category entry against the map, raw input, and original source. Pass this prompt's scope and provenance requirements explicitly. Verify that frontmatter, file-wide prose, enclosing-section scope, local restrictions, exceptions, and reference inheritance survived, and every section has an explicit complete effective scope. Check that mixed-scope grouping and deduplication neither broaden nor narrow applicability and that copied "this file" declarations have an unambiguous source. Metadata must be sufficient for a reviewer to judge applicability without reopening the source merely to reconstruct missing scope.
+Before publishing or caching generated artifacts, execute a subagent (GPT 6 Luna) to compare every generated guideline and category entry against the map, raw input, and original source in `PREPARATION_STATE`. Pass the preparation directory and this prompt's scope and provenance requirements explicitly. Verify that frontmatter, file-wide prose, enclosing-section scope, local restrictions, exceptions, and reference inheritance survived, and every section has an explicit complete effective scope. Check that mixed-scope grouping and deduplication neither broaden nor narrow applicability and that copied "this file" declarations have an unambiguous source. Metadata must be sufficient for a reviewer to judge applicability without reopening the source merely to reconstruct missing scope.
 
 Report and repair omissions or incorrect scope in the map, then rerun the assembler before proceeding; uncertain source meaning must be declared as uncertain rather than guessed. Structural validation cannot establish these semantic properties.
 
 Verify every non-null `pathScope` specifically: it must describe the complete inherited and local applicability, including every alternative and exception. Any role, cross-file concern, or uncertainty that cannot be expressed by this path-only contract requires null. The metadata can suppress worker dispatch, so an unjustified narrowing is a coverage error.
 
-Validate the generated artifacts by executing the command in `pwsh-calls/validate-focus-area-artifacts.md`.
+After scope verification, execute `pwsh-calls/publish-focus-area-generation.md`
+with the real session and the retained generation ID. Publication validates the
+generation and installs its outputs and receipt only if it is still current.
+If publication reports `Cannot remove publication staging` after installing the
+outputs, retain the original identities and report the cleanup failure. Validate
+the published artifacts as described below, and continue only if validation
+confirms the current preparation identity. For any other failure, stop this
+attempt and restart discovery and restore; do not copy outputs or adopt another
+generation's receipt.
 
-A successful command emits JSON with `status: "Valid"`. If it exits unsuccessfully, correct or regenerate the artifacts and repeat validation; do not begin the review phase with invalid artifacts.
+Validate the published artifacts in the real session by executing the command
+in `pwsh-calls/validate-focus-area-artifacts.md` with the same
+`preparationIdentity` returned by restore.
+
+A successful command emits JSON with `status: "Valid"`. If it reports invalid
+artifacts for the current identity, repair the preparation map or sources,
+reassemble and verify the private generation, then publish and validate again.
+If the identity is stale, stop and restart discovery and restore. Do not edit
+published artifacts or begin the review phase with invalid artifacts.
 
 Before storing, require finalized expansion. The save command reads and validates `focus-area-expansion-status.json` itself.
 
-Invoke the command in `pwsh-calls/save-focus-area-cache.md`, replacing `SKILL_ROOT` and `SESSION_STATE`.
+Invoke the command in `pwsh-calls/save-focus-area-cache.md` with the real
+session, the original source directory, and the same `preparationIdentity`.
 
 The command emits one compact JSON object. `status` is `Stored` for a new entry, `Existing` when an equivalent entry already exists, or `Bypassed` when storage was intentionally skipped. `reason` explains bypasses. `Degraded` input always produces `Bypassed` and is never published.
 
-The cache always stores and restores the complete focus-area set. Do not select, filter, sample, or omit focus areas based on the current review content. Return the discovery root mapping with the generated focus areas so the parent can retain source ownership in its checkpoint.
+The cache always stores and restores the complete focus-area set. Do not select, filter, sample, or omit focus areas based on the current review content. Return the source-root mappings, including `repositoryRoot` when present, generated focus areas, and exact retained `preparationIdentity` to the parent so it can bind review work to this preparation and retain source ownership in its checkpoint.

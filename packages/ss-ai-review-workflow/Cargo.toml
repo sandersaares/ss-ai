@@ -21,6 +21,9 @@ ss-ai-git = { workspace = true }
 ss-ai-review-context = { workspace = true }
 ss-ai-runtime = { workspace = true }
 
+[build-dependencies]
+sha2 = { workspace = true }
+
 [dev-dependencies]
 jiff = { workspace = true }
 

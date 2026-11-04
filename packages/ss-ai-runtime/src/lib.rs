@@ -8,5 +8,5 @@ mod process;
 
 pub use clock::{Clock, SystemClock};
 pub use error::{Failure, caused_by, classification, fail};
-pub use file::{FileTransaction, read_bytes};
+pub use file::{FileTransaction, LockMode, ResourceLock, read_bytes};
 pub use process::{NativeProcess, Process, ProcessOutput};

@@ -526,6 +526,9 @@ Equivalent guidance inputs may reuse a complete generated focus-area set.
 Different inputs do not share one, and incomplete or degraded inputs are not
 promoted as reusable truth. A cache miss, damaged entry, or unavailable cache
 changes performance only; it never reduces coverage.
+Selected repository instruction sources retain their repository origin so
+identical instruction text from different repositories does not share expanded
+guidance.
 
 Preparation quality remains visible in the review diagnostics. This lets the
 user distinguish ordinary reuse from degraded instruction expansion without

@@ -9,6 +9,8 @@ use std::cell::Cell;
 use std::env;
 use std::fs;
 use std::io::{self, BufRead, BufReader, Read, Write};
+#[cfg(unix)]
+use std::os::unix::fs::symlink;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::Mutex;
@@ -18,8 +20,11 @@ use std::time::Duration;
 use jiff::Timestamp;
 use ohno::AppError;
 use serde_json::{Value, json};
-use ss_ai_review_workflow::{findings, review_work};
-use ss_ai_runtime::{Clock, FileTransaction, SystemClock, caused_by, fail};
+use ss_ai_review_workflow::{
+    findings, focus_area_expansion, focus_area_generation, focus_area_map, focus_cache,
+    review_work, worker_input,
+};
+use ss_ai_runtime::{Clock, FileTransaction, LockMode, ResourceLock, SystemClock, caused_by, fail};
 
 /// Excludes process creation while a test requires releasing the only lock handle.
 ///
@@ -68,6 +73,224 @@ fn inputs(workspace: &Workspace) -> (PathBuf, PathBuf, Value) {
         workspace.put("groups.json", &groups),
         files,
     )
+}
+
+/// Produces a published preparation using the same identity chain as the workflow.
+fn published_preparation(workspace: &Workspace, clock: &dyn Clock) -> String {
+    let session = &workspace.0;
+    fs::create_dir_all(session.join("instruction-set-source")).unwrap();
+    fs::write(
+        session.join("instruction-set-source/guide.md"),
+        "# Rule\nKeep it.\n",
+    )
+    .unwrap();
+    let identity = restore_identity(workspace, clock);
+    publish_identity(session, &identity, clock);
+    identity
+}
+
+/// Publishes complete artifacts for the caller's restored preparation.
+fn publish_identity(session: &Path, identity: &str, clock: &dyn Clock) {
+    let generation = focus_area_generation::begin(session, identity, clock).unwrap();
+    let preparation = Path::new(&generation.session_state);
+    focus_area_expansion::update(
+        preparation,
+        focus_area_expansion::Operation::Initialize,
+        clock,
+    )
+    .unwrap();
+    focus_area_expansion::update(
+        preparation,
+        focus_area_expansion::Operation::Finalize,
+        clock,
+    )
+    .unwrap();
+    let span = |root| json!({"root":root,"path":"guide.md","startLine":1,"endLine":2});
+    let map = json!({"schemaVersion":1,"categories":[{"id":"rules","title":"Rules"}],
+        "chapters":[{"id":"rule","categoryId":"rules","content":span("instruction-set-raw"),
+            "sources":[span("instruction-set-source")],"applicability":[{
+                "effectiveScope":"No explicit restriction; interpret the guideline in context.",
+                "declarations":[],"origins":[],"uncertainties":[]}]}]});
+    let map_path = preparation.join("focus-area-map.json");
+    focus_area_map::update(
+        preparation,
+        &map_path,
+        focus_area_map::MapOperation::Append(serde_json::to_vec(&map).unwrap()),
+        clock,
+    )
+    .unwrap();
+    focus_area_map::assemble(preparation, &map_path, clock).unwrap();
+    focus_area_generation::publish(session, &generation.generation_id, clock).unwrap();
+}
+
+/// Starts a new source and restore epoch without authorizing old artifacts.
+fn restore_identity(workspace: &Workspace, clock: &dyn Clock) -> String {
+    let session = &workspace.0;
+    let _operation = ResourceLock::open(
+        &session.join("focus-area-cache-operation"),
+        LockMode::Exclusive,
+        clock,
+    )
+    .unwrap();
+    focus_area_generation::invalidate_locked(session, clock).unwrap();
+    focus_area_generation::invalidate_snapshot_locked(session, clock).unwrap();
+    focus_area_generation::bind_snapshot_locked(session, clock).unwrap();
+    focus_area_generation::bind_restore_locked(
+        session,
+        &session.join("instruction-set-source"),
+        clock,
+    )
+    .unwrap()
+}
+
+#[test]
+fn bound_work_rejects_stale_unready_changed_and_unbound_artifacts() {
+    let workspace = Workspace::new("bound-fencing");
+    let clock = SystemClock::default();
+    let (inventory, groups, _) = inputs(&workspace);
+    let first = published_preparation(&workspace, &clock);
+    let focus = workspace.path("focus-areas");
+    let output = workspace.path("work");
+    let make = |identity: &str, focus_path: &Path| {
+        review_work::create_with_preparation(
+            &inventory,
+            &groups,
+            focus_path,
+            &output,
+            None,
+            None,
+            &review_work::PreparationBinding {
+                session: &workspace.0,
+                identity,
+            },
+            &clock,
+        )
+    };
+
+    assert!(review_work::create(&inventory, &groups, &focus, &output, None, None, &clock).is_err());
+    let other = workspace.path("other");
+    fs::create_dir_all(&other).unwrap();
+    fs::write(other.join("area.md"), "Legacy guidance").unwrap();
+    assert!(make(&first, &other).is_err());
+    assert!(!output.exists());
+    assert!(
+        review_work::create(
+            &inventory,
+            &groups,
+            &other,
+            &workspace.path("legacy-work"),
+            None,
+            None,
+            &clock
+        )
+        .is_ok()
+    );
+
+    let second = restore_identity(&workspace, &clock);
+    assert_ne!(first, second);
+    assert!(make(&first, &focus).is_err());
+    assert!(make(&second, &focus).is_err());
+    assert!(!output.exists());
+
+    // A published receipt must not authorize later modified artifact bytes.
+    publish_identity(&workspace.0, &second, &clock);
+    fs::write(focus.join("focus-rules.md"), "changed").unwrap();
+    assert!(make(&second, &focus).is_err());
+    assert!(!output.exists());
+}
+
+/// Keeps cache freshness stable and treats unexpected contention as a failure.
+struct FixedClock;
+
+impl Clock for FixedClock {
+    fn now(&self) -> Timestamp {
+        Timestamp::UNIX_EPOCH
+    }
+
+    fn wait(&self, _: Duration) -> Result<(), AppError> {
+        Err(fail("contention", "Unexpected fixture lock contention"))
+    }
+}
+
+#[test]
+fn bound_work_accepts_verified_cache_hits() {
+    let workspace = Workspace::new("bound-cache-hit");
+    let clock = FixedClock;
+    let (inventory, groups, _) = inputs(&workspace);
+    let source = workspace.path("instruction-set-source");
+    fs::create_dir_all(&source).unwrap();
+    fs::write(source.join("guide.md"), "# Rule\nKeep it.\n").unwrap();
+    let skill =
+        fs::canonicalize(Path::new(env!("CARGO_MANIFEST_DIR")).join("../../skills/ss-review"))
+            .unwrap();
+    let recipe = skill.join("prepare-focus-areas.md");
+    let cache = workspace.path("cache");
+    let options = focus_cache::CacheOptions {
+        session: &workspace.0,
+        input_directory: &source,
+        skill_root: &skill,
+        recipe: &recipe,
+        cache_directory: &cache,
+        generator_profile: "review-test",
+        // Match the wrapper default; the fake clock keeps the bucket stable.
+        freshness_days: 7,
+    };
+    let snapshot = {
+        let _operation = ResourceLock::open(
+            &workspace.path("focus-area-cache-operation"),
+            LockMode::Exclusive,
+            &clock,
+        )
+        .unwrap();
+        focus_area_generation::invalidate_locked(&workspace.0, &clock).unwrap();
+        focus_area_generation::invalidate_snapshot_locked(&workspace.0, &clock).unwrap();
+        focus_area_generation::bind_snapshot_locked(&workspace.0, &clock).unwrap()
+    };
+    let miss = focus_cache::restore(&options, false, &snapshot, &clock).unwrap();
+    assert_eq!(miss.status, "Miss");
+    let identity = miss.preparation_identity.unwrap();
+    publish_identity(&workspace.0, &identity, &clock);
+    assert_eq!(
+        focus_cache::store(&options, &identity, &clock)
+            .unwrap()
+            .status,
+        "Stored"
+    );
+    let snapshot = {
+        let _operation = ResourceLock::open(
+            &workspace.path("focus-area-cache-operation"),
+            LockMode::Exclusive,
+            &clock,
+        )
+        .unwrap();
+        focus_area_generation::invalidate_locked(&workspace.0, &clock).unwrap();
+        focus_area_generation::invalidate_snapshot_locked(&workspace.0, &clock).unwrap();
+        focus_area_generation::bind_snapshot_locked(&workspace.0, &clock).unwrap()
+    };
+    let hit = focus_cache::restore(&options, false, &snapshot, &clock).unwrap();
+    assert_eq!(hit.status, "Hit");
+    let identity = hit.preparation_identity.unwrap();
+    let result = review_work::create_with_preparation(
+        &inventory,
+        &groups,
+        &workspace.path("focus-areas"),
+        &workspace.path("work"),
+        None,
+        None,
+        &review_work::PreparationBinding {
+            session: &workspace.0,
+            identity: &identity,
+        },
+        &clock,
+    )
+    .unwrap();
+    let manifest: Value =
+        serde_json::from_slice(&fs::read(result["manifestPath"].as_str().unwrap()).unwrap())
+            .unwrap();
+    assert!(
+        Path::new(manifest["reviewers"][0]["focusArea"].as_str().unwrap())
+            .starts_with(workspace.path("work"))
+    );
 }
 
 /// Builds an assessment for each assigned file.
@@ -508,6 +731,344 @@ impl Clock for GateClock {
         self.release.recv().unwrap();
         Ok(())
     }
+}
+
+/// Reports contention or premature acquisition through the same ordered channel.
+struct EventGateClock {
+    events: Sender<&'static str>,
+    release: Receiver<()>,
+    waits: Cell<u8>,
+}
+
+impl Clock for EventGateClock {
+    fn now(&self) -> Timestamp {
+        Timestamp::UNIX_EPOCH
+    }
+
+    fn wait(&self, _: Duration) -> Result<(), AppError> {
+        let waits = self.waits.get();
+        // Each participant may be blocked once at each controlled checkpoint.
+        if waits >= 2 {
+            return Err(fail("contention", "Unexpected repeated lock contention"));
+        }
+        self.waits.set(waits.saturating_add(1));
+        self.events.send("contended").unwrap();
+        self.release
+            .recv()
+            .map_err(|error| caused_by("io", "Retry permission was not received", error))?;
+        Ok(())
+    }
+}
+
+/// Pauses publication with its artifact directory absent, then resumes the reader.
+fn work_waits_for_focus_publication(bound: bool, alias: bool) {
+    let _process_exclusion = PROCESS_CREATION_AND_CONTROLLED_LOCK
+        .lock()
+        .expect("Another test panicked while excluding process creation");
+    let workspace = Workspace::new(match (bound, alias) {
+        (false, false) => "legacy-publication-gap",
+        (true, false) => "bound-publication-gap",
+        (false, true) => "legacy-publication-alias",
+        (true, true) => "bound-publication-alias",
+    });
+    let clock = SystemClock::default();
+    let (inventory, groups, _) = inputs(&workspace);
+    let focus = workspace.path("focus-areas");
+    let identity = if bound {
+        Some(published_preparation(&workspace, &clock))
+    } else {
+        fs::create_dir_all(&focus).unwrap();
+        fs::write(focus.join("focus-rules.md"), "Focus guidance").unwrap();
+        None
+    };
+    let original = fs::read_to_string(focus.join("focus-rules.md")).unwrap();
+    let input = if alias {
+        #[cfg(unix)]
+        {
+            let link = workspace.path("focus-alias");
+            symlink("focus-areas", &link).unwrap();
+            link
+        }
+        #[cfg(not(unix))]
+        {
+            panic!("The alias fixture is only used where symlinks are available");
+        }
+    } else {
+        focus.clone()
+    };
+    let operation = ResourceLock::open(
+        &workspace.path("focus-area-cache-operation"),
+        LockMode::Shared,
+        &clock,
+    )
+    .unwrap();
+    let artifacts = FileTransaction::open(&focus, &clock).unwrap();
+    let backup = workspace.path("focus-backup");
+    fs::rename(&focus, &backup).unwrap();
+    let (events_tx, events_rx) = mpsc::channel();
+    let (retry_tx, retry_rx) = mpsc::channel();
+    let session = workspace.0.clone();
+    let output = workspace.path("work");
+    std::thread::scope(|scope| {
+        let worker = scope.spawn(move || {
+            let clock = EventGateClock {
+                events: events_tx.clone(),
+                release: retry_rx,
+                waits: Cell::new(0),
+            };
+            let result = if let Some(identity) = identity.as_deref() {
+                review_work::create_with_preparation(
+                    &inventory,
+                    &groups,
+                    &input,
+                    &output,
+                    None,
+                    None,
+                    &review_work::PreparationBinding {
+                        session: &session,
+                        identity,
+                    },
+                    &clock,
+                )
+            } else {
+                review_work::create(&inventory, &groups, &input, &output, None, None, &clock)
+            };
+            events_tx.send("finished").unwrap();
+            result
+        });
+        // The reader must reach the artifact lock rather than inspect the
+        // temporarily absent directory during the publication transaction.
+        assert_eq!(events_rx.recv().unwrap(), "contended");
+        fs::rename(&backup, &focus).unwrap();
+        drop(artifacts);
+        drop(operation);
+        retry_tx.send(()).unwrap();
+        let result = worker.join().unwrap().unwrap();
+        let manifest: Value =
+            serde_json::from_slice(&fs::read(result["manifestPath"].as_str().unwrap()).unwrap())
+                .unwrap();
+        let snapshot = Path::new(manifest["reviewers"][0]["focusArea"].as_str().unwrap());
+        assert_eq!(fs::read_to_string(snapshot).unwrap(), original);
+    });
+}
+
+#[test]
+fn work_waits_for_focus_publication_before_resolving_directory() {
+    work_waits_for_focus_publication(false, false);
+    work_waits_for_focus_publication(true, false);
+}
+
+#[cfg(unix)]
+#[test]
+fn work_waits_for_focus_publication_through_directory_alias() {
+    work_waits_for_focus_publication(false, true);
+    work_waits_for_focus_publication(true, true);
+}
+
+#[cfg(unix)]
+#[test]
+fn work_rejects_retargeted_and_cyclic_focus_aliases() {
+    let _process_exclusion = PROCESS_CREATION_AND_CONTROLLED_LOCK
+        .lock()
+        .expect("Another test panicked while excluding process creation");
+    let workspace = Workspace::new("focus-alias-changes");
+    let clock = SystemClock::default();
+    let (inventory, groups, _) = inputs(&workspace);
+    let focus = workspace.path("focus-areas");
+    let other = workspace.path("other");
+    fs::create_dir_all(&focus).unwrap();
+    fs::create_dir_all(&other).unwrap();
+    fs::write(focus.join("area.md"), "Original").unwrap();
+    fs::write(other.join("area.md"), "Replacement").unwrap();
+    let alias = workspace.path("focus-alias");
+    symlink("focus-areas", &alias).unwrap();
+    let held = FileTransaction::open(&focus, &clock).unwrap();
+    let (events_tx, events_rx) = mpsc::channel();
+    let (retry_tx, retry_rx) = mpsc::channel();
+    let output = workspace.path("work");
+    std::thread::scope(|scope| {
+        let worker = scope.spawn({
+            let alias = &alias;
+            let output = &output;
+            let inventory = &inventory;
+            let groups = &groups;
+            move || {
+                let clock = EventGateClock {
+                    events: events_tx,
+                    release: retry_rx,
+                    waits: Cell::new(0),
+                };
+                review_work::create(inventory, groups, alias, output, None, None, &clock)
+            }
+        });
+        assert_eq!(events_rx.recv().unwrap(), "contended");
+        fs::remove_file(&alias).unwrap();
+        symlink("other", &alias).unwrap();
+        drop(held);
+        retry_tx.send(()).unwrap();
+        assert!(worker.join().unwrap().is_err());
+    });
+    assert!(!output.exists());
+
+    fs::remove_file(&alias).unwrap();
+    symlink("focus-alias", &alias).unwrap();
+    assert!(review_work::create(&inventory, &groups, &alias, &output, None, None, &clock).is_err());
+    assert!(!output.exists());
+}
+
+#[test]
+fn bound_work_holds_operation_lock_and_snapshots_before_replacement() {
+    let _process_exclusion = PROCESS_CREATION_AND_CONTROLLED_LOCK
+        .lock()
+        .expect("Another test panicked while excluding process creation");
+    let workspace = Workspace::new("bound-overlap");
+    let clock = SystemClock::default();
+    let (inventory, groups, _) = inputs(&workspace);
+    let identity = published_preparation(&workspace, &clock);
+    let scope_path = workspace.path("scope.md");
+    fs::write(&scope_path, "Review scope").unwrap();
+    fs::write(workspace.path("references.md"), "References").unwrap();
+    fs::write(workspace.path("content-overview.md"), "Overview").unwrap();
+    let skill =
+        fs::canonicalize(Path::new(env!("CARGO_MANIFEST_DIR")).join("../../skills/ss-review"))
+            .unwrap();
+    let focus = workspace.path("focus-areas");
+    let original = fs::read_to_string(focus.join("focus-rules.md")).unwrap();
+    // The artifact lock pauses initialization after it owns the operation lock;
+    // the finding lock pauses it again after it has snapshotted focus documents.
+    let held_artifacts = FileTransaction::open(&focus, &clock).unwrap();
+    let findings = workspace.path("artifacts");
+    fs::create_dir_all(&findings).unwrap();
+    let held_finding = FileTransaction::open(&findings.join("focus-001.json"), &clock).unwrap();
+    let (worker_events_tx, worker_events_rx) = mpsc::channel();
+    let (worker_retry_tx, worker_retry_rx) = mpsc::channel();
+    let (writer_events_tx, writer_events_rx) = mpsc::channel();
+    let (writer_retry_tx, writer_retry_rx) = mpsc::channel();
+    let (writer_resume_tx, writer_resume_rx) = mpsc::channel();
+    let session = workspace.0.clone();
+    let output = workspace.path("work");
+    let assignment_output = workspace.path("attempt");
+    std::thread::scope(move |scope| {
+        let worker = scope.spawn({
+            let session = session.clone();
+            let focus = focus.clone();
+            move || {
+                let clock = EventGateClock {
+                    events: worker_events_tx.clone(),
+                    release: worker_retry_rx,
+                    waits: Cell::new(0),
+                };
+                let result = review_work::create_with_preparation(
+                    &inventory,
+                    &groups,
+                    &focus,
+                    &output,
+                    Some(&session),
+                    Some(&findings),
+                    &review_work::PreparationBinding {
+                        session: &session,
+                        identity: &identity,
+                    },
+                    &clock,
+                );
+                worker_events_tx.send("finished").unwrap();
+                result
+            }
+        });
+        assert_eq!(worker_events_rx.recv().unwrap(), "contended");
+        let writer = scope.spawn({
+            let session = session.clone();
+            let focus = focus.clone();
+            move || -> Result<(), AppError> {
+                let clock = EventGateClock {
+                    events: writer_events_tx.clone(),
+                    release: writer_retry_rx,
+                    waits: Cell::new(0),
+                };
+                let _operation = ResourceLock::open(
+                    &session.join("focus-area-cache-operation"),
+                    LockMode::Exclusive,
+                    &clock,
+                )?;
+                writer_events_tx.send("acquired").unwrap();
+                writer_resume_rx.recv().map_err(|error| {
+                    caused_by("io", "Writer permission was not received", error)
+                })?;
+                let _artifacts = FileTransaction::open(&focus, &clock)?;
+                focus_area_generation::invalidate_locked(&session, &clock)?;
+                fs::write(focus.join("focus-rules.md"), "replacement")?;
+                Ok(())
+            }
+        });
+        assert_eq!(writer_events_rx.recv().unwrap(), "contended");
+        drop(held_artifacts);
+        worker_retry_tx.send(()).unwrap();
+        assert_eq!(worker_events_rx.recv().unwrap(), "contended");
+        // The writer must still be excluded after the snapshot, through publication.
+        writer_retry_tx.send(()).unwrap();
+        assert_eq!(writer_events_rx.recv().unwrap(), "contended");
+        drop(held_finding);
+        worker_retry_tx.send(()).unwrap();
+        let result = worker.join().unwrap().unwrap();
+        writer_retry_tx.send(()).unwrap();
+        assert_eq!(writer_events_rx.recv().unwrap(), "acquired");
+        writer_resume_tx.send(()).unwrap();
+        writer.join().unwrap().unwrap();
+
+        let manifest: Value =
+            serde_json::from_slice(&fs::read(result["manifestPath"].as_str().unwrap()).unwrap())
+                .unwrap();
+        let snapshot = Path::new(manifest["reviewers"][0]["focusArea"].as_str().unwrap());
+        assert_eq!(fs::read_to_string(snapshot).unwrap(), original);
+        assert_eq!(
+            fs::read_to_string(focus.join("focus-rules.md")).unwrap(),
+            "replacement"
+        );
+        let assignment = worker_input::create_assignment(
+            &worker_input::AssignmentOptions {
+                phase: "review",
+                session_state: &session,
+                scope_path: &scope_path,
+                output_directory: &assignment_output,
+                skill_root: &skill,
+                manifest_path: Some(Path::new(result["manifestPath"].as_str().unwrap())),
+                reviewer_id: Some("focus-001"),
+                context_path: None,
+                resume: false,
+                repository_instructions: false,
+                include_pre_existing: false,
+            },
+            &SystemClock::default(),
+        )
+        .unwrap();
+        let page = worker_input::read_document(
+            Path::new(assignment["assignmentPath"].as_str().unwrap()),
+            "focusArea",
+            0,
+            &SystemClock::default(),
+        )
+        .unwrap();
+        assert_eq!(page["content"], original);
+        assert_eq!(page["complete"], true);
+        let preparation_assignment = worker_input::create_assignment(
+            &worker_input::AssignmentOptions {
+                phase: "focusAreas",
+                session_state: &session,
+                scope_path: &scope_path,
+                output_directory: &session.join("preparation-attempt"),
+                skill_root: &skill,
+                manifest_path: None,
+                reviewer_id: None,
+                context_path: None,
+                resume: false,
+                repository_instructions: false,
+                include_pre_existing: false,
+            },
+            &SystemClock::default(),
+        )
+        .unwrap();
+        assert!(preparation_assignment["assignmentPath"].is_string());
+    });
 }
 
 /// Exchanges explicit retry permission with a PowerShell lock owner.

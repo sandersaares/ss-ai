@@ -4,23 +4,27 @@
 # before cache lookup (docs/implementation.md, "Worker input boundary").
 [CmdletBinding(PositionalBinding = $false)]
 param(
-    [Parameter(Mandatory)][string] $SessionStateDirectory
+    [Parameter(Mandatory)][string] $SessionStateDirectory,
+    [string] $RepositoryRoot,
+    [string[]] $RepositoryInstruction
 )
 
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 $PSNativeCommandUseErrorActionPreference = $true
 
-. "$PSScriptRoot\lib\PullRequestModel.ps1"
-. "$PSScriptRoot\lib\InstructionSources.ps1"
-
-$session = [IO.Path]::GetFullPath($SessionStateDirectory)
-[void][IO.Directory]::CreateDirectory($session)
-$lock = Open-PullRequestFileLock -Path (Join-Path $session 'focus-area-cache-operation')
-try {
-    Copy-ReviewInstructionSources -SessionStateDirectory $session `
-        -SkillRoot (Split-Path -Parent $PSScriptRoot) `
-        -DirectoryList ([Environment]::GetEnvironmentVariable('COPILOT_CUSTOM_INSTRUCTIONS_DIRS')) `
-        -BaseDirectory (Get-Location).ProviderPath |
-        ConvertTo-Json -Depth 5 -Compress
-} finally { $lock.Dispose() }
+. "$PSScriptRoot\lib\NativeWorkflowBridge.ps1"
+$session = $ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath($SessionStateDirectory)
+$skillRoot = Split-Path -Parent $PSScriptRoot
+$arguments = @(
+    'snapshot-instructions', "--session-state=$session", "--skill-root=$skillRoot"
+)
+if ($RepositoryRoot) {
+    $arguments += "--repository-root=$($ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath($RepositoryRoot))"
+}
+if ($null -ne $RepositoryInstruction) {
+    foreach ($path in $RepositoryInstruction) {
+        $arguments += "--repository-instruction=$path"
+    }
+}
+Invoke-NativeReviewWorkflow -Arguments $arguments

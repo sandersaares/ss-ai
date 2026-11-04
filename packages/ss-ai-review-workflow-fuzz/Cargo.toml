@@ -38,5 +38,12 @@ test = false
 doc = false
 bench = false
 
+[[bin]]
+name = "focus_area_expansion"
+path = "fuzz_targets/focus_area_expansion.rs"
+test = false
+doc = false
+bench = false
+
 [lints]
 workspace = true
