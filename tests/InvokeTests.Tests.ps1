@@ -59,17 +59,24 @@ BeforeAll {
 
 Describe 'prepared helper' {
     It 'receives the prebuilt test executable' {
-        foreach ($name in @(__HELPER_NAMES__)) {
-            $helper = [Environment]::GetEnvironmentVariable($name)
-            $helper | Should -Not -BeNullOrEmpty
-            Test-Path -LiteralPath $helper -PathType Leaf | Should -BeTrue
+        foreach ($helper in @(__HELPERS__)) {
+            $copy = [Environment]::GetEnvironmentVariable($helper.name)
+            $source = Join-Path $PSScriptRoot $helper.source
+            $copy | Should -Not -BeNullOrEmpty
+            Test-Path -LiteralPath $copy -PathType Leaf | Should -BeTrue
+            $copy | Should -Not -BeExactly $source
+            [IO.File]::ReadAllText($copy) | Should -BeExactly 'fixture'
+            [IO.File]::WriteAllText($source, 'replacement')
+            [IO.File]::ReadAllText($copy) | Should -BeExactly 'fixture'
         }
     }
 }
-'@.Replace('__HELPER_NAMES__', $(if ($NativePesterName -eq 'SsReviewWorkerInput.Tests.ps1') {
-                    "'SS_AI_WORKER_INPUT_TEST_EXECUTABLE'"
+'@.Replace('__HELPERS__', $(if ($NativePesterName -eq 'SsReviewWorkerInput.Tests.ps1') {
+                    "@{ name = 'SS_AI_WORKER_INPUT_TEST_EXECUTABLE'; source = 'worker_input-helper' }"
                 } else {
-                    "'SS_AI_FINDING_TEST_EXECUTABLE', 'SS_AI_AUDIT_TEST_EXECUTABLE', 'SS_AI_REVIEW_WORK_TEST_EXECUTABLE'"
+                    "@{ name = 'SS_AI_FINDING_TEST_EXECUTABLE'; source = 'finding_plans-helper' }, " +
+                    "@{ name = 'SS_AI_AUDIT_TEST_EXECUTABLE'; source = 'audit-helper' }, " +
+                    "@{ name = 'SS_AI_REVIEW_WORK_TEST_EXECUTABLE'; source = 'review_work-helper' }"
                 })))
         }
         $testPath = if ($FailNativePester -or $NativePrerequisiteSucceeds) { $root } else { $test }

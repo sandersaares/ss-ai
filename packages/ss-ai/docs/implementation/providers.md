@@ -45,9 +45,8 @@ observation of classic branch protection, then reads every page of the effective
 branch rules. It retains the combined last-push approval requirement rather than
 unrelated merge restrictions or ruleset presentation. This covers organization
 and repository rulesets without treating a retained `APPROVED` review as proof of
-source freshness. Renewal replay retains each standing review's approved source
-separately from its original external anchor, so another source update never
-moves the cumulative comparison baseline.
+source freshness. The applicable account-owned approval event supplies its own
+approved source as the comparison baseline, regardless of how it was submitted.
 
 ## Account identity and registration
 

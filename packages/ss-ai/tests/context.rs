@@ -1,4 +1,6 @@
 //! Real-process compatibility between native and PowerShell context readers.
+#![cfg_attr(coverage_nightly, feature(coverage_attribute))]
+#![cfg_attr(coverage_nightly, coverage(off))]
 #![allow(
     clippy::indexing_slicing,
     clippy::arithmetic_side_effects,

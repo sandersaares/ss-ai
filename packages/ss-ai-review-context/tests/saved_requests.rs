@@ -1,4 +1,6 @@
 //! Exercises saved request and diagnostics file transactions.
+#![cfg_attr(coverage_nightly, feature(coverage_attribute))]
+#![cfg_attr(coverage_nightly, coverage(off))]
 #![allow(
     clippy::assertions_on_result_states,
     clippy::indexing_slicing,
@@ -295,8 +297,9 @@ fn duplicate_properties_are_rejected_without_changing_records() {
     }
 }
 
-/// Distinguishes initial malformed setup from rejection of an existing request,
-/// while requiring diagnostics records to remain complete.
+/// Distinguishes malformed setup from rejection of an existing request.
+///
+/// Diagnostics records must also remain complete.
 #[test]
 fn diagnostics_reject_malformed_records_and_account_for_failed_setup() {
     let files = Files::new();

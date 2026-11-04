@@ -387,6 +387,27 @@ Describe 'ss-review approved finding freshness against the reviewed diff' {
         Should -Invoke Invoke-NativeReviewWorkflowWithJson -Times 1 -Exactly
     }
 
+    It 'validates each native result variant independently' -TestCases @(
+        @{ json = '{"anchor":{"kind":"file","path":"src/lib.rs","wasDowngraded":false}}'; accepted = $true }
+        @{ json = '{"anchor":{"kind":"line","path":"src/lib.rs","startLine":1,"endLine":2,"side":"left","wasDowngraded":false}}'; accepted = $true }
+        @{ json = '{"anchor":{"kind":"file","path":"src/lib.rs","wasDowngraded":true,"downgradeReason":"reason"}}'; accepted = $true }
+        @{ json = '{"error":"Unresolvable anchor: missing"}'; accepted = $true }
+        @{ json = '{"argumentError":"invalid"}'; accepted = $true }
+        @{ json = '{"anchor":{"kind":"line","path":"src/lib.rs","startLine":1,"endLine":2,"side":"other","wasDowngraded":false}}'; accepted = $false }
+        @{ json = '{"anchor":{"kind":"file","path":"src/lib.rs","wasDowngraded":true}}'; accepted = $false }
+        @{ json = '{"error":"other"}'; accepted = $false }
+        @{ json = '{"argumentError":""}'; accepted = $false }
+        @{ json = '{"anchor":{},"error":"Unresolvable anchor: missing"}'; accepted = $false }
+    ) {
+        param($json, $accepted)
+        $entry = ConvertFrom-JsonVerbatim -Text $json
+        if ($accepted) {
+            { Assert-NativeAnchorResolutionResult -Entry $entry } | Should -Not -Throw
+        } else {
+            { Assert-NativeAnchorResolutionResult -Entry $entry } | Should -Throw '*Invalid native anchor resolution result*'
+        }
+    }
+
     It 'propagates a native failure without changing the document' {
         Mock Invoke-NativeReviewWorkflowWithJson { throw 'native process failed' }
         $document = New-TestApprovedDocument -Finding @(

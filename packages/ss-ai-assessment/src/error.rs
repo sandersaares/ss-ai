@@ -33,10 +33,90 @@ classified_error!(
     "Missing cumulative rationale"
 );
 classified_error!(
+    MissingSignificantConclusion,
+    "invalidState",
+    "Partial completion requires a supported significant change judgment"
+);
+classified_error!(
     InvalidAssessmentBinding,
     "invalidState",
     "Assessment binding, context selection, or completion is invalid"
 );
+classified_error!(
+    InvalidSourceEvidence,
+    "invalidState",
+    "Source evidence does not match the captured inventory"
+);
+classified_error!(
+    InvalidContextRange,
+    "invalidInput",
+    "Context range must contain complete existing captured-source lines"
+);
+classified_error!(
+    InvalidContextBinding,
+    "invalidState",
+    "Source context binding changed"
+);
+classified_error!(
+    InvalidUnitManifest,
+    "invalidState",
+    "Invalid exact evidence unit manifest"
+);
+classified_error!(UnknownUnit, "invalidInput", "Unknown evidence unit");
+classified_error!(
+    MissingDiscussionObservation,
+    "invalidState",
+    "Record the discussion observation before cumulative assessment"
+);
+classified_error!(
+    InvalidCheckpointNote,
+    "invalidInput",
+    "Semantic records require nonempty observations and exact evidence; cumulative interactions belong in the final reasoning or unresolved concerns"
+);
+classified_error!(
+    MissingExactEvidence,
+    "invalidState",
+    "Semantic work requires exact native evidence, not only summaries"
+);
+classified_error!(
+    UnknownCheck,
+    "invalidInput",
+    "Unknown or stale concern or interaction"
+);
+classified_error!(
+    UnresolvedCheck,
+    "invalidState",
+    "Every concern and interaction requires an evidence-backed disposition"
+);
+classified_error!(
+    NoCheckpointProgress,
+    "invalidState",
+    "A planned checkpoint requires newly completed immutable work"
+);
+classified_error!(
+    StaleAggregate,
+    "invalidState",
+    "Aggregate dependencies are missing or stale"
+);
+classified_error!(
+    InvalidAggregateDependency,
+    "invalidInput",
+    "Judgment contains a prohibited semantic dependency"
+);
+
+/// Reconstruction failures keep their parser diagnostic without becoming opaque evidence.
+#[ohno::error]
+pub(crate) struct InvalidSourcePatch;
+
+impl InvalidSourcePatch {
+    pub(crate) fn from_error(error: ss_ai_git::ExactPatchError) -> AssessmentError {
+        AssessmentError::caused_by(Self::caused_by(ss_ai_runtime::caused_by(
+            "invalidState",
+            "Invalid exact source patch",
+            error,
+        )))
+    }
+}
 classified_error!(
     ReadBeyondEvidence,
     "invalidState",
@@ -63,14 +143,74 @@ classified_error!(
     "Completed assessments are immutable"
 );
 classified_error!(
+    OnlyDiscussionObservation,
+    "invalidInput",
+    "Direct assessments accept only the discussion observation, not transport-unit notes"
+);
+classified_error!(
     StaleJudgment,
     "invalidState",
     "Judgment changed; refresh its previous digest before replacing it"
 );
 classified_error!(
+    StaleAssessment,
+    "invalidState",
+    "Assessment changed; refresh its state token before submitting the batch"
+);
+classified_error!(
+    StaleReadToken,
+    "invalidState",
+    "Required evidence changed; refresh the read token"
+);
+classified_error!(
+    StaleReadContent,
+    "invalidState",
+    "Evidence content changed; restart the read from its first page"
+);
+classified_error!(
+    MissingReadContentDigest,
+    "invalidInput",
+    "Continuing a mutable evidence record requires its content digest"
+);
+classified_error!(
+    MutableReadRequiresBatch,
+    "invalidInput",
+    "Continue mutable evidence through a batch with its content digest"
+);
+classified_error!(
+    DuplicateBatchItem,
+    "invalidInput",
+    "Batch references and change identifiers must be distinct"
+);
+classified_error!(
+    EmptyBatch,
+    "invalidInput",
+    "Batch must contain at least one item"
+);
+classified_error!(
+    ZeroReadLimit,
+    "invalidInput",
+    "Evidence reads require a positive character limit"
+);
+classified_error!(
+    InvalidBatchJudgment,
+    "invalidInput",
+    "A judgment batch cannot contain a cumulative judgment"
+);
+classified_error!(
     IncompleteEvidenceReads,
     "invalidState",
-    "Insignificant assessment requires complete policy, discussion, and changed-source reads"
+    "Assessment requires complete policy, discussion, required patch, and requested context reads; inspect read progress and continue missing evidence, not semantic uncertainty"
+);
+classified_error!(
+    OversizedResponse,
+    "evidenceDelivery",
+    "Assessment metadata exceeds the bounded response budget; retain incomplete work without publishing a semantic refusal"
+);
+classified_error!(
+    OversizedContextBatch,
+    "batchTooLarge",
+    "Context registration response exceeds the bounded response budget; retry with smaller batches"
 );
 classified_error!(
     MissingJudgmentEvidence,
@@ -91,7 +231,7 @@ classified_error!(UnknownChange, "invalidInput", "Unknown change identifier");
 classified_error!(
     UncitedChange,
     "invalidState",
-    "Change judgment must cite that change"
+    "Change judgment must cite its required patch reference"
 );
 classified_error!(
     UnavailableSource,
@@ -117,7 +257,7 @@ classified_error!(UnknownEvidenceSide, "invalidInput", "Unknown evidence side");
 classified_error!(
     UnreadableEvidence,
     "invalidInput",
-    "This evidence side has no readable text; record a non-insignificant judgment"
+    "This captured source side has no readable text"
 );
 classified_error!(
     IncompleteInventory,
@@ -164,7 +304,7 @@ mod tests {
 
     use super::{
         AssessmentError, IncompleteCoverage, IncompleteInventory, InvalidChangeId,
-        InvalidChangeShape, InvalidCommit, InvalidReference, NoncontiguousRead,
+        InvalidChangeShape, InvalidCommit, InvalidReference, InvalidSourcePatch, NoncontiguousRead,
     };
 
     /// Confirms both the owning invariant and the application's recovery category.
@@ -210,7 +350,8 @@ mod tests {
 
     #[test]
     fn assessment_failures_keep_distinct_types_and_categories() {
-        let mut assessment = Assessment::new(inventory(), "snapshot", "policy").unwrap();
+        let mut assessment =
+            Assessment::new_direct(inventory(), &[], "snapshot", "policy", "discussion").unwrap();
         assert_failure::<IncompleteCoverage>(
             assessment.finish("policy", "discussion").unwrap_err(),
             "invalidState",
@@ -227,5 +368,15 @@ mod tests {
                 .unwrap_err(),
             "invalidInput",
         );
+    }
+
+    #[test]
+    fn source_patch_failure_preserves_the_parser_error_and_classification() {
+        let parser = ss_ai_git::validate_patch("", "old\n", "new\n").unwrap_err();
+        let error = InvalidSourcePatch::from_error(parser);
+        let error: AppError = error.into();
+        assert!(error.find_source::<InvalidSourcePatch>().is_some());
+        assert!(error.find_source::<ss_ai_git::ExactPatchError>().is_some());
+        assert_eq!(classification(&error), "invalidState");
     }
 }

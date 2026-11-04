@@ -45,6 +45,7 @@ $ErrorActionPreference = 'Stop'
 $PSNativeCommandUseErrorActionPreference = $true
 
 . "$PSScriptRoot\lib\NativeWorkflowBridge.ps1"
+. "$PSScriptRoot\lib\FindingIdentifiers.ps1"
 $artifact = $ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath($ArtifactPath)
 $finding = $ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath($FindingPath)
 $arguments = @('add-finding', "--artifact-path=$artifact", "--finding-path=$finding", "--origin=$Origin")
@@ -52,10 +53,7 @@ if ($ContextPath) {
     $context = $ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath($ContextPath)
     $arguments += "--context-path=$context"
 }
-foreach ($entry in $SourceFindingId) {
-    foreach ($part in $entry.Split(',')) {
-        $id = $part.Trim()
-        if ($id) { $arguments += "--source-id=$id" }
-    }
+foreach ($id in (ConvertTo-FindingIdentifierList -Value $SourceFindingId)) {
+    $arguments += "--source-id=$id"
 }
 Invoke-NativeReviewWorkflow -Arguments $arguments
