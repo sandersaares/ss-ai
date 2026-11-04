@@ -1,18 +1,37 @@
 //! Durable audit decisions and approval gates.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::error::Error;
 use std::fs;
 use std::path::Path;
 use std::str::FromStr;
 
 use ohno::AppError;
+use serde::Deserialize;
+use serde::de::value::{Error as DeserializeError, StrDeserializer};
 use serde_json::{Value, json};
 use ss_ai_review_context::{decode_file_text, read_capture};
 use ss_ai_runtime::{Clock, FileTransaction, caused_by, fail, read_bytes};
 
 use crate::findings::read_artifact;
-use crate::workflow_plan::{self, DecisionValue, PlanItem, PlanKind, parse_json};
+use crate::workflow_plan::{self, Decision, DecisionValue, PlanItem, PlanKind, parse_json};
+
+/// Keeps the validated document and its last verdict for each finding together.
+pub(crate) struct DecisionJournal {
+    document: Value,
+    last: HashMap<String, DecisionValue>,
+}
+
+impl DecisionJournal {
+    /// Replays validated verdicts without revisiting the JSON representation.
+    pub(crate) fn last_decision(&self, id: &str) -> Option<DecisionValue> {
+        self.last.get(id).copied()
+    }
+}
+
+/// Identifies a journal verdict outside the canonical decision vocabulary.
+#[ohno::error]
+struct UnknownJournalDecision;
 
 /// Appends a validated batch to the decision journal under one transaction.
 ///
@@ -48,7 +67,7 @@ pub fn add_decisions(
         let PlanItem::Decision(decision) = item else {
             return Err(invalid("Expected a decision plan"));
         };
-        requests.push(serde_json::to_value(decision)?);
+        requests.push(decision.clone());
     }
     append_decisions(
         path,
@@ -101,7 +120,7 @@ pub fn add_decision(
     };
     append_decisions(
         path,
-        vec![serde_json::to_value(decision)?],
+        vec![decision],
         audit_feedback_path,
         policy_classification,
         recorded_utc,
@@ -112,7 +131,7 @@ pub fn add_decision(
 /// Commits a fully validated decision request through the common authority gate.
 fn append_decisions(
     path: &Path,
-    mut requests: Vec<Value>,
+    mut requests: Vec<Decision>,
     audit_feedback_path: Option<&Path>,
     policy_classification: bool,
     recorded_utc: &str,
@@ -124,35 +143,30 @@ fn append_decisions(
                 "Feedback requires one individual user decision without inline feedback",
             ));
         };
-        if policy_classification || request.get("feedback").is_some() {
+        if policy_classification || request.feedback.is_some() {
             return Err(invalid(
                 "Feedback requires one individual user decision without inline feedback",
             ));
         }
-        let feedback = get_feedback(feedback_path, required_text(request, "findingId")?, clock)?;
+        let feedback = get_feedback(feedback_path, &request.finding_id, clock)?;
         if !feedback.trim().is_empty() {
-            request
-                .as_object_mut()
-                .ok_or_else(|| invalid("Invalid decision"))?
-                .insert("feedback".to_owned(), json!(feedback));
+            request.feedback = Some(feedback);
         }
     }
     text(recorded_utc, "recordedUtc")?;
     validate_timestamp(clock.now(), recorded_utc)?;
     let mut ids = HashSet::new();
     for request in &requests {
-        validate_decision(request, false)?;
-        let id = required_text(request, "findingId")?;
-        if !ids.insert(id) {
+        if !ids.insert(&request.finding_id) {
             return Err(invalid("A decision batch repeats a finding"));
         }
         if policy_classification
             && (!matches!(
-                required_text(request, "decision")?,
-                "auto-approved" | "needs-audit"
+                request.decision,
+                DecisionValue::AutoApproved | DecisionValue::NeedsAudit
             ) || request
-                .get("feedback")
-                .and_then(Value::as_str)
+                .feedback
+                .as_deref()
                 .is_some_and(|s| !s.trim().is_empty()))
         {
             return Err(invalid(
@@ -165,28 +179,34 @@ fn append_decisions(
         Some(bytes) => parse(&bytes)?,
         None => json!({"schemaVersion": 1, "decisions": []}),
     };
-    validate_decisions(&document, clock)?;
+    document = validate_decisions(document, clock)?.document;
     let decisions = document
         .get_mut("decisions")
         .and_then(Value::as_array_mut)
         .ok_or_else(|| invalid("Invalid journal"))?;
     let mut recorded = Vec::new();
-    for request in &requests {
-        let mut record = request.clone();
+    for mut request in requests {
+        // Check feedback presence before omitting blank optional text.
+        if request
+            .reason
+            .as_deref()
+            .is_some_and(|s| s.trim().is_empty())
+        {
+            request.reason = None;
+        }
+        if request
+            .feedback
+            .as_deref()
+            .is_some_and(|s| s.trim().is_empty())
+        {
+            request.feedback = None;
+        }
+        recorded.push(request.finding_id.clone());
+        let mut record = serde_json::to_value(request)?;
         let object = record
             .as_object_mut()
             .ok_or_else(|| invalid("Invalid decision"))?;
-        for field in ["reason", "feedback"] {
-            if object
-                .get(field)
-                .and_then(Value::as_str)
-                .is_some_and(|s| s.trim().is_empty())
-            {
-                object.remove(field);
-            }
-        }
         object.insert("recordedUtc".to_owned(), json!(recorded_utc));
-        recorded.push(required_text(&record, "findingId")?.to_owned());
         decisions.push(record);
     }
     write(&transaction, &document)?;
@@ -205,13 +225,13 @@ pub fn poll_classification(
 ) -> Result<Value, AppError> {
     let artifact = read_artifact(artifact_path, clock)?;
     consolidated(&artifact)?;
-    let decisions = read_decisions(decisions_path, clock)?;
+    let decisions = read_journal(decisions_path, clock)?;
     let mut next = Value::Null;
     let mut remaining = 0_usize;
     let mut audit_ids = Vec::new();
     for finding in array(&artifact, "findings")? {
         let id = required_text(finding, "id")?;
-        match last_decision(&decisions, id)? {
+        match decisions.last_decision(id) {
             None => {
                 if next.is_null() {
                     next = finding.clone();
@@ -219,7 +239,7 @@ pub fn poll_classification(
                 remaining = remaining.saturating_add(1);
                 audit_ids.push(id);
             }
-            Some("needs-audit") => audit_ids.push(id),
+            Some(DecisionValue::NeedsAudit) => audit_ids.push(id),
             Some(_) => {}
         }
     }
@@ -469,44 +489,50 @@ fn set_merge_approval_from_context(
     Ok(json!({"status": "Recorded", "sourceCommit": commit}))
 }
 
-/// Validates the append-only decision journal before replay.
-fn validate_decisions(document: &Value, clock: &dyn Clock) -> Result<(), AppError> {
-    object_fields(document, &["schemaVersion", "decisions"])?;
-    version(document)?;
-    for record in array(document, "decisions")? {
-        validate_decision(record, true)?;
+/// Validates the journal once and builds the replay index in journal order.
+fn validate_decisions(document: Value, clock: &dyn Clock) -> Result<DecisionJournal, AppError> {
+    object_fields(&document, &["schemaVersion", "decisions"])?;
+    version(&document)?;
+    let mut last = HashMap::new();
+    for record in array(&document, "decisions")? {
+        let (finding_id, decision) = validate_decision(record)?;
         validate_timestamp(clock.now(), required_text(record, "recordedUtc")?)?;
+        last.insert(finding_id.to_owned(), decision);
     }
-    Ok(())
+    Ok(DecisionJournal { document, last })
 }
 
-/// Validates request and journal entries without coercing malformed JSON.
-fn validate_decision(record: &Value, journal: bool) -> Result<(), AppError> {
+/// Validates journal entries without coercing malformed JSON.
+fn validate_decision(record: &Value) -> Result<(&str, DecisionValue), AppError> {
     object_fields(
         record,
         &["findingId", "decision", "reason", "feedback", "recordedUtc"],
     )?;
     let finding_id = required_text(record, "findingId")?;
     let decision = required_text(record, "decision")?;
-    if !matches!(
-        decision,
-        "approved" | "auto-approved" | "needs-audit" | "rejected" | "dropped"
-    ) {
-        return Err(invalid(format!(
-            "Unknown decision '{decision}' for finding '{finding_id}'"
-        )));
-    }
+    let decision = decision_value(decision, finding_id)?;
     for name in ["reason", "feedback"] {
         if record.get(name).is_some_and(|v| !v.is_string()) {
             return Err(invalid("Invalid decision text"));
         }
     }
-    if journal {
-        required_text(record, "recordedUtc")?;
-    } else if record.get("recordedUtc").is_some() {
-        return Err(invalid("Timestamp belongs to the journal writer"));
-    }
-    Ok(())
+    required_text(record, "recordedUtc")?;
+    Ok((finding_id, decision))
+}
+
+/// Interprets a canonical journal verdict while preserving useful diagnostics.
+fn decision_value(decision: &str, finding_id: &str) -> Result<DecisionValue, AppError> {
+    DecisionValue::deserialize(StrDeserializer::<DeserializeError>::new(decision)).map_err(
+        |_error| {
+            UnknownJournalDecision::caused_by(
+                invalid(format!(
+                    "Unknown decision '{decision}' for finding '{finding_id}'"
+                ))
+                .into_std_error(),
+            )
+            .into()
+        },
+    )
 }
 
 /// Adds a useful field path to a rejected typed decision plan.
@@ -596,12 +622,16 @@ fn check_merge(document: &Value, url: &str, commit: &str) -> Result<bool, AppErr
 ///
 /// Rejects malformed journals and file errors.
 pub fn read_decisions(path: &Path, clock: &dyn Clock) -> Result<Value, AppError> {
+    Ok(read_journal(path, clock)?.document)
+}
+
+/// Reads and validates the journal for typed replay.
+pub(crate) fn read_journal(path: &Path, clock: &dyn Clock) -> Result<DecisionJournal, AppError> {
     let document = match read_bytes(path, clock)? {
         Some(bytes) => parse(&bytes)?,
         None => json!({"schemaVersion": 1, "decisions": []}),
     };
-    validate_decisions(&document, clock)?;
-    Ok(document)
+    validate_decisions(document, clock)
 }
 
 /// Selects the last recorded decision without changing journal history.
@@ -609,10 +639,10 @@ pub fn read_decisions(path: &Path, clock: &dyn Clock) -> Result<Value, AppError>
 /// # Errors
 ///
 /// Rejects malformed decision entries.
-pub fn last_decision<'a>(document: &'a Value, id: &str) -> Result<Option<&'a str>, AppError> {
+pub fn last_decision(document: &Value, id: &str) -> Result<Option<DecisionValue>, AppError> {
     for record in array(document, "decisions")?.iter().rev() {
         if required_text(record, "findingId")? == id {
-            return Ok(Some(required_text(record, "decision")?));
+            return decision_value(required_text(record, "decision")?, id).map(Some);
         }
     }
     Ok(None)
@@ -713,4 +743,62 @@ fn array<'a>(value: &'a Value, key: &str) -> Result<&'a Vec<Value>, AppError> {
 /// Classifies rejected records as invalid input at the operation boundary.
 fn invalid(message: impl Into<String>) -> AppError {
     fail("invalidInput", message.into())
+}
+
+#[cfg(test)]
+mod tests {
+    use std::time::Duration;
+
+    use jiff::Timestamp;
+    use ohno::AppError;
+    use serde_json::json;
+    use ss_ai_runtime::{Clock, classification, fail};
+
+    use super::{UnknownJournalDecision, validate_decisions};
+    use crate::workflow_plan::DecisionValue;
+
+    /// Supplies a deterministic clock for journal validation.
+    struct FixedClock;
+
+    impl Clock for FixedClock {
+        fn now(&self) -> Timestamp {
+            Timestamp::UNIX_EPOCH
+        }
+
+        fn wait(&self, _: Duration) -> Result<(), AppError> {
+            Err(fail("contention", "Unexpected wait"))
+        }
+    }
+
+    #[test]
+    fn replay_uses_last_validated_verdict_and_preserves_history() {
+        let document = json!({"schemaVersion":1,"decisions":[
+            {"findingId":"F-1","decision":"approved","recordedUtc":"2026-01-01T00:00:00Z"},
+            {"findingId":"F-2","decision":"needs-audit","recordedUtc":"2026-01-01T00:00:00Z"},
+            {"findingId":"F-1","decision":"rejected","recordedUtc":"2025-01-01T00:00:00Z"}
+        ]});
+        let journal = validate_decisions(document.clone(), &FixedClock).unwrap();
+        assert_eq!(journal.last_decision("F-1"), Some(DecisionValue::Rejected));
+        assert_eq!(
+            journal.last_decision("F-2"),
+            Some(DecisionValue::NeedsAudit)
+        );
+        assert_eq!(journal.last_decision("missing"), None);
+        assert_eq!(journal.document, document);
+    }
+
+    #[test]
+    fn overwritten_unknown_verdict_keeps_its_category_and_diagnostic() {
+        let document = json!({"schemaVersion":1,"decisions":[
+            {"findingId":"F-1","decision":"maybe","recordedUtc":"2026-01-01T00:00:00Z"},
+            {"findingId":"F-1","decision":"approved","recordedUtc":"2026-01-01T00:00:00Z"}
+        ]});
+        let error = validate_decisions(document, &FixedClock).err().unwrap();
+        assert!(error.find_source::<UnknownJournalDecision>().is_some());
+        assert_eq!(classification(&error), "invalidInput");
+        assert_eq!(
+            error.to_string(),
+            fail("invalidInput", "Unknown decision 'maybe' for finding 'F-1'").to_string()
+        );
+    }
 }

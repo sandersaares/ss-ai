@@ -13,6 +13,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use libfuzzer_sys::fuzz_target;
 use serde_json::{Value, json};
 use ss_ai_review_workflow::audit::{add_decisions, last_decision, read_decisions};
+use ss_ai_review_workflow::workflow_plan::DecisionValue;
 use ss_ai_runtime::SystemClock;
 
 // Bound filesystem work per input while allowing repeated decisions and replays.
@@ -85,7 +86,9 @@ fn apply(files: &Files, entries: Vec<Value>, policy: bool, accepted: bool, model
                 .iter()
                 .rev()
                 .find(|record| record["findingId"] == id)
-                .map(|record| record["decision"].as_str().unwrap());
+                .map(|record| {
+                    serde_json::from_value::<DecisionValue>(record["decision"].clone()).unwrap()
+                });
             assert_eq!(last_decision(&actual, id).unwrap(), last);
         }
     }

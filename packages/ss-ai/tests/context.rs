@@ -385,6 +385,31 @@ fn saved_requests_resume_and_restart_explicitly() {
 
 #[test]
 #[cfg_attr(miri, ignore = "requires native subprocesses")]
+fn conflicting_saved_actions_do_not_start_a_transaction() {
+    let fixture = Fixture::new();
+    let request = Fixture::path(&fixture.request);
+    let output = fixture.native(&[
+        "read-saved",
+        "--request-path",
+        request,
+        "--next",
+        "--restart",
+    ]);
+    assert!(!output.status.success());
+    assert!(output.stdout.is_empty());
+    let stderr = String::from_utf8(output.stderr).unwrap();
+    assert!(stderr.contains("invalidInput"), "{stderr}");
+    assert!(
+        stderr.contains("Next and Restart are mutually exclusive"),
+        "{stderr}"
+    );
+    assert!(!fixture.request.exists());
+    assert!(!fixture.root.join("request.json.lock").exists());
+    assert!(!fixture.diagnostics.exists());
+}
+
+#[test]
+#[cfg_attr(miri, ignore = "requires native subprocesses")]
 fn malformed_saved_requests_are_rejected_without_mutation() {
     for missing in [true, false] {
         let fixture = Fixture::new();

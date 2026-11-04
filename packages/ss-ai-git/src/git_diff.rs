@@ -8,7 +8,7 @@ use ss_ai_runtime::fail;
 
 /// Changed path and commentable ranges in an exact unified comparison.
 #[derive(Debug, Deserialize, Serialize)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
+#[serde(rename_all = "camelCase", try_from = "RawFileDiff")]
 pub struct FileDiff {
     path: String,
     previous_path: Option<String>,
@@ -17,25 +17,23 @@ pub struct FileDiff {
 }
 
 impl FileDiff {
-    /// Validates a file diff received through a structured boundary.
+    /// Checks the invariants shared by parsed and deserialized file diffs.
     ///
     /// # Errors
     ///
     /// Rejects missing paths and invalid hunk ranges.
     pub fn validate(&self) -> Result<(), AppError> {
+        self.check()
+            .map_err(|message| fail("invalidInput", message))
+    }
+
+    /// Keeps structured input and parser construction under the same rules.
+    fn check(&self) -> Result<(), &'static str> {
         if self.path.is_empty() {
-            return Err(fail("invalidInput", "Diff file has no path"));
+            return Err("Diff file has no path");
         }
         for hunk in &self.hunks {
-            for (start, count) in [
-                (hunk.old_start, hunk.old_count),
-                (hunk.new_start, hunk.new_count),
-            ] {
-                if count > 0 && (start == 0 || start.checked_add(count.saturating_sub(1)).is_none())
-                {
-                    return Err(fail("invalidInput", "Invalid Git diff line range"));
-                }
-            }
+            hunk.check()?;
         }
         Ok(())
     }
@@ -66,6 +64,31 @@ impl FileDiff {
     }
 }
 
+/// Receives the existing serialized shape before checking file invariants.
+#[derive(Deserialize)]
+#[serde(rename = "FileDiff", rename_all = "camelCase", deny_unknown_fields)]
+struct RawFileDiff {
+    path: String,
+    previous_path: Option<String>,
+    status: Status,
+    hunks: Vec<Hunk>,
+}
+
+impl TryFrom<RawFileDiff> for FileDiff {
+    type Error = &'static str;
+
+    fn try_from(raw: RawFileDiff) -> Result<Self, Self::Error> {
+        let file = Self {
+            path: raw.path,
+            previous_path: raw.previous_path,
+            status: raw.status,
+            hunks: raw.hunks,
+        };
+        file.check()?;
+        Ok(file)
+    }
+}
+
 /// Side-specific ranges, including the context displayed by review services.
 #[derive(Debug, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -74,6 +97,21 @@ struct Hunk {
     old_count: u32,
     new_start: u32,
     new_count: u32,
+}
+
+impl Hunk {
+    /// Allows empty sides while ensuring nonempty ranges have representable endpoints.
+    fn check(&self) -> Result<(), &'static str> {
+        for (start, count) in [
+            (self.old_start, self.old_count),
+            (self.new_start, self.new_count),
+        ] {
+            if count > 0 && (start == 0 || start.checked_add(count.saturating_sub(1)).is_none()) {
+                return Err("Invalid Git diff line range");
+            }
+        }
+        Ok(())
+    }
 }
 
 /// File operation labels consumed by the existing review anchor model.
@@ -309,14 +347,8 @@ fn parse_hunk(line: &str) -> Result<Hunk, AppError> {
         new_start: number(3, 0)?,
         new_count: number(4, 1)?,
     };
-    for (start, count) in [
-        (hunk.old_start, hunk.old_count),
-        (hunk.new_start, hunk.new_count),
-    ] {
-        if count > 0 && (start == 0 || start.checked_add(count.saturating_sub(1)).is_none()) {
-            return Err(fail("invalidInput", "Invalid Git diff line range"));
-        }
-    }
+    hunk.check()
+        .map_err(|message| fail("invalidInput", message))?;
     Ok(hunk)
 }
 
@@ -370,6 +402,26 @@ mod tests {
         ] {
             parse(&format!("{prefix}{hunk}")).unwrap_err();
         }
+    }
+
+    #[test]
+    fn parser_enforces_range_bounds_but_accepts_empty_sides() {
+        let prefix = "diff --git a/file b/file\n--- a/file\n+++ b/file\n";
+        for header in [
+            "@@ -0,1 +1,0 @@\n-old",
+            "@@ -1,0 +0,1 @@\n+new",
+            "@@ -4294967295,2 +1,0 @@\n-old\n-old",
+            "@@ -1,0 +4294967295,2 @@\n+new\n+new",
+        ] {
+            let error = parse(&format!("{prefix}{header}")).unwrap_err();
+            assert_eq!(ss_ai_runtime::classification(&error), "invalidInput");
+            assert!(error.to_string().contains("Invalid Git diff line range"));
+        }
+        let files = parse(&format!("{prefix}@@ -4294967295,0 +4294967295 @@\n+new")).unwrap();
+        let file = files.first().unwrap();
+        file.validate().unwrap();
+        assert!(file.contains_range(u32::MAX, u32::MAX, false));
+        assert!(!file.contains_range(u32::MAX, u32::MAX, true));
     }
 
     #[test]

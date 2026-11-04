@@ -31,6 +31,32 @@ pub struct ValidatedMap {
     map: Map,
 }
 
+/// A map checked for complete raw input coverage before publication.
+pub(crate) struct CompleteMap(ValidatedMap);
+
+impl CompleteMap {
+    /// Performs complete validation before allowing publication rendering.
+    pub(crate) fn parse(bytes: &[u8], sources: &SourceSnapshot) -> Result<Self, AppError> {
+        ValidatedMap::parse(bytes, sources, true).map(Self)
+    }
+
+    /// Checks the authored alternatives against the finalized expansion.
+    pub(crate) fn validate_reference_alternatives(
+        &self,
+        expansion: &Expansion,
+    ) -> Result<(), AppError> {
+        self.0.validate_reference_alternatives(expansion)
+    }
+
+    /// Renders the complete map for publication.
+    pub(crate) fn render(
+        &self,
+        sources: &SourceSnapshot,
+    ) -> Result<BTreeMap<String, String>, AppError> {
+        self.0.render(sources)
+    }
+}
+
 /// Agent-assigned category and chapter data.
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -897,12 +923,12 @@ pub fn assemble(session: &Path, map_path: &Path, clock: &dyn Clock) -> Result<Va
     let expansion = Expansion::parse(&expansion, &sources, true)?;
     let map = read_bytes(map_path, clock)?
         .ok_or_else(|| fail("invalidInput", "Focus-area map is missing"))?;
-    let map = ValidatedMap::parse(&map, &sources, true)?;
+    let map = CompleteMap::parse(&map, &sources)?;
     map.validate_reference_alternatives(&expansion)?;
     let documents = map.render(&sources)?;
     publish_documents(session, &documents, clock)?;
     Ok(
-        json!({"status": "Assembled", "categoryCount": map.map.categories.len(), "chapterCount": map.map.chapters.len()}),
+        json!({"status": "Assembled", "categoryCount": map.0.map.categories.len(), "chapterCount": map.0.map.chapters.len()}),
     )
 }
 
@@ -1146,8 +1172,8 @@ mod tests {
     use ss_ai_runtime::Clock;
 
     use super::{
-        AssemblyStorage, ValidatedMap, base64, merge_map, publish_with_storage, quote, regroup,
-        retry_contention,
+        AssemblyStorage, CompleteMap, ValidatedMap, base64, merge_map, publish_with_storage, quote,
+        regroup, retry_contention,
     };
     use crate::focus_area_expansion::Expansion;
     use crate::focus_area_source::SourceSnapshot;
@@ -1514,6 +1540,7 @@ mod tests {
         value["chapters"][0]["applicability"][0]["pathScope"] = Value::Null;
         assert!(ValidatedMap::from_value(value.clone(), &sources, false).is_ok());
         assert!(ValidatedMap::from_value(value.clone(), &sources, true).is_err());
+        assert!(CompleteMap::parse(&serde_json::to_vec(&value).unwrap(), &sources).is_err());
         value["chapters"][0]["applicability"][0]["pathScope"] =
             json!({"base":".","include":["**/*.ps1"]});
         assert!(ValidatedMap::from_value(value.clone(), &sources, false).is_err());
@@ -1522,6 +1549,18 @@ mod tests {
         second["id"] = json!("other");
         value["chapters"].as_array_mut().unwrap().push(second);
         assert!(ValidatedMap::from_value(value, &sources, false).is_err());
+    }
+
+    #[test]
+    fn complete_map_renders_the_same_documents_as_the_validated_map() {
+        let (sources, value) = fixture();
+        let bytes = serde_json::to_vec(&value).unwrap();
+        let complete = CompleteMap::parse(&bytes, &sources).unwrap();
+        let validated = ValidatedMap::parse(&bytes, &sources, true).unwrap();
+        assert_eq!(
+            complete.render(&sources).unwrap(),
+            validated.render(&sources).unwrap()
+        );
     }
 
     #[test]

@@ -323,27 +323,6 @@ pub fn store(
     Ok(result)
 }
 
-/// Resets a previous hit after validation fails for the same preparation.
-///
-/// # Errors
-///
-/// Returns an error if coordination or diagnostics publication fails.
-pub fn record_validation_failure(
-    session: &Path,
-    expected_preparation_identity: &str,
-    clock: &dyn Clock,
-) -> Result<(), AppError> {
-    let session = fs::canonicalize(session)?;
-    let _operation = ResourceLock::open(
-        &session.join("focus-area-cache-operation"),
-        LockMode::Exclusive,
-        clock,
-    )?;
-    require_preparation(&session, expected_preparation_identity, clock)?;
-    focus_area_generation::invalidate_ready_locked(&session, expected_preparation_identity, clock)?;
-    record_validation_failure_locked(&session, clock)
-}
-
 /// Validates artifact structure without acquiring session locks.
 ///
 /// The caller coordinates writes when inspecting active session artifacts.

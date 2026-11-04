@@ -21,6 +21,7 @@ use ss_ai_review_workflow::audit::{
     add_decision, add_decisions, add_feedback, get_feedback, last_decision, poll_classification,
     read_decisions, set_merge_approval, set_merge_approval_from_files, test_merge_approval,
 };
+use ss_ai_review_workflow::workflow_plan::DecisionValue;
 use ss_ai_runtime::{Clock, FileTransaction, SystemClock, caused_by, fail};
 
 /// Prevents a concurrent subprocess launch from temporarily inheriting a test's held lock.
@@ -286,7 +287,10 @@ fn decisions_validate_complete_batches_and_preserve_verbatim_feedback() {
     assert!(add_decisions(&path, &input, None, false, "bad timestamp", &clock).is_err());
     add_decisions(&path, &input, None, false, timestamp, &clock).unwrap();
     let document = read_decisions(&path, &clock).unwrap();
-    assert_eq!(last_decision(&document, "F-1").unwrap(), Some("approved"));
+    assert_eq!(
+        last_decision(&document, "F-1").unwrap(),
+        Some(DecisionValue::Approved)
+    );
     assert_eq!(
         document["decisions"][1]["feedback"],
         "  Exact words\nnext line  "
@@ -312,12 +316,30 @@ fn individual_decision_normalization_keeps_plans_and_journals_strict() {
     let path = workspace.path("decisions.json");
     let clock = FixedClock;
     let timestamp = "2026-01-01T00:00:00Z";
-    for (index, input, expected, policy) in [
-        ("1", "APPROVED", "approved", false),
-        ("2", " Auto-Approved ", "auto-approved", true),
-        ("3", "NEEDS-AUDIT", "needs-audit", true),
-        ("4", " ReJeCtEd ", "rejected", false),
-        ("5", "DROPPED", "dropped", false),
+    for (index, input, expected, verdict, policy) in [
+        ("1", "APPROVED", "approved", DecisionValue::Approved, false),
+        (
+            "2",
+            " Auto-Approved ",
+            "auto-approved",
+            DecisionValue::AutoApproved,
+            true,
+        ),
+        (
+            "3",
+            "NEEDS-AUDIT",
+            "needs-audit",
+            DecisionValue::NeedsAudit,
+            true,
+        ),
+        (
+            "4",
+            " ReJeCtEd ",
+            "rejected",
+            DecisionValue::Rejected,
+            false,
+        ),
+        ("5", "DROPPED", "dropped", DecisionValue::Dropped, false),
     ] {
         let item = workspace.put(
             "item.json",
@@ -325,7 +347,7 @@ fn individual_decision_normalization_keeps_plans_and_journals_strict() {
         );
         add_decision(&path, &item, None, policy, timestamp, &clock).unwrap();
         let journal = read_decisions(&path, &clock).unwrap();
-        assert_eq!(last_decision(&journal, index).unwrap(), Some(expected));
+        assert_eq!(last_decision(&journal, index).unwrap(), Some(verdict));
         assert_eq!(
             journal["decisions"].as_array().unwrap().last().unwrap()["decision"],
             expected
@@ -361,6 +383,72 @@ fn individual_decision_normalization_keeps_plans_and_journals_strict() {
             {"findingId":"1","decision":"APPROVED","recordedUtc":timestamp}]}),
     );
     assert!(read_decisions(&noncanonical, &clock).is_err());
+}
+
+#[test]
+fn blank_optional_text_is_omitted_only_after_feedback_authority_checks() {
+    let workspace = Workspace::new("blank-decision-text");
+    let journal = workspace.path("decisions.json");
+    let feedback = workspace.put("feedback.json", &json!({"schemaVersion":1,"feedback":[]}));
+    let timestamp = "2026-01-01T00:00:00Z";
+    let clock = SystemClock::default();
+    let item = workspace.put(
+        "item.json",
+        &json!({"findingId":"F-1","decision":"approved","reason":" \n","feedback":" "}),
+    );
+
+    let error = add_decision(&journal, &item, Some(&feedback), false, timestamp, &clock)
+        .unwrap_err()
+        .to_string();
+    assert!(error.contains("without inline feedback"), "{error}");
+    assert!(!journal.exists());
+    add_decision(&journal, &item, None, false, timestamp, &clock).unwrap();
+    assert_eq!(
+        read_decisions(&journal, &clock).unwrap()["decisions"][0],
+        json!({"findingId":"F-1","decision":"approved","recordedUtc":timestamp})
+    );
+    let input = plan(
+        &workspace,
+        json!([{"findingId":"F-2","decision":"needs-audit","reason":" ","feedback":" "}]),
+    );
+    add_decisions(&journal, &input, None, true, timestamp, &clock).unwrap();
+    assert_eq!(
+        read_decisions(&journal, &clock).unwrap()["decisions"][1],
+        json!({"findingId":"F-2","decision":"needs-audit","recordedUtc":timestamp})
+    );
+
+    let before = fs::read(&journal).unwrap();
+    let input = plan(
+        &workspace,
+        json!([{"findingId":"F-3","decision":"auto-approved","feedback":"user words"}]),
+    );
+    assert!(add_decisions(&journal, &input, None, true, timestamp, &clock).is_err());
+    assert_eq!(fs::read(&journal).unwrap(), before);
+}
+
+#[test]
+fn invalid_journal_entries_reject_appends_without_losing_history() {
+    let workspace = Workspace::new("invalid-decision-journal");
+    let journal = workspace.path("decisions.json");
+    let input = plan(
+        &workspace,
+        json!([{"findingId":"F-2","decision":"approved"}]),
+    );
+    let clock = SystemClock::default();
+    let timestamp = "2026-01-01T00:00:00Z";
+    for record in [
+        json!({"findingId":"F-1","decision":"approved","recordedUtc":"bad"}),
+        json!({"findingId":"F-1","decision":"APPROVED","recordedUtc":timestamp}),
+        json!({"findingId":"F-1","decision":"approved","recordedUtc":timestamp,"feedback":null}),
+        json!({"findingId":"F-1","decision":"approved","recordedUtc":timestamp,"extra":true}),
+    ] {
+        let document = json!({"schemaVersion":1,"decisions":[record]});
+        fs::write(&journal, serde_json::to_vec(&document).unwrap()).unwrap();
+        let before = fs::read(&journal).unwrap();
+        assert!(read_decisions(&journal, &clock).is_err());
+        assert!(add_decisions(&journal, &input, None, false, timestamp, &clock).is_err());
+        assert_eq!(fs::read(&journal).unwrap(), before);
+    }
 }
 
 #[test]
@@ -501,7 +589,7 @@ fn bom_marked_audit_records_preserve_duplicate_key_validation() {
         fs::write(&feedback, feedback_bytes).unwrap();
         assert_eq!(
             last_decision(&read_decisions(&journal, &clock).unwrap(), "F-1").unwrap(),
-            Some("approved")
+            Some(DecisionValue::Approved)
         );
         assert_eq!(
             get_feedback(&feedback, "F-1", &clock).unwrap(),

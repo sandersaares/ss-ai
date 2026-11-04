@@ -24,6 +24,13 @@ const COUNTERS: [&str; 6] = [
     "cursorRestarts",
 ];
 
+/// Identifies a malformed diagnostics record while retaining the original error.
+#[ohno::error]
+#[display("{message}")]
+pub struct MalformedDiagnostics {
+    message: String,
+}
+
 /// Reads one diagnostic record or sums records in a run directory.
 pub fn read_diagnostics(path: &Path, clock: &dyn Clock) -> Result<Value, AppError> {
     let path = absolute(path)?;
@@ -115,9 +122,13 @@ fn read_record(path: &Path, clock: &dyn Clock) -> Result<Value, AppError> {
 
 /// Rejects malformed or incomplete records rather than filling missing fields.
 fn parse(bytes: &[u8]) -> Result<Value, AppError> {
-    let record = parse_json(bytes)?;
-    validate(&record)?;
-    Ok(record)
+    let result = parse_json(bytes).and_then(|record| {
+        validate(&record)?;
+        Ok(record)
+    });
+    result.map_err(|error| {
+        MalformedDiagnostics::caused_by(error.to_string(), error.into_std_error()).into()
+    })
 }
 
 /// Reads workflow JSON using the Unicode encodings accepted by the shared reader.

@@ -13,7 +13,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 use libfuzzer_sys::fuzz_target;
 use serde_json::{Value, json};
-use ss_ai_review_context::{normalize_options, prepare, query, read_saved};
+use ss_ai_review_context::{SavedRequestAction, normalize_options, prepare, query, read_saved};
 use ss_ai_runtime::SystemClock;
 
 // Keep file operations per iteration bounded while allowing several changes,
@@ -59,9 +59,9 @@ impl Drop for Files {
 }
 
 /// Requires failed operations to preserve the saved request exactly.
-fn rejected(files: &Files, next: bool, restart: bool, clock: &SystemClock) {
+fn rejected(files: &Files, action: SavedRequestAction, clock: &SystemClock) {
     let before = fs::read(&files.request).unwrap();
-    read_saved(&files.request, next, restart, clock).unwrap_err();
+    read_saved(&files.request, action, clock).unwrap_err();
     assert_eq!(fs::read(&files.request).unwrap(), before);
 }
 
@@ -103,27 +103,29 @@ fuzz_target!(|input: &[u8]| {
     let mut last: Option<String> = None;
     let mut stale = false;
     let mut changes = 0;
-    rejected(&files, true, false, &clock);
+    rejected(&files, SavedRequestAction::Next, &clock);
     for operation in input.iter().take(MAX_OPERATIONS) {
         match operation % 5 {
-            0 if stale => rejected(&files, false, false, &clock),
+            0 if stale => rejected(&files, SavedRequestAction::Replay, &clock),
             0 => {
                 let expected = last
                     .clone()
                     .unwrap_or_else(|| query(&document, &options, None, None).unwrap());
-                let actual = read_saved(&files.request, false, false, &clock).unwrap();
+                let actual =
+                    read_saved(&files.request, SavedRequestAction::Replay, &clock).unwrap();
                 assert_eq!(actual, expected);
                 last = Some(actual);
             }
-            1 if stale || last.is_none() => rejected(&files, true, false, &clock),
+            1 if stale || last.is_none() => rejected(&files, SavedRequestAction::Next, &clock),
             1 => {
                 let previous: Value = serde_json::from_str(last.as_ref().unwrap()).unwrap();
                 if previous["complete"] == true {
-                    rejected(&files, true, false, &clock);
+                    rejected(&files, SavedRequestAction::Next, &clock);
                 } else {
                     let cursor = previous["nextCursor"].as_str().unwrap();
                     let expected = query(&document, &options, None, Some(cursor)).unwrap();
-                    let actual = read_saved(&files.request, true, false, &clock).unwrap();
+                    let actual =
+                        read_saved(&files.request, SavedRequestAction::Next, &clock).unwrap();
                     assert_eq!(actual, expected);
                     assert_ne!(actual, *last.as_ref().unwrap());
                     last = Some(actual);
@@ -131,7 +133,8 @@ fuzz_target!(|input: &[u8]| {
             }
             2 => {
                 let expected = query(&document, &options, None, None).unwrap();
-                let actual = read_saved(&files.request, false, true, &clock).unwrap();
+                let actual =
+                    read_saved(&files.request, SavedRequestAction::Restart, &clock).unwrap();
                 assert_eq!(actual, expected);
                 last = Some(actual);
                 stale = false;
@@ -142,18 +145,26 @@ fuzz_target!(|input: &[u8]| {
                 fs::write(&files.capture, serde_json::to_vec(&document).unwrap()).unwrap();
                 stale = true;
             }
-            _ => rejected(&files, true, true, &clock),
+            _ if stale => rejected(&files, SavedRequestAction::Next, &clock),
+            _ => {
+                if let Some(expected) = &last {
+                    assert_eq!(
+                        read_saved(&files.request, SavedRequestAction::Replay, &clock).unwrap(),
+                        *expected
+                    );
+                }
+            }
         }
         if !stale && let Some(expected) = &last {
             assert_eq!(
-                read_saved(&files.request, false, false, &clock).unwrap(),
+                read_saved(&files.request, SavedRequestAction::Replay, &clock).unwrap(),
                 *expected
             );
         }
     }
 
     // Drain from the current capture independently of the generated sequence.
-    let mut page = read_saved(&files.request, false, true, &clock).unwrap();
+    let mut page = read_saved(&files.request, SavedRequestAction::Restart, &clock).unwrap();
     let mut reconstructed = String::new();
     let mut cursors = HashSet::new();
     for _ in 0..MAX_PAGES {
@@ -177,9 +188,9 @@ fuzz_target!(|input: &[u8]| {
         if value["complete"] == true {
             assert!(value["nextCursor"].is_null());
             assert_eq!(reconstructed, text);
-            rejected(&files, true, false, &clock);
+            rejected(&files, SavedRequestAction::Next, &clock);
             assert_eq!(
-                read_saved(&files.request, false, false, &clock).unwrap(),
+                read_saved(&files.request, SavedRequestAction::Replay, &clock).unwrap(),
                 page
             );
             return;
@@ -187,7 +198,7 @@ fuzz_target!(|input: &[u8]| {
         let cursor = value["nextCursor"].as_str().unwrap();
         assert!(cursors.insert(cursor.to_owned()), "cursor must advance");
         let expected = query(&document, &options, None, Some(cursor)).unwrap();
-        page = read_saved(&files.request, true, false, &clock).unwrap();
+        page = read_saved(&files.request, SavedRequestAction::Next, &clock).unwrap();
         assert_eq!(page, expected);
     }
     panic!("bounded evidence did not complete within the page limit");
