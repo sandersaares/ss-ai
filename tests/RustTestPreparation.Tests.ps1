@@ -333,6 +333,8 @@ Describe 'Rust preparation boundary' {
             'packages/ss-ai/tests/fixtures/github-approval.json',
             'packages/ss-ai-cargo-fuzz/seeds/dependencies.toml',
             'packages/ss-ai-cargo-fuzz/seeds/malformed.toml',
+            'tests/fixtures/ss-review-query-capture.json',
+            'tests/fixtures/ss-review-query-expected.json',
             'skills/ss-autoreapprove/significance.md',
             'Cargo.toml', 'Cargo.lock', 'rust-toolchain.toml', '.cargo/config.toml'
         )) {
@@ -369,6 +371,8 @@ Describe 'Rust preparation boundary' {
         @{ Asset = 'packages/ss-ai/tests/fixtures/github-approval.json' }
         @{ Asset = 'packages/ss-ai-cargo-fuzz/seeds/dependencies.toml' }
         @{ Asset = 'packages/ss-ai-cargo-fuzz/seeds/malformed.toml' }
+        @{ Asset = 'tests/fixtures/ss-review-query-capture.json' }
+        @{ Asset = 'tests/fixtures/ss-review-query-expected.json' }
         @{ Asset = 'skills/ss-autoreapprove/significance.md' }
     ) {
         $assetPath = Join-Path $fixture.root $Asset

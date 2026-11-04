@@ -17,7 +17,7 @@ use ss_ai_review_context::{
 use ss_ai_runtime::{Clock, caused_by, fail};
 
 /// Keeps local evidence operations independent of provider initialization.
-#[derive(Debug, Parser)]
+#[derive(Parser)]
 #[command(name = "ss-ai context", about = "Inspect captured review evidence")]
 struct ContextCli {
     #[command(subcommand)]
@@ -25,7 +25,7 @@ struct ContextCli {
 }
 
 /// Exposes direct and saved queries, preparation, and diagnostic records.
-#[derive(Debug, Subcommand)]
+#[derive(Subcommand)]
 enum ContextCommand {
     /// Read a page directly from a capture.
     Read {
@@ -80,7 +80,7 @@ enum ContextCommand {
 }
 
 /// Carries selectors in the same shape as persisted query requests.
-#[derive(Debug, Args)]
+#[derive(Args)]
 struct QueryOptions {
     #[arg(long)]
     query: String,

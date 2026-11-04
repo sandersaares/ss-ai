@@ -143,8 +143,8 @@ Saved reads replay the last page unless `--next` explicitly advances it.
 `--restart` binds the same selectors to current evidence after a capture changes.
 The commands do not contact a provider. Their pages contain at most 16 KiB of
 serialized UTF-8 output including the final newline; long text continues at
-UTF-16 code-unit offsets. Literal search uses Unicode simple case folding,
-without normalization or multi-character expansion. The skill's
+UTF-16 code-unit offsets. Literal search compares Unicode single-character
+case equivalents without normalization or multi-character expansion. The skill's
 `pwsh-calls/query-pr-context.md` describes the selection and consumption of
 bounded pages.
 
