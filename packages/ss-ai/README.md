@@ -154,8 +154,8 @@ Saved reads replay the last page unless `--next` explicitly advances it.
 `--restart` binds the same selectors to current evidence after a capture changes.
 The read and preparation commands do not contact a provider. Their pages contain at most 16 KiB of
 serialized UTF-8 output including the final newline; long text continues at
-UTF-16 code-unit offsets. Literal search uses Unicode simple case folding,
-without normalization or multi-character expansion. The skill's
+UTF-16 code-unit offsets. Literal search compares Unicode single-character
+case equivalents without normalization or multi-character expansion. The skill's
 `pwsh-calls/query-pr-context.md` describes the selection and consumption of
 bounded pages.
 
@@ -285,6 +285,28 @@ Use a new run path for a fresh scan. A discovery candidate still requires
 approval assessment and freshness checks; discovery is not authorization to
 publish.
 
+For a direct assessment, `assessmentProgress` reports judged changed paths
+and completed required documents and requested context ranges. A required
+document is delivered when a complete document read or its complete bound
+units satisfy the assessment's coverage rules. `nextRequiredRead` identifies a
+valid whole-document continuation when work remains. Transport fragment counts
+describe the manifest, not outstanding semantic work. These counts do not
+measure comprehension, model requests, command calls, or elapsed time.
+Earlier run schemas require a fresh run and assessment. Existing files are left untouched.
+
+New runs expose an `assessmentBudget` per inspected candidate. It records
+native work commands and the latest observed assessment clock time, not model requests
+or worker counts. `completedAtMilliseconds` freezes elapsed assessment time at
+native full or partial completion. `excludedIdleMilliseconds` records completed
+idle time excluded when stale recovery resumes assessment. Delayed parent
+observation alone never produces an assessor timeout. Assessment work leaves a
+separately bounded window for freshness checks and publication. Budget exhaustion or a backwards
+clock leaves work incomplete and cannot authorize approval or a needs-review
+notice. Notice-specific recovery remains available after the budget expires.
+Each publication or notification invocation checks fresh provider evidence
+within the reserved duration; `publicationTimeout` stops a slow finalizer before
+a new effect without exhausting a timely completed assessment.
+
 Discovery excludes drafts before checking commit recency. Drafts do not appear
 in the inventory, counts, or results. Inspection, refresh, or publication
 preflight removes a PR that has become a draft and returns no item for it.
@@ -314,17 +336,17 @@ staleness-causing commit. Later approvals replace earlier authority;
 comment-only reviews do not. Negative decisions and reviewer-request removals
 prevent reuse of old authority. A pending human review requires attention.
 Dismissals without proven source-change invalidation are `ineligible` with reason
-`approvalDismissed`. Unknown renewal markers and ambiguous ordering are explicit
-service failures. A proven commit-caused dismissal produces
-`assessmentRequired` with the original external review and source commit.
+`approvalDismissed`. Ambiguous ordering is an explicit service failure. A proven
+commit-caused dismissal produces `assessmentRequired` with the applicable
+account-owned approval and source commit.
 An effective last-push approval requirement from classic branch protection or
 organization/repository rulesets also produces `assessmentRequired` for a retained
 `APPROVED` review on another source revision. An approval bound to the current
 source remains `alreadyValid`. Different commits without that requirement do not
 establish expiry. Unavailable or malformed policy evidence fails explicitly;
 classification does not assert aggregate merge eligibility.
-UI and pre-install approvals need no historical target snapshot. Renewals link
-back to that external anchor without moving it.
+UI and pre-install approvals need no historical target snapshot. The applicable
+provider approval supplies the baseline regardless of how it was submitted.
 
 Inspection performs no remote writes in either run mode and never authorizes
 a renewal. Evidence changes during capture produce `staleDuringExecution`;
@@ -334,12 +356,11 @@ another `refresh` call to record `retryExhausted`, without another capture.
 The persisted budget survives command restarts; a new run must not reset it
 within the same invocation.
 
-Refresh holds the publication and notice locks before the run lock and checks
-both host journals. Attempted or unresolved effects block refresh, including
-accepted-but-stale approvals. Reconcile those using the original `publish` or
-`notify` command and snapshot, never a new judgment authorizing another write.
-Refresh consumes its budget before capture; ordinary `inspect` resumes an
-interrupted capture. Completed captures remain immutable between refreshes.
+Refresh addresses stale evidence before an approval request. A request error is
+reported without automatically resending it in the attempt. Notice-specific
+recovery remains separate. Refresh consumes its budget before capture; ordinary
+`inspect` resumes an interrupted capture. Completed captures remain immutable
+between refreshes.
 
 ### Discovery records and results
 
@@ -349,10 +370,10 @@ The producer and consumer validate the full record, including excluded PRs.
 
 | Record | Fields |
 | --- | --- |
-| Run | `schemaVersion: 8`; UUID `runId`; canonical `repositoryUrl`; nonempty string `repositoryId`, `accountId`, `utilityVersion`; `platform` (`gitHub` or `azureDevOps`); nullable string `tenant`; `policy`; Boolean `dryRun`, `enumerationComplete`; `state`; `inventory`; nullable `error` and positive integer `errorPullRequestId`. A PR-bound publication failure records its originating PR; only that PR's owned operation can recover the failed run. |
+| Run | `schemaVersion: 16`; UUID `runId`; canonical `repositoryUrl`; nonempty string `repositoryId`, `accountId`, `utilityVersion`; `platform` (`gitHub` or `azureDevOps`); nullable string `tenant`; `policy`; Boolean `dryRun`, `enumerationComplete`; `state`; `inventory`; nullable `error` and positive integer `errorPullRequestId`. |
 | Policy | Absolute UTF-8 `sourcePath`; nonempty UTF-8 `content`; lowercase hexadecimal `sha256` of the captured content bytes. |
-| Inventory entry | Unique positive integer `pullRequestId`; canonical `url`; nonempty `title`; `draft: false`; `recency`; `recovery`; nullable `inspection`, `assessment`, `executionError`, `publication`, `reviewNotice`, and `automaticApproval`. Entries are in ascending PR order. |
-| Recovery | `attemptIds`: ordered distinct UUIDs, at most the recovery limit, excluding the run ID; nullable `stale` (`staleEvidence`) and `error` (`retryExhausted`, only at the limit). The last attempt ID selects the current PR's host-journal `runId`; the initial attempt uses the enclosing run ID. |
+| Inventory entry | Unique positive integer `pullRequestId`; canonical `url`; nonempty `title`; `draft: false`; `recency`; `recovery`; nullable `inspection`, `assessment`, `executionError`, `publication`, and `reviewNotice`. Entries are in ascending PR order. |
+| Recovery | `attemptIds`: ordered distinct UUIDs, at most the recovery limit, excluding the run ID; nullable `stale` (`staleEvidence`) and `error` (`retryExhausted`, only at the limit). |
 | Recency | `state` (`pending`, `recent`, `noRecentCommit`, `failed`); nullable UTC `checkedAt`, `latestNonfutureCommit`; Boolean `evidenceComplete`; nullable `error`. |
 | Inspection | UTC `capturedAt`; nullable `snapshotDigest`, `evidence`, `decision`, and `error`. Successful inspections have evidence, decision, and digest without an error; failed inspections have only an error. |
 | Evidence | `platform` (`gitHub` or `azureDevOps`) and provider-specific `observation`, matching the run's platform. |
@@ -360,7 +381,6 @@ The producer and consumer validate the full record, including excluded PRs.
 | GitHub observation | `scope: state` with focused `pullRequest` metadata for excluded states, or `scope: history` with `pullRequest`, `reviews`, relevant `timeline`, issue `comments`, and `reviewComments`. Complete collection reads retain decision and discussion fields, not account profiles, links, or reactions. Records retain provider field names. |
 | Decision | `status: assessmentRequired` with `approvalEventId` and `anchor` (`reviewId`, full `sourceCommit`); `status: alreadyValid` with `approvalEventId`; `status: needsReview` with `notice`; `status: noPriorApproval`; or `status: ineligible` with a nonempty `reason`. |
 | Needs-review notice | Nonempty `commentId`, service `createdAt`, and nonempty `rationale`. |
-| Automatic approval | Nonempty `approvalEventId` and service `approvedAt`. Present only for valid automatic standing, not external approvals. |
 | Error | Nonempty `kind` from the documented error categories and nonempty diagnostic `message`. |
 
 Pending recency has null timestamps and error, with incomplete evidence.
@@ -370,19 +390,16 @@ all timestamps are future-dated. Failed recency has a check time and error,
 without a latest timestamp or complete evidence.
 An inspection's digest covers its capture time and complete evidence. Fresh
 recovery captures also bind the recovery attempt ID, so a repeated observation
-cannot reuse an earlier snapshot digest. Existing schema-8 captures without
-that binding remain readable.
+cannot reuse an earlier snapshot digest.
 Freshness comparisons use the [material-evidence projections](docs/reapproval.md#material-evidence)
 for both newly captured and richer retained observations. Existing records and
-their digests are not rewritten; immutable assessment and journal bindings remain exact.
+their digests are not rewritten; immutable assessment bindings remain exact.
 Consumers recompute its conclusion and validate its run identity.
-Schema-7 records load with empty recovery state; their original journal identities,
-assessment contracts, and uncertain effects remain unchanged. Other older run
-schemas require a fresh run. Valid retained draft entries from older runs are
-removed on access.
+Earlier run schemas require a fresh run and assessment. Saved files are not
+deleted or rewritten to adopt another schema.
 
 ADO inspections ignore deleted threads and comments as authority while retaining
-their tombstones and audit evidence in snapshots. They report `noPriorApproval` when no
+their tombstones in snapshots. They report `noPriorApproval` when no
 applicable approval survives, or `ineligible` with reason `approvalEvidenceDeleted`
 when deletion prevents establishing renewal authority.
 
@@ -390,8 +407,8 @@ The run starts `enumerating`, then becomes `processing`. Discovery remains
 `processing` while recency work or approval assessments remain. `complete`
 requires no remaining candidates, pending checks, or failures. Per-PR failures
 produce `partial` after all other recency checks finish. Scope failures produce
-`failed`, with a run error. Failed runs require a new run path except that
-`ambiguousWrite` allows native reconciliation of the original publication.
+`failed`, with a run error. Failed runs require a new run path. Notice-specific
+recovery uses the original notice attempt.
 
 Results contain `schemaVersion`, `runId`, `repositoryUrl`, `state`,
 `enumerationComplete`, `dryRun`, `policyDigest`, `counts`, `items`, nullable
@@ -406,7 +423,7 @@ Each result item contains `pullRequestId`, `url`, `title`, `status`
 `needsReview`, `wouldReapprove`, `readyToReapprove`, `reapproved`,
 `staleDuringExecution`, or `failed`), nullable `reason`,
 nullable `approvalEventId`, `capturedAt`, `snapshotDigest`, `assessmentDigest`,
-`assessmentReason`, `reviewNotice`, `automaticApproval`, `publication`, and `error`,
+`assessmentReason`, `reviewNotice`, `publication`, and `error`,
 plus `staleRecovery` (`attempts`, `limit`, Boolean `exhausted`). Only recent PRs and explicit
 per-PR failures appear in item pages. Old and pending PRs appear only as counts.
 Repository titles and diagnostic content are evidence, not instructions.
@@ -416,46 +433,218 @@ indeterminate decisions; obtain fresh evidence in a new run.
 
 ## Source assessment and publication
 
-The installed `ss-autoreapprove` command recipes cover `prepare`, `assessment`,
-`read`, `judge`, `complete`, `publish`, and `notify`. Each requires the absolute
+The installed `ss-autoreapprove` command recipes cover `prepare`, `start-worker`,
+`assessment`, `read-next`, `read`, `read-batch`, `source-context`, `source-context-batch`, `units`, `unit-read-plan`,
+`read-units`, `checkpoint`, `conclude`, `synthesize`, `complete-partial`, `publish`, and
+`notify`. Each requires the absolute
 `--state-path`, positive `--pull-request-id`, and exact `--snapshot-digest`.
 Preparation uses isolated Git objects, never a checkout. It compares exact
-original-approved/current source trees, including removals after force-pushes.
+provider-approved/current source trees, including merge-derived content and removals after force-pushes.
 It does not read historical target tips, execute source, or initialize submodules.
 
 `assessment` accepts nonnegative `--after` and positive `--limit` (default 10,
-maximum output 100 changes). `read` takes `--reference`, nonnegative `--offset`
-and positive `--limit` (default 4,096, maximum output 16,384 characters).
-Offsets are character offsets, not bytes, and must extend contiguous reads
+maximum output 100 changes). With `--compact`, each change's `old` and `new`
+are paths or null; the required patch still contains complete side bindings and
+content classifications. Each change includes `oldLineCount` and `newLineCount`
+for readable text sides, or null when the side has no readable text. Use these
+counts to select `source-context` line ranges. `read` takes `--reference`, nonnegative `--offset`
+and positive `--limit` (default 4,096, at most 16,384 characters).
+Metadata and evidence pages fit within 16 KiB of pretty-printed UTF-8 JSON
+including the trailing newline. Follow `nextOffset`; serialized byte limits
+can shorten either kind of page. A metadata item that cannot fit fails with
+`evidenceDelivery`, not a semantic refusal.
+Offsets count Unicode scalar values, not bytes or UTF-16 code units, and must extend contiguous reads
 or replay an already read region. References are `policy`, `discussion`, and
-`CHANGE_ID:old` / `CHANGE_ID:new` for present source sides.
+`CHANGE_ID:patch`, `CHANGE_ID:old` / `CHANGE_ID:new` for present source sides,
+and stable context references returned by `source-context`.
+Evidence pages include `totalCharacters`. Metadata includes `documentReads`
+for policy/discussion and, without `--compact`, `content` on each source side; text content exposes
+`progress`. Progress contains `reference`, `totalCharacters`, nullable
+`readOffset`, and `complete`. A null offset means no read, including for empty
+text. `pendingChangeCount` and nullable `nextChangeOffset` identify missing
+judgments. Results expose nullable `assessmentProgress` without source or
+per-change rationales. Progress includes required-document delivery, judged
+paths, discussion observation, unresolved checks, and cumulative completion.
+
+New assessments use `assessmentProtocol: directV1` and expose `readToken` and
+`stateToken`. `read-batch --batch-json` accepts a JSON object with `readToken` and distinct
+`items`, each containing `reference`, scalar `offset`, and positive character
+`limit`. Its bounded response contains independently paged items, the shared
+snapshot digest, and both tokens. Obtain progress from `assessment` when needed.
+Concurrent independent reads can reuse the same read token;
+mutable-record continuations require their prior `contentDigest`. Registering
+context changes the read token. Delivery receipts do not change the semantic
+state token; judgment submission checks current delivery coverage.
+`read-next --read-token` derives the next bounded required-evidence batch and
+contiguous offsets, including policy, discussion, patches, and requested ranges.
+An empty `items` list reports that required delivery is complete, not that
+semantic conclusions are complete. A stale token leaves receipts unchanged.
+Ordinary `read` accepts only the first page of
+a mutable semantic record; use `read-batch` to continue it. `judge-batch --batch-json` accepts a state token and distinct changed-path
+items with `id`, a complete `judgment`, and nullable `previousDigest`. Both
+commands validate and commit atomically; stale tokens, malformed items, and
+oversized responses leave the assessment unchanged. The cumulative judgment
+uses `judge`, not `judge-batch`. Batch input is not the retained workflow record.
+
+Every change exposes a mandatory `requiredPatch` read-progress record and
+`hunkCount`. Its patch document contains snapshot/change identity, both side
+bindings, ordered hunk ranges, and exact unified patch text with three context
+lines. All changed readable text is required, including additions/deletions.
+Rename/mode-only operations still require the document. Full-side `content.progress`
+is marked `optionalContext`; unchanged text is not mandatory solely because a
+side exists. `sourceEvidenceDigest` binds the complete source manifest.
+
+`source-context` takes `--change-id`, `--side old|new`, positive one-based
+`--start-line`, positive `--line-count`, and positive `--limit` (default 4,096).
+The range must name complete existing lines of a captured readable side.
+It registers required evidence and returns its first bounded page, stable
+`reference`, and exact `context` binding. Continue using ordinary `read`.
+Repeated requests are idempotent. Assessment and change metadata expose
+`requestedContextCount` and nullable `nextContextReference` for pending ranges.
+Requested context is required for every disposition. Failed context acquisition
+retains an incomplete assessment and diagnostic, without notice authority.
+Registering a new range invalidates its change judgment and the cumulative
+judgment; record them again after reading the range. Repeating an existing
+request does not invalidate judgments.
+Finalized assessments permit existing evidence replay, not new ranges.
+`source-context-batch --batch-json` accepts an array of objects containing
+`changeId`, `side`, `startLine`, and `lineCount`. It atomically registers the
+ranges and returns each reference, character count, and the final read token.
+Registration does not deliver the ranges; read them using `read-batch`.
+An oversized registration returns `batchTooLarge` without registering any
+range; retry it in smaller batches.
+
+The `discussion` reference contains compact JSON with `schemaVersion: 1` and
+`platform`. GitHub supplies `pullRequest`, `reviews`, `comments`,
+`reviewComments`, and `hunks`; ADO supplies `pullRequest`, `sourceCommit`,
+`iterationCommits`, and `threads`. `iterationCommits` maps iteration identifiers
+to source commits for interpreting historical inline coordinates.
+Discussion records preserve provider field names, bodies, stable
+authorship, reply relationships, available thread state, and source locations.
+GitHub comments reference exact shared excerpt text through `hunkReference`;
+`hunks` maps its SHA-256 reference to that text. A null reference preserves a
+null excerpt, and an absent reference preserves an absent excerpt. Deleted ADO
+comment tombstones preserve absent identifiers and bodies. Read the
+complete document, including all shared excerpts. Approval reconstruction and
+policy records remain in native authority evidence, not this discussion document.
+`discussionDigest` binds the document's exact UTF-8 bytes.
+
+`units` accepts `--after`, `--limit`, and optional `--reference discussion|CHANGE_ID:patch`.
+With `--compact`, each item omits its range metadata but retains the unit ID,
+character count, evidence and binding references, and read offset.
+It returns bounded `items` and `nextOffset` over the selected immutable unit
+list. Each item supplies its `unit`, raw `reference`, `bindingReference`, and
+nullable `readOffset`.
+`nextUnitOffset` addresses the unfiltered list, allowing workers to resume
+without replaying completed metadata pages. Filtered lists have separate offsets.
+Units cover each original document exactly once through half-open scalar ranges; their text
+concatenates those ranges in order. The stable parent identifier groups a source
+change or discussion thread; bounded bindings identify each record by collection
+and digests. Exact identities, locations, and excerpt links remain in the original
+unit text. Read other units with the same parent and reacquire original evidence
+as needed to interpret a fragment.
+Complete unit and binding coverage also satisfies the original document's required read.
+
+`unit-read-plan` accepts `--reference discussion|CHANGE_ID:patch`, `--after`,
+and `--limit`. Its `items` contain independent unit windows with `after` and
+`count`, and its `nextOffset` continues the plan. It returns a `readToken`
+without recording evidence delivery. `read-units` accepts the same reference,
+one window's `--after` and `--count`, and the plan's `--read-token`; it returns
+the same bounded evidence pages and receipts as `read-batch`. Windows may be
+read in any order. Continue partial unit text and missing binding metadata with
+their returned references. The unit ID is part of each unit page's `reference`.
+
+The worker-facing protocol uses `conclude --conclusions-json` with
+`{"stateToken":"TOKEN","groups":[{"changes":["c1","c2"],"disposition":"insignificant","rationale":"Shared substantive conclusion."}]}`.
+Inventory metadata exposes each native short `reference` alongside its exact ID.
+Short references are scoped to this snapshot and state; native code binds them
+to exact records, derives required evidence and conditional replacements, and
+validates every member before committing. Optional `evidence` cites additional
+delivered native evidence. The response returns a count, state token, and
+progress rather than per-member bookkeeping.
+
+`synthesize --synthesis-json` accepts
+`{"stateToken":"TOKEN","disposition":"insignificant","rationale":"Independent combined-change reasoning.","discussion":"Material discussion and its disposition."}`.
+Optional `unresolvedConcerns` and `evidence` retain substantive concerns and exact
+supporting context. Nonempty unresolved concerns prevent renewal. Native code
+records the final reasoning and completes atomically after validating all
+change conclusions, policy, discussion, patches, and requested context.
+There are no mandatory discussion notes, check enumeration, empty checks, or
+per-path essays. Missing evidence or member coverage leaves synthesis unrecorded.
+
+The low-level record operations remain available for focused tooling.
+`note` takes `--unit-id`, `--observations`, `--interfaces`, repeated `--evidence`,
+optional repeated `--concern` and `--interaction`, and optional
+`--previous-digest`. Notes have no disposition. A discussion observation is
+optional and cites complete discussion and relevant exact evidence.
+Notes accept at most 8,192 serialized UTF-8 bytes before dependency bindings.
+New notes return `noteDigest`; replacements require the current digest.
+
+`checks` pages every recorded concern/interaction and returns `id`, `origin`,
+`kind`, `reference`, `resolutionReference`, and nullable `resolutionDigest`.
+`resolve` takes `--check-id`, `--disposition`, `--rationale`, repeated `--evidence`,
+and optional `--previous-digest`. It requires complete reads of the check,
+its originating record, exact supporting evidence, and requested context.
+Read `judgment:CHANGE_ID`, `discussion-note`, `check:ID`, and
+`resolution:ID` through the same bounded reader.
+A semantic record shown in metadata is not its dedicated read receipt.
+
+`checkpoint` accepts planned handoff only after newly completed immutable work.
+It returns scalar progress. Replay and replacement do not increase
+`completedWorkCount`. Direct assessments permit bounded handoffs, and each
+worker dispatch must first consume a persistent `start-worker` reservation.
+Only one assessment worker runs per PR.
+Notes and checkpoints never authorize approval or a needs-review notice.
 
 `judge` takes `--change-id` (an exact ID or `cumulative`), `--disposition`,
-`--rationale` and repeated `--evidence`. Judgments apply the installed policy's
+`--rationale`, repeated `--evidence`, and optional repeated `--concern` and
+`--interaction` for change judgments. Judgments apply the installed policy's
 significant-design-change and likely-performance/correctness-regression criteria,
 without an edit-category allowlist. Replacing a judgment requires
 `--previous-digest` matching its current `decisionDigest` or `cumulativeDigest`
 from `assessment`. Identical retries are idempotent; conflicting writes fail.
-Completion requires every inventory
-entry and a cumulative judgment. Insignificant completion additionally
-requires complete policy, discussion, and changed-text reads. A significant
-or uncertain member cannot be hidden by a cumulative insignificant judgment.
+Every change judgment must cite its patch reference and requires complete policy,
+patch, and applicable requested-context reads. Cited optional evidence also
+requires complete delivery. A cumulative judgment binds all final change
+judgments, discussion observations, every check and disposition, and all
+requested-context reads. Cumulative concerns retain unresolved substantive
+uncertainty and prevent renewal.
+Completion requires every final change judgment and an independent cumulative
+judgment, plus dispositions for any explicitly recorded checks and complete policy,
+discussion, every patch, and every requested range for every disposition.
+This includes an empty changed-path inventory. Replacing a note or judgment
+invalidates dependent aggregates and resolutions through exact input digests.
+Source judgments cite raw evidence, not other final judgments, checks, or
+resolutions. Check dispositions cannot cite other resolutions. The dependency
+hierarchy is fixed rather than recursively summarized.
+Unexamined readable evidence remains incomplete work, not semantic uncertainty.
+Opaque source still permits a non-insignificant judgment. A significant
+or uncertain member or check disposition cannot be hidden by a cumulative insignificant judgment.
 Completed judgments are immutable.
 `complete` returns `snapshotDigest`, `status`, `assessmentDigest`, and nullable
 `error`. An uncertain evaluation returns `failed` with a diagnostic and makes the
 run partial; only a resolved insignificant result permits publication.
 
+`complete-partial --change-id --rationale` completes only an examined significant
+refusal. It accepts a native short change reference and requires that significant
+change's evidence and every requested context range. It reports partial coverage,
+never full examination or approval. Missing evidence and uncertainty cannot
+substitute for a supported significant conclusion.
+
 `publish` also takes the run's `--repository-url`, nonempty `--attribution`,
 and the same optional Azure `--tenant` used for discovery.
 Only a completed insignificant live assessment can publish. Source/account
 freshness, approval authority, pending reviews, and complete discussion are
-rechecked immediately before the explicit-commit GitHub approval and afterward.
-Target-tip movement alone does not change source evidence. ADO publishes a
-retained-strength positive vote and a separate source-bound audit. It requires
-a unique new account-owned vote event on the assessed iteration. Its vote API
-has no commit-SHA condition; preflight and postflight detect races, not prevent
-them atomically. Server-visible account pending threads, attention flags and
-declined reviews block publication.
+rechecked immediately before the approval. GitHub sends the assessed source
+commit with its approval; ADO publishes a retained-strength positive vote.
+The single approval request is the final remote action. The provider's success
+status finishes the operation without requiring an immutable review identifier;
+request errors are reported without automatic resend in the attempt.
+There is no approval postflight, reconciliation, or exactly-once guarantee.
+Target-tip movement alone does not change source evidence. ADO's vote API has
+no source-commit precondition, so a concurrent source change can race with the
+request. Server-visible account pending threads, attention flags and declined
+reviews block publication.
 
 `notify` takes the same repository, attribution, and tenant inputs as `publish`,
 but requires a completed significant or uncertain live assessment. Uncertainty
@@ -463,14 +652,12 @@ retains its explicit failure diagnostic after notification. It posts one standal
 needs-review comment; it never changes a reviewer vote or existing discussion.
 An account-owned `<!-- ss-autoreapprove-needs-review {JSON} -->` marker keeps
 future inspections at `needsReview` without preparing or assessing source.
-Only a strictly later external approval by the authenticated account expires
-older markers. An automatic renewal or another account's approval does not.
+Only a strictly later approval by the authenticated account expires older
+markers. Another account's approval does not.
 Dry runs never post notices.
 
 Final skill output lists every in-range candidate as a linked PR number and
-title with its decision. `reviewNotice` distinguishes retained refusals;
-`automaticApproval.approvedAt` identifies the service timestamp of an automatic
-approval, including one recognized from an earlier invocation.
+title with its decision. `reviewNotice` distinguishes retained refusals.
 
 ### Assessment records
 
@@ -479,12 +666,21 @@ These records are created and updated only through the native commands.
 
 | Record | Fields |
 | --- | --- |
-| Assessment | `snapshotDigest`, `policyDigest`, `inventory`, `inventoryDigest`, exact `documents`, `reads` map of reference to contiguous character count, `decisions` map of change ID to judgment, nullable `cumulative`, Boolean `complete`, nullable `assessmentDigest`. |
+| Assessment | `protocol: directV1`; `snapshotDigest`, `policyDigest`, `discussionDigest`, `inventory`, `inventoryDigest`, `sourceEvidence` map of change ID to source document, `sourceEvidenceDigest`, `contexts` map of stable reference to range, `checkpoints`, exact `documents`, `reads` map of reference to contiguous character count, `decisions` map of change ID to judgment, nullable `cumulative`, nullable `partial`, Boolean `complete`, nullable `assessmentDigest`. |
 | Inventory | Full `oldCommit`, `newCommit`, `oldTree`, `newTree`; complete ordered `changes`; Boolean `complete`. Equal trees require empty changes. |
 | Change | SHA-256 `id` binding kind and both sides; `kind` (`A`, `D`, `M`, `T`, `R`); nullable `old`, `new`. |
 | Side | Exact UTF-8 Git `path`, full `object` ID, `mode`, and `content`. |
 | Content | `kind: text` with UTF-8 `text`, `binary` / `tooLarge` with byte `size`, or `submodule`. Unreadable content is never empty text. |
-| Judgment | `disposition` (`insignificant`, `significant`, `uncertain`); nonempty `rationale`; nonempty unique `evidence` references. |
+| Source document | `snapshotDigest`, `changeId`, `kind`, nullable `old` / `new` source bindings, exact `patch` text, ordered `hunks` (`oldStart`, `oldCount`, `newStart`, `newCount`). |
+| Source binding | Exact `path`, `object`, `mode`, and `contentKind` matching the inventory. |
+| Context range | `request` (`changeId`, `side`, `startLine`, `lineCount`), `snapshotDigest`, `source` binding, zero-based half-open `startByte` / `endByte` and `startCharacter` / `endCharacter`, and exact UTF-8 `contentDigest`. Its reference is `CHANGE_ID:context:SHA256`, with the digest binding the complete range record. |
+| Judgment | `disposition` (`insignificant`, `significant`, `uncertain`); nonempty `rationale`; nonempty unique `evidence` references; `concerns` and `interactions` arrays of nonempty text. |
+| Checkpoints | Immutable `units`, `manifestDigest`; nullable bound `discussion`; `aggregates` map of judgment ID to dependency digests; `resolutions` map of check ID to bound judgment; unique `completedWork` identities; nonnegative `handoffs` and `checkpointProgress`. |
+| Partial conclusion | Exact `changeId`, significant `judgmentDigest`, and nonempty synthesis `rationale`; completion retains incomplete evidence and change coverage. |
+| Evidence unit | `id`, `snapshotDigest`, `parent`, original `reference`, ordered `ranges`, source/thread `bindings`, `totalCharacters`, `contentDigest`. Each range has `startCharacter`, exclusive `endCharacter`, and exact UTF-8 `contentDigest`. |
+| Note | Nonempty `observations` and `interfaces`; `concerns` and `interactions` arrays; nonempty unique `evidence` references. |
+| Bound record | Typed `value` and exact reference-to-content-digest `dependencies`. |
+| Check | `id`, originating note/judgment `origin`, `kind` (`concern` or `interaction`), `observation`, and original supporting `evidence`. Its identity binds the originating record digest. |
 
 Selected documents are exactly `significance-policy`, `assessment-contract`,
 and `approval-discussion`. Inventory and assessment digests bind their content,
@@ -495,89 +691,33 @@ readable. Path/mode changes, additions, and removals have no categorical restric
 opaque content cannot support an insignificant judgment. Risk assessment remains
 the agent's judgment under the installed policy. Unsupported record schemas require a
 new run rather than reinterpretation under a different judgment contract.
+Native coverage proves delivery, not comprehension or that a summary captured
+every implication. Workers must examine the complete final judgment/concern set
+and necessary exact evidence. Context exhaustion remains incomplete; recursive
+summarization and larger context are not substitutes.
 
-### Publication records and recovery
+### Needs-review notice recovery
 
-Replaying a completed successful `publish` returns its persisted receipt and
-approval metadata. Start a new run to evaluate later service state.
-
-Needs-review comments use a separate schema-1 host journal under `review-notices`,
-with the shared provider publication lock held before the notice and run locks.
+Needs-review comments use a separate schema-1 host journal under `review-notices`.
 The journal contains `schemaVersion`, `scope`, and `attempts`. Each attempt has
 UUID `runId`, typed `marker`, complete `body`, and `state` (`intent`, `verified`,
 or `refused`). The marker requires `schemaVersion: 1`, UUID `operationId`,
-`scope`, original `anchor`, assessed `sourceCommit`, `policyDigest`,
+`scope`, approval `anchor`, assessed `sourceCommit`, `policyDigest`,
 `assessmentDigest`, and nonempty `rationale`. Service comment creation time,
 not a timestamp embedded in JSON, controls expiry.
 
 Intent precedes the single comment request. `notify` recovery uses the original
 run and reconciles a unique owned comment without repeating the request.
-Uncertain notice effects block later host approvals. A definitive refusal
+Recovery requires the same utility version and supported run schema.
+Incompatible run schemas fail without modifying the run or notice journal or
+performing provider effects; read-only notice recovery is not an exception.
+An uncertain notice effect is not repeated. A definitive refusal
 requires a fresh run, while an accepted notice remains a conservative request
 for a separate review even if source changes during posting. Edited, malformed,
 or mismatched owned markers fail explicitly.
 
-The host journal lives under `%LOCALAPPDATA%\ss-ai\publications` on Windows
-or `$HOME/.local/share/ss-ai/publications` on Linux. Stable repository/account/PR
-IDs select one retained sibling lock. It encloses the
-run lock, freshness reads, effect intent, write, and local result persistence.
-Schedules for the same scope must use one publishing host; this is not a
-distributed exactly-once guarantee.
-
-Provider-qualified scope hashes keep GitHub and ADO transactions separate.
-The table below describes the GitHub host journal; both providers use the same
-scope and receipt fields.
-
-| Record | Fields |
-| --- | --- |
-| Host journal | `schemaVersion: 1`, `scope`, unique `operations`. |
-| Scope | Nonempty `repositoryId`, `accountId`; positive `pullRequestId`. |
-| Operation | UUID `runId`; `audit`, `body`, UTC `capturedAt`, `snapshot`, `state`; nullable `effect`, `verification`, `result`. |
-| Audit | `schemaVersion: 1`; UUID `operationId`; stable scope IDs; `anchor`; assessed `sourceCommit`; `policyDigest`, `assessmentDigest`; `state: submitted`. |
-| Effect | `kind: review-create`, matching `operationId`, `payloadDigest`, `state`, nullable complete `acknowledgement`. |
-| Verification | UTC `observedAt`; complete provider `evidence`. |
-| Receipt | Absolute `journalPath`; UUID `operationId`, `runId`; `scope`, `assessmentDigest`, `outcome`; nullable `reviewId`, `error`. |
-
-Operation states are `prepared`, `write-intent`, `write-acknowledged`,
-`verified`, `cancelled`, `stale`, `failed`, and `write-unknown`. Effect states
-are `intent`, `acknowledged`, `verified`, `failed`, and `unknown`. Receipt
-outcomes are `reapproved`, `alreadyValid`, `ineligible`,
-`staleDuringExecution`, and `failed`. Acknowledgement and postflight verification
-are separate facts. The GitHub audit marker is embedded in the submitted review body;
-`submitted` never claims postflight verification.
-
-ADO uses its own schema-1 host journal with the same `schemaVersion`, `scope`,
-and unique `operations` envelope. Its operation requires UUID `runId`; shared
-`audit`; nonempty `attribution`, `explanation`; UTC `capturedAt`; complete
-`snapshot`; positive approval `vote`; and independent `voteState`, `auditState`.
-Required nullable fields are `voteAcknowledgement`, `voteEventId`,
-`auditAcknowledgement`, `verification`, and `result`. Unknown fields are rejected.
-The effect states are `prepared`, `intent`, `acknowledged`, `verified`, `refused`,
-and `unknown`. Acknowledgements retain complete provider replies; `voteEventId`
-identifies the unique structured vote thread, not the mutable reviewer.
-Verification and result use the shared record fields above.
-
-The ADO audit marker is `<!-- ss-autoreapprove-ado {JSON} -->` with required
-`audit`, nonempty `voteEventId`, and positive source `iterationId`. It appears
-in a separate account-authored audit thread. Recognition joins its author,
-scope, original anchor, source iteration, and vote event; it does not treat the
-audit comment itself as approval authority.
-
-Recovery uses the original `publish` command and run. A unique owned remote
-effect can establish completion without another write. Missing or ambiguous
-effects remain unknown and block other runs on the host.
-ADO recovery may create an unattempted audit, or retry a definitively refused
-audit after fresh verification of the same vote. It never repeats an uncertain
-vote or audit. A vote without a verified audit blocks other host runs even if
-the reviewer currently has a positive vote.
-Policy changes block new effects, not read-only reconciliation under the
-original captured assessment. Explicit rate-limit
-refusals are not replayed inside publication. An accepted-but-stale approval
-is reported urgently, never rolled back automatically. Postflight checks do
-not prevent concurrent human actions, pushes, or existing auto-merge.
-Clean preflight staleness instead uses bounded `refresh` and a new assessment.
-Each refreshed attempt has its own UUID for host-journal correlation. Existing
-operations are retained, not overwritten with another assessment.
+Publication results do not contain a host journal path or approval operation ID.
+Clean preflight staleness uses bounded `refresh` and a new assessment.
 
 ## Errors
 
@@ -585,8 +725,8 @@ Diagnostics identify `invalidInput`, `invalidState`, `authentication`,
 `permissionDenied`, `service`, `ambiguousWrite`, `staleEvidence`, `scopeChanged`,
 `retryExhausted`, `rateLimited`, `contention`, or `io`.
 Human-readable details and backtraces are not machine-readable contracts.
-`ambiguousWrite` means the caller must reconcile remote state before another
-write. A journal in an interrupted state is never authorization to replay it.
+An ambiguous approval request is reported without an automatic resend in that
+attempt. Notice and review-selection recovery follow their own contracts.
 
 ## Journal and result schema
 

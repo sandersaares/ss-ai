@@ -9,10 +9,12 @@ mod approval;
 mod assessment {
     pub(crate) use ss_ai_assessment::{Assessment, Disposition, Judgment};
 }
+mod assessment_budget;
 mod capture;
 mod clock;
 mod command;
 mod discovery;
+mod discussion;
 mod github_approval;
 mod github_capture;
 mod identity;

@@ -11,7 +11,7 @@ use std::fs;
 use std::io::{self, BufRead, BufReader, Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Child, ChildStdin, ChildStdout, Command, Stdio};
-use std::sync::Mutex;
+use std::sync::{Mutex, MutexGuard, PoisonError};
 use std::time::Duration;
 
 use jiff::Timestamp;
@@ -25,6 +25,13 @@ use ss_ai_runtime::{Clock, FileTransaction, SystemClock, caused_by, fail};
 
 /// Prevents a concurrent subprocess launch from temporarily inheriting a test's held lock.
 static PROCESS_LAUNCH: Mutex<()> = Mutex::new(());
+
+/// Poisoning cannot invalidate the exclusion-only mutex after a test panics.
+fn lock_process_launch() -> MutexGuard<'static, ()> {
+    PROCESS_LAUNCH
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
+}
 
 /// Keeps each integration test's files in the checkout, away from other tests.
 struct Workspace(PathBuf);
@@ -80,14 +87,7 @@ struct PredecessorWriter {
 }
 
 impl PredecessorWriter {
-    fn start(
-        workspace: &Workspace,
-        mode: &str,
-        artifact: &Path,
-        record: &Path,
-        context: &Path,
-        diff: &Path,
-    ) -> Self {
+    fn start(workspace: &Workspace, mode: &str, record: &Path) -> Self {
         let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
         let script = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/audit_predecessor.ps1");
         let mut child = Command::new("pwsh")
@@ -97,14 +97,8 @@ impl PredecessorWriter {
             .arg(root)
             .arg("-Mode")
             .arg(mode)
-            .arg("-Artifact")
-            .arg(artifact)
             .arg("-Decisions")
             .arg(record)
-            .arg("-Context")
-            .arg(context)
-            .arg("-Diff")
-            .arg(diff)
             .current_dir(&workspace.0)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
@@ -276,7 +270,7 @@ fn audit_interop_helper_reports_real_contention_for_each_operation() {
             &json!({"schemaVersion":1, "kind":"consolidated",
                 "findings":[finding("F-1","a.rs")], "removed":[]}),
         );
-        let launch = PROCESS_LAUNCH.lock().unwrap();
+        let launch = lock_process_launch();
         let lock = FileTransaction::open(&record, &clock).unwrap();
         let mut child = Command::new(env::current_exe().unwrap())
             .args(["native_audit_lock_interop_helper", "--exact", "--nocapture"])
@@ -479,19 +473,13 @@ fn feedback_text_matches_predecessor_for_bom_encodings() {
     let script = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/audit_predecessor.ps1");
     for (index, bytes) in encoded(text).iter().enumerate() {
         fs::write(&text_path, bytes).unwrap();
-        let launch = PROCESS_LAUNCH.lock().unwrap();
+        let launch = lock_process_launch();
         let output = Command::new("pwsh")
             .args(["-NoLogo", "-NoProfile", "-NonInteractive", "-File"])
             .arg(&script)
             .arg("-Root")
             .arg(&root)
-            .args(["-Mode", "read-text", "-Artifact"])
-            .arg(&artifact)
-            .arg("-Decisions")
-            .arg(workspace.path("unused.json"))
-            .arg("-Context")
-            .arg(workspace.path("unused-context.json"))
-            .arg("-Diff")
+            .args(["-Mode", "read-text", "-TextPath"])
             .arg(&text_path)
             .output()
             .unwrap();
@@ -769,14 +757,11 @@ fn overlapping_predecessor_and_native_updates_keep_both_transactions() {
             "kind":"consolidated", "findings":[finding("F-1","src/lib.rs"),
                 finding("F-2","src/lib.rs")], "removed":[]}),
         );
-        let context = workspace.put("context.json", &capture(&"b".repeat(40), false));
-        let diff = workspace.put("diff.json", &json!({"files":[]}));
         let record = workspace.path("record.json");
         let clock = SystemClock::default();
-        let launch = PROCESS_LAUNCH.lock().unwrap();
+        let launch = lock_process_launch();
         let transaction = FileTransaction::open(&record, &clock).unwrap();
-        let mut contender =
-            PredecessorWriter::start(&workspace, mode, &artifact, &record, &context, &diff);
+        let mut contender = PredecessorWriter::start(&workspace, mode, &record);
         contender.expect("contended");
         drop(transaction);
         drop(launch);

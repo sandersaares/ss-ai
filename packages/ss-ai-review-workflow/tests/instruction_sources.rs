@@ -514,6 +514,9 @@ fn remove_directory_link(link: &Path) {
 #[cfg(any(unix, windows))]
 #[test]
 fn nested_directory_retarget_changes_source_provenance() {
+    // Equal instruction bytes isolate origin-sensitive reuse. On Unix both
+    // files also resolve to one target, while their parents have different
+    // referenced guidance; source_prefix must therefore include the parent.
     let workspace = Workspace::new("nested-origin");
     let root = workspace.0.join("root");
     let common = workspace.put("root/shared/source.txt", b"See docs/rules.md\n");

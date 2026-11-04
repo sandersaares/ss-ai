@@ -486,6 +486,29 @@ Describe 'Human audit records' {
         $feedback | Should -BeExactly $text
     }
 
+    It 'stages audit inputs outside a read-only working directory' -Skip:$IsWindows {
+        $readOnly = Join-Path $script:Root 'read-only'
+        [IO.Directory]::CreateDirectory($readOnly) | Out-Null
+        $originalMode = [IO.File]::GetUnixFileMode($readOnly)
+        $readOnlyMode = [IO.UnixFileMode]::UserRead -bor [IO.UnixFileMode]::UserExecute
+        [IO.File]::SetUnixFileMode($readOnly, $readOnlyMode)
+        Push-Location -LiteralPath $readOnly
+        try {
+            { [IO.File]::WriteAllText((Join-Path $readOnly 'probe'), 'x') } | Should -Throw
+            Add-ReviewAuditFeedback -Path $script:FeedbackPath -FindingsPath $script:FindingsPath `
+                -ResponseId response-1 -FindingId $script:FindingId -Text 'Human response'
+            Set-ReviewMergeApproval -Path $script:ApprovalPath -Context $script:Context -ApproveMerge $true |
+                Should -Be 'Recorded'
+            Get-ReviewAuditFeedback -Path $script:FeedbackPath -FindingId $script:FindingId |
+                Should -BeExactly 'Human response'
+            Test-ReviewMergeApproval -Path $script:ApprovalPath -PullRequestUrl $script:Context.pullRequestUrl `
+                -SourceCommit ('a' * 40) | Should -BeTrue
+        } finally {
+            Pop-Location
+            [IO.File]::SetUnixFileMode($readOnly, $originalMode)
+        }
+    }
+
     It 'loads accumulated feedback in the decision command rather than a shell-generated argument' {
         Add-ReviewAuditFeedback -Path $script:FeedbackPath -FindingsPath $script:FindingsPath -ResponseId response-1 -FindingId $script:FindingId -Text 'Preserve $this exactly.'
         $run = Invoke-DataCommand 'Add-FindingDecision.ps1' @(
