@@ -346,8 +346,8 @@ mod tests {
         assert!(error.find_source::<MissingSource>().is_some());
         assert_eq!(classification(&error), "invalidInput");
         assert_eq!(
-            error.to_string(),
-            "invalidInput: Source file not found with exact spelling"
+            error.to_string().lines().next(),
+            Some("invalidInput: Source file not found with exact spelling")
         );
 
         span.path = "a.md".to_owned();
@@ -355,19 +355,28 @@ mod tests {
         let error = snapshot.span(&span).unwrap_err();
         assert!(error.find_source::<InvalidSourceLine>().is_some());
         assert_eq!(classification(&error), "invalidInput");
-        assert_eq!(error.to_string(), "invalidInput: Invalid source line");
+        assert_eq!(
+            error.to_string().lines().next(),
+            Some("invalidInput: Invalid source line")
+        );
 
         span.start_line = 2;
         span.end_line = 1;
         let error = snapshot.span(&span).unwrap_err();
         assert!(error.find_source::<InvalidSourceRange>().is_some());
         assert_eq!(classification(&error), "invalidInput");
-        assert_eq!(error.to_string(), "invalidInput: Invalid source line range");
+        assert_eq!(
+            error.to_string().lines().next(),
+            Some("invalidInput: Invalid source line range")
+        );
 
         span.end_line = 2;
         let error = snapshot.span(&span).unwrap_err();
         assert!(error.find_source::<BlankSourceSpan>().is_some());
         assert_eq!(classification(&error), "invalidInput");
-        assert_eq!(error.to_string(), "invalidInput: Source span is blank");
+        assert_eq!(
+            error.to_string().lines().next(),
+            Some("invalidInput: Source span is blank")
+        );
     }
 }

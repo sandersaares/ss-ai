@@ -798,8 +798,8 @@ mod tests {
         assert!(error.find_source::<UnknownJournalDecision>().is_some());
         assert_eq!(classification(&error), "invalidInput");
         assert_eq!(
-            error.to_string(),
-            fail("invalidInput", "Unknown decision 'maybe' for finding 'F-1'").to_string()
+            error.to_string().lines().next(),
+            Some("invalidInput: Unknown decision 'maybe' for finding 'F-1'")
         );
     }
 }

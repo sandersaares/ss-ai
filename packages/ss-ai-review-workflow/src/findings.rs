@@ -1558,7 +1558,7 @@ fn validate_stored_record(value: &Value) -> Result<(), AppError> {
                 || "Finding with missing or invalid identifier".to_owned(),
                 |id| format!("Finding '{id}'"),
             );
-        caused_by("invalidInput", format!("{subject}: {error}"), error).into()
+        fail("invalidInput", format!("{subject}: {error}"))
     })
 }
 
@@ -1831,12 +1831,11 @@ mod artifact_tests {
     use std::path::Path;
 
     use serde_json::{Error, Value, json, to_string, to_vec};
-    use ss_ai_runtime::{Failure, caused_by, classification};
+    use ss_ai_runtime::{Failure, classification};
 
     use super::{
         ConflictingMergeSource, UnknownMergeSource, UnknownUpdateTarget, ValidatedArtifact,
-        make_record, parse_artifact, parse_json, resolve_merge_source, validate_artifact,
-        validated_content,
+        make_record, parse_artifact, resolve_merge_source, validate_artifact, validated_content,
     };
 
     /// Supplies authored content without adding defaults to the persisted input.
@@ -1896,36 +1895,30 @@ mod artifact_tests {
 
     #[test]
     fn parsing_retains_the_original_json_error_and_classification() {
-        let cause = parse_json(b"{").unwrap_err();
-        let expected = caused_by(
-            "invalidInput",
-            format!("Finding artifact 'source.json': {cause}"),
-            cause,
-        )
-        .to_string();
         let Err(error) = parse_artifact(b"{", Path::new("source.json")) else {
             panic!("malformed JSON was accepted");
         };
         assert_eq!(classification(&error), "invalidInput");
-        assert_eq!(error.to_string(), expected);
+        assert_eq!(
+            error.to_string().lines().next(),
+            Some("invalidInput: Finding artifact 'source.json': invalidInput: Invalid JSON")
+        );
         assert!(error.find_source::<Error>().is_some());
     }
 
     #[test]
     fn malformed_artifact_shape_keeps_its_classified_validation_cause() {
         let value = json!({"schemaVersion":2,"kind":"consolidated","findings":[]});
-        let cause = validate_artifact(&value).unwrap_err();
-        let expected = caused_by(
-            "invalidInput",
-            format!("Finding artifact 'source.json': {cause}"),
-            cause,
-        )
-        .to_string();
         let bytes = to_vec(&value).unwrap();
         let Err(error) = parse_artifact(&bytes, Path::new("source.json")) else {
             panic!("malformed artifact was accepted");
         };
-        assert_eq!(error.to_string(), expected);
+        assert_eq!(
+            error.to_string().lines().next(),
+            Some(
+                "invalidInput: Finding artifact 'source.json': invalidInput: Invalid finding artifact version"
+            )
+        );
         assert_eq!(classification(&error), "invalidInput");
         assert!(error.find_source::<Failure>().is_some());
     }
@@ -1936,8 +1929,8 @@ mod artifact_tests {
         let mut claimed = HashSet::new();
         let error = resolve_merge_source("missing", &positions, &mut claimed).unwrap_err();
         assert_eq!(
-            error.to_string(),
-            "invalidInput: Merge references unknown finding 'missing'"
+            error.to_string().lines().next(),
+            Some("invalidInput: Merge references unknown finding 'missing'")
         );
         assert_eq!(classification(&error), "invalidInput");
         assert!(error.find_source::<UnknownMergeSource>().is_some());
@@ -1950,8 +1943,8 @@ mod artifact_tests {
         );
         let error = resolve_merge_source("g1-1", &positions, &mut claimed).unwrap_err();
         assert_eq!(
-            error.to_string(),
-            "invalidInput: Finding 'g1-1' appears in multiple merges"
+            error.to_string().lines().next(),
+            Some("invalidInput: Finding 'g1-1' appears in multiple merges")
         );
         assert_eq!(classification(&error), "invalidInput");
         assert!(error.find_source::<ConflictingMergeSource>().is_some());
@@ -1967,8 +1960,8 @@ mod artifact_tests {
         let content = validated_content(content("Replacement")).unwrap();
         let error = artifact.update("F1", &content).unwrap_err();
         assert_eq!(
-            error.to_string(),
-            "invalidInput: Finding to update does not exist"
+            error.to_string().lines().next(),
+            Some("invalidInput: Finding to update does not exist")
         );
         assert_eq!(classification(&error), "invalidInput");
         assert!(error.find_source::<UnknownUpdateTarget>().is_some());

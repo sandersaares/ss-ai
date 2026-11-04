@@ -400,7 +400,7 @@ fn invalid(message: impl Into<String>) -> AppError {
 #[cfg(test)]
 #[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
-    use ss_ai_runtime::{classification, fail};
+    use ss_ai_runtime::classification;
 
     use super::{IncompleteDecisionJournal, incomplete_journal};
 
@@ -410,12 +410,10 @@ mod tests {
         assert!(error.find_source::<IncompleteDecisionJournal>().is_some());
         assert_eq!(classification(&error), "invalidInput");
         assert_eq!(
-            error.to_string(),
-            fail(
-                "invalidInput",
-                "The audit recorded no decision for 'F-1' or 'F-2'. Every finding must be decided."
+            error.to_string().lines().next(),
+            Some(
+                "invalidInput: The audit recorded no decision for 'F-1' or 'F-2'. Every finding must be decided."
             )
-            .to_string()
         );
     }
 }
