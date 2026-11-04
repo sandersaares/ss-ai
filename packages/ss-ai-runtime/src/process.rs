@@ -1,6 +1,7 @@
 //! Runs authentication CLIs without console encoding or shell payload coupling.
 
 use std::env;
+use std::ffi::OsStr;
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
@@ -22,6 +23,35 @@ pub trait Process {
         arguments: &[String],
         input: &[u8],
     ) -> io::Result<ProcessOutput>;
+
+    /// Runs a tool in its own directory with a child-only PATH override.
+    fn execute_in(
+        &self,
+        _program: &str,
+        _arguments: &[String],
+        _input: &[u8],
+        _directory: &Path,
+        _path: Option<&OsStr>,
+    ) -> io::Result<ProcessOutput> {
+        Err(io::Error::new(
+            io::ErrorKind::Unsupported,
+            "Execution with a working directory is unavailable",
+        ))
+    }
+
+    /// Runs a tool in the invocation directory with a child-only PATH override.
+    fn execute_with_path(
+        &self,
+        _program: &str,
+        _arguments: &[String],
+        _input: &[u8],
+        _path: &OsStr,
+    ) -> io::Result<ProcessOutput> {
+        Err(io::Error::new(
+            io::ErrorKind::Unsupported,
+            "Execution with a PATH override is unavailable",
+        ))
+    }
 
     /// Reads Git objects in an invocation-owned repository with isolated configuration.
     fn isolated_git(&self, directory: &Path, arguments: &[String]) -> io::Result<ProcessOutput> {
@@ -82,6 +112,15 @@ pub struct NativeProcess {
     directory: PathBuf,
 }
 
+/// Carries child-only execution context through the common launcher.
+#[derive(Clone, Copy)]
+struct LaunchOptions<'a> {
+    isolated_git: bool,
+    oauth: Option<(&'a str, &'a str)>,
+    directory: &'a Path,
+    path: Option<&'a OsStr>,
+}
+
 impl NativeProcess {
     /// Binds provider execution to the caller-selected working directory.
     #[must_use]
@@ -97,14 +136,13 @@ impl NativeProcess {
         program: &str,
         arguments: &[String],
         input: &[u8],
-        isolated_git: bool,
-        oauth: Option<(&str, &str)>,
+        options: LaunchOptions<'_>,
     ) -> io::Result<ProcessOutput> {
         #[cfg(windows)]
-        let program = resolve_program(program)?;
+        let program = resolve_program(program, options.path)?;
         // Native Unix lookup skips non-executable PATH entries and preserves exec errors.
         let mut command = Command::new(program);
-        if isolated_git {
+        if options.isolated_git {
             // Inherited Git paths/configuration must not redirect writes into the user's checkout.
             for (key, _) in env::vars_os() {
                 if key
@@ -120,7 +158,7 @@ impl NativeProcess {
                 .env("GIT_CONFIG_GLOBAL", self.directory.join("empty-config"))
                 .env("GIT_CONFIG_SYSTEM", self.directory.join("empty-config"));
         }
-        if let Some((url, token)) = oauth {
+        if let Some((url, token)) = options.oauth {
             // The secret stays off argv and disk; the header matches only the trusted repository.
             command
                 .env("GIT_CONFIG_COUNT", "1")
@@ -130,9 +168,12 @@ impl NativeProcess {
                     format!("Authorization: Bearer {token}"),
                 );
         }
+        if let Some(path) = options.path {
+            command.env("PATH", path);
+        }
         command
             .args(arguments)
-            .current_dir(&self.directory)
+            .current_dir(options.directory)
             .env("GH_PAGER", "")
             .env("GH_PROMPT_DISABLED", "1")
             .env("GIT_TERMINAL_PROMPT", "0")
@@ -150,11 +191,72 @@ impl Process for NativeProcess {
         arguments: &[String],
         input: &[u8],
     ) -> io::Result<ProcessOutput> {
-        self.launch(program, arguments, input, false, None)
+        self.launch(
+            program,
+            arguments,
+            input,
+            LaunchOptions {
+                isolated_git: false,
+                oauth: None,
+                directory: &self.directory,
+                path: None,
+            },
+        )
+    }
+
+    fn execute_in(
+        &self,
+        program: &str,
+        arguments: &[String],
+        input: &[u8],
+        directory: &Path,
+        path: Option<&OsStr>,
+    ) -> io::Result<ProcessOutput> {
+        self.launch(
+            program,
+            arguments,
+            input,
+            LaunchOptions {
+                isolated_git: false,
+                oauth: None,
+                directory,
+                path,
+            },
+        )
+    }
+
+    fn execute_with_path(
+        &self,
+        program: &str,
+        arguments: &[String],
+        input: &[u8],
+        path: &OsStr,
+    ) -> io::Result<ProcessOutput> {
+        self.launch(
+            program,
+            arguments,
+            input,
+            LaunchOptions {
+                isolated_git: false,
+                oauth: None,
+                directory: &self.directory,
+                path: Some(path),
+            },
+        )
     }
 
     fn isolated_git(&self, directory: &Path, arguments: &[String]) -> io::Result<ProcessOutput> {
-        Self::new(directory).launch("git", arguments, &[], true, None)
+        Self::new(directory).launch(
+            "git",
+            arguments,
+            &[],
+            LaunchOptions {
+                isolated_git: true,
+                oauth: None,
+                directory,
+                path: None,
+            },
+        )
     }
 
     fn isolated_git_oauth(
@@ -164,7 +266,17 @@ impl Process for NativeProcess {
         url: &str,
         token: &str,
     ) -> io::Result<ProcessOutput> {
-        Self::new(directory).launch("git", arguments, &[], true, Some((url, token)))
+        Self::new(directory).launch(
+            "git",
+            arguments,
+            &[],
+            LaunchOptions {
+                isolated_git: true,
+                oauth: Some((url, token)),
+                directory,
+                path: None,
+            },
+        )
     }
 }
 
@@ -199,12 +311,15 @@ fn execute_child(mut command: Command, input: &[u8]) -> io::Result<ProcessOutput
 
 /// Windows PATH discovery includes Azure CLI's command shim.
 #[cfg(windows)]
-fn resolve_program(program: &str) -> io::Result<PathBuf> {
+fn resolve_program(program: &str, path_override: Option<&OsStr>) -> io::Result<PathBuf> {
     let path = Path::new(program);
     if path.components().count() > 1 {
         return Ok(path.to_owned());
     }
-    let search = env::var_os("PATH")
+    // Executable selection must use the same PATH that the child will inherit.
+    let search = path_override
+        .map(OsStr::to_owned)
+        .or_else(|| env::var_os("PATH"))
         .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "PATH is not configured"))?;
     for directory in env::split_paths(&search) {
         let extensions = [".exe", ".cmd", ".bat", ""];

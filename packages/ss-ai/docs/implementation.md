@@ -16,7 +16,7 @@ The nonpublished workspace packages implement the utility-wide [design](design.m
 - `ss-ai-review-workflow` owns local finding artifacts, consolidation, audit
   records, approved projections, shared Markdown rendering, worker assignments,
   bounded shared-document reads, instruction snapshots, focus-area preparation
-  and reuse, and their workflow plans.
+  and reuse, report tooling, HTML rendering, and their workflow plans.
 
 Dependencies flow from command composition toward focused operations and shared
 runtime boundaries, never back to the executable. Review selection, provider
@@ -32,6 +32,9 @@ a capture without its initial decisions. Semantic decisions use the same
 sidecar lock and remain separate from provider evidence.
 Local finding operations use the same runtime transactions as PowerShell
 consumers, so hybrid runs preserve accepted updates and artifact history.
+Report commands take the active skill root explicitly, keeping the locked
+dependencies and template tied to the skill that invokes them. PowerShell
+entry points retain compatibility while the native commands own report tooling.
 Audit and projection operations share the captured-evidence serializer and
 exact Git comparison with other review commands. PowerShell adapters keep the
 remaining publication commands compatible without duplicating finding prose.

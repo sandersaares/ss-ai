@@ -27,9 +27,9 @@ jobs:
         include:
           - os: windows-latest
             tests: ./tests
-          # Preserve Ubuntu setup/native coverage without promising the entire report stack there.
+          # Report suites use offline prerequisites and do not install the report stack.
           - os: ubuntu-latest
-            tests: ./tests/Install.Tests.ps1,./tests/AgentInstallation.Tests.ps1,./tests/NativeInstallation.Tests.ps1,./tests/BashEnvironment.Tests.ps1,./tests/LibraryLayout.Tests.ps1,./tests/InvokeTests.Tests.ps1,./tests/InstallCiPester.Tests.ps1,./tests/SsReviewGitDiff.Tests.ps1,./tests/SsReviewPullRequestAnchor.Tests.ps1,./tests/ss-cargo-deps-tidy
+            tests: ./tests/Install.Tests.ps1,./tests/AgentInstallation.Tests.ps1,./tests/NativeInstallation.Tests.ps1,./tests/BashEnvironment.Tests.ps1,./tests/LibraryLayout.Tests.ps1,./tests/InvokeTests.Tests.ps1,./tests/InstallCiPester.Tests.ps1,./tests/SsReviewGitDiff.Tests.ps1,./tests/SsReviewPullRequestAnchor.Tests.ps1,./tests/SsReviewReports.Tests.ps1,./tests/SsReviewReportTools.Tests.ps1,./tests/SsReviewOverviewApi.Tests.ps1,./tests/ss-cargo-deps-tidy
           # macOS supports the PowerShell-only Cargo helper and directory linking, not native setup.
           - os: macos-latest
             tests: ./tests/Install.Tests.ps1,./tests/InstallCiPester.Tests.ps1,./tests/ss-cargo-deps-tidy

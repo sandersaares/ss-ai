@@ -45,5 +45,12 @@ test = false
 doc = false
 bench = false
 
+[[bin]]
+name = "report_svg"
+path = "fuzz_targets/report_svg.rs"
+test = false
+doc = false
+bench = false
+
 [lints]
 workspace = true

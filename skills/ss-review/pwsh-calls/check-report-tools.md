@@ -1,10 +1,19 @@
 ```powershell
-pwsh -NoProfile -NonInteractive -File "{{SKILL_ROOT}}/scripts/Test-ReviewReportTools.ps1"
+#Requires -Version 7.6
+
+Set-StrictMode -Version Latest
+$ErrorActionPreference = 'Stop'
+$PSNativeCommandUseErrorActionPreference = $true
+
+& (Join-Path "{{SKILL_ROOT}}" 'scripts/Test-ReviewReportTools.ps1')
 ```
 
 | Placeholder | Description |
 | --- | --- |
-| `SKILL_ROOT` | Directory containing the active `SKILL.md`. |
+| `SKILL_ROOT` | Absolute directory containing the active `SKILL.md`. |
+
+The adapter selects the shared user-local tools directory and passes it and the active skill
+directory to `ss-ai workflow test-review-report-tools`.
 
 Run in the review's actual host/container/WSL distribution, as the same user and with the same
 environment and working directory that will render reports. The command emits JSON with

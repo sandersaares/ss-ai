@@ -177,6 +177,54 @@ fn workflow_command() -> Command {
     }
 }
 
+/// Title prose is read from UTF-8 files before report publication begins.
+#[test]
+#[cfg_attr(miri, ignore = "requires a native subprocess")]
+fn report_cli_rejects_missing_or_non_utf8_title_without_output() {
+    let directory = Builder::new()
+        .prefix(".report-cli-")
+        .tempdir_in(env!("CARGO_MANIFEST_DIR"))
+        .unwrap();
+    let title = directory.path().join("title.txt");
+    let output_path = directory.path().join("report.html");
+    for (contents, diagnostic) in [
+        (None, "Report title file is missing"),
+        (Some(&[0xff][..]), "Report title is not UTF-8"),
+    ] {
+        if let Some(contents) = contents {
+            fs::write(&title, contents).unwrap();
+        }
+        let output = workflow_command()
+            .current_dir(directory.path())
+            .args([
+                "workflow",
+                "render-review-html",
+                "--path",
+                "input.md",
+                "--output-path",
+            ])
+            .arg(&output_path)
+            .args([
+                "--skill-root",
+                "skill",
+                "--tools-directory",
+                "tools",
+                "--title-path",
+            ])
+            .arg(&title)
+            .output()
+            .unwrap();
+        assert!(!output.status.success());
+        assert!(output.stdout.is_empty());
+        assert!(
+            String::from_utf8_lossy(&output.stderr).contains(diagnostic),
+            "unexpected diagnostic: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert!(!output_path.exists());
+    }
+}
+
 /// Every command reaches its operation without exhausting the parser stack.
 #[test]
 #[cfg_attr(miri, ignore = "requires a native subprocess")]
@@ -469,6 +517,42 @@ fn all_workflow_commands_dispatch_with_a_bounded_stack() {
             false,
         ),
         (&["resolve-anchor", "--request-path", "missing"], false),
+        (
+            &[
+                "render-review-html",
+                "--path",
+                "missing",
+                "--output-path",
+                "missing",
+                "--skill-root",
+                "missing",
+                "--tools-directory",
+                "missing",
+                "--title-path",
+                "missing",
+            ],
+            false,
+        ),
+        (
+            &[
+                "test-review-report-tools",
+                "--skill-root",
+                "missing",
+                "--tools-directory",
+                "missing",
+            ],
+            false,
+        ),
+        (
+            &[
+                "install-review-report-tools",
+                "--skill-root",
+                "missing",
+                "--tools-directory",
+                "missing",
+            ],
+            false,
+        ),
         (
             &[
                 "audit-add-decisions",
