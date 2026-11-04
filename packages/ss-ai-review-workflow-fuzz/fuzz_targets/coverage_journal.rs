@@ -53,7 +53,7 @@ impl Files {
     )]
     fn new() -> Self {
         static NEXT: AtomicU64 = AtomicU64::new(0);
-        // The atomic only assigns distinct names within the process.
+        // Relaxed atomicity assigns distinct names; no other state is synchronized.
         let id = NEXT.fetch_add(1, Ordering::Relaxed);
         let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
             .join(format!(".coverage-fuzz-{}-{id}", std::process::id()));

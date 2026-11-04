@@ -1,6 +1,8 @@
 //! Preparation and bounded reading of worker guidance.
 
+use std::any::type_name;
 use std::collections::{BTreeMap, HashSet};
+use std::fmt;
 use std::num::{NonZeroU32, NonZeroUsize};
 use std::path::{Path, absolute};
 
@@ -19,7 +21,6 @@ const OUTPUT_LIMIT: usize = 16 * 1024;
 const OUTPUT_NEWLINE: &str = if cfg!(windows) { "\r\n" } else { "\n" };
 
 /// Inputs selected by the primary session for one worker attempt.
-#[derive(Debug)]
 #[expect(
     clippy::exhaustive_structs,
     reason = "This application-internal CLI boundary is constructed directly"
@@ -47,6 +48,15 @@ pub struct AssignmentOptions<'a> {
     pub repository_instructions: bool,
     /// Whether pre-existing findings are authorized.
     pub include_pre_existing: bool,
+}
+
+impl fmt::Debug for AssignmentOptions<'_> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct(type_name::<Self>())
+            .field("phase", &self.phase)
+            .field("has_manifest", &self.manifest_path.is_some())
+            .finish_non_exhaustive()
+    }
 }
 
 /// Immutable record binding a phase to its exact shared guidance.
@@ -614,9 +624,12 @@ fn required_bytes(path: &Path, clock: &dyn Clock) -> Result<Vec<u8>, AppError> {
 /// Reads canonical text without changing its content.
 fn text(path: &Path, clock: &dyn Clock) -> Result<String, AppError> {
     let bytes = required_bytes(path, clock)?;
-    let bytes = bytes.strip_prefix(&[0xef, 0xbb, 0xbf]).unwrap_or(&bytes);
-    String::from_utf8(bytes.to_vec())
-        .map_err(|error| invalid(format!("Invalid UTF-8 guidance: {error}")))
+    let mut text = String::from_utf8(bytes)
+        .map_err(|error| invalid(format!("Invalid UTF-8 guidance: {error}")))?;
+    if text.starts_with('\u{feff}') {
+        text.drain(..'\u{feff}'.len_utf8());
+    }
+    Ok(text)
 }
 
 /// Publishes complete normalized guidance under its retained sibling lock.

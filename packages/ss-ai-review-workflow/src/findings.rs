@@ -1128,7 +1128,7 @@ pub fn complete(path: &Path, queue_path: &Path, clock: &dyn Clock) -> Result<Val
 }
 
 /// Avoids recursively acquiring a sibling lock through equivalent paths.
-fn same_lock(path: &Path, queue_path: &Path) -> bool {
+pub(crate) fn same_lock(path: &Path, queue_path: &Path) -> bool {
     let lock_identity = |path: &Path| {
         Some((
             fs::canonicalize(path.parent()?).ok()?,

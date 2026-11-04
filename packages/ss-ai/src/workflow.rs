@@ -1,6 +1,8 @@
 //! CLI translation for local review workflow operations.
 
+use std::any::type_name;
 use std::ffi::OsString;
+use std::fmt;
 use std::path::{PathBuf, absolute};
 use std::time::Duration;
 
@@ -130,7 +132,7 @@ enum ReviewCommand {
 }
 
 /// Selects worker input and rendering operations.
-#[derive(Debug, Subcommand)]
+#[derive(Subcommand)]
 enum WorkerCommand {
     /// Prepare a bounded worker assignment from installed skill assets.
     WorkerAssignment {
@@ -181,6 +183,24 @@ enum WorkerCommand {
         #[arg(long)]
         request_path: PathBuf,
     },
+}
+
+impl fmt::Debug for WorkerCommand {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let variant = match self {
+            Self::WorkerAssignment { .. } => "WorkerAssignment",
+            Self::WorkerDocument { .. } => "WorkerDocument",
+            Self::Render { .. } => "Render",
+            Self::RenderMarkdownFiles { .. } => "RenderMarkdownFiles",
+            Self::ResolveAnchor { .. } => "ResolveAnchor",
+        };
+        let mut debug = f.debug_struct(type_name::<Self>());
+        debug.field("variant", &variant);
+        if let Self::WorkerAssignment { phase, .. } = self {
+            debug.field("phase", phase);
+        }
+        debug.finish_non_exhaustive()
+    }
 }
 
 /// Selects audit and approved-set operations.

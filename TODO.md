@@ -32,7 +32,8 @@ Improvement ideas to revisit when the repo matures.
   their callers migrate while preserving the hybrid workflow's records,
   transaction boundaries and authority gates.
 - **Type ss-review workflow errors.** Replace generic application errors at the
-  finding, plan, audit, projection, anchor, rendering and diff-validation
+  finding, plan, audit, projection, anchor, rendering, diff-validation,
+  coverage and worker-input
   boundaries with typed invariant errors and aggregates, preserving command-level
   error categories and diagnostics. Complete this when focused tests can
   distinguish rejected invariants without matching prose.
