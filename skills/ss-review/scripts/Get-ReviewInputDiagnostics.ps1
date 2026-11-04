@@ -11,6 +11,7 @@ param(
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 $PSNativeCommandUseErrorActionPreference = $true
+. "$PSScriptRoot/lib/NativeContextPath.ps1"
 
 # Preserve JSON on PowerShell's success stream for callers that parse it.
 function Invoke-NativeContext {
@@ -39,6 +40,7 @@ function Invoke-NativeContext {
 
 $arguments = [Collections.Generic.List[string]]::new()
 $arguments.Add('diagnostics')
+$Path = Resolve-NativeContextFilePath -Path $Path
 $arguments.Add("--path=$Path")
 if ($PSBoundParameters.ContainsKey('Record')) { $arguments.Add("--record=$Record") }
 if ($PSBoundParameters.ContainsKey('Count')) { $arguments.Add("--count=$Count") }

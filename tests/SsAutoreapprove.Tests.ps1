@@ -242,6 +242,18 @@ Describe 'Automatic reapproval repository scope instructions' {
         $script:Recipes | Should -Match 'Repeating the original command with the same utility version and\s+supported run schema reconciles the same intent without posting again'
     }
 
+    It 'limits refusal comments to reasons and clears approvals through the native transaction' {
+        $script:Prompt | Should -Match 'Include only decision-justifying reasons'
+        $script:Prompt | Should -Match 'no PR summary, unrelated discussion, coverage caveats'
+        $script:Prompt | Should -Match 'Keep partial coverage and diagnostics in the final report, not the comment'
+        $script:Prompt | Should -Match 'dismisses the account''s\s+captured approvals on GitHub or resets its positive ADO vote to zero'
+        $script:Prompt | Should -Match 'Never submit a\s+negative review or alter another account''s approval'
+        $script:Prompt | Should -Match 'Dry runs report the decision without posting a marker or changing approvals'
+        $script:Recipes | Should -Match 'an uncertain\s+or refused reset is never resent automatically'
+        $assignment = Get-Content -LiteralPath (Join-Path $skill 'assessment.md') -Raw
+        $assignment | Should -Match 'Never add coverage caveats or workflow diagnostics to a\s+refusal rationale'
+    }
+
     It 'recovers stale evidence with fresh assessments and a retained bounded budget' {
         $script:Prompt | Should -Match '`staleEvidence` and `staleDuringExecution` are transient evidence conditions'
         $script:Prompt | Should -Match 'two recovery attempts per PR after\s+the initial attempt'

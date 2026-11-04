@@ -582,12 +582,21 @@ reviews block publication.
 `notify` takes the same repository, attribution, and tenant inputs as `publish`,
 but requires a completed significant or uncertain live assessment. Uncertainty
 retains its explicit failure diagnostic after notification. It posts one standalone
-needs-review comment; it never changes a reviewer vote or existing discussion.
+needs-review comment with a Markdown heading and a list explaining only why
+the existing approval cannot be renewed. It omits PR summaries, unrelated
+discussion, coverage caveats, and workflow diagnostics.
+It then dismisses the account's captured GitHub approving reviews or resets
+its positive ADO vote to zero. Already-cleared approvals require no write.
+It preserves other accounts' decisions, independent later approvals, and
+nonpositive votes. It never submits a negative review or modifies existing
+discussion. GitHub requires review-dismissal permission. Reset failures remain
+explicit even if the comment exists. ADO has no atomic prior-vote condition;
+a human vote can race with the request.
 An account-owned `<!-- ss-autoreapprove-needs-review {JSON} -->` marker keeps
 future inspections at `needsReview` without preparing or assessing source.
 Only a strictly later approval by the authenticated account expires older
 markers. Another account's approval does not.
-Dry runs never post notices.
+Dry runs never post notices or change approvals.
 
 Final skill output lists every in-range candidate as a linked PR number and
 title with its decision. `reviewNotice` distinguishes retained refusals.
@@ -631,16 +640,22 @@ summarization and larger context are not substitutes.
 
 ### Needs-review notice recovery
 
-Needs-review comments use a separate schema-1 host journal under `review-notices`.
+Needs-review notifications use a separate schema-2 host journal under `review-notices`.
 The journal contains `schemaVersion`, `scope`, and `attempts`. Each attempt has
-UUID `runId`, typed `marker`, complete `body`, and `state` (`intent`, `verified`,
-or `refused`). The marker requires `schemaVersion: 1`, UUID `operationId`,
+UUID `runId`, typed `marker`, complete `body`, `state` (`intent`, `verified`,
+or `refused`), and `resets`. Each reset has captured `reviewId` and `state`
+(`pending`, `intent`, `verified`, or `refused`). The marker requires `schemaVersion: 1`, UUID `operationId`,
 `scope`, approval `anchor`, assessed `sourceCommit`, `policyDigest`,
 `assessmentDigest`, and nonempty `rationale`. Service comment creation time,
 not a timestamp embedded in JSON, controls expiry.
 
 Intent precedes the single comment request. `notify` recovery uses the original
 run and reconciles a unique owned comment without repeating the request.
+It then clears captured positive approvals, persisting each reset's intent
+before its request and verifying current standing afterward. Only a pending
+reset may start during recovery; an uncertain or refused reset is never resent.
+Readback can settle a reset after the account clears the approval manually.
+An incomplete reset remains an explicit notification failure.
 Recovery requires the same utility version and supported run schema.
 Incompatible run schemas fail without modifying the run or notice journal or
 performing provider effects; read-only notice recovery is not an exception.
