@@ -8,10 +8,11 @@ use std::num::NonZeroU32;
 use ohno::AppError;
 use serde_json::{Value, json};
 use url::Url;
+use uuid::Uuid;
 
 use crate::error::{caused_by, fail};
 use crate::json::{array, field, text};
-use crate::target::{Platform, escape};
+use crate::target::{Platform, decode, escape};
 use crate::tracker_body;
 use crate::tracker_target::TrackerTarget as Target;
 use crate::transport::Transport;
@@ -49,7 +50,7 @@ pub(crate) fn state(
         .any(|segment| segment.trim().is_empty() || matches!(*segment, "." | ".."))
         || segments
             .first()
-            .is_none_or(|segment| !segment.eq_ignore_ascii_case(project))
+            .is_none_or(|segment| !same_name(segment, project))
     {
         return Err(fail(
             "invalidInput",
@@ -65,16 +66,14 @@ pub(crate) fn state(
         "7.1",
     )?;
     let service_project = service_text(&project_record, "name")?;
-    if !service_project.eq_ignore_ascii_case(project) {
+    if !same_name(service_project, project) {
         return Err(fail("service", "Azure returned a different project"));
     }
     let types = transport.list(&format!("{project_segment}/_apis/wit/workitemtypes"))?;
     let mut resolved_type = None;
     for candidate in &types {
         let name = service_text(candidate, "name")?;
-        if name.eq_ignore_ascii_case(requested_type)
-            && resolved_type.replace(name.to_owned()).is_some()
-        {
+        if same_name(name, requested_type) && resolved_type.replace(name.to_owned()).is_some() {
             return Err(fail("service", "Azure returned duplicate work item types"));
         }
     }
@@ -147,7 +146,7 @@ pub(crate) fn state(
     }
     let area = get(transport, &area_route, &[], "7.1")?;
     let area_name = service_text(&area, "name")?;
-    if !area_name.eq_ignore_ascii_case(segments.last().expect("area has a root")) {
+    if !same_name(area_name, segments.last().expect("area has a root")) {
         return Err(fail("service", "Azure returned a different area"));
     }
     let mut resolved_area = segments.iter().map(|s| (*s).to_owned()).collect::<Vec<_>>();
@@ -160,7 +159,7 @@ pub(crate) fn state(
                 .last_mut()
                 .expect("area has at least one segment"),
         );
-    } else if !area_name.eq_ignore_ascii_case(project) {
+    } else if !same_name(area_name, project) {
         return Err(fail("service", "Azure returned a different area root"));
     }
 
@@ -178,15 +177,14 @@ pub(crate) fn state(
             ));
         }
         let fields = field(&response, "fields")?;
-        if !service_text(fields, "System.TeamProject")?.eq_ignore_ascii_case(project) {
+        if !same_name(service_text(fields, "System.TeamProject")?, project) {
             return Err(fail(
                 "invalidInput",
                 "Parent work item belongs to another project",
             ));
         }
         let url = service_text(&response, "url")?;
-        let expected = format!("{collection}/_apis/wit/workItems/{id}");
-        if !url.eq_ignore_ascii_case(&expected) {
+        if !parent_url_matches(url, collection, project, id) {
             return Err(fail(
                 "service",
                 "Azure returned an unexpected parent API URL",
@@ -241,7 +239,7 @@ pub(crate) fn create(
     if !parent.is_null() {
         let id = positive_id(field(parent, "itemId")?, "invalidInput")?;
         let url = input_text(parent, "url")?;
-        if !url.eq_ignore_ascii_case(&format!("{collection}/_apis/wit/workItems/{id}")) {
+        if !parent_url_matches(url, collection, project, id) {
             return Err(fail("invalidInput", "Invalid parent work item URL"));
         }
         patch.push(json!({"op":"add", "path":"/relations/-", "value":{
@@ -293,7 +291,7 @@ pub(crate) fn read(
 fn validate_state(state: &Value, collection: &str, project: &str) -> Result<(), AppError> {
     if state.get("platform").and_then(Value::as_str) != Some("azureDevOps")
         || input_text(state, "collectionUrl")? != collection
-        || !input_text(state, "project")?.eq_ignore_ascii_case(project)
+        || !same_name(input_text(state, "project")?, project)
     {
         return Err(fail(
             "invalidInput",
@@ -304,15 +302,41 @@ fn validate_state(state: &Value, collection: &str, project: &str) -> Result<(), 
     if area
         .split('\\')
         .any(|part| part.trim().is_empty() || matches!(part, "." | ".."))
-        || !area
-            .split('\\')
-            .next()
-            .unwrap_or_default()
-            .eq_ignore_ascii_case(project)
+        || !same_name(area.split('\\').next().unwrap_or_default(), project)
     {
         return Err(fail("invalidInput", "Tracker state has an invalid area"));
     }
     Ok(())
+}
+
+/// Matches Azure names using the same Unicode casing as tracker identities.
+fn same_name(left: &str, right: &str) -> bool {
+    left.to_lowercase() == right.to_lowercase()
+}
+
+/// Restricts parent links to the collection and globally identified work item.
+fn parent_url_matches(url: &str, collection: &str, project: &str, id: NonZeroU32) -> bool {
+    let suffix = format!("_apis/wit/workItems/{id}");
+    if url.eq_ignore_ascii_case(&format!("{collection}/{suffix}")) {
+        return true;
+    }
+
+    // Azure can qualify the route with a project ID instead of its name.
+    // The parent response separately establishes project membership.
+    let Ok(parsed) = Url::parse(url) else {
+        return false;
+    };
+    let Some(segment) = parsed
+        .path_segments()
+        .and_then(|mut segments| segments.nth_back(4))
+    else {
+        return false;
+    };
+    let Ok(decoded) = decode(segment) else {
+        return false;
+    };
+    (same_name(&decoded, project) || Uuid::parse_str(&decoded).is_ok())
+        && url.eq_ignore_ascii_case(&format!("{collection}/{segment}/{suffix}"))
 }
 
 /// Rejects malformed or reserved body fields before authentication or writes.
@@ -664,6 +688,98 @@ mod tests {
             ])
         );
         assert!(requests[7].1.contains("api-version=7.2-preview.3"));
+    }
+
+    #[test]
+    fn unicode_names_and_project_qualified_parent_survive_preflight_and_creation() {
+        let parent_url =
+            "https://dev.azure.com/org/1f9c8c6e-0000-0000-0000-000000000000/_apis/wit/workItems/9";
+        let mut replies = preflight();
+        replies[0]["name"] = json!("PrØject");
+        replies[1]["value"][0]["name"] = json!("BÜG");
+        replies[4]["name"] = json!("SÜB Area");
+        replies[5]["fields"]["System.TeamProject"] = json!("PRØJECT");
+        replies[5]["url"] = json!(parent_url);
+        replies.push(work_item());
+        let mock = Mock::new(replies);
+        let transport_target = transport_target();
+        let mut transport = Transport::new(&transport_target, None, &mock, &mock, &NoWait);
+        let input = json!({"workItemType":"büg","areaPath":"prØject\\süb area",
+            "descriptionField":REPRO,"parentWorkItemId":9});
+        let mut saved = state(&mut transport, &target(), &input).unwrap();
+        assert_eq!(saved["workItemType"], "BÜG");
+        assert_eq!(saved["areaPath"], "Prøject\\SÜB Area");
+        assert_eq!(saved["parent"]["url"], parent_url);
+        saved["project"] = json!("PRØJECT");
+        saved["areaPath"] = json!("PRØJECT\\SÜB Area");
+        create(
+            &mut transport,
+            &target(),
+            &saved,
+            &json!({"title":"Tést","body":"body"}),
+        )
+        .unwrap();
+        assert_eq!(
+            mock.requests.borrow()[6].2.as_ref().unwrap()[4]["value"]["url"],
+            parent_url
+        );
+    }
+
+    #[test]
+    fn parent_links_preserve_collection_and_work_item_identity() {
+        let id = NonZeroU32::new(9).unwrap();
+        let collection = "https://dev.azure.com/org";
+        let project = "Prøject";
+        for url in [
+            "https://dev.azure.com/org/_apis/wit/workItems/9",
+            "https://dev.azure.com/org/Pr%C3%B8ject/_apis/wit/workItems/9",
+            "https://dev.azure.com/org/Pr%C3%98ject/_apis/wit/workItems/9",
+            "https://dev.azure.com/org/1f9c8c6e-0000-0000-0000-000000000000/_apis/wit/workItems/9",
+        ] {
+            assert!(parent_url_matches(url, collection, project, id), "{url}");
+        }
+        for url in [
+            "https://dev.azure.com/other/_apis/wit/workItems/9",
+            "https://dev.azure.com/org/Other/_apis/wit/workItems/9",
+            "https://dev.azure.com/org/1f9c8c6e-0000-0000-0000-000000000000/_apis/wit/workItems/10",
+            "https://dev.azure.com/org/_apis/wit/workItems/9?redirect=other",
+            "https://dev.azure.com/org/extra/1f9c8c6e-0000-0000-0000-000000000000/_apis/wit/workItems/9",
+        ] {
+            assert!(!parent_url_matches(url, collection, project, id), "{url}");
+        }
+    }
+
+    #[test]
+    fn foreign_parent_url_is_rejected_before_creation() {
+        let mut replies = preflight();
+        replies[5]["url"] = json!("https://dev.azure.com/other/_apis/wit/workItems/9");
+        let mock = Mock::new(replies);
+        let transport_target = transport_target();
+        let mut transport = Transport::new(&transport_target, None, &mock, &mock, &NoWait);
+        assert!(state(&mut transport, &target(), &metadata()).is_err());
+        assert!(
+            mock.requests
+                .borrow()
+                .iter()
+                .all(|request| request.0 == "GET")
+        );
+
+        let mock = Mock::new(Vec::new());
+        let mut transport = Transport::new(&transport_target, None, &mock, &mock, &NoWait);
+        let saved = json!({"platform":"azureDevOps","collectionUrl":"https://dev.azure.com/org",
+            "project":"Prøject","areaPath":"Prøject","workItemType":"Bug",
+            "descriptionField":DESCRIPTION,"parent":{"itemId":"9",
+                "url":"https://dev.azure.com/other/_apis/wit/workItems/9"}});
+        assert!(
+            create(
+                &mut transport,
+                &target(),
+                &saved,
+                &json!({"title":"T","body":"body"})
+            )
+            .is_err()
+        );
+        assert!(mock.requests.borrow().is_empty());
     }
 
     #[test]

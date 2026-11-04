@@ -307,7 +307,7 @@ pub(crate) fn escape(value: &str) -> String {
 ///
 /// Browser coordinates use path syntax rather than form encoding; preserving
 /// that distinction keeps repository and project names intact.
-fn decode(value: &str) -> Result<String, AppError> {
+pub(crate) fn decode(value: &str) -> Result<String, AppError> {
     let mut bytes = Vec::new();
     let mut source = value.bytes();
     while let Some(byte) = source.next() {
