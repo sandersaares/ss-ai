@@ -3,10 +3,12 @@
 
 mod cargo;
 mod command;
+mod context;
 mod git;
 
 pub use cargo::run as run_cargo;
 pub use command::{run, run_in};
+pub use context::run as run_context;
 pub use git::run as run_git;
 pub use ss_ai_review::{
     Clock, Http, HttpResponse, NativeHttp, NativeProcess, Process, ProcessOutput, SystemClock,

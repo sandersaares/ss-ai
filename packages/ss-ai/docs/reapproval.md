@@ -507,7 +507,7 @@ run lock and verifies neither range nor its progress is overwritten. Synthetic
 sparse/dense fixtures measure every serialized page separately from source
 characters and requested context. Sparse edits require at least 90% fewer
 mandatory source characters; dense replacements have no reduction guarantee.
-The bounded `ss-ai-assessment/fuzz` target exercises exact patch parsing and
+The bounded `ss-ai-assessment-fuzz` target exercises exact patch parsing and
 read/context/judgment operation ordering without contacting a provider.
 
 Publication-only matrices share an immutable editorial source repository and

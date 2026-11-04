@@ -10,7 +10,7 @@ The CLI guarantees bounded output, not filesystem access control. Raw files rema
 
 ## Query contract
 
-Prepare a saved request with `scripts\New-PullRequestQueryRequest.ps1`, then read it with `scripts\Read-PullRequestContext.ps1 -RequestPath`. Use named arguments and noninteractive PowerShell. Requests store the resolved capture paths, snapshot identities, normalized selectors, and exact continuation. Never hand-author a request, embed JSON in a shell string, or reconstruct filters for continuation. Commands read local captures without fetching or modifying them.
+Prepare a saved request with `scripts\New-PullRequestQueryRequest.ps1`, then read it with `scripts\Read-PullRequestContext.ps1 -RequestPath`. These entry points invoke the native `ss-ai context` commands; a native failure is an error, not a reason to use another reader. Use named arguments and noninteractive PowerShell. Requests store the resolved capture paths, snapshot identities, normalized selectors, and exact continuation. Never hand-author a request, embed JSON in a shell string, or reconstruct filters for continuation. Commands read local captures without fetching or modifying them.
 
 Request creation accepts `-PageSize` from 1 through 50, defaulting to 20. Each reading response is at most 16 KiB of serialized UTF-8 stdout, including its final newline. The byte ceiling can yield fewer items than the requested page size. There is no switch to raise the ceiling and no all/full-document mode. The direct query CLI remains available for programmatic callers; workers use saved requests.
 
@@ -190,7 +190,7 @@ pwsh -NoProfile -NonInteractive -File '{{SKILL_ROOT}}\scripts\New-PullRequestQue
 | --- | --- |
 | `TEXT_PATH` | Absolute UTF-8 text-file path containing the exact literal search text, including any quotes or line breaks. Do not add a final newline unless it is part of the search. For simple text, `-Text 'Widget'` avoids a file. Do not combine `-Text` and `-TextPath`. |
 
-Search matches a case-insensitive literal substring in complete comment bodies and in the description when scope permits. It returns one bounded match excerpt per matching comment, not every occurrence and not full bodies. Resolved and outdated discussion remains included unless explicitly filtered. An unfiltered search reaches other-file and global discussion; do this before emitting a finding rather than relying only on assigned-file discovery. Vary the topic or symbol when one spelling cannot establish coverage. Read relevant hits through exact-comment or conversation queries before drawing conclusions.
+Search matches a case-insensitive literal substring in complete comment bodies and in the description when scope permits. It uses Unicode simple case folding without normalization or multi-character expansion; match offsets refer to the original text. It returns one bounded match excerpt per matching comment, not every occurrence and not full bodies. Resolved and outdated discussion remains included unless explicitly filtered. An unfiltered search reaches other-file and global discussion; do this before emitting a finding rather than relying only on assigned-file discovery. Vary the topic or symbol when one spelling cannot establish coverage. Read relevant hits through exact-comment or conversation queries before drawing conclusions.
 
 ## Freshness changes
 
