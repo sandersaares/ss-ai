@@ -37,6 +37,19 @@ BeforeAll {
 
     function Invoke-WorkScript {
         param([string] $Name, [string[]] $ArgumentList)
+        if ($script:AlternatePaths) {
+            # Exercise PowerShell path syntax across the real process boundary.
+            for ($index = 0; $index -lt $ArgumentList.Count - 1; $index++) {
+                if ($ArgumentList[$index] -match '^-(?:.*Path|.*Directory|.*Root|SessionState)$') {
+                    $ArgumentList[$index + 1] = if ($IsWindows) {
+                        $ArgumentList[$index + 1].Replace('\', '/')
+                    } else {
+                        $ArgumentList[$index + 1].Replace('/', '\')
+                    }
+                    $index++
+                }
+            }
+        }
         $start = [Diagnostics.ProcessStartInfo]::new((Get-Process -Id $PID).Path)
         foreach ($argument in (@('-NoProfile', '-NonInteractive', '-File', (Join-Path $script:Scripts $Name)) + $ArgumentList)) {
             $start.ArgumentList.Add($argument)
@@ -83,6 +96,7 @@ Describe 'Review work initialization' {
     }
 
     BeforeEach {
+        $script:AlternatePaths = $false
         $script:Root = Join-Path $TestDrive ([guid]::NewGuid())
         $script:Areas = Join-Path $script:Root 'focus-areas'
         New-Item -ItemType Directory -Path $script:Areas -Force | Out-Null
@@ -513,7 +527,8 @@ Describe 'Review work initialization' {
         Assert-ReviewFileGroupQueueComplete -Path $worker.fileGroupQueuePath -Group $script:Groups
     }
 
-    It 'runs queue and finding commands with one JSON result and refuses premature completion' {
+    It 'runs queue and finding commands with alternate path separators and refuses premature completion' {
+        $script:AlternatePaths = $true
         $run = Invoke-WorkScript -Name 'New-ReviewWork.ps1' -ArgumentList @(
             '-InventoryPath', $script:Inventory, '-FileGroupsPath', $script:GroupedInventory, '-FocusAreaDirectory', $script:Areas, '-OutputDirectory', $script:Work
         )
@@ -556,7 +571,8 @@ Describe 'Review work initialization' {
         (Get-FindingArtifactValidation -Path $artifact -ExpectedReviewerId @($worker.reviewerId)).isValid | Should -BeTrue
     }
 
-    It 'runs the complete native review workflow with PowerShell-produced inputs and findings' {
+    It 'runs the complete native review workflow with PowerShell paths, inputs and findings' {
+        $script:AlternatePaths = $true
         Remove-Item -LiteralPath (Join-Path $script:Areas 'z.md')
         $publishedInventory = Join-Path $script:Root 'published-inventory.json'
         $publishedGroups = Join-Path $script:Root 'published-groups.json'

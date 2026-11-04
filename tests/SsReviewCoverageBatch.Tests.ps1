@@ -288,7 +288,8 @@ Describe 'Atomic assessment batches' {
 
     It 'requires explicit validated resume after a worker failure without losing prior work' {
         Set-ReviewFileAssessment @script:Arguments -Assessment $script:Batch.assessments[0]
-        $result = & "$script:Scripts\Set-ReviewWorkerFailure.ps1" -QueuePath $script:Queue -Reason 'Worker exhausted its runtime context.' | ConvertFrom-Json
+        $queue = if ($IsWindows) { $script:Queue.Replace('\', '/') } else { $script:Queue.Replace('/', '\') }
+        $result = & "$script:Scripts\Set-ReviewWorkerFailure.ps1" -QueuePath $queue -Reason 'Worker exhausted its runtime context.' | ConvertFrom-Json
         $result.status | Should -Be 'Failed'
         $before = [IO.File]::ReadAllText($script:Queue)
         Set-ReviewWorkerFailure -QueuePath $script:Queue -Reason 'Worker exhausted its runtime context.' | Out-Null

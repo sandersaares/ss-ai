@@ -268,8 +268,11 @@ Describe 'Persisted file assessments' {
         Write-PullRequestOutputFileAtomically -Path $assessment -Content (ConvertTo-JsonText -Value @{
             groupId = 'group-001'; path = $script:Files[0].path; disposition = 'reviewed'; scope = ''; reason = ''
         })
+        $paths = @($script:QueuePath, $script:Inventory, $script:Grouped, $assessment) | ForEach-Object {
+            if ($IsWindows) { $_.Replace('\', '/') } else { $_.Replace('/', '\') }
+        }
         $run = Invoke-DataCommand 'Set-ReviewFileAssessment.ps1' @(
-            '-QueuePath', $script:QueuePath, '-InventoryPath', $script:Inventory, '-FileGroupsPath', $script:Grouped, '-AssessmentPath', $assessment
+            '-QueuePath', $paths[0], '-InventoryPath', $paths[1], '-FileGroupsPath', $paths[2], '-AssessmentPath', $paths[3]
         )
         $run.exitCode | Should -Be 0 -Because $run.error
         (Read-ReviewQueueDocument -Path $script:QueuePath).assessments.Count | Should -Be 1

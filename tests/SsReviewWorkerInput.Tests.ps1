@@ -129,6 +129,20 @@ Describe 'Prepared bounded worker inputs' {
         $assignment.phase | Should -BeExactly $Canonical
     }
 
+    It 'resolves PowerShell paths for assignments, document reads and diagnostics' {
+        $state = if ($IsWindows) { $script:State.Replace('\', '/') } else { $script:State.Replace('/', '\') }
+        $scope = if ($IsWindows) { $script:Scope.Replace('\', '/') } else { $script:Scope.Replace('/', '\') }
+        $output = "$state\path-attempt"
+        $result = & (Join-Path $script:Scripts 'New-ReviewWorkerAssignment.ps1') -Phase references `
+            -SessionState $state -ScopePath $scope -OutputDirectory $output | ConvertFrom-Json -AsHashtable
+        $path = if ($IsWindows) { $result.assignmentPath.Replace('\', '/') } else { $result.assignmentPath.Replace('/', '\') }
+        $read = Invoke-WorkerRead -AssignmentPath $path -DocumentId scope -Offset 0
+        $read.exitCode | Should -Be 0 -Because $read.errors
+        (ConvertFrom-JsonVerbatim -Text $read.output).content | Should -BeExactly 'Review the current diff in the fixture repository.'
+        $diagnostics = & (Join-Path $script:Scripts 'Get-ReviewInputDiagnostics.ps1') -Path $state | ConvertFrom-Json -AsHashtable
+        $diagnostics.counts.documentReadCalls | Should -BeGreaterThan 0
+    }
+
     It 'provides bounded initial reads and exact complete guidance for original and resumed reviewers' {
         foreach ($resume in @($false, $true)) {
             $result = & (Join-Path $script:Scripts 'New-ReviewWorkerAssignment.ps1') -Phase review `

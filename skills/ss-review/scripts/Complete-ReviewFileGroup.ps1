@@ -13,4 +13,5 @@ Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 $PSNativeCommandUseErrorActionPreference = $true
 . "$PSScriptRoot\lib\NativeWorkflowBridge.ps1"
+$QueuePath = $ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath($QueuePath)
 Invoke-NativeReviewWorkflow -Arguments @('complete-review-group', "--queue-path=$QueuePath", "--group-id=$GroupId")
