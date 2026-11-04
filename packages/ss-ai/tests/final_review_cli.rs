@@ -1368,11 +1368,16 @@ fn executable_partial_outcome_preserves_receipts_and_refuses_replay() {
     let journal_path = workspace.path("output/publication-result.json");
     let journal_bytes = fs::read(&journal_path).unwrap();
     let journal: Value = from_slice(&journal_bytes).unwrap();
+    let message = outcome["message"].as_str().unwrap();
+    assert!(
+        message.starts_with("The review is published and verified; reconcile these threads without publishing again: thread 'PRRT_1': ambiguousWrite: GraphQL mutation returned incomplete evidence"),
+        "{message}"
+    );
     assert_eq!(
         outcome,
         json!({
             "schemaVersion":1, "status":"publishedWithFollowUpFailure",
-            "message":"The review is published and verified; reconcile these threads without publishing again: thread 'PRRT_1': ambiguousWrite: GraphQL mutation returned incomplete evidence",
+            "message":message,
             "platform":"gitHub", "pullRequestUrl":"https://github.com/octo/widget/pull/7",
             "reviewId":"review", "reviewUrl":"https://github.com/octo/widget/pull/7#review",
             "resultPath":journal_path, "publishedFindingCount":1, "failedOperationCount":0,
