@@ -1,6 +1,8 @@
 //! Exercises the actual PowerShell and native shared-file implementations together.
 
 use std::cell::{Cell, RefCell};
+#[cfg(windows)]
+use std::fs;
 use std::fs::{remove_file, write};
 use std::io::{BufRead, BufReader, Write};
 #[cfg(windows)]
