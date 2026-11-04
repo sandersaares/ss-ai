@@ -1242,10 +1242,9 @@ pub fn set_assessment(
     assessment: &Value,
     clock: &dyn Clock,
 ) -> Result<Value, AppError> {
-    validate_assessment(assessment)?;
+    let path = validate_assessment(assessment)?;
     let inputs = read_inputs(inventory, groups, clock)?;
     let group_id = nonblank(assessment.get("groupId"), "groupId")?;
-    let path = nonblank(assessment.get("path"), "path")?;
     let group = find_group(&inputs.groups, group_id)?;
     if !group_contains(group, path)? {
         return Err(invalid("Assessment does not belong to its group"));
@@ -1383,8 +1382,7 @@ pub fn complete_batch(
     };
     let mut seen = HashSet::new();
     for entry in batch_assessments {
-        validate_assessment(entry)?;
-        let path = nonblank(entry.get("path"), "path")?;
+        let path = validate_assessment(entry)?;
         if entry["groupId"] != group_id || !group_contains(group, path)? || !seen.insert(path) {
             return Err(invalid(
                 "Batch assessments must name distinct files in the group",
@@ -1472,16 +1470,25 @@ fn assert_findings(artifact: &Value, ids: &[Value]) -> Result<(), AppError> {
     Ok(())
 }
 
-/// Applies the assessment schema before inserting records into a journal.
-fn validate_assessment(value: &Value) -> Result<(), AppError> {
-    let fields = object(
-        value,
-        &["groupId", "path", "disposition", "scope", "reason"],
-    )?;
-    if !valid_id(nonblank(fields.get("groupId"), "groupId")?) {
+/// Applies the assessment schema at both draft and journal boundaries.
+pub(crate) fn validate_assessment(value: &Value) -> Result<&str, AppError> {
+    let fields = value
+        .as_object()
+        .ok_or_else(|| invalid("Expected an assessment object"))?;
+    if let Some(key) = fields
+        .keys()
+        .find(|key| !["groupId", "path", "disposition", "scope", "reason"].contains(&key.as_str()))
+    {
+        return Err(invalid(&format!("Unexpected assessment property '{key}'")));
+    }
+    if !valid_id(assessment_text(fields.get("groupId"), "groupId")?) {
         return Err(invalid("Invalid group identifier"));
     }
-    absolute_path(fields.get("path"), "path")?;
+    let path = assessment_text(fields.get("path"), "path")?;
+    if !Path::new(path).is_absolute() {
+        return Err(invalid("Expected absolute path"));
+    }
+    let disposition = assessment_text(fields.get("disposition"), "disposition")?;
     let scope = fields
         .get("scope")
         .and_then(Value::as_str)
@@ -1490,11 +1497,20 @@ fn validate_assessment(value: &Value) -> Result<(), AppError> {
         .get("reason")
         .and_then(Value::as_str)
         .ok_or_else(|| invalid("Invalid assessment reason"))?;
-    match fields.get("disposition").and_then(Value::as_str) {
-        Some("reviewed") => Ok(()),
-        Some("excluded") if !scope.trim().is_empty() && !reason.trim().is_empty() => Ok(()),
+    match disposition {
+        "reviewed" => Ok(path),
+        "excluded" if !scope.trim().is_empty() && !reason.trim().is_empty() => Ok(path),
+        "excluded" => Err(invalid("Excluded assessment requires scope and reason")),
         _ => Err(invalid("Invalid assessment disposition")),
     }
+}
+
+/// Names required assessment text when a field is missing or blank.
+fn assessment_text<'a>(value: Option<&'a Value>, name: &str) -> Result<&'a str, AppError> {
+    value
+        .and_then(Value::as_str)
+        .filter(|text| !text.trim().is_empty())
+        .ok_or_else(|| invalid(&format!("Expected non-empty string '{name}'")))
 }
 
 /// Confirms every original group remains represented without changed file metadata.

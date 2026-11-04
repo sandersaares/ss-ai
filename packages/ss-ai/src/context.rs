@@ -14,8 +14,8 @@ use ohno::AppError;
 use serde_json::{Value, json};
 use ss_ai_review::{capture_target, collect_capture};
 use ss_ai_review_context::{
-    increment_diagnostic, normalize_options, prepare, prepare_capture, prepare_failure, query,
-    read_capture, read_diagnostics, read_saved, write_comment_authorship,
+    SavedRequestAction, increment_diagnostic, normalize_options, prepare, prepare_capture,
+    prepare_failure, query, read_capture, read_diagnostics, read_saved, write_comment_authorship,
 };
 use ss_ai_runtime::{Clock, caused_by, fail};
 
@@ -335,7 +335,20 @@ where
             request_path,
             next,
             restart,
-        } => read_saved(&request_path, next, restart, clock),
+        } => {
+            let action = match (next, restart) {
+                (true, true) => {
+                    return Err(fail(
+                        "invalidInput",
+                        "Next and Restart are mutually exclusive",
+                    ));
+                }
+                (true, false) => SavedRequestAction::Next,
+                (false, true) => SavedRequestAction::Restart,
+                (false, false) => SavedRequestAction::Replay,
+            };
+            read_saved(&request_path, action, clock)
+        }
         ContextCommand::Prepare {
             path,
             request_path,

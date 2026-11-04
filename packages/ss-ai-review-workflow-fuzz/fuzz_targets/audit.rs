@@ -11,8 +11,9 @@ use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use libfuzzer_sys::fuzz_target;
-use serde_json::{Value, json};
+use serde_json::{Value, from_value, json, to_vec};
 use ss_ai_review_workflow::audit::{add_decisions, last_decision, read_decisions};
+use ss_ai_review_workflow::workflow_plan::DecisionValue;
 use ss_ai_runtime::SystemClock;
 
 // Bound filesystem work per input while allowing repeated decisions and replays.
@@ -58,7 +59,7 @@ impl Drop for Files {
 fn apply(files: &Files, entries: Vec<Value>, policy: bool, accepted: bool, model: &mut Vec<Value>) {
     fs::write(
         &files.plan,
-        serde_json::to_vec(&json!({"schemaVersion": 1, "decisions": entries})).unwrap(),
+        to_vec(&json!({"schemaVersion": 1, "decisions": entries})).unwrap(),
     )
     .unwrap();
     let clock = SystemClock::default();
@@ -85,7 +86,7 @@ fn apply(files: &Files, entries: Vec<Value>, policy: bool, accepted: bool, model
                 .iter()
                 .rev()
                 .find(|record| record["findingId"] == id)
-                .map(|record| record["decision"].as_str().unwrap());
+                .map(|record| from_value::<DecisionValue>(record["decision"].clone()).unwrap());
             assert_eq!(last_decision(&actual, id).unwrap(), last);
         }
     }

@@ -170,6 +170,33 @@ impl Clock for DiagnosticClock<'_> {
     ignore = "the handshake requires both participants to progress"
 )]
 fn concurrent_native_diagnostic_updates_are_not_lost() {
+    // Other tests launch processes; isolate the lock holder from their fork/exec windows.
+    let output = Command::new(std::env::current_exe().unwrap())
+        .args([
+            "--exact",
+            "diagnostic_update_child",
+            "--ignored",
+            "--nocapture",
+        ])
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(String::from_utf8_lossy(&output.stdout).contains("1 passed"));
+}
+
+#[test]
+#[ignore = "launched by the isolated diagnostic overlap test"]
+#[cfg_attr(miri, ignore = "requires a native process and real file locks")]
+#[cfg_attr(
+    mutants,
+    ignore = "the handshake requires both participants to progress"
+)]
+fn diagnostic_update_child() {
     let fixture = Fixture::new();
     page(fixture.native(&[
         "diagnostics",
@@ -392,6 +419,31 @@ fn saved_requests_resume_and_restart_explicitly() {
     let sidecar = page(fixture.native(&["diagnostics", "--path", diagnostics]));
     assert_eq!(sidecar["counts"]["setupCalls"], 1);
     assert_eq!(sidecar["counts"]["cursorRestarts"], 1);
+}
+
+#[test]
+#[cfg_attr(miri, ignore = "requires native subprocesses")]
+fn conflicting_saved_actions_do_not_start_a_transaction() {
+    let fixture = Fixture::new();
+    let request = Fixture::path(&fixture.request);
+    let output = fixture.native(&[
+        "read-saved",
+        "--request-path",
+        request,
+        "--next",
+        "--restart",
+    ]);
+    assert!(!output.status.success());
+    assert!(output.stdout.is_empty());
+    let stderr = String::from_utf8(output.stderr).unwrap();
+    assert!(stderr.contains("invalidInput"), "{stderr}");
+    assert!(
+        stderr.contains("Next and Restart are mutually exclusive"),
+        "{stderr}"
+    );
+    assert!(!fixture.request.exists());
+    assert!(!fixture.root.join("request.json.lock").exists());
+    assert!(!fixture.diagnostics.exists());
 }
 
 #[test]

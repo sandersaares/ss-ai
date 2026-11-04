@@ -612,6 +612,15 @@ fn tracker_item(finding: &Value, context: Option<&Value>) -> Result<Value, Strin
     tracker_item_with_urls(finding, context, None)
 }
 
+/// Validates and renders a borrowed finding for tracker planning.
+pub(crate) fn render_tracker_item(
+    finding: &Value,
+    context: Option<&Value>,
+) -> Result<Value, String> {
+    validate_finding(finding)?;
+    tracker_item_with_urls(finding, context, None)
+}
+
 /// Uses resolved links when the caller already has provenance.
 fn tracker_item_with_urls(
     finding: &Value,
@@ -792,7 +801,12 @@ fn destination(request: &Value) -> Result<&str, String> {
 
 /// Checks the captured fields that can affect tracker provenance.
 fn context(request: &Value) -> Result<Option<&Value>, String> {
-    match request.get("context") {
+    validate_tracker_context(request.get("context"))
+}
+
+/// Checks a borrowed capture before rendering tracker items from it.
+pub(crate) fn validate_tracker_context(context: Option<&Value>) -> Result<Option<&Value>, String> {
+    match context {
         None | Some(Value::Null) => Ok(None),
         Some(context) => {
             object(context, "context")?;

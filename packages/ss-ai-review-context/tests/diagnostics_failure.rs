@@ -11,7 +11,7 @@ use std::time::Duration;
 use jiff::Timestamp;
 use ohno::AppError;
 use serde_json::Value;
-use ss_ai_review_context::{increment_diagnostic, read_diagnostics};
+use ss_ai_review_context::{MalformedDiagnostics, increment_diagnostic, read_diagnostics};
 use ss_ai_runtime::{Clock, FileTransaction, LockMode, ResourceLock, classification};
 
 /// Exercises bounded retries without consulting or waiting for the real clock.
@@ -66,6 +66,7 @@ fn exhausted_contention_preserves_record_and_retained_owner() {
     let owner = FileTransaction::open(&path, &clock).unwrap();
     let error = increment_diagnostic(&path, "setupCalls", NonZeroU32::MIN, &clock).unwrap_err();
     assert_eq!(classification(&error), "contention");
+    assert!(error.find_source::<MalformedDiagnostics>().is_none());
     assert!(clock.0.get() > 0);
     assert_eq!(fs::read(&path).unwrap(), before);
     let lock_path = workspace.0.join("input-diagnostics.json.lock");

@@ -15,8 +15,8 @@ use jiff::Timestamp;
 use ohno::AppError;
 use serde_json::{Value, json};
 use ss_ai_review_context::{
-    document_hash, prepare, query, read_diagnostics, read_saved, snapshot_id,
-    write_comment_authorship,
+    CaptureChanged, ModifiedSelectors, SavedRequestAction, document_hash, prepare, query,
+    read_diagnostics, read_saved, snapshot_id, write_comment_authorship,
 };
 use ss_ai_runtime::Clock;
 
@@ -109,7 +109,7 @@ impl Files {
             &clock,
         )
         .unwrap();
-        read_saved(&self.request, false, false, &clock).unwrap();
+        read_saved(&self.request, SavedRequestAction::Replay, &clock).unwrap();
         self.record()
     }
 
@@ -126,8 +126,8 @@ impl Files {
     /// Both replay and continuation must refuse edited evidence without rewriting it.
     fn rejects_both(&self, diagnostic: &str) {
         let before = fs::read(&self.request).unwrap();
-        for next in [false, true] {
-            let error = read_saved(&self.request, next, false, &NoWait).unwrap_err();
+        for action in [SavedRequestAction::Replay, SavedRequestAction::Next] {
+            let error = read_saved(&self.request, action, &NoWait).unwrap_err();
             assert!(error.to_string().contains(diagnostic), "{error}");
             assert_eq!(fs::read(&self.request).unwrap(), before);
         }
@@ -217,7 +217,7 @@ fn saved_page_and_starting_cursor_must_be_present_together() {
     files.rejects_both("queryRequest");
 
     files.write_record(&initial);
-    read_saved(&files.request, false, false, &clock).unwrap();
+    read_saved(&files.request, SavedRequestAction::Replay, &clock).unwrap();
     let original = files.record();
     assert_eq!(original["lastPageCursor"], "");
     let mut null_cursor = original.clone();
@@ -247,26 +247,26 @@ fn replay_and_next_preserve_the_saved_comment_selection() {
     )
     .unwrap();
     assert!(
-        read_saved(&files.request, true, false, &clock)
+        read_saved(&files.request, SavedRequestAction::Next, &clock)
             .unwrap_err()
             .to_string()
             .contains("first page")
     );
-    let first = read_saved(&files.request, false, false, &clock).unwrap();
+    let first = read_saved(&files.request, SavedRequestAction::Replay, &clock).unwrap();
     assert_eq!(
-        read_saved(&files.request, false, false, &clock).unwrap(),
+        read_saved(&files.request, SavedRequestAction::Replay, &clock).unwrap(),
         first
     );
-    let second = read_saved(&files.request, true, false, &clock).unwrap();
+    let second = read_saved(&files.request, SavedRequestAction::Next, &clock).unwrap();
     assert_eq!(
-        read_saved(&files.request, false, false, &clock).unwrap(),
+        read_saved(&files.request, SavedRequestAction::Replay, &clock).unwrap(),
         second
     );
     let second: Value = serde_json::from_str(&second).unwrap();
     assert_eq!(second["items"][0]["commentId"], "Reply");
     assert_eq!(second["complete"], true);
     assert!(
-        read_saved(&files.request, true, false, &clock)
+        read_saved(&files.request, SavedRequestAction::Next, &clock)
             .unwrap_err()
             .to_string()
             .contains("complete")
@@ -281,9 +281,9 @@ fn edited_selectors_reject_both_continuation_and_restart() {
     request["options"]["threadId"] = json!("t");
     files.write_record(&request);
     let before = fs::read(&files.request).unwrap();
-    for (next, restart) in [(true, false), (false, true)] {
-        let error = read_saved(&files.request, next, restart, &NoWait).unwrap_err();
-        assert!(error.to_string().contains("modified"));
+    for action in [SavedRequestAction::Next, SavedRequestAction::Restart] {
+        let error = read_saved(&files.request, action, &NoWait).unwrap_err();
+        assert!(error.find_source::<ModifiedSelectors>().is_some());
         assert_eq!(fs::read(&files.request).unwrap(), before);
     }
 }
@@ -296,8 +296,10 @@ fn changed_capture_rejects_replay_and_next_until_explicit_restart() {
     fs::write(&files.capture, serde_json::to_vec(&files.document).unwrap()).unwrap();
     files.rejects_both("capture changed");
     let clock = NoWait;
-    let restarted: Value =
-        serde_json::from_str(&read_saved(&files.request, false, true, &clock).unwrap()).unwrap();
+    let restarted: Value = serde_json::from_str(
+        &read_saved(&files.request, SavedRequestAction::Restart, &clock).unwrap(),
+    )
+    .unwrap();
     assert_eq!(restarted["items"][0]["content"], "changed root");
     assert_eq!(
         read_diagnostics(&files.diagnostics, &clock).unwrap()["counts"]["cursorRestarts"],
@@ -326,17 +328,19 @@ fn changed_baseline_rejects_replay_and_restart_rebinds_changes() {
         &clock,
     )
     .unwrap();
-    read_saved(&files.request, false, false, &clock).unwrap();
+    read_saved(&files.request, SavedRequestAction::Replay, &clock).unwrap();
     let mut changed = files.document.clone();
     changed["threads"][0]["comments"][0]["content"] = json!("older root");
     changed["threads"][0]["comments"][0]["lastEditedUtc"] = json!("2026-09-01T12:00:00Z");
     fs::write(&baseline, serde_json::to_vec(&changed).unwrap()).unwrap();
     let before = fs::read(&files.request).unwrap();
-    let error = read_saved(&files.request, false, false, &clock).unwrap_err();
-    assert!(error.to_string().contains("capture changed"));
+    let error = read_saved(&files.request, SavedRequestAction::Replay, &clock).unwrap_err();
+    assert!(error.find_source::<CaptureChanged>().is_some());
     assert_eq!(fs::read(&files.request).unwrap(), before);
-    let restarted: Value =
-        serde_json::from_str(&read_saved(&files.request, false, true, &clock).unwrap()).unwrap();
+    let restarted: Value = serde_json::from_str(
+        &read_saved(&files.request, SavedRequestAction::Restart, &clock).unwrap(),
+    )
+    .unwrap();
     assert_eq!(restarted["items"][0]["change"], "commentsEdited");
 }
 
@@ -357,8 +361,10 @@ fn changed_semantic_authorship_requires_restart_without_changing_capture() {
     .unwrap();
     assert_eq!(fs::read(&files.capture).unwrap(), before);
     files.rejects_both("capture changed");
-    let restarted: Value =
-        serde_json::from_str(&read_saved(&files.request, false, true, &clock).unwrap()).unwrap();
+    let restarted: Value = serde_json::from_str(
+        &read_saved(&files.request, SavedRequestAction::Restart, &clock).unwrap(),
+    )
+    .unwrap();
     assert_ne!(restarted["snapshotId"], snapshot);
     assert_eq!(restarted["items"][0]["commentId"], "Reply");
 }

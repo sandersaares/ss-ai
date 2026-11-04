@@ -10,6 +10,7 @@ use ohno::AppError;
 use serde_json::{Map, Value, json};
 use ss_ai_runtime::{Clock, FileTransaction, caused_by, fail, read_bytes};
 
+use crate::review_work::validate_assessment;
 use crate::workflow_plan::{PlanItem, PlanKind, parse_json};
 
 /// Describes the artifact created or resumed under its lock.
@@ -55,12 +56,198 @@ pub struct ConsolidationResult {
 /// Keeps authored content distinct from unchecked JSON and stored provenance.
 struct ValidatedContent(Value);
 
+/// Owns persisted JSON after validation and limits changes to finding operations.
+struct ValidatedArtifact(Value);
+
+impl ValidatedArtifact {
+    /// Establishes the artifact invariant without changing its serialized form.
+    fn new(value: Value) -> Result<Self, AppError> {
+        validate_artifact(&value)?;
+        Ok(Self(value))
+    }
+
+    /// Exposes the original wire value at consumer boundaries.
+    fn into_value(self) -> Value {
+        self.0
+    }
+
+    /// Checks reviewer identity without accepting a consolidated artifact.
+    fn matches_reviewer(&self, reviewer: &str, focus_area: &str) -> bool {
+        self.0.get("kind") == Some(&json!("reviewer"))
+            && self.0.get("reviewerId") == Some(&json!(reviewer))
+            && self.0.get("focusArea") == Some(&json!(focus_area))
+    }
+
+    /// Distinguishes reviewer artifacts for reviewer-only operations.
+    fn is_reviewer(&self) -> bool {
+        self.0.get("kind") == Some(&json!("reviewer"))
+    }
+
+    /// Reads validated active records without exposing mutable artifact data.
+    fn findings(&self) -> Result<&Vec<Value>, AppError> {
+        array(self.0.get("findings"), "findings")
+    }
+
+    /// Keeps discarded identifiers reserved when assigning the next ordinal.
+    fn next_id(&self) -> Result<String, AppError> {
+        let prefix = match text(self.0.get("kind"), "kind")? {
+            "reviewer" => format!("{}-", text(self.0.get("reviewerId"), "reviewerId")?),
+            "consolidated" => "F".to_owned(),
+            _ => return Err(invalid("Invalid artifact kind")),
+        };
+        let active = self.findings()?.iter();
+        let removed = self
+            .0
+            .get("removed")
+            .and_then(Value::as_array)
+            .into_iter()
+            .flatten()
+            .filter_map(|entry| entry.get("finding"));
+        let highest = active
+            .chain(removed)
+            .filter_map(|finding| finding.get("id").and_then(Value::as_str))
+            .filter_map(|id| id.strip_prefix(&prefix))
+            .filter_map(|suffix| suffix.parse::<i32>().ok())
+            .max()
+            .unwrap_or(0);
+        let next = highest
+            .checked_add(1)
+            .ok_or_else(|| invalid("Finding identifier space exhausted"))?;
+        Ok(format!("{prefix}{next}"))
+    }
+
+    /// Applies a reviewer status after the caller has checked its journal.
+    fn set_status(&mut self, status: &str) -> Result<(), AppError> {
+        if !self.is_reviewer() || !matches!(status, "open" | "complete") {
+            return Err(invalid("Invalid reviewer status"));
+        }
+        self.0
+            .as_object_mut()
+            .ok_or_else(|| invalid("Invalid artifact"))?
+            .insert("status".to_owned(), json!(status));
+        Ok(())
+    }
+
+    /// Assigns an unused identifier and appends tool-owned provenance.
+    fn append(
+        &mut self,
+        content: &ValidatedContent,
+        origin: &str,
+        source_ids: &[String],
+    ) -> Result<String, AppError> {
+        if self.0.get("status") == Some(&json!("complete")) {
+            return Err(invalid(
+                "Completed reviewer artifact cannot accept findings",
+            ));
+        }
+        let id = self.next_id()?;
+        let record = make_record(content, &id, origin, source_ids)?;
+        self.0
+            .get_mut("findings")
+            .and_then(Value::as_array_mut)
+            .ok_or_else(|| invalid("Missing findings"))?
+            .push(record);
+        Ok(id)
+    }
+
+    /// Replaces content while preserving the original identity and provenance.
+    fn update(&mut self, id: &str, content: &ValidatedContent) -> Result<(), AppError> {
+        let findings = self
+            .0
+            .get_mut("findings")
+            .and_then(Value::as_array_mut)
+            .ok_or_else(|| invalid("Missing findings"))?;
+        let finding = findings
+            .iter_mut()
+            .find(|finding| finding.get("id").and_then(Value::as_str) == Some(id))
+            .ok_or_else(|| {
+                UnknownUpdateTarget::caused_by(
+                    invalid("Finding to update does not exist").into_std_error(),
+                )
+            })?;
+        let origin = text(finding.get("origin"), "origin")?;
+        let sources = array(finding.get("sourceFindingIds"), "sourceFindingIds")?
+            .iter()
+            .map(|value| text(Some(value), "sourceFindingIds").map(str::to_owned))
+            .collect::<Result<Vec<_>, _>>()?;
+        *finding = make_record(content, id, origin, &sources)?;
+        Ok(())
+    }
+
+    /// Moves a record to history so its identifier remains reserved.
+    fn remove(&mut self, id: &str, reason: &str, removed_utc: &str) -> Result<(), AppError> {
+        text(Some(&json!(reason)), "reason")?;
+        text(Some(&json!(removed_utc)), "removedUtc")?;
+        let findings = self
+            .0
+            .get_mut("findings")
+            .and_then(Value::as_array_mut)
+            .ok_or_else(|| invalid("Missing findings"))?;
+        let index = findings
+            .iter()
+            .position(|finding| finding.get("id").and_then(Value::as_str) == Some(id))
+            .ok_or_else(|| invalid("Finding to remove does not exist"))?;
+        let finding = findings.remove(index);
+        let object = self
+            .0
+            .as_object_mut()
+            .ok_or_else(|| invalid("Invalid artifact"))?;
+        let removed = object.entry("removed").or_insert_with(|| json!([]));
+        removed
+            .as_array_mut()
+            .ok_or_else(|| invalid("Invalid removal history"))?
+            .push(json!({"finding": finding, "reason":reason, "removedUtc":removed_utc}));
+        Ok(())
+    }
+
+    /// Extracts reviewer metadata and records for indexing and consolidation.
+    fn reviewer_sources(&self) -> Result<(Value, &Vec<Value>), AppError> {
+        if !self.is_reviewer() {
+            return Err(invalid("Expected reviewer artifact"));
+        }
+        let metadata = json!({
+            "reviewerId": self.0.get("reviewerId"),
+            "focusArea": self.0.get("focusArea"),
+        });
+        Ok((metadata, self.findings()?))
+    }
+
+    /// Revalidates before publishing to preserve the external boundary.
+    fn publish(&self, transaction: &FileTransaction<'_>) -> Result<(), AppError> {
+        publish(transaction, &self.0)
+    }
+}
+
+/// Carries validated reviewer identity and record data through consolidation.
+struct ReviewerSource {
+    metadata: Value,
+    finding: Value,
+    id: String,
+}
+
+/// Identifies a merge reference absent from the source snapshot.
+#[ohno::error]
+struct UnknownMergeSource;
+
+/// Identifies a source claimed by more than one merge.
+#[ohno::error]
+struct ConflictingMergeSource;
+
+/// Identifies an update whose target is absent from the artifact.
+#[ohno::error]
+struct UnknownUpdateTarget;
+
 /// Reads a strictly validated finding artifact.
 ///
 /// # Errors
 ///
 /// Returns an error when the artifact is missing or malformed.
 pub fn read_artifact(path: &Path, clock: &dyn Clock) -> Result<Value, AppError> {
+    Ok(read_validated_artifact(path, clock)?.into_value())
+}
+
+/// Keeps the validated representation within finding operations.
+fn read_validated_artifact(path: &Path, clock: &dyn Clock) -> Result<ValidatedArtifact, AppError> {
     let bytes = read_bytes(path, clock)?
         .ok_or_else(|| fail("invalidInput", "Finding artifact is missing"))?;
     parse_artifact(&bytes, path)
@@ -295,11 +482,12 @@ pub fn validate_artifact(value: &Value) -> Result<(), AppError> {
             let finding = entry
                 .get("finding")
                 .ok_or_else(|| invalid("Missing removed finding"))?;
-            validate_stored_record(finding).map_err(|error| {
-                fail(
+            validate_stored_record(finding).map_err(|error| -> AppError {
+                caused_by(
                     "invalidInput",
                     format!("Finding in removal record at position {index} has missing or invalid fields: {error}"),
-                )
+                    error,
+                ).into()
             })?;
             let id = text(finding.get("id"), "id")?;
             if !ids.insert(id.to_owned()) {
@@ -316,16 +504,13 @@ pub fn validate_artifact(value: &Value) -> Result<(), AppError> {
 }
 
 /// Parses and validates a complete persisted artifact.
-fn parse_artifact(bytes: &[u8], path: &Path) -> Result<Value, AppError> {
-    let context = |error| {
-        fail(
-            "invalidInput",
-            format!("Finding artifact '{}': {error}", path.display()),
-        )
+fn parse_artifact(bytes: &[u8], path: &Path) -> Result<ValidatedArtifact, AppError> {
+    let context = |error: AppError| -> AppError {
+        let message = format!("Finding artifact '{}': {error}", path.display());
+        caused_by("invalidInput", message, error).into()
     };
     let value = parse_json(bytes).map_err(context)?;
-    validate_artifact(&value).map_err(context)?;
-    Ok(value)
+    ValidatedArtifact::new(value).map_err(context)
 }
 
 /// Creates a reviewer artifact under its retained sibling lock.
@@ -353,9 +538,11 @@ pub fn initialize(
             "Finding artifact already exists; use --resume to preserve it or --force for a new review",
         ));
     }
-    let value = json!({"schemaVersion":1,"kind":"reviewer","reviewerId":reviewer,"focusArea":focus_area,"status":"open","findings":[]});
-    publish(&transaction, &value)?;
-    Ok(value)
+    let value = ValidatedArtifact::new(
+        json!({"schemaVersion":1,"kind":"reviewer","reviewerId":reviewer,"focusArea":focus_area,"status":"open","findings":[]}),
+    )?;
+    value.publish(&transaction)?;
+    Ok(value.into_value())
 }
 
 /// Creates or resumes a reviewer after checking its file-group journal.
@@ -414,26 +601,22 @@ pub fn initialize_with_queue_result(
         }
     } else if let Some(bytes) = &existing {
         let artifact = parse_artifact(bytes, path)?;
-        if !array(artifact.get("findings"), "findings")?.is_empty() {
+        if !artifact.findings()?.is_empty() {
             return Err(invalid("Journal is missing despite recorded findings"));
         }
     }
     let value = if resume {
         if let Some(bytes) = existing {
             let mut artifact = parse_artifact(&bytes, path)?;
-            if artifact.get("kind") != Some(&json!("reviewer"))
-                || artifact.get("reviewerId") != Some(&json!(reviewer))
-                || artifact.get("focusArea") != Some(&json!(focus_area))
-            {
+            if !artifact.matches_reviewer(reviewer, focus_area) {
                 return Err(invalid("Reviewer identity does not match artifact"));
             }
-            artifact
-                .as_object_mut()
-                .ok_or_else(|| invalid("Invalid artifact"))?
-                .insert("status".to_owned(), json!("open"));
+            artifact.set_status("open")?;
             artifact
         } else {
-            json!({"schemaVersion":1,"kind":"reviewer","reviewerId":reviewer,"focusArea":focus_area,"status":"open","findings":[]})
+            ValidatedArtifact::new(
+                json!({"schemaVersion":1,"kind":"reviewer","reviewerId":reviewer,"focusArea":focus_area,"status":"open","findings":[]}),
+            )?
         }
     } else {
         if existing.is_some() && !force {
@@ -441,11 +624,13 @@ pub fn initialize_with_queue_result(
                 "Finding artifact already exists; use --resume to preserve it or --force for a new review",
             ));
         }
-        json!({"schemaVersion":1,"kind":"reviewer","reviewerId":reviewer,"focusArea":focus_area,"status":"open","findings":[]})
+        ValidatedArtifact::new(
+            json!({"schemaVersion":1,"kind":"reviewer","reviewerId":reviewer,"focusArea":focus_area,"status":"open","findings":[]}),
+        )?
     };
-    publish(&artifact_transaction, &value)?;
+    value.publish(&artifact_transaction)?;
     Ok(InitializationResult {
-        artifact: value,
+        artifact: value.into_value(),
         resumed_existing,
     })
 }
@@ -492,19 +677,8 @@ pub fn add_with_context(
         .read_bytes()?
         .ok_or_else(|| invalid("Finding artifact is missing"))?;
     let mut artifact = parse_artifact(&bytes, path)?;
-    if artifact.get("status") == Some(&json!("complete")) {
-        return Err(invalid(
-            "Completed reviewer artifact cannot accept findings",
-        ));
-    }
-    let id = next_id(&artifact)?;
-    let record = make_record(&content, &id, origin, source_ids)?;
-    artifact
-        .get_mut("findings")
-        .and_then(Value::as_array_mut)
-        .ok_or_else(|| invalid("Missing findings"))?
-        .push(record);
-    publish(&transaction, &artifact)?;
+    let id = artifact.append(&content, origin, source_ids)?;
+    artifact.publish(&transaction)?;
     Ok(id)
 }
 
@@ -561,7 +735,9 @@ pub fn build_index_result(
 ) -> Result<IndexResult, AppError> {
     let (sources, artifact_count) = reviewer_sources(directory, clock)?;
     let mut records = Vec::new();
-    for (metadata, finding) in &sources {
+    for source in &sources {
+        let metadata = &source.metadata;
+        let finding = &source.finding;
         let anchor = finding
             .get("anchor")
             .ok_or_else(|| invalid("Missing anchor"))?;
@@ -743,7 +919,7 @@ fn hidden_entry(entry: &fs::DirEntry) -> Result<bool, AppError> {
 fn reviewer_sources(
     directory: &Path,
     clock: &dyn Clock,
-) -> Result<(Vec<(Value, Value)>, usize), AppError> {
+) -> Result<(Vec<ReviewerSource>, usize), AppError> {
     let entries = fs::read_dir(directory)
         .map_err(|error| caused_by("io", "Cannot read reviewer directory", error))?;
     let mut paths = Vec::new();
@@ -770,17 +946,11 @@ fn reviewer_sources(
     let mut result = Vec::new();
     let mut ids = HashSet::new();
     for path in paths {
-        let artifact = read_artifact(&path, clock)?;
-        if artifact.get("kind") != Some(&json!("reviewer")) {
-            return Err(invalid("Expected reviewer artifact"));
-        }
+        let artifact = read_validated_artifact(&path, clock)?;
         // The index needs only these fields; copying the full artifact per finding
         // would also repeatedly copy every finding and the removal history.
-        let metadata = json!({
-            "reviewerId": artifact.get("reviewerId"),
-            "focusArea": artifact.get("focusArea"),
-        });
-        for finding in array(artifact.get("findings"), "findings")? {
+        let (metadata, findings) = artifact.reviewer_sources()?;
+        for finding in findings {
             let id = text(finding.get("id"), "id")?;
             if !ids.insert(id.to_owned()) {
                 return Err(fail(
@@ -788,7 +958,11 @@ fn reviewer_sources(
                     format!("Duplicate finding identifier '{id}' across artifacts"),
                 ));
             }
-            result.push((metadata.clone(), finding.clone()));
+            result.push(ReviewerSource {
+                metadata: metadata.clone(),
+                finding: finding.clone(),
+                id: id.to_owned(),
+            });
         }
     }
     Ok((result, artifact_count))
@@ -825,8 +999,8 @@ pub fn consolidate_result(
     let transaction = FileTransaction::open(output, clock)?;
     let (sources, _) = reviewer_sources(directory, clock)?;
     let mut positions = HashMap::new();
-    for (index, (_, finding)) in sources.iter().enumerate() {
-        positions.insert(text(finding.get("id"), "id")?.to_owned(), index);
+    for (index, source) in sources.iter().enumerate() {
+        positions.insert(source.id.clone(), index);
     }
     let mut groups = HashMap::new();
     let mut claimed = HashSet::new();
@@ -839,24 +1013,13 @@ pub fn consolidate_result(
             let mut first = usize::MAX;
             let mut replacements = Vec::new();
             for id in &group.source_finding_ids {
-                let position = *positions.get(id).ok_or_else(|| {
-                    fail(
-                        "invalidInput",
-                        format!("Merge references unknown finding '{id}'"),
-                    )
-                })?;
-                if !claimed.insert(id.clone()) {
-                    return Err(fail(
-                        "invalidInput",
-                        format!("Finding '{id}' appears in multiple merges"),
-                    ));
-                }
+                let position = resolve_merge_source(id, &positions, &mut claimed)?;
                 first = first.min(position);
                 replacements.push(
                     &sources
                         .get(position)
                         .ok_or_else(|| invalid("Missing merge source"))?
-                        .1,
+                        .finding,
                 );
             }
             let path = Path::new(&group.finding_path);
@@ -881,9 +1044,12 @@ pub fn consolidate_result(
             groups.insert(first, (content, origin, group.source_finding_ids.clone()));
         }
     }
-    let mut artifact = json!({"schemaVersion":1,"kind":"consolidated","findings":[],"removed":[]});
-    for (position, (_, finding)) in sources.iter().enumerate() {
-        let source_id = text(finding.get("id"), "id")?;
+    let mut artifact = ValidatedArtifact::new(
+        json!({"schemaVersion":1,"kind":"consolidated","findings":[],"removed":[]}),
+    )?;
+    for (position, source) in sources.iter().enumerate() {
+        let finding = &source.finding;
+        let source_id = &source.id;
         let record = if let Some((content, origin, ids)) = groups.remove(&position) {
             Some((content, origin.to_owned(), ids))
         } else if !claimed.contains(source_id) {
@@ -904,17 +1070,10 @@ pub fn consolidate_result(
         };
         if let Some((mut content, origin, ids)) = record {
             normalize_content(&mut content.0)?;
-            let id = next_id(&artifact)?;
-            let record = make_record(&content, &id, &origin, &ids)?;
-            artifact
-                .get_mut("findings")
-                .ok_or_else(|| invalid("Missing findings"))?
-                .as_array_mut()
-                .ok_or_else(|| invalid("Missing findings"))?
-                .push(record);
+            artifact.append(&content, &origin, &ids)?;
         }
     }
-    let findings = array(artifact.get("findings"), "findings")?;
+    let findings = artifact.findings()?;
     let finding_count = findings.len();
     let merged_count = findings
         .iter()
@@ -925,9 +1084,9 @@ pub fn consolidate_result(
                 .is_some_and(|ids| ids.len() > 1)
         })
         .count();
-    publish(&transaction, &artifact)?;
+    artifact.publish(&transaction)?;
     Ok(ConsolidationResult {
-        artifact,
+        artifact: artifact.into_value(),
         finding_count,
         merged_count,
         carried_over_count: finding_count
@@ -935,6 +1094,34 @@ pub fn consolidate_result(
             .ok_or_else(|| invalid("Invalid consolidation count"))?,
         output_path: output.to_path_buf(),
     })
+}
+
+/// Resolves merge references against a single source snapshot.
+fn resolve_merge_source(
+    id: &str,
+    positions: &HashMap<String, usize>,
+    claimed: &mut HashSet<String>,
+) -> Result<usize, AppError> {
+    let position = *positions.get(id).ok_or_else(|| {
+        UnknownMergeSource::caused_by(
+            fail(
+                "invalidInput",
+                format!("Merge references unknown finding '{id}'"),
+            )
+            .into_std_error(),
+        )
+    })?;
+    if !claimed.insert(id.to_owned()) {
+        return Err(ConflictingMergeSource::caused_by(
+            fail(
+                "invalidInput",
+                format!("Finding '{id}' appears in multiple merges"),
+            )
+            .into_std_error(),
+        )
+        .into());
+    }
+    Ok(position)
 }
 
 /// Prevents a merge from discarding positions or changing a reply destination.
@@ -1060,29 +1247,10 @@ pub fn update(
         .read_bytes()?
         .ok_or_else(|| invalid("Finding artifact is missing"))?;
     let mut artifact = parse_artifact(&bytes, path)?;
-    let findings = artifact
-        .get_mut("findings")
-        .and_then(Value::as_array_mut)
-        .ok_or_else(|| invalid("Missing findings"))?;
     for ((id, _), content) in updates.iter().zip(contents) {
-        let index = findings
-            .iter()
-            .position(|finding| finding.get("id").and_then(Value::as_str) == Some(id))
-            .ok_or_else(|| invalid("Finding to update does not exist"))?;
-        let old = findings
-            .get(index)
-            .ok_or_else(|| invalid("Finding to update does not exist"))?;
-        let origin = text(old.get("origin"), "origin")?;
-        let sources = array(old.get("sourceFindingIds"), "sourceFindingIds")?
-            .iter()
-            .map(|value| text(Some(value), "sourceFindingIds").map(str::to_owned))
-            .collect::<Result<Vec<_>, _>>()?;
-        let replacement = make_record(&content, id, origin, &sources)?;
-        *findings
-            .get_mut(index)
-            .ok_or_else(|| invalid("Finding to update does not exist"))? = replacement;
+        artifact.update(id, &content)?;
     }
-    publish(&transaction, &artifact)
+    artifact.publish(&transaction)
 }
 
 /// Moves findings into immutable removal history in one transaction.
@@ -1110,25 +1278,9 @@ pub fn remove(
         .ok_or_else(|| invalid("Finding artifact is missing"))?;
     let mut artifact = parse_artifact(&bytes, path)?;
     for (id, reason) in removals {
-        let findings = artifact
-            .get_mut("findings")
-            .and_then(Value::as_array_mut)
-            .ok_or_else(|| invalid("Missing findings"))?;
-        let index = findings
-            .iter()
-            .position(|finding| finding.get("id").and_then(Value::as_str) == Some(id))
-            .ok_or_else(|| invalid("Finding to remove does not exist"))?;
-        let finding = findings.remove(index);
-        let object = artifact
-            .as_object_mut()
-            .ok_or_else(|| invalid("Invalid artifact"))?;
-        let removed = object.entry("removed").or_insert_with(|| json!([]));
-        removed
-            .as_array_mut()
-            .ok_or_else(|| invalid("Invalid removal history"))?
-            .push(json!({"finding": finding, "reason":reason, "removedUtc":removed_utc}));
+        artifact.remove(id, reason, &removed_utc)?;
     }
-    publish(&transaction, &artifact)
+    artifact.publish(&transaction)
 }
 
 /// Completes a reviewer only after its file-group journal is complete.
@@ -1148,7 +1300,7 @@ pub fn complete(path: &Path, queue_path: &Path, clock: &dyn Clock) -> Result<Val
         .read_bytes()?
         .ok_or_else(|| invalid("Finding artifact is missing"))?;
     let mut artifact = parse_artifact(&bytes, path)?;
-    if artifact.get("kind") != Some(&json!("reviewer")) {
+    if !artifact.is_reviewer() {
         return Err(invalid("Only reviewer artifacts can be completed"));
     }
     let queue_transaction = FileTransaction::open(queue_path, clock)?;
@@ -1157,12 +1309,9 @@ pub fn complete(path: &Path, queue_path: &Path, clock: &dyn Clock) -> Result<Val
         .ok_or_else(|| invalid("File-group journal is missing"))?;
     let queue = parse_json(&bytes)?;
     validate_queue(&queue, true, clock)?;
-    artifact
-        .as_object_mut()
-        .ok_or_else(|| invalid("Invalid artifact"))?
-        .insert("status".to_owned(), json!("complete"));
-    publish(&artifact_transaction, &artifact)?;
-    Ok(artifact)
+    artifact.set_status("complete")?;
+    artifact.publish(&artifact_transaction)?;
+    Ok(artifact.into_value())
 }
 
 /// Avoids recursively acquiring a sibling lock through equivalent paths.
@@ -1262,28 +1411,9 @@ pub(crate) fn validate_queue(
     }
     let mut assessed = HashSet::new();
     for assessment in array(fields.get("assessments"), "assessments")? {
-        let assessment = object(
-            assessment,
-            &["groupId", "path", "disposition", "scope", "reason"],
-        )?;
-        schema_id(text(assessment.get("groupId"), "groupId")?)?;
-        let path = text(assessment.get("path"), "path")?;
-        if !Path::new(path).is_absolute() || !assessed.insert(path.to_owned()) {
-            return Err(invalid("Invalid or duplicate assessment path"));
-        }
-        let disposition = text(assessment.get("disposition"), "disposition")?;
-        let scope = assessment
-            .get("scope")
-            .and_then(Value::as_str)
-            .ok_or_else(|| invalid("Invalid assessment scope"))?;
-        let reason = assessment
-            .get("reason")
-            .and_then(Value::as_str)
-            .ok_or_else(|| invalid("Invalid assessment reason"))?;
-        if !matches!(disposition, "reviewed" | "excluded")
-            || (disposition == "excluded" && (scope.trim().is_empty() || reason.trim().is_empty()))
-        {
-            return Err(invalid("Invalid assessment disposition"));
+        let path = validate_assessment(assessment)?;
+        if !assessed.insert(path) {
+            return Err(invalid("Duplicate assessment path"));
         }
     }
     let mut receipt_groups = HashSet::new();
@@ -1373,11 +1503,13 @@ fn read_content(path: &Path, clock: &dyn Clock) -> Result<ValidatedContent, AppE
             format!("Finding content '{}' is missing", path.display()),
         )
     })?;
-    let context = |error| {
-        fail(
+    let context = |error: AppError| -> AppError {
+        caused_by(
             "invalidInput",
             format!("Finding content '{}': {error}", path.display()),
+            error,
         )
+        .into()
     };
     let value = parse_json(&bytes).map_err(context)?;
     let mut value = validated_content(value).map_err(context)?;
@@ -1415,33 +1547,6 @@ fn make_record(
     Ok(record)
 }
 
-/// Keeps discarded identifiers reserved when assigning the next ordinal.
-fn next_id(artifact: &Value) -> Result<String, AppError> {
-    let prefix = match text(artifact.get("kind"), "kind")? {
-        "reviewer" => format!("{}-", text(artifact.get("reviewerId"), "reviewerId")?),
-        "consolidated" => "F".to_owned(),
-        _ => return Err(invalid("Invalid artifact kind")),
-    };
-    let active = array(artifact.get("findings"), "findings")?.iter();
-    let removed = artifact
-        .get("removed")
-        .and_then(Value::as_array)
-        .into_iter()
-        .flatten()
-        .filter_map(|entry| entry.get("finding"));
-    let highest = active
-        .chain(removed)
-        .filter_map(|finding| finding.get("id").and_then(Value::as_str))
-        .filter_map(|id| id.strip_prefix(&prefix))
-        .filter_map(|suffix| suffix.parse::<i32>().ok())
-        .max()
-        .unwrap_or(0);
-    let next = highest
-        .checked_add(1)
-        .ok_or_else(|| invalid("Finding identifier space exhausted"))?;
-    Ok(format!("{prefix}{next}"))
-}
-
 /// Adds a finding identifier to validation errors from persisted evidence.
 fn validate_stored_record(value: &Value) -> Result<(), AppError> {
     validate_record(value).map_err(|error| {
@@ -1453,7 +1558,7 @@ fn validate_stored_record(value: &Value) -> Result<(), AppError> {
                 || "Finding with missing or invalid identifier".to_owned(),
                 |id| format!("Finding '{id}'"),
             );
-        fail("invalidInput", format!("{subject}: {error}"))
+        caused_by("invalidInput", format!("{subject}: {error}"), error).into()
     })
 }
 
@@ -1712,6 +1817,184 @@ fn text<'a>(value: Option<&'a Value>, name: &str) -> Result<&'a str, AppError> {
 /// Classifies invalid input consistently with the runtime.
 fn invalid(message: &str) -> AppError {
     fail("invalidInput", message)
+}
+
+#[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
+mod artifact_tests {
+    #![allow(
+        clippy::indexing_slicing,
+        reason = "The tests use fixed JSON fixture shapes"
+    )]
+
+    use std::collections::{HashMap, HashSet};
+    use std::path::Path;
+
+    use serde_json::{Error, Value, json, to_string, to_vec};
+    use ss_ai_runtime::{Failure, caused_by, classification};
+
+    use super::{
+        ConflictingMergeSource, UnknownMergeSource, UnknownUpdateTarget, ValidatedArtifact,
+        make_record, parse_artifact, parse_json, resolve_merge_source, validate_artifact,
+        validated_content,
+    };
+
+    /// Supplies authored content without adding defaults to the persisted input.
+    fn content(title: &str) -> Value {
+        json!({
+            "title": title, "description": "Details", "reasoning": "Why",
+            "consequence": "Impact", "recommendedAction": "Fix",
+            "anchor": {"kind":"line", "path":"src/./file.rs", "startLine":1}
+        })
+    }
+
+    #[test]
+    fn operations_preserve_provenance_history_and_wire_order() {
+        let value = json!({
+            "schemaVersion": 1, "kind": "reviewer", "reviewerId": "reviewer name",
+            "focusArea": "focus", "status": "open", "findings": []
+        });
+        let serialized = to_string(&value).unwrap();
+        let mut artifact = parse_artifact(serialized.as_bytes(), Path::new("source.json")).unwrap();
+        assert_eq!(to_string(&artifact.0).unwrap(), serialized);
+
+        let original = validated_content(content("Original")).unwrap();
+        let id = artifact
+            .append(&original, "synthesis", &["source".into()])
+            .unwrap();
+        assert_eq!(id, "reviewer name-1");
+        let replacement = validated_content(content("Replacement")).unwrap();
+        artifact.update(&id, &replacement).unwrap();
+        let (_, records) = artifact.reviewer_sources().unwrap();
+        assert_eq!(records[0]["id"], id);
+        assert_eq!(records[0]["origin"], "synthesis");
+        assert_eq!(records[0]["sourceFindingIds"], json!(["source"]));
+        assert_eq!(records[0]["title"], "Replacement");
+        let expected = json!({
+            "schemaVersion":1, "id":"reviewer name-1", "sourceFindingIds":["source"],
+            "origin":"synthesis", "title":"Replacement", "description":"Details",
+            "reasoning":"Why", "consequence":"Impact", "recommendedAction":"Fix",
+            "anchor":{"kind":"line", "path":"src/./file.rs", "startLine":1}
+        });
+        assert_eq!(
+            to_string(&records[0]).unwrap(),
+            to_string(&expected).unwrap()
+        );
+        artifact.remove(&id, "not applicable", "timestamp").unwrap();
+        assert_eq!(
+            artifact.append(&original, "reviewer", &[]).unwrap(),
+            "reviewer name-2"
+        );
+        artifact.set_status("complete").unwrap();
+        artifact.append(&original, "reviewer", &[]).unwrap_err();
+        artifact.set_status("open").unwrap();
+        let value = artifact.into_value();
+        assert_eq!(value["removed"][0]["finding"]["id"], id);
+        assert_eq!(value["findings"][0]["anchor"]["path"], "src/./file.rs");
+        validate_artifact(&value).unwrap();
+    }
+
+    #[test]
+    fn parsing_retains_the_original_json_error_and_classification() {
+        let cause = parse_json(b"{").unwrap_err();
+        let expected = caused_by(
+            "invalidInput",
+            format!("Finding artifact 'source.json': {cause}"),
+            cause,
+        )
+        .to_string();
+        let Err(error) = parse_artifact(b"{", Path::new("source.json")) else {
+            panic!("malformed JSON was accepted");
+        };
+        assert_eq!(classification(&error), "invalidInput");
+        assert_eq!(error.to_string(), expected);
+        assert!(error.find_source::<Error>().is_some());
+    }
+
+    #[test]
+    fn malformed_artifact_shape_keeps_its_classified_validation_cause() {
+        let value = json!({"schemaVersion":2,"kind":"consolidated","findings":[]});
+        let cause = validate_artifact(&value).unwrap_err();
+        let expected = caused_by(
+            "invalidInput",
+            format!("Finding artifact 'source.json': {cause}"),
+            cause,
+        )
+        .to_string();
+        let bytes = to_vec(&value).unwrap();
+        let Err(error) = parse_artifact(&bytes, Path::new("source.json")) else {
+            panic!("malformed artifact was accepted");
+        };
+        assert_eq!(error.to_string(), expected);
+        assert_eq!(classification(&error), "invalidInput");
+        assert!(error.find_source::<Failure>().is_some());
+    }
+
+    #[test]
+    fn merge_reference_failures_distinguish_missing_and_conflicting_sources() {
+        let positions = HashMap::from([("g1-1".to_owned(), 0)]);
+        let mut claimed = HashSet::new();
+        let error = resolve_merge_source("missing", &positions, &mut claimed).unwrap_err();
+        assert_eq!(
+            error.to_string(),
+            "invalidInput: Merge references unknown finding 'missing'"
+        );
+        assert_eq!(classification(&error), "invalidInput");
+        assert!(error.find_source::<UnknownMergeSource>().is_some());
+        assert!(error.find_source::<ConflictingMergeSource>().is_none());
+        assert!(claimed.is_empty());
+
+        assert_eq!(
+            resolve_merge_source("g1-1", &positions, &mut claimed).unwrap(),
+            0
+        );
+        let error = resolve_merge_source("g1-1", &positions, &mut claimed).unwrap_err();
+        assert_eq!(
+            error.to_string(),
+            "invalidInput: Finding 'g1-1' appears in multiple merges"
+        );
+        assert_eq!(classification(&error), "invalidInput");
+        assert!(error.find_source::<ConflictingMergeSource>().is_some());
+        assert!(error.find_source::<UnknownMergeSource>().is_none());
+    }
+
+    #[test]
+    fn missing_update_target_is_typed_without_changing_the_artifact() {
+        let value = json!({
+            "schemaVersion":1, "kind":"consolidated", "findings":[]
+        });
+        let mut artifact = ValidatedArtifact::new(value.clone()).unwrap();
+        let content = validated_content(content("Replacement")).unwrap();
+        let error = artifact.update("F1", &content).unwrap_err();
+        assert_eq!(
+            error.to_string(),
+            "invalidInput: Finding to update does not exist"
+        );
+        assert_eq!(classification(&error), "invalidInput");
+        assert!(error.find_source::<UnknownUpdateTarget>().is_some());
+        assert_eq!(artifact.into_value(), value);
+    }
+
+    #[test]
+    fn removed_identifiers_can_exhaust_the_ordinal_space() {
+        let content = validated_content(content("Original")).unwrap();
+        let mut artifact = ValidatedArtifact::new(json!({
+            "schemaVersion":1, "kind":"consolidated", "findings":[], "removed":[]
+        }))
+        .unwrap();
+        let historical = make_record(&content, "F2147483647", "reviewer", &[]).unwrap();
+        artifact.0["removed"] = json!([{
+            "finding":historical, "reason":"historical", "removedUtc":"timestamp"
+        }]);
+        let artifact = ValidatedArtifact::new(artifact.into_value()).unwrap();
+        let error = artifact.next_id().unwrap_err();
+        assert_eq!(classification(&error), "invalidInput");
+        assert!(
+            error
+                .to_string()
+                .contains("Finding identifier space exhausted")
+        );
+    }
 }
 
 #[cfg(test)]

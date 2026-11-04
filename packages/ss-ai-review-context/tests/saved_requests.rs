@@ -18,9 +18,10 @@ use jiff::Timestamp;
 use ohno::AppError;
 use serde_json::{Value, json};
 use ss_ai_review_context::{
+    CaptureChanged, MalformedDiagnostics, ModifiedSelectors, SavedRequestAction,
     increment_diagnostic, prepare, prepare_failure, read_diagnostics, read_saved,
 };
-use ss_ai_runtime::{Clock, FileTransaction, SystemClock, fail};
+use ss_ai_runtime::{Clock, FileTransaction, SystemClock, classification, fail};
 
 /// Coordinates a lock retry without waiting for real time.
 struct ContendedClock {
@@ -121,20 +122,19 @@ fn replay_advances_once_and_rejects_complete_or_unstarted_next() {
     let files = Files::new();
     files.prepare();
     let clock = SystemClock::default();
-    assert!(read_saved(&files.request, true, false, &clock).is_err());
-    let first = read_saved(&files.request, false, false, &clock).unwrap();
+    assert!(read_saved(&files.request, SavedRequestAction::Next, &clock).is_err());
+    let first = read_saved(&files.request, SavedRequestAction::Replay, &clock).unwrap();
     assert_eq!(
-        read_saved(&files.request, false, false, &clock).unwrap(),
+        read_saved(&files.request, SavedRequestAction::Replay, &clock).unwrap(),
         first
     );
-    let second = read_saved(&files.request, true, false, &clock).unwrap();
+    let second = read_saved(&files.request, SavedRequestAction::Next, &clock).unwrap();
     assert_ne!(first, second);
     assert_eq!(
-        read_saved(&files.request, false, false, &clock).unwrap(),
+        read_saved(&files.request, SavedRequestAction::Replay, &clock).unwrap(),
         second
     );
-    assert!(read_saved(&files.request, true, false, &clock).is_err());
-    assert!(read_saved(&files.request, true, true, &clock).is_err());
+    assert!(read_saved(&files.request, SavedRequestAction::Next, &clock).is_err());
 }
 
 #[test]
@@ -142,16 +142,18 @@ fn edited_cached_page_and_selectors_are_not_replayed() {
     let files = Files::new();
     files.prepare();
     let clock = SystemClock::default();
-    read_saved(&files.request, false, false, &clock).unwrap();
+    read_saved(&files.request, SavedRequestAction::Replay, &clock).unwrap();
     let original = files.request();
     let mut altered = original.clone();
     altered["lastPage"]["items"][0]["id"] = json!("forged");
     files.write_request(&altered);
-    assert!(read_saved(&files.request, false, false, &clock).is_err());
+    assert!(read_saved(&files.request, SavedRequestAction::Replay, &clock).is_err());
     altered = original;
     altered["options"]["pageSize"] = json!(2);
     files.write_request(&altered);
-    assert!(read_saved(&files.request, false, false, &clock).is_err());
+    let error = read_saved(&files.request, SavedRequestAction::Replay, &clock).unwrap_err();
+    assert!(error.find_source::<ModifiedSelectors>().is_some());
+    assert_eq!(classification(&error), "invalidInput");
 }
 
 #[test]
@@ -170,7 +172,7 @@ fn malformed_saved_options_report_workflow_schema_and_preserve_the_record() {
         }
         files.write_request(&request);
         let before = fs::read(&files.request).unwrap();
-        let error = read_saved(&files.request, false, false, &clock).unwrap_err();
+        let error = read_saved(&files.request, SavedRequestAction::Replay, &clock).unwrap_err();
         assert!(
             error
                 .to_string()
@@ -190,12 +192,12 @@ fn oversized_saved_page_reports_the_bound_and_preserves_the_record() {
     let files = Files::new();
     files.prepare();
     let clock = SystemClock::default();
-    read_saved(&files.request, false, false, &clock).unwrap();
+    read_saved(&files.request, SavedRequestAction::Replay, &clock).unwrap();
     let mut request = files.request();
     request["lastPage"]["items"][0]["oversized"] = json!("x".repeat(20_000));
     files.write_request(&request);
     let before = fs::read(&files.request).unwrap();
-    let error = read_saved(&files.request, false, false, &clock).unwrap_err();
+    let error = read_saved(&files.request, SavedRequestAction::Replay, &clock).unwrap_err();
     assert!(error.to_string().contains("bounded output limit"));
     assert_eq!(fs::read(&files.request).unwrap(), before);
 }
@@ -205,12 +207,14 @@ fn stale_capture_requires_explicit_restart_and_counts_attempts() {
     let files = Files::new();
     files.prepare();
     let clock = SystemClock::default();
-    read_saved(&files.request, false, false, &clock).unwrap();
+    read_saved(&files.request, SavedRequestAction::Replay, &clock).unwrap();
     let mut capture: Value = serde_json::from_slice(&fs::read(&files.capture).unwrap()).unwrap();
     capture["pullRequest"]["title"] = json!("Changed");
     fs::write(&files.capture, serde_json::to_vec(&capture).unwrap()).unwrap();
-    assert!(read_saved(&files.request, false, false, &clock).is_err());
-    read_saved(&files.request, false, true, &clock).unwrap();
+    let error = read_saved(&files.request, SavedRequestAction::Replay, &clock).unwrap_err();
+    assert!(error.find_source::<CaptureChanged>().is_some());
+    assert_eq!(classification(&error), "invalidInput");
+    read_saved(&files.request, SavedRequestAction::Restart, &clock).unwrap();
     let diagnostics = read_diagnostics(&files.diagnostics, &clock).unwrap();
     assert_eq!(diagnostics["counts"]["cursorRestarts"], 1);
 }
@@ -228,12 +232,12 @@ fn comparison_baseline_is_bound_and_restart_rebinds_it() {
         &clock,
     )
     .unwrap();
-    read_saved(&files.request, false, false, &clock).unwrap();
+    read_saved(&files.request, SavedRequestAction::Replay, &clock).unwrap();
     let mut baseline: Value = serde_json::from_slice(&fs::read(&files.baseline).unwrap()).unwrap();
     baseline["pullRequest"]["title"] = json!("Another title");
     fs::write(&files.baseline, serde_json::to_vec(&baseline).unwrap()).unwrap();
-    assert!(read_saved(&files.request, false, false, &clock).is_err());
-    read_saved(&files.request, false, true, &clock).unwrap();
+    assert!(read_saved(&files.request, SavedRequestAction::Replay, &clock).is_err());
+    read_saved(&files.request, SavedRequestAction::Restart, &clock).unwrap();
 }
 
 #[test]
@@ -247,7 +251,7 @@ fn workflow_records_accept_bom_marked_unicode_encodings() {
         request_utf16.extend_from_slice(&word.to_le_bytes());
     }
     fs::write(&files.request, request_utf16).unwrap();
-    read_saved(&files.request, false, false, &clock).unwrap();
+    read_saved(&files.request, SavedRequestAction::Replay, &clock).unwrap();
 
     let diagnostic = fs::read_to_string(&files.diagnostics).unwrap();
     let mut utf32 = vec![0, 0, 0xfe, 0xff];
@@ -272,7 +276,7 @@ fn duplicate_properties_are_rejected_without_changing_records() {
     for key in ["schemaVersion", "SchemaVersion"] {
         let request = original_request.replacen('{', &format!("{{\"{key}\":0,"), 1);
         fs::write(&files.request, &request).unwrap();
-        let error = read_saved(&files.request, false, false, &clock).unwrap_err();
+        let error = read_saved(&files.request, SavedRequestAction::Replay, &clock).unwrap_err();
         assert!(error.to_string().to_lowercase().contains("duplicate"));
         assert_eq!(fs::read_to_string(&files.request).unwrap(), request);
     }
@@ -286,11 +290,13 @@ fn duplicate_properties_are_rejected_without_changing_records() {
         assert_ne!(diagnostics, original_diagnostics);
         fs::write(&files.diagnostics, &diagnostics).unwrap();
         let error = read_diagnostics(&files.diagnostics, &clock).unwrap_err();
+        assert!(error.find_source::<MalformedDiagnostics>().is_some());
+        assert_eq!(classification(&error), "invalidInput");
         assert!(error.to_string().to_lowercase().contains("duplicate"));
-        assert!(
-            increment_diagnostic(&files.diagnostics, "setupCalls", NonZeroU32::MIN, &clock)
-                .is_err()
-        );
+        let error = increment_diagnostic(&files.diagnostics, "setupCalls", NonZeroU32::MIN, &clock)
+            .unwrap_err();
+        assert!(error.find_source::<MalformedDiagnostics>().is_some());
+        assert_eq!(classification(&error), "invalidInput");
         assert_eq!(fs::read_to_string(&files.diagnostics).unwrap(), diagnostics);
     }
 }
@@ -329,10 +335,15 @@ fn diagnostics_reject_malformed_records_and_account_for_failed_setup() {
     assert_eq!(diagnostic["counts"]["repeatedSetupCalls"], 1);
     assert_eq!(diagnostic["counts"]["malformedQueryFailures"], 1);
     fs::write(&files.diagnostics, br#"{"schemaVersion":1,"counts":{}}"#).unwrap();
-    assert!(
-        increment_diagnostic(&files.diagnostics, "setupCalls", NonZeroU32::MIN, &clock).is_err()
-    );
-    assert!(read_diagnostics(&files.diagnostics, &clock).is_err());
+    let before = fs::read(&files.diagnostics).unwrap();
+    let error = increment_diagnostic(&files.diagnostics, "setupCalls", NonZeroU32::MIN, &clock)
+        .unwrap_err();
+    assert!(error.find_source::<MalformedDiagnostics>().is_some());
+    assert_eq!(classification(&error), "invalidInput");
+    let error = read_diagnostics(&files.diagnostics, &clock).unwrap_err();
+    assert!(error.find_source::<MalformedDiagnostics>().is_some());
+    assert_eq!(classification(&error), "invalidInput");
+    assert_eq!(fs::read(&files.diagnostics).unwrap(), before);
 }
 
 #[test]

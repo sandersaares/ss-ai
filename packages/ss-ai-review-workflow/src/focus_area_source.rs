@@ -40,6 +40,26 @@ pub struct SourceSnapshot {
     files: BTreeMap<(String, String), Vec<String>>,
 }
 
+// Keep the classified diagnostic in the cause chain so callers retain their
+// existing recovery category while tests can identify the rejected invariant.
+macro_rules! selection_error {
+    ($name:ident, $message:literal) => {
+        #[ohno::error]
+        struct $name;
+
+        impl $name {
+            fn classified() -> AppError {
+                Self::caused_by(fail("invalidInput", $message).into_std_error()).into()
+            }
+        }
+    };
+}
+
+selection_error!(MissingSource, "Source file not found with exact spelling");
+selection_error!(InvalidSourceLine, "Invalid source line");
+selection_error!(InvalidSourceRange, "Invalid source line range");
+selection_error!(BlankSourceSpan, "Source span is blank");
+
 impl SourceSnapshot {
     /// Builds a snapshot from caller-provided lines for pure validation tests.
     #[cfg(test)]
@@ -85,19 +105,20 @@ impl SourceSnapshot {
         let lines = self
             .files
             .get(&(span.root.clone(), path))
-            .ok_or_else(|| fail("invalidInput", "Source file not found with exact spelling"))?;
+            .ok_or_else(MissingSource::classified)?;
         let start = usize::try_from(span.start_line)
             .ok()
             .and_then(|line| line.checked_sub(1))
-            .ok_or_else(|| fail("invalidInput", "Invalid source line"))?;
-        let end = usize::try_from(span.end_line)
-            .map_err(|error| caused_by("invalidInput", "Invalid source line", error))?;
+            .ok_or_else(InvalidSourceLine::classified)?;
+        let end = usize::try_from(span.end_line).map_err(|error| {
+            InvalidSourceLine::caused_by(caused_by("invalidInput", "Invalid source line", error))
+        })?;
         let selected = lines
             .get(start..end)
             .filter(|lines| !lines.is_empty())
-            .ok_or_else(|| fail("invalidInput", "Invalid source line range"))?;
+            .ok_or_else(InvalidSourceRange::classified)?;
         if selected.iter().all(|line| line.trim().is_empty()) {
-            return Err(fail("invalidInput", "Source span is blank"));
+            return Err(BlankSourceSpan::classified());
         }
         Ok(selected)
     }
@@ -284,7 +305,14 @@ fn text_lines(text: &str) -> Vec<String> {
     reason = "Boolean result checks make invalid-path cases concise"
 )]
 mod tests {
-    use super::{decode_text, source_path, text_lines};
+    use std::collections::BTreeMap;
+
+    use ss_ai_runtime::classification;
+
+    use super::{
+        BlankSourceSpan, InvalidSourceLine, InvalidSourceRange, MissingSource, SourceSnapshot,
+        Span, decode_text, source_path, text_lines,
+    };
 
     #[test]
     fn paths_reject_escape_without_changing_case() {
@@ -299,5 +327,47 @@ mod tests {
         assert_eq!(text_lines("a\r\nb\rc\n"), ["a", "b", "c"]);
         assert_eq!(decode_text(&[0xff, 0xfe, b'a', 0]).unwrap(), "a");
         assert!(decode_text(&[0xff, 0xfe, b'a']).is_err());
+    }
+
+    #[test]
+    fn span_failures_retain_the_rejected_invariant_and_category() {
+        let files = BTreeMap::from([(
+            ("instruction-set-source".to_owned(), "a.md".to_owned()),
+            vec!["content".to_owned(), "  ".to_owned()],
+        )]);
+        let snapshot = SourceSnapshot::from_files(files);
+        let mut span = Span {
+            root: "instruction-set-source".to_owned(),
+            path: "missing.md".to_owned(),
+            start_line: 1,
+            end_line: 1,
+        };
+        let error = snapshot.span(&span).unwrap_err();
+        assert!(error.find_source::<MissingSource>().is_some());
+        assert_eq!(classification(&error), "invalidInput");
+        assert_eq!(
+            error.to_string(),
+            "invalidInput: Source file not found with exact spelling"
+        );
+
+        span.path = "a.md".to_owned();
+        span.start_line = 0;
+        let error = snapshot.span(&span).unwrap_err();
+        assert!(error.find_source::<InvalidSourceLine>().is_some());
+        assert_eq!(classification(&error), "invalidInput");
+        assert_eq!(error.to_string(), "invalidInput: Invalid source line");
+
+        span.start_line = 2;
+        span.end_line = 1;
+        let error = snapshot.span(&span).unwrap_err();
+        assert!(error.find_source::<InvalidSourceRange>().is_some());
+        assert_eq!(classification(&error), "invalidInput");
+        assert_eq!(error.to_string(), "invalidInput: Invalid source line range");
+
+        span.end_line = 2;
+        let error = snapshot.span(&span).unwrap_err();
+        assert!(error.find_source::<BlankSourceSpan>().is_some());
+        assert_eq!(classification(&error), "invalidInput");
+        assert_eq!(error.to_string(), "invalidInput: Source span is blank");
     }
 }

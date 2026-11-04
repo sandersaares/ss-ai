@@ -111,10 +111,7 @@ fn read_diff(diff: &Value) -> Result<Vec<FileDiff>, AppError> {
 
 /// Validates serialized Git evidence before using it for publication.
 fn read_file(value: &Value) -> Result<FileDiff, AppError> {
-    let file = FileDiff::deserialize(value)
-        .map_err(|error| invalid(format!("Invalid diff file: {error}")))?;
-    file.validate()?;
-    Ok(file)
+    FileDiff::deserialize(value).map_err(|error| invalid(format!("Invalid diff file: {error}")))
 }
 
 /// Resolves an anchor using the exact comparison used by publication.
@@ -148,7 +145,6 @@ fn resolve_anchor_in_files(anchor: &Value, files: &[FileDiff]) -> Result<Value, 
 ///
 /// Returns an error for an invalid anchor or a different file.
 pub fn resolve_anchor(anchor: &Value, file: &FileDiff) -> Result<Value, AppError> {
-    file.validate()?;
     let object = anchor
         .as_object()
         .ok_or_else(|| invalid("Anchor must be an object"))?;

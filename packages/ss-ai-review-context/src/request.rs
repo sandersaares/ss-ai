@@ -9,13 +9,33 @@ use std::path::{Component, Path, PathBuf, absolute};
 
 use ohno::AppError;
 use serde_json::{Value, json};
-use ss_ai_runtime::{Clock, FileTransaction, fail};
+use ss_ai_runtime::{Clock, FileTransaction, caused_by, fail};
 
 use crate::diagnostics::parse_json;
 use crate::{
     document_hash, increment_diagnostic, normalize_options, powershell_json, query, read_capture,
     snapshot_id,
 };
+
+/// Selects how a saved request is read.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[non_exhaustive]
+pub enum SavedRequestAction {
+    /// Read the first page or replay the last page.
+    Replay,
+    /// Advance from the last page.
+    Next,
+    /// Rebind the request to current captures and read the first page.
+    Restart,
+}
+
+/// Identifies a saved request whose selectors or identity were modified.
+#[ohno::error]
+pub struct ModifiedSelectors;
+
+/// Identifies a saved request bound to different capture evidence.
+#[ohno::error]
+pub struct CaptureChanged;
 
 /// Creates a saved query after validating selectors and their capture.
 pub fn prepare(
@@ -103,16 +123,9 @@ fn prepare_inner(
 /// Replays the last page, advances once, or restarts against current captures.
 pub fn read_saved(
     request_path: &Path,
-    next: bool,
-    restart: bool,
+    action: SavedRequestAction,
     clock: &dyn Clock,
 ) -> Result<String, AppError> {
-    if next && restart {
-        return Err(fail(
-            "invalidInput",
-            "Next and Restart are mutually exclusive",
-        ));
-    }
     let request_path = full_path(request_path)?;
     let transaction = FileTransaction::open(&request_path, clock)?;
     let bytes = transaction
@@ -143,12 +156,14 @@ pub fn read_saved(
     if document_hash(&options)? != document_hash(&request["options"])?
         || request_id(&request)? != required_string(&request, "requestId")?
     {
-        return Err(fail(
+        return Err(caused_by(
             "invalidInput",
             "Saved query selectors or identity were modified",
-        ));
+            ModifiedSelectors::new(),
+        )
+        .into());
     }
-    if restart {
+    if action == SavedRequestAction::Restart {
         increment_diagnostic(&diagnostics_path, "cursorRestarts", NonZeroU32::MIN, clock)?;
         request = new_request(
             &path,
@@ -168,14 +183,16 @@ pub fn read_saved(
     if request["snapshotId"].as_str() != Some(snapshot.as_str())
         || optional_string(&request, "baselineId")? != baseline.as_deref()
     {
-        return Err(fail(
+        return Err(caused_by(
             "invalidInput",
             "Saved query capture changed; restart or create a new request",
-        ));
+            CaptureChanged::new(),
+        )
+        .into());
     }
     let last_page = &request["lastPage"];
     let cursor = if last_page.is_null() {
-        if next {
+        if action == SavedRequestAction::Next {
             return Err(fail(
                 "invalidInput",
                 "Read the first page before requesting Next",
@@ -211,7 +228,7 @@ pub fn read_saved(
                 "Saved query page does not match the bound request and capture",
             ));
         }
-        if !next {
+        if action != SavedRequestAction::Next {
             return Ok(expected);
         }
         if last_page["complete"] == true {

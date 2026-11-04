@@ -12,7 +12,7 @@ use ss_ai_review_context::bytes_hash;
 use ss_ai_runtime::{Clock, FileTransaction, LockMode, ResourceLock, fail, read_bytes};
 
 use crate::focus_area_expansion::Expansion;
-use crate::focus_area_map::{ValidatedMap, retry_contention};
+use crate::focus_area_map::{CompleteMap, retry_contention};
 use crate::focus_area_source::SourceSnapshot;
 use crate::focus_cache::read_generation_key_locked;
 
@@ -45,10 +45,10 @@ pub struct Generation {
     pub session_state: String,
 }
 
-/// Fences old workers and binds a successful publication to its inputs.
+/// The persisted generation schema, validated before conversion to live state.
 #[derive(Deserialize, Serialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
-struct ActiveGeneration {
+struct ActiveGenerationRecord {
     schema_version: u32,
     preparation_identity: Option<String>,
     generation_id: Option<String>,
@@ -58,7 +58,7 @@ struct ActiveGeneration {
     hit_receipt: Option<String>,
 }
 
-impl ActiveGeneration {
+impl ActiveGenerationRecord {
     /// Represents a session with no preparation authorized to publish.
     fn invalidated() -> Self {
         Self {
@@ -71,7 +71,100 @@ impl ActiveGeneration {
             hit_receipt: None,
         }
     }
+}
 
+/// Fences old workers and binds a successful publication to its inputs.
+struct ActiveGeneration {
+    preparation: Option<Preparation>,
+}
+
+/// Keeps the identity, its source, and its publication state together.
+struct Preparation {
+    identity: String,
+    source_digest: String,
+    cache_key: Option<String>,
+    work: PreparationWork,
+}
+
+/// A restore and a generation have mutually exclusive receipt types.
+enum PreparationWork {
+    Restore { receipt: Option<String> },
+    Generation { id: String, receipt: Option<String> },
+}
+
+impl ActiveGeneration {
+    /// Represents a session with no preparation authorized to publish.
+    fn invalidated() -> Self {
+        Self { preparation: None }
+    }
+
+    /// Converts the checked wire record without accepting partial identities.
+    fn from_record(record: ActiveGenerationRecord) -> Result<Self, AppError> {
+        record.validate()?;
+        let preparation = match (record.preparation_identity, record.source_digest) {
+            (Some(identity), Some(source_digest)) => Some(Preparation {
+                identity,
+                source_digest,
+                cache_key: record.cache_key,
+                work: match record.generation_id {
+                    Some(id) => PreparationWork::Generation {
+                        id,
+                        receipt: record.receipt,
+                    },
+                    None => PreparationWork::Restore {
+                        receipt: record.hit_receipt,
+                    },
+                },
+            }),
+            (None, None) => None,
+            _ => {
+                return Err(fail(
+                    "invalidInput",
+                    "Invalid preparation generation record",
+                ));
+            }
+        };
+        Ok(Self { preparation })
+    }
+
+    /// Produces the established flat JSON record for persistence.
+    fn to_record(&self) -> ActiveGenerationRecord {
+        let mut record = ActiveGenerationRecord::invalidated();
+        if let Some(preparation) = &self.preparation {
+            record.preparation_identity = Some(preparation.identity.clone());
+            record.source_digest = Some(preparation.source_digest.clone());
+            record.cache_key.clone_from(&preparation.cache_key);
+            match &preparation.work {
+                PreparationWork::Restore { receipt } => record.hit_receipt.clone_from(receipt),
+                PreparationWork::Generation { id, receipt } => {
+                    record.generation_id = Some(id.clone());
+                    record.receipt.clone_from(receipt);
+                }
+            }
+        }
+        record
+    }
+
+    /// Updates the publication receipt only for the active generation.
+    fn set_generation_receipt(&mut self, receipt: Option<String>) -> Result<(), AppError> {
+        let Some(Preparation {
+            work: PreparationWork::Generation {
+                receipt: current, ..
+            },
+            ..
+        }) = &mut self.preparation
+        else {
+            return Err(fail(
+                "staleGeneration",
+                "Preparation generation is not active",
+            ));
+        };
+        *current = receipt;
+        Ok(())
+    }
+}
+
+impl ActiveGenerationRecord {
     /// Rejects records that cannot describe one coherent generation.
     fn validate(&self) -> Result<(), AppError> {
         if self.schema_version != 1
@@ -203,13 +296,12 @@ pub fn bind_restore_locked(
     write_active(
         &transaction,
         &ActiveGeneration {
-            schema_version: 1,
-            preparation_identity: Some(identity.clone()),
-            generation_id: None,
-            source_digest: Some(source_digest),
-            cache_key,
-            receipt: None,
-            hit_receipt: None,
+            preparation: Some(Preparation {
+                identity: identity.clone(),
+                source_digest,
+                cache_key,
+                work: PreparationWork::Restore { receipt: None },
+            }),
         },
     )?;
     Ok(identity)
@@ -260,8 +352,8 @@ pub fn is_managed_locked(session: &Path, clock: &dyn Clock) -> Result<bool, AppE
     let Some(bytes) = transaction.read_bytes()? else {
         return Ok(false);
     };
-    let active: ActiveGeneration = serde_json::from_slice(&bytes)?;
-    active.validate()?;
+    let record: ActiveGenerationRecord = serde_json::from_slice(&bytes)?;
+    ActiveGeneration::from_record(record)?;
     Ok(true)
 }
 
@@ -277,13 +369,12 @@ pub fn verify_preparation_locked(
 ) -> Result<bool, AppError> {
     let transaction = FileTransaction::open(&session.join(ACTIVE), clock)?;
     let active = read_active(&transaction)?;
-    let Some(source) = active.source_digest else {
+    let Some(preparation) = active.preparation else {
         return Ok(false);
     };
-    Ok(
-        active.preparation_identity.as_deref() == Some(expected_identity)
-            && tree_digest(&session.join("instruction-set-source"), clock)? == source,
-    )
+    Ok(preparation.identity == expected_identity
+        && tree_digest(&session.join("instruction-set-source"), clock)?
+            == preparation.source_digest)
 }
 
 /// Computes the exact cache payload identity after staged validation.
@@ -312,15 +403,17 @@ pub fn record_hit_locked(
 ) -> Result<(), AppError> {
     let transaction = FileTransaction::open(&session.join(ACTIVE), clock)?;
     let mut active = read_active(&transaction)?;
-    if active.preparation_identity.as_deref() != Some(expected_identity)
-        || active.cache_key.as_deref() != Some(expected_key)
-        || active.generation_id.is_some()
+    let Some(preparation) = active.preparation.as_mut() else {
+        return Err(fail(
+            "staleGeneration",
+            "Cache hit does not match the active preparation",
+        ));
+    };
+    if preparation.identity != expected_identity
+        || preparation.cache_key.as_deref() != Some(expected_key)
+        || !matches!(preparation.work, PreparationWork::Restore { .. })
         || !valid_digest(staged_digest)
-        || active.source_digest.as_deref()
-            != Some(&tree_digest(
-                &session.join("instruction-set-source"),
-                clock,
-            )?)
+        || preparation.source_digest != tree_digest(&session.join("instruction-set-source"), clock)?
         || hit_digest(session, clock)? != staged_digest
     {
         return Err(fail(
@@ -328,7 +421,9 @@ pub fn record_hit_locked(
             "Cache hit does not match the active preparation",
         ));
     }
-    active.hit_receipt = Some(staged_digest.to_owned());
+    preparation.work = PreparationWork::Restore {
+        receipt: Some(staged_digest.to_owned()),
+    };
     write_active(&transaction, &active)
 }
 
@@ -346,28 +441,35 @@ pub fn verify_ready_locked(
 ) -> Result<bool, AppError> {
     let transaction = FileTransaction::open(&session.join(ACTIVE), clock)?;
     let active = read_active(&transaction)?;
-    if active.preparation_identity.as_deref() != Some(expected_identity) {
-        return Ok(false);
-    }
-    let Some(source) = active.source_digest else {
+    let Some(preparation) = active.preparation else {
         return Ok(false);
     };
-    if tree_digest(&session.join("instruction-set-source"), clock)? != source {
+    if preparation.identity != expected_identity {
         return Ok(false);
     }
-    if let Some(receipt) = active.receipt {
-        if !outputs_present(session, &OUTPUTS)? {
-            return Ok(false);
-        }
-        return Ok(publication_digest(session, clock)? == receipt);
+    if tree_digest(&session.join("instruction-set-source"), clock)? != preparation.source_digest {
+        return Ok(false);
     }
-    if let Some(receipt) = active.hit_receipt {
-        if !outputs_present(session, &HIT_OUTPUTS)? {
-            return Ok(false);
+    match preparation.work {
+        PreparationWork::Generation {
+            receipt: Some(receipt),
+            ..
+        } => {
+            if !outputs_present(session, &OUTPUTS)? {
+                return Ok(false);
+            }
+            Ok(publication_digest(session, clock)? == receipt)
         }
-        return Ok(hit_digest(session, clock)? == receipt);
+        PreparationWork::Restore {
+            receipt: Some(receipt),
+        } => {
+            if !outputs_present(session, &HIT_OUTPUTS)? {
+                return Ok(false);
+            }
+            Ok(hit_digest(session, clock)? == receipt)
+        }
+        _ => Ok(false),
     }
-    Ok(false)
 }
 
 /// Clears failed artifact readiness without allowing a stale caller to change it.
@@ -384,14 +486,21 @@ pub fn invalidate_ready_locked(
 ) -> Result<(), AppError> {
     let transaction = FileTransaction::open(&session.join(ACTIVE), clock)?;
     let mut active = read_active(&transaction)?;
-    if active.preparation_identity.as_deref() != Some(expected_identity) {
+    let Some(preparation) = active
+        .preparation
+        .as_mut()
+        .filter(|value| value.identity == expected_identity)
+    else {
         return Err(fail(
             "staleGeneration",
             "Preparation identity is not active",
         ));
+    };
+    match &mut preparation.work {
+        PreparationWork::Restore { receipt } | PreparationWork::Generation { receipt, .. } => {
+            *receipt = None;
+        }
     }
-    active.receipt = None;
-    active.hit_receipt = None;
     write_active(&transaction, &active)
 }
 
@@ -413,42 +522,37 @@ pub fn begin(
     )?;
     let transaction = FileTransaction::open(&session.join(ACTIVE), clock)?;
     let active = read_active(&transaction)?;
-    if active.preparation_identity.as_deref() != Some(expected_identity)
-        || active.generation_id.is_some()
-    {
+    let Some(preparation) = active.preparation.filter(|preparation| {
+        preparation.identity == expected_identity
+            && matches!(preparation.work, PreparationWork::Restore { .. })
+    }) else {
         return Err(fail(
             "staleGeneration",
             "Preparation identity is not active",
         ));
-    }
+    };
     let source = session.join("instruction-set-source");
     let before = tree_digest(&source, clock)?;
-    if active.source_digest.as_deref() != Some(&before) {
+    if preparation.source_digest != before {
         return Err(fail("invalidInput", "Preparation sources changed"));
     }
     let root = session.join(GENERATIONS);
     ensure_directory(&root)?;
     let (id, generation) = allocate(&root, "generation")?;
     let result = (|| {
+        // The operation lock protects the source until these private copies are complete.
         copy_tree(&source, &generation.join("instruction-set-source"), clock)?;
         copy_tree(&source, &generation.join("instruction-set-raw"), clock)?;
-        if tree_digest(&source, clock)? != before
-            || tree_digest(&generation.join("instruction-set-source"), clock)? != before
-            || tree_digest(&generation.join("instruction-set-raw"), clock)? != before
-        {
-            return Err(fail(
-                "invalidInput",
-                "Instruction sources changed during preparation",
-            ));
-        }
         let state = ActiveGeneration {
-            schema_version: 1,
-            preparation_identity: active.preparation_identity,
-            generation_id: Some(id.clone()),
-            source_digest: Some(before),
-            cache_key: active.cache_key,
-            receipt: None,
-            hit_receipt: None,
+            preparation: Some(Preparation {
+                identity: preparation.identity,
+                source_digest: before,
+                cache_key: preparation.cache_key,
+                work: PreparationWork::Generation {
+                    id: id.clone(),
+                    receipt: None,
+                },
+            }),
         };
         write_active(&transaction, &state)?;
         Ok(Generation {
@@ -487,7 +591,11 @@ pub fn publish(session: &Path, generation_id: &str, clock: &dyn Clock) -> Result
     )?;
     let transaction = FileTransaction::open(&session.join(ACTIVE), clock)?;
     let mut active = read_active(&transaction)?;
-    if !valid_id(generation_id) || active.generation_id.as_deref() != Some(generation_id) {
+    if !valid_id(generation_id)
+        || !matches!(&active.preparation, Some(Preparation {
+            work: PreparationWork::Generation { id, .. }, ..
+        }) if id == generation_id)
+    {
         return Err(fail(
             "staleGeneration",
             "Preparation generation is not active",
@@ -507,8 +615,9 @@ pub fn publish(session: &Path, generation_id: &str, clock: &dyn Clock) -> Result
     let _real_artifacts =
         ResourceLock::open(&session.join("focus-areas"), LockMode::Exclusive, clock)?;
     let expected_source = active
-        .source_digest
-        .clone()
+        .preparation
+        .as_ref()
+        .map(|preparation| preparation.source_digest.clone())
         .ok_or_else(|| fail("invalidInput", "Preparation source identity is missing"))?;
     if tree_digest(&session.join("instruction-set-source"), clock)? != expected_source
         || tree_digest(&generation.join("instruction-set-source"), clock)? != expected_source
@@ -542,7 +651,7 @@ pub fn publish(session: &Path, generation_id: &str, clock: &dyn Clock) -> Result
                 "Preparation changed during validation",
             ));
         }
-        active.receipt = None;
+        active.set_generation_receipt(None)?;
         write_active(&transaction, &active)?;
         let backup = stage.join("backup");
         fs::create_dir(&backup)?;
@@ -553,7 +662,7 @@ pub fn publish(session: &Path, generation_id: &str, clock: &dyn Clock) -> Result
             &backup,
             &mut rollback_failed,
             || {
-                active.receipt = Some(staged.clone());
+                active.set_generation_receipt(Some(staged.clone()))?;
                 write_active(&transaction, &active)
             },
         )?;
@@ -589,10 +698,20 @@ pub fn validate_published_locked(
 ) -> Result<bool, AppError> {
     let transaction = FileTransaction::open(&session.join(ACTIVE), clock)?;
     let active = read_active(&transaction)?;
-    let (Some(source), Some(receipt)) = (&active.source_digest, &active.receipt) else {
+    let Some(Preparation {
+        source_digest: source,
+        cache_key,
+        work:
+            PreparationWork::Generation {
+                receipt: Some(receipt),
+                ..
+            },
+        ..
+    }) = &active.preparation
+    else {
         return Ok(false);
     };
-    if active.cache_key.as_deref() != Some(expected_key)
+    if cache_key.as_deref() != Some(expected_key)
         || tree_digest(&session.join("instruction-set-source"), clock)? != *source
         || tree_digest(input_directory, clock)? != *source
     {
@@ -607,7 +726,7 @@ fn validate_staged(stage: &Path, clock: &dyn Clock) -> Result<(), AppError> {
     let expansion = required_bytes(&stage.join("focus-area-expansion-status.json"), clock)?;
     let expansion = Expansion::parse(&expansion, &sources, true)?;
     let map = required_bytes(&stage.join("focus-area-map.json"), clock)?;
-    let map = ValidatedMap::parse(&map, &sources, true)?;
+    let map = CompleteMap::parse(&map, &sources)?;
     map.validate_reference_alternatives(&expansion)?;
     let documents = map.render(&sources)?;
     let mut actual = BTreeMap::new();
@@ -636,9 +755,8 @@ fn read_active(transaction: &FileTransaction<'_>) -> Result<ActiveGeneration, Ap
     let Some(bytes) = transaction.read_bytes()? else {
         return Ok(ActiveGeneration::invalidated());
     };
-    let value: ActiveGeneration = serde_json::from_slice(&bytes)?;
-    value.validate()?;
-    Ok(value)
+    let value: ActiveGenerationRecord = serde_json::from_slice(&bytes)?;
+    ActiveGeneration::from_record(value)
 }
 
 /// Publishes an internally consistent fencing record.
@@ -646,8 +764,7 @@ fn write_active(
     transaction: &FileTransaction<'_>,
     value: &ActiveGeneration,
 ) -> Result<(), AppError> {
-    value.validate()?;
-    transaction.write_bytes(&serde_json::to_vec(value)?)
+    transaction.write_bytes(&serde_json::to_vec(&value.to_record())?)
 }
 
 /// Identifies all staged files by exact spelling, kind, and bytes.
@@ -1004,9 +1121,76 @@ mod tests {
     use std::path::{Path, PathBuf};
 
     use ohno::AppError;
+    use serde_json::{Value, from_value, json, to_value, to_vec};
     use ss_ai_runtime::fail;
 
-    use super::{OUTPUTS, Swap, swap_with};
+    use super::{ActiveGeneration, ActiveGenerationRecord, OUTPUTS, Swap, swap_with};
+
+    #[test]
+    fn generation_records_preserve_wire_shape_and_reject_incoherent_states() {
+        let digest = "a".repeat(64);
+        for mask in 0..64 {
+            let present = |bit| mask & (1 << bit) != 0;
+            let record = json!({
+                "schemaVersion": 1,
+                "preparationIdentity": present(0).then_some("epoch-1"),
+                "generationId": present(1).then_some("generation-1"),
+                "sourceDigest": present(2).then_some(&digest),
+                "cacheKey": present(3).then_some(&digest),
+                "receipt": present(4).then_some(&digest),
+                "hitReceipt": present(5).then_some(&digest),
+            });
+            // The persisted optional-field combinations require preparation identity
+            // and source digest together. Other work requires preparation; a
+            // generation receipt requires a generation ID, while a restore receipt
+            // excludes it. Accepted records retain their flat JSON and bytes.
+            let expected = present(0) == present(2)
+                && (present(0) || !(present(1) || present(3) || present(4) || present(5)))
+                && (present(1) || !present(4))
+                && (!present(1) || !present(5));
+            let wire: ActiveGenerationRecord = from_value(record.clone()).unwrap();
+            let wire_bytes = to_vec(&wire).unwrap();
+            let active = ActiveGeneration::from_record(wire);
+            assert_eq!(active.is_ok(), expected, "record: {record}");
+            if let Ok(active) = active {
+                let serialized_record = active.to_record();
+                assert_eq!(to_vec(&serialized_record).unwrap(), wire_bytes);
+                let serialized = to_value(serialized_record).unwrap();
+                assert_eq!(serialized, record);
+            }
+        }
+
+        let mut record = json!({"schemaVersion":1,"preparationIdentity":"epoch-1",
+            "generationId":null,"sourceDigest":digest,"cacheKey":null,"receipt":null,"hitReceipt":null});
+        for (field, invalid) in [
+            ("schemaVersion", json!(2)),
+            ("preparationIdentity", json!("bad")),
+            ("generationId", json!("bad")),
+            ("sourceDigest", json!("bad")),
+            ("cacheKey", json!("bad")),
+            ("receipt", json!("bad")),
+            ("hitReceipt", json!("bad")),
+        ] {
+            let original = record.get(field).unwrap().clone();
+            *record.get_mut(field).unwrap() = invalid;
+            let wire: ActiveGenerationRecord = from_value(record.clone()).unwrap();
+            assert!(ActiveGeneration::from_record(wire).is_err(), "{field}");
+            *record.get_mut(field).unwrap() = original;
+        }
+        *record.get_mut("generationId").unwrap() = json!("generation-1");
+        *record.get_mut("receipt").unwrap() = json!("bad");
+        assert!(ActiveGeneration::from_record(from_value(record.clone()).unwrap()).is_err());
+        *record.get_mut("generationId").unwrap() = Value::Null;
+        *record.get_mut("receipt").unwrap() = Value::Null;
+        *record.get_mut("hitReceipt").unwrap() = json!("bad");
+        assert!(ActiveGeneration::from_record(from_value(record.clone()).unwrap()).is_err());
+        *record.get_mut("hitReceipt").unwrap() = Value::Null;
+        record
+            .as_object_mut()
+            .unwrap()
+            .insert("unexpected".into(), Value::Bool(true));
+        assert!(from_value::<ActiveGenerationRecord>(record).is_err());
+    }
 
     /// Simulates the filesystem while injecting one or more rename failures.
     struct FakeSwap {
