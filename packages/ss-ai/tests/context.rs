@@ -32,7 +32,9 @@ struct Fixture {
 impl Fixture {
     /// Copies the immutable shared contract into an independent working directory.
     fn new() -> Self {
-        let root = repository().join(format!("target/context-test-{}", Uuid::new_v4()));
+        let root = repository()
+            .join("target")
+            .join(format!("context-test-{}", Uuid::new_v4()));
         fs::create_dir_all(&root).unwrap();
         let capture = root.join("capture space é.json");
         fs::copy(
@@ -268,13 +270,22 @@ fn direct_pagination_preserves_utf16_offsets() {
     let mut cursor = String::new();
     let mut seen = HashSet::new();
     let mut content = String::new();
-    // Frozen predecessor JSON bytes cover cursor framing and the byte budget.
-    let expected_hashes = [
-        "972AB8854BB3A478203B12F148115F8C15B31F317A1D442E4E3A147AC4500F7B",
-        "D022D6151737D940AB1D7B7A0A99BA7D82987053EA5737038ECA4AC0EAAFFA22",
-        "D9BC113931EBEFFEF0E4907EB4C9F5368F48F9157F2CB72A9CEA913C88BA8AF9",
-        "74B9B1FEE173352C0C924FEF7AE392EAEC175ECA32C55D4CA17C6FC6C3094237",
-    ];
+    // The output budget reserves the platform line ending, changing later fragments.
+    let expected_hashes = if cfg!(windows) {
+        [
+            "972AB8854BB3A478203B12F148115F8C15B31F317A1D442E4E3A147AC4500F7B",
+            "D022D6151737D940AB1D7B7A0A99BA7D82987053EA5737038ECA4AC0EAAFFA22",
+            "9140140D3025BE278CB91C6BB6FB28953D50269D6120249C2C4B644FC413FB14",
+            "731C573F4EA88F201E55E28A128AC2AF7A0E9D634D90105007745315178E10D6",
+        ]
+    } else {
+        [
+            "972AB8854BB3A478203B12F148115F8C15B31F317A1D442E4E3A147AC4500F7B",
+            "D022D6151737D940AB1D7B7A0A99BA7D82987053EA5737038ECA4AC0EAAFFA22",
+            "D9BC113931EBEFFEF0E4907EB4C9F5368F48F9157F2CB72A9CEA913C88BA8AF9",
+            "74B9B1FEE173352C0C924FEF7AE392EAEC175ECA32C55D4CA17C6FC6C3094237",
+        ]
+    };
     // The chosen fixture needs only a few pages; the bound catches stalled pagination.
     for page_index in 0..64 {
         let mut native = vec![

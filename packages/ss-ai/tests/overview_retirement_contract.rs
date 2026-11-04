@@ -627,29 +627,37 @@ fn missing_or_misordered_sections_never_upload() {
 #[test]
 fn private_local_paths_never_upload() {
     let workspace = Workspace::new();
-    let path = workspace.0.join("private/output");
-    let source = format!("{}\n{}\n", overview(), path.display());
-    let args = workspace.scenario("private", &source, "");
-    let provider = Provider::default();
-    let result = publish(&args, &provider);
-    assert_eq!(result.get("status"), Some(&json!("failed")), "{result}");
-    assert!(
-        result
-            .get("error")
-            .unwrap()
-            .as_str()
-            .unwrap()
-            .contains("private"),
-        "{result}"
-    );
-    assert!(
-        provider
-            .requests
-            .borrow()
-            .iter()
-            .all(|request| !request.starts_with("POST ")),
-        "{result}"
-    );
+    for (name, forward_slashes) in [("native", false), ("forward", true)] {
+        let path = workspace.0.join(name).join("output");
+        let path = path.to_str().unwrap();
+        let path = if forward_slashes {
+            path.replace('\\', "/")
+        } else {
+            path.to_owned()
+        };
+        let source = format!("{}\n{path}\n", overview());
+        let args = workspace.scenario(name, &source, "");
+        let provider = Provider::default();
+        let result = publish(&args, &provider);
+        assert_eq!(result.get("status"), Some(&json!("failed")), "{result}");
+        assert!(
+            result
+                .get("error")
+                .unwrap()
+                .as_str()
+                .unwrap()
+                .contains("private"),
+            "{result}"
+        );
+        assert!(
+            provider
+                .requests
+                .borrow()
+                .iter()
+                .all(|request| !request.starts_with("POST ")),
+            "{result}"
+        );
+    }
 }
 
 /// Best-effort publication records provider failures without stopping the review.
