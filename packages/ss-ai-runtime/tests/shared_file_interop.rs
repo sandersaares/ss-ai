@@ -1,7 +1,7 @@
 //! Exercises the actual PowerShell and native shared-file implementations together.
 
 use std::cell::{Cell, RefCell};
-use std::fs;
+use std::fs::{remove_file, write};
 use std::io::{BufRead, BufReader, Write};
 #[cfg(windows)]
 use std::os::windows::fs::OpenOptionsExt;
@@ -35,7 +35,7 @@ impl Drop for TestFile {
     fn drop(&mut self) {
         let mut lock = self.path.as_os_str().to_owned();
         lock.push(".lock");
-        if let Err(error) = fs::remove_file(lock) {
+        if let Err(error) = remove_file(lock) {
             assert_eq!(error.kind(), std::io::ErrorKind::NotFound);
         }
     }
@@ -186,7 +186,7 @@ fn native_owner_blocks_powershell_lock() {
 )]
 fn complete_publications_are_readable_in_both_directions() {
     let file = TestFile::new();
-    fs::write(&file.path, br#"{"version":"original"}"#).unwrap();
+    write(&file.path, br#"{"version":"original"}"#).unwrap();
     let mut reader = PowerShell::start(&file.path, "publication");
     reader.expect("reader-open");
     let transaction = FileTransaction::open(&file.path, &NoWaitClock).unwrap();

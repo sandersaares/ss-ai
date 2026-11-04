@@ -1,0 +1,33 @@
+[package]
+name = "ss-ai-assessment-fuzz"
+description = "Bounded exact-source parser and read-state fuzz target"
+version = "0.1.0"
+publish = false
+authors.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+include.workspace = true
+
+[package.metadata]
+cargo-fuzz = true
+
+[package.metadata.docs.rs]
+all-features = true
+
+[dependencies]
+libfuzzer-sys = { workspace = true, features = ["link_libfuzzer"] }
+serde_json = { workspace = true }
+ss-ai-assessment = { workspace = true }
+ss-ai-git = { workspace = true }
+
+[[bin]]
+name = "source_evidence"
+path = "fuzz_targets/source_evidence.rs"
+test = false
+doc = false
+bench = false
+
+[lints]
+workspace = true
