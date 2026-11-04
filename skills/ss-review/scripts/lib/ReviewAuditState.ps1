@@ -10,7 +10,8 @@ $PSNativeCommandUseErrorActionPreference = $true
 function New-ReviewAuditInputFile {
     param([Parameter(Mandatory)][AllowEmptyString()][string] $Content)
 
-    $path = Join-Path (Get-Location).ProviderPath ".ss-ai-audit-$([guid]::NewGuid().ToString('N')).input"
+    # The caller's working directory need not permit creating temporary inputs.
+    $path = Join-Path ([IO.Path]::GetTempPath()) ".ss-ai-audit-$([guid]::NewGuid().ToString('N')).input"
     $options = [IO.FileStreamOptions]::new()
     $options.Mode = [IO.FileMode]::CreateNew
     $options.Access = [IO.FileAccess]::Write

@@ -97,6 +97,37 @@ function Resolve-PullRequestAnchorInDiff {
     ConvertFrom-JsonVerbatim -Text $result
 }
 
+# Validates each native result variant before the batch reaches publication.
+function Assert-NativeAnchorResolutionResult {
+    param([AllowNull()][object] $Entry)
+
+    if ($Entry -isnot [System.Collections.IDictionary] -or $Entry.Count -ne 1) {
+        throw 'Invalid native anchor resolution result.'
+    }
+    if ($Entry.Contains('anchor') -and $Entry['anchor'] -is [System.Collections.IDictionary]) {
+        $resolved = $Entry['anchor']
+        if ($resolved['kind'] -cnotin @('file', 'line') -or
+            $resolved['path'] -isnot [string] -or $resolved['path'].Length -eq 0 -or
+            $resolved['wasDowngraded'] -isnot [bool]) {
+            throw 'Invalid native anchor resolution result.'
+        }
+        if ($resolved['kind'] -ceq 'line' -and
+            ($resolved['startLine'] -isnot [long] -or $resolved['endLine'] -isnot [long] -or
+                $resolved['side'] -cnotin @('left', 'right'))) {
+            throw 'Invalid native anchor resolution result.'
+        }
+        if ($resolved['wasDowngraded'] -and $resolved['downgradeReason'] -isnot [string]) {
+            throw 'Invalid native anchor resolution result.'
+        }
+        return
+    }
+    if ($Entry.Contains('error') -and $Entry['error'] -is [string] -and
+        $Entry['error'].StartsWith('Unresolvable anchor:')) { return }
+    if ($Entry.Contains('argumentError') -and $Entry['argumentError'] -is [string] -and
+        $Entry['argumentError'].Length -gt 0) { return }
+    throw 'Invalid native anchor resolution result.'
+}
+
 # Resolves a set of authored anchors with one validated copy of the diff.
 function Resolve-PullRequestAnchorsInDiff {
     param(
@@ -115,22 +146,7 @@ function Resolve-PullRequestAnchorsInDiff {
         throw 'Invalid native anchor resolution response.'
     }
     foreach ($entry in $response['results']) {
-        if ($entry -isnot [System.Collections.IDictionary] -or $entry.Count -ne 1) {
-            throw 'Invalid native anchor resolution result.'
-        }
-        if ($entry.Contains('anchor') -and $entry['anchor'] -is [System.Collections.IDictionary]) {
-            $resolved = $entry['anchor']
-            if ($resolved['kind'] -cin @('file', 'line') -and
-                $resolved['path'] -is [string] -and $resolved['path'].Length -gt 0 -and
-                $resolved['wasDowngraded'] -is [bool] -and
-                ($resolved['kind'] -cne 'line' -or
-                    ($resolved['startLine'] -is [long] -and $resolved['endLine'] -is [long] -and
-                        $resolved['side'] -cin @('left', 'right'))) -and
-                (-not $resolved['wasDowngraded'] -or $resolved['downgradeReason'] -is [string])) { continue }
-        }
-        if (($entry.Contains('error') -and $entry['error'] -is [string] -and $entry['error'].StartsWith('Unresolvable anchor:')) -or
-            ($entry.Contains('argumentError') -and $entry['argumentError'] -is [string] -and $entry['argumentError'].Length -gt 0)) { continue }
-        throw 'Invalid native anchor resolution result.'
+        Assert-NativeAnchorResolutionResult -Entry $entry
     }
     , $response['results']
 }

@@ -103,8 +103,7 @@ pub fn add_decisions(
         .and_then(Value::as_array_mut)
         .ok_or_else(|| invalid("Invalid journal"))?;
     let mut recorded = Vec::new();
-    for request in &requests {
-        let mut record = request.clone();
+    for mut record in requests {
         let object = record
             .as_object_mut()
             .ok_or_else(|| invalid("Invalid decision"))?;

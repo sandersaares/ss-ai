@@ -253,11 +253,13 @@ fn line(anchor: &Value, name: &str) -> Result<Option<NonZeroU32>, AppError> {
     match anchor.get(name) {
         None | Some(Value::Null) => Ok(None),
         Some(value) => {
+            // Stored PowerShell anchors use signed integers, so retain that range.
             let value = value
                 .as_u64()
                 .filter(|value| *value <= i32::MAX as u64)
                 .and_then(|value| u32::try_from(value).ok());
             match value {
+                // A zero end represents the omitted endpoint of a single-line range.
                 Some(0) if name == "endLine" => Ok(None),
                 Some(value) => NonZeroU32::new(value)
                     .map(Some)
