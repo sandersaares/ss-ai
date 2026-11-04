@@ -172,6 +172,9 @@ Describe 'Safe report presentation' {
             Mock Invoke-NativeReviewWorkflow {
                 param($Arguments)
                 (Get-Location).ProviderPath | Should -BeExactly $invocation
+                $Arguments | Should -Contain "--path=$(Join-Path $invocation 'source')"
+                $Arguments | Should -Contain "--output-path=$(Join-Path $destination 'report.html')"
+                $Arguments | Should -Contain "--skill-root=$script:SkillRoot"
                 $titleOption = @($Arguments | Where-Object { $_ -like '--title-path=*' })[0]
                 $script:TitleFile = $titleOption.Substring('--title-path='.Length)
                 [IO.Path]::GetDirectoryName($script:TitleFile) | Should -BeExactly $destination
@@ -186,6 +189,24 @@ Describe 'Safe report presentation' {
         } finally {
             Set-Location -LiteralPath $previousLocation
             if (-not $IsWindows) { [IO.File]::SetUnixFileMode($invocation, $previousMode) }
+        }
+    }
+
+    It 'passes PowerShell drive paths to the native renderer as filesystem paths' {
+        $drive = 'ReviewReportTest'
+        New-PSDrive -Name $drive -PSProvider FileSystem -Root $TestDrive | Out-Null
+        try {
+            Mock Invoke-NativeReviewWorkflow {
+                param($Arguments)
+                $Arguments | Should -Contain "--path=$(Join-Path $TestDrive 'source.md')"
+                $Arguments | Should -Contain "--output-path=$(Join-Path $TestDrive 'report.html')"
+                $Arguments | Should -Contain "--skill-root=$(Join-Path $TestDrive 'skill')"
+                '{"diagramCount":0}'
+            }
+            $null = Write-ReviewHtml -Path "${drive}:\source.md" -OutputPath "${drive}:\report.html" -SkillRoot "${drive}:\skill"
+            Should -Invoke Invoke-NativeReviewWorkflow -Times 1 -Exactly
+        } finally {
+            Remove-PSDrive -Name $drive
         }
     }
 

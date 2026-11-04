@@ -160,6 +160,32 @@ fn skill_root() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join("../../skills/ss-review")
 }
 
+/// Reads visible inline text without prescribing Pandoc's container structure.
+fn inline_text(node: &Value) -> String {
+    match node.get("t").and_then(Value::as_str) {
+        Some("Str") => node["c"].as_str().unwrap().to_owned(),
+        Some("Code") => node["c"][1].as_str().unwrap().to_owned(),
+        Some("Space") => " ".to_owned(),
+        _ => match node {
+            Value::Array(values) => values.iter().map(inline_text).collect(),
+            Value::Object(object) => object.get("c").map_or_else(String::new, inline_text),
+            _ => String::new(),
+        },
+    }
+}
+
+/// Detects links independently of the inline containers that Pandoc chooses.
+fn contains_link(node: &Value) -> bool {
+    match node {
+        Value::Array(values) => values.iter().any(contains_link),
+        Value::Object(object) => {
+            object.get("t").and_then(Value::as_str) == Some("Link")
+                || object.values().any(contains_link)
+        }
+        _ => false,
+    }
+}
+
 /// The reading view preserves visible source, identity, and locked publication.
 /// The conflicting lock attempts verify ownership during both renderer calls.
 /// See the report presentation and HTML rendering sections in the skill docs.
@@ -206,13 +232,11 @@ fn embeds_checked_diagrams_and_transforms_the_pandoc_ast() {
     assert_eq!(ast["meta"], json!({}));
     assert_eq!(ast["blocks"][1]["t"], "CodeBlock");
     assert_eq!(ast["blocks"][2]["c"][0]["t"], "Str");
-    assert_eq!(
-        ast["blocks"][2]["c"][1],
-        json!({"t":"Span","c":[["",[],[]],[
-            {"t":"Str","c":"File"},{"t":"Space"},{"t":"Str","c":"("},
-            {"t":"Code","c":[["",[],[]],"src/a.rs"]},{"t":"Str","c":")"}
-        ]]})
-    );
+    let reference = &ast["blocks"][2]["c"][1];
+    let text = inline_text(reference);
+    assert!(text.contains("File"));
+    assert!(text.contains("src/a.rs"));
+    assert!(!contains_link(reference));
     assert_eq!(ast["blocks"][2]["c"][2]["t"], "Link");
     assert_eq!(result.source_hash.len(), 64);
     assert_eq!(
@@ -456,8 +480,11 @@ fn rejects_unsafe_svg_links_and_images_before_publication() {
     let guard = tools_lock(directory.path(), LockMode::Shared, &TestClock).unwrap();
     for svg in [
         "<svg><script/></svg>",
+        "<svg><SCRIPT/></svg>",
         "<svg><image href=\"https://example.com/a\"/></svg>",
         "<svg onload=\"alert(1)\"/>",
+        "<svg ONLOAD=\"alert(1)\"/>",
+        "<svg><use HREF=\"https://example.com/a\"/></svg>",
         "<svg><style>path { fill: url(https://example.com/x); }</style></svg>",
         "<svg><style>@import 'https://example.com/x';</style></svg>",
         "<svg><style>path { fill: u\\72l(https://example.com/x); }</style></svg>",
@@ -593,7 +620,7 @@ fn real_pandoc_preserves_raw_inline_and_block_source() {
     let output = directory.path().join("report.html");
     fs::write(
         &source,
-        "Before <b>inline</b> after.\n\n<div class=\"example\">\nBlock <strong>text</strong>\n</div>\n\n<!-- comment -->\n",
+        "Before <b>inline</b> after.\n\n<div class=\"example\">\nBlock <strong>text</strong>\n</div>\n\n<!-- comment -->\n\n[File](src/a.rs)\n",
     )
     .unwrap();
     let process = RecordingPandoc {
@@ -625,4 +652,7 @@ fn real_pandoc_preserves_raw_inline_and_block_source() {
     assert!(html.contains("&lt;!-- comment --&gt;"));
     assert!(!html.contains("<div class=\"example\">"));
     assert!(!html.contains("<strong>text</strong>"));
+    assert!(html.contains("File"));
+    assert!(html.contains("src/a.rs"));
+    assert!(!html.contains("href=\"src/a.rs\""));
 }

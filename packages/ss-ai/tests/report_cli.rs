@@ -135,6 +135,7 @@ fn report_dispatch_with_offline_dependencies() {
         String::from_utf8_lossy(&output.stdout),
         String::from_utf8_lossy(&output.stderr)
     );
+    assert!(String::from_utf8_lossy(&output.stdout).contains("1 passed"));
 }
 
 /// Checks output contracts and the production readiness probe using fake processes.
