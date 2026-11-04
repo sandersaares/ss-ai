@@ -3,7 +3,7 @@
 use std::ffi::OsString;
 use std::fs::{self, File};
 use std::io::Read;
-use std::path::{Path, PathBuf, absolute};
+use std::path::{Component, Path, PathBuf, absolute};
 
 use clap::Parser;
 use clap::error::ErrorKind;
@@ -95,16 +95,34 @@ pub(crate) fn run(
             process,
             clock,
             |tools, guard, source, output| {
-                report_html::write_report(
-                    source,
-                    output,
-                    &skill_root,
+                // The report renderer removes parent components lexically. Resolve
+                // existing paths first so `..` after a symlink keeps filesystem
+                // semantics, then retain the requested artifact path in the manifest.
+                let renderer_source = renderer_path(source)?;
+                let parent = output
+                    .parent()
+                    .ok_or_else(|| fail("invalidState", "Report output has no parent"))?;
+                let name = output
+                    .file_name()
+                    .ok_or_else(|| fail("invalidState", "Report output has no filename"))?;
+                let rendered_output = renderer_path(parent)?.join(name);
+                let renderer_skill_root = renderer_path(&skill_root)?;
+                let mut result = report_html::write_report(
+                    &renderer_source,
+                    &rendered_output,
+                    &renderer_skill_root,
                     "Pull request overview",
                     tools,
                     guard,
                     process,
                     clock,
-                )
+                )?;
+                if result.html_path != rendered_output {
+                    return Err(fail("invalidState", "Renderer returned a different path"));
+                }
+                source.clone_into(&mut result.source_path);
+                output.clone_into(&mut result.html_path);
+                Ok(result)
             },
         )?;
         Ok(match artifact {
@@ -157,13 +175,22 @@ fn artifact_directory(
     Ok(root.join(run_id))
 }
 
-/// Normalizes paths relative to this process without losing Unicode.
+/// Makes paths absolute relative to this process without losing Unicode.
 fn path(value: &Path) -> Result<PathBuf, AppError> {
     let path = absolute(value)?;
     if path.to_str().is_none() {
         return Err(fail("invalidInput", "Overview paths must be Unicode"));
     }
     Ok(path)
+}
+
+/// Resolves parent components as the filesystem does before report rendering.
+fn renderer_path(value: &Path) -> Result<PathBuf, AppError> {
+    if value.components().any(|part| part == Component::ParentDir) {
+        Ok(fs::canonicalize(value)?)
+    } else {
+        Ok(value.to_owned())
+    }
 }
 
 /// Limits attribution input while preserving every accepted UTF-8 byte.

@@ -10,6 +10,7 @@
 
 use std::cell::RefCell;
 use std::collections::BTreeMap;
+use std::env;
 use std::ffi::OsString;
 use std::fs;
 use std::io;
@@ -27,6 +28,9 @@ use ss_ai::{Http, HttpResponse, Process, ProcessOutput, SystemClock, run};
 use ss_ai_review::{Clock, OverviewInput, OverviewRender, publish_overview};
 use ss_ai_runtime::FileTransaction;
 use tempfile::{Builder, TempDir};
+
+#[cfg(unix)]
+use std::os::unix::fs::{PermissionsExt, symlink};
 
 /// Keeps fake provider state local to an individual publication.
 #[derive(Default)]
@@ -567,6 +571,202 @@ fn cli_reuses_completed_retry_artifact_and_preserves_orphan() {
         b"orphaned output"
     );
     assert_eq!(&*provider.archive.borrow(), b"archive");
+}
+
+/// Exercises the actual report renderer while replacing its external processes.
+struct OfflineRenderer {
+    browser: PathBuf,
+    render_calls: RefCell<usize>,
+}
+
+impl Process for OfflineRenderer {
+    fn execute(&self, program: &str, arguments: &[String], _: &[u8]) -> io::Result<ProcessOutput> {
+        if program == "az" {
+            return Ok(ProcessOutput::new(true, b"fixture-token".to_vec(), vec![]));
+        }
+        if arguments.first().is_some_and(|argument| argument == "-e") {
+            return Ok(ProcessOutput::new(
+                true,
+                self.browser.to_string_lossy().as_bytes().to_vec(),
+                vec![],
+            ));
+        }
+        assert_eq!(Path::new(program).file_stem().unwrap(), "pandoc");
+        *self.render_calls.borrow_mut() += 1;
+        let output = if arguments.iter().any(|argument| argument == "--to=json") {
+            br#"{"pandoc-api-version":[1,23],"meta":{},"blocks":[]}"#.to_vec()
+        } else {
+            concat!(
+                "<!DOCTYPE html><html><meta http-equiv=\"Content-Security-Policy\" ",
+                "content=\"default-src 'none'; img-src data:; style-src 'unsafe-inline'; ",
+                "base-uri 'none'; form-action 'none'\"><body>Overview</body></html>"
+            )
+            .as_bytes()
+            .to_vec()
+        };
+        Ok(ProcessOutput::new(true, output, vec![]))
+    }
+}
+
+/// Creates discovery fixtures without installing or running report tools.
+fn report_fixture_file(path: &Path, contents: &[u8]) {
+    fs::create_dir_all(path.parent().unwrap()).unwrap();
+    fs::write(path, contents).unwrap();
+}
+
+#[test]
+#[cfg_attr(miri, ignore = "requires a native subprocess")]
+fn cli_renders_parent_component_paths_with_offline_tools() {
+    let fixture = fixture();
+    let root = fixture.path();
+    let bin = root.join("bin");
+    for name in ["node", "pandoc"] {
+        let name = if cfg!(windows) {
+            format!("{name}.exe")
+        } else {
+            name.to_owned()
+        };
+        let path = bin.join(name);
+        report_fixture_file(&path, b"");
+        #[cfg(unix)]
+        fs::set_permissions(path, fs::Permissions::from_mode(0o755)).unwrap();
+    }
+    let output = Command::new(env::current_exe().unwrap())
+        .args([
+            "--exact",
+            "cli_renders_parent_component_paths_child",
+            "--ignored",
+            "--nocapture",
+        ])
+        .env("OVERVIEW_CLI_TEST_ROOT", root)
+        .env("PATH", &bin)
+        .env("HOME", root)
+        .env("LOCALAPPDATA", root.join("local"))
+        .env_remove("NVM_BIN")
+        .env_remove("NVM_SYMLINK")
+        .env_remove("NVM_DIR")
+        .env_remove("XDG_CONFIG_HOME")
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+/// Checks rendering, the manifest and retry using the CLI's actual composition.
+#[test]
+#[ignore = "launched with an isolated environment"]
+fn cli_renders_parent_component_paths_child() {
+    let root = PathBuf::from(env::var_os("OVERVIEW_CLI_TEST_ROOT").unwrap());
+    let lock = b"{\"lockfileVersion\":3}";
+    let tools = root.join("local/ss-review/tools");
+    let packages = tools
+        .join(format!("mermaid-{:x}", Sha256::digest(lock)))
+        .join("node_modules");
+    for (path, contents) in [
+        ("@mermaid-js/mermaid-cli/src/cli.js", &b""[..]),
+        ("puppeteer/install.mjs", &b""[..]),
+        ("puppeteer/package.json", &br#"{"main":"lib/main.js"}"#[..]),
+        ("puppeteer/lib/main.js", &b""[..]),
+    ] {
+        report_fixture_file(&packages.join(path), contents);
+    }
+    let browser = root.join("browser");
+    report_fixture_file(&browser, b"");
+    let renderer = OfflineRenderer {
+        browser,
+        render_calls: RefCell::new(0),
+    };
+
+    #[cfg(unix)]
+    let cases = [("ordinary", false), ("symlink", true)].as_slice();
+    #[cfg(not(unix))]
+    let cases = [("ordinary", false)].as_slice();
+    for &(name, use_symlink) in cases {
+        let case = root.join(name);
+        fs::create_dir_all(&case).unwrap();
+        prepare(&case);
+        fs::write(
+            case.join("capture 雪.json"),
+            to_vec(&azure_capture()).unwrap(),
+        )
+        .unwrap();
+        report_fixture_file(&case.join("skill 雪/tools/package-lock.json"), lock);
+        let output_parent = if use_symlink {
+            let destination = case.join("destination/nested");
+            fs::create_dir_all(&destination).unwrap();
+            #[cfg(unix)]
+            symlink(&destination, case.join("step")).unwrap();
+            case.join("destination")
+        } else {
+            fs::create_dir_all(case.join("step")).unwrap();
+            case.clone()
+        };
+        let requested_output = case.join("step/../output 雪");
+        let mut args = arguments(&case);
+        let argument = args
+            .iter_mut()
+            .find(|argument| {
+                argument
+                    .to_string_lossy()
+                    .starts_with("--output-directory=")
+            })
+            .unwrap();
+        *argument = OsString::from(format!("--output-directory={}", requested_output.display()));
+        let refused = Azure {
+            reject_upload: true,
+            ..Azure::default()
+        };
+        let before = *renderer.render_calls.borrow();
+        let first: Value =
+            from_str(&run(&args, &renderer, &refused, &SystemClock::default()).unwrap()).unwrap();
+        assert_eq!(first["operations"][0]["status"], "failed", "{first}");
+        assert_eq!(*renderer.render_calls.borrow(), before + 2);
+        let generation = output_parent
+            .join("output 雪/overview-publication")
+            .join(first["snapshot"]["runId"].as_str().unwrap());
+        let manifest_bytes = fs::read(generation.join("html.json")).unwrap();
+        let manifest: Value = from_slice(&manifest_bytes).unwrap();
+        assert_eq!(manifest["sourcePath"], first["snapshot"]["markdownPath"]);
+        let html_path = Path::new(manifest["htmlPath"].as_str().unwrap());
+        let archive_path = Path::new(manifest["archivePath"].as_str().unwrap());
+        assert_eq!(
+            html_path,
+            absolute(&requested_output)
+                .unwrap()
+                .join("overview-publication")
+                .join(first["snapshot"]["runId"].as_str().unwrap())
+                .join("report.html")
+        );
+        assert_eq!(
+            fs::read(html_path).unwrap(),
+            fs::read(generation.join("report.html")).unwrap()
+        );
+        assert_eq!(
+            manifest["htmlHash"],
+            format!("{:x}", Sha256::digest(fs::read(html_path).unwrap()))
+        );
+        assert_eq!(
+            manifest["archiveHash"],
+            format!("{:x}", Sha256::digest(fs::read(archive_path).unwrap()))
+        );
+        let accepted = Azure::default();
+        let second: Value =
+            from_str(&run(&args, &renderer, &accepted, &SystemClock::default()).unwrap()).unwrap();
+        assert_eq!(second["status"], "succeeded", "{second}");
+        assert_eq!(*renderer.render_calls.borrow(), before + 2);
+        assert_eq!(
+            fs::read(generation.join("html.json")).unwrap(),
+            manifest_bytes
+        );
+        assert_eq!(*accepted.archive.borrow(), fs::read(archive_path).unwrap());
+        if use_symlink {
+            assert!(!case.join("output 雪").exists());
+        }
+    }
 }
 
 /// Coordinates a paused provider write and observed real lock contention.
