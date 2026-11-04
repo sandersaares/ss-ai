@@ -1,0 +1,27 @@
+[package]
+name = "ss-ai-review-workflow"
+description = "Finding and workflow plan operations for review workflows"
+version = "0.1.0"
+publish = false
+authors.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+include.workspace = true
+
+[package.metadata.docs.rs]
+all-features = true
+
+[dependencies]
+ohno = { workspace = true, features = ["app-err"] }
+serde = { workspace = true, features = ["derive"] }
+serde_json = { workspace = true, features = ["preserve_order"] }
+ss-ai-review-context = { workspace = true }
+ss-ai-runtime = { workspace = true }
+
+[dev-dependencies]
+jiff = { workspace = true }
+
+[lints]
+workspace = true

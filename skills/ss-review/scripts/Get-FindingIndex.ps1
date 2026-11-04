@@ -27,21 +27,9 @@ param(
 
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
+$PSNativeCommandUseErrorActionPreference = $true
 
-. "$PSScriptRoot\lib\JsonValue.ps1"
-. "$PSScriptRoot\lib\PullRequestModel.ps1"
-. "$PSScriptRoot\lib\WorkflowData.ps1"
-. "$PSScriptRoot\lib\FindingModel.ps1"
-
-$artifacts = Read-FindingReviewerArtifactSet -Path $ReviewerArtifactDirectory
-$document = New-FindingIndexDocument -ReviewerArtifact $artifacts
-
-Write-PullRequestOutputFile -Path $OutputPath -Content (ConvertTo-JsonText -Value $document)
-
-$findings = Get-JsonArrayProperty -Node $document -Name 'findings'
-
-[ordered]@{
-    outputPath    = Resolve-PullRequestPath -Path $OutputPath
-    artifactCount = $artifacts.Count
-    findingCount  = $findings.Count
-} | ConvertTo-Json -Depth 32 -Compress
+. "$PSScriptRoot\lib\NativeWorkflowBridge.ps1"
+$directory = $ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath($ReviewerArtifactDirectory)
+$output = $ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath($OutputPath)
+Invoke-NativeReviewWorkflow -Arguments @('finding-index', "--reviewer-directory=$directory", "--output-path=$output")
