@@ -17,7 +17,9 @@ cargo-fuzz = true
 all-features = true
 
 [dependencies]
+jiff = { workspace = true }
 libfuzzer-sys = { workspace = true, features = ["link_libfuzzer"] }
+ohno = { workspace = true, features = ["app-err"] }
 serde_json = { workspace = true }
 ss-ai-review-workflow = { workspace = true }
 ss-ai-runtime = { workspace = true }
@@ -25,6 +27,13 @@ ss-ai-runtime = { workspace = true }
 [[bin]]
 name = "audit"
 path = "fuzz_targets/audit.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "coverage_journal"
+path = "fuzz_targets/coverage_journal.rs"
 test = false
 doc = false
 bench = false

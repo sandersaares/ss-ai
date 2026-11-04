@@ -39,6 +39,7 @@ function Invoke-NativeContext {
 
 $arguments = [Collections.Generic.List[string]]::new()
 $arguments.Add('diagnostics')
+$Path = $ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath($Path)
 $arguments.Add("--path=$Path")
 if ($PSBoundParameters.ContainsKey('Record')) { $arguments.Add("--record=$Record") }
 if ($PSBoundParameters.ContainsKey('Count')) { $arguments.Add("--count=$Count") }

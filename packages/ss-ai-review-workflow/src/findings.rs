@@ -1184,7 +1184,7 @@ pub fn complete(path: &Path, queue_path: &Path, clock: &dyn Clock) -> Result<Val
 }
 
 /// Avoids recursively acquiring a sibling lock through equivalent paths.
-fn same_lock(path: &Path, queue_path: &Path) -> bool {
+pub(crate) fn same_lock(path: &Path, queue_path: &Path) -> bool {
     let lock_identity = |path: &Path| {
         Some((
             fs::canonicalize(path.parent()?).ok()?,
@@ -1198,7 +1198,7 @@ fn same_lock(path: &Path, queue_path: &Path) -> bool {
 }
 
 /// Validates the journal schema and every persisted batch receipt.
-fn validate_queue(
+pub(crate) fn validate_queue(
     queue: &Value,
     require_complete: bool,
     clock: &dyn Clock,

@@ -2,24 +2,20 @@
 
 <#
 .SYNOPSIS
-Measures per-file and batch coverage persistence on the issue #125 inventory size.
+Compares native per-file and batch coverage persistence.
 .DESCRIPTION
-Creates an isolated fixture in a new StateDirectory. Each persistence operation uses a fresh
-PowerShell process. Reports validated coverageMeasurement records; setup is excluded from timing.
-Schema validation is measured separately from worker elapsed time (which includes startup,
-serialization, I/O and semantic checks). Claims run in the driver and count as journal writes.
-Fixtures remain available for inspection. Child operation parameters are used by the driver.
+Creates an isolated fixture in a new StateDirectory using the inventory size reported in issue #125.
+Measures actual native workflow process launches and elapsed time, excluding setup and final validation.
+Retains the fixtures for inspection.
 #>
 [CmdletBinding(PositionalBinding = $false)]
 param(
-    [Parameter(Mandatory)][string] $StateDirectory,
-    [ValidateSet('Compare', 'File', 'Batch', 'Complete')][string] $Operation = 'Compare',
-    [string] $ItemPath,
-    [string] $GroupId
+    [Parameter(Mandatory)][string] $StateDirectory
 )
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 $PSNativeCommandUseErrorActionPreference = $true
+
 $repoRoot = Split-Path -Parent (Split-Path -Parent $PSScriptRoot)
 $skillScripts = Join-Path $repoRoot 'skills\ss-review\scripts'
 . "$skillScripts\lib\JsonValue.ps1"
@@ -28,105 +24,75 @@ $skillScripts = Join-Path $repoRoot 'skills\ss-review\scripts'
 . "$skillScripts\lib\FindingModel.ps1"
 . "$skillScripts\lib\ReviewWork.ps1"
 
-$script:SchemaValidationMilliseconds = 0.0
-$script:JournalWrites = 0
-$script:ValidateWorkflow = ${function:Assert-WorkflowData}
-$script:WriteAtomically = ${function:Write-PullRequestOutputFileAtomically}
+$program = (Get-Command ss-ai -CommandType Application -ErrorAction Stop | Select-Object -First 1).Source
+$script:ProcessLaunches = 0
+$script:PersistenceProcessLaunches = 0
 
-# Instrument the real schema boundary without changing production behavior.
-function Assert-WorkflowData {
-    param([Parameter(Mandatory)][string] $Kind, [Parameter(Mandatory)][AllowNull()] $Value)
-    $timer = [Diagnostics.Stopwatch]::StartNew()
-    try { & $script:ValidateWorkflow -Kind $Kind -Value $Value }
-    finally { $script:SchemaValidationMilliseconds += $timer.Elapsed.TotalMilliseconds }
-}
-
-# Count committed journal replacements, excluding drafts, immutable inputs and finding artifacts.
-function Write-PullRequestOutputFileAtomically {
-    param([Parameter(Mandatory)][string] $Path, [Parameter(Mandatory)][AllowEmptyString()][string] $Content)
-    & $script:WriteAtomically -Path $Path -Content $Content
-    if ([IO.Path]::GetFileName($Path) -ceq 'queue.json') { $script:JournalWrites++ }
-}
-
-# Native argument lists keep child measurements comparable to agent-facing process invocation.
-function Invoke-CoverageMeasurementChild {
-    param([string] $Root, [string] $Action, [string] $Draft = '', [string] $Group = '')
-    $start = [Diagnostics.ProcessStartInfo]::new((Get-Process -Id $PID).Path)
+# Counts only processes that actually start during the measured interval.
+function Invoke-CoverageOperation {
+    param(
+        [Parameter(Mandatory)][string[]] $Arguments,
+        [switch] $Measure,
+        [switch] $Persistence
+    )
+    $start = [Diagnostics.ProcessStartInfo]::new($program)
+    $start.WorkingDirectory = (Get-Location).ProviderPath
     $start.UseShellExecute = $false
     $start.RedirectStandardOutput = $true
     $start.RedirectStandardError = $true
-    foreach ($argument in @('-NoProfile', '-NonInteractive', '-File', $PSCommandPath, '-StateDirectory', $Root, '-Operation', $Action)) {
-        $start.ArgumentList.Add($argument)
-    }
-    if ($Draft) { $start.ArgumentList.Add('-ItemPath'); $start.ArgumentList.Add($Draft) }
-    if ($Group) { $start.ArgumentList.Add('-GroupId'); $start.ArgumentList.Add($Group) }
+    $start.StandardOutputEncoding = [Text.UTF8Encoding]::new($false, $true)
+    $start.StandardErrorEncoding = [Text.UTF8Encoding]::new($false, $true)
+    foreach ($argument in @('workflow') + $Arguments) { $start.ArgumentList.Add($argument) }
     $process = [Diagnostics.Process]::Start($start)
     try {
+        if ($Measure) {
+            $script:ProcessLaunches++
+            if ($Persistence) { $script:PersistenceProcessLaunches++ }
+        }
         $stdout = $process.StandardOutput.ReadToEndAsync()
         $stderr = $process.StandardError.ReadToEndAsync()
         $process.WaitForExit()
-        if ($process.ExitCode -ne 0) { throw $stderr.GetAwaiter().GetResult() }
-        $measurement = ConvertFrom-JsonVerbatim -Text $stdout.GetAwaiter().GetResult()
-        & $script:ValidateWorkflow -Kind coverageMeasurement -Value $measurement
-        $measurement
+        $output = $stdout.GetAwaiter().GetResult()
+        $errors = $stderr.GetAwaiter().GetResult()
+        if ($process.ExitCode -ne 0) { throw "ss-ai workflow operation failed: $errors" }
+        ConvertFrom-JsonVerbatim -Text $output
     } finally { $process.Dispose() }
 }
 
 $StateDirectory = Resolve-PullRequestPath -Path $StateDirectory
-if ($Operation -cne 'Compare') {
-    $timer = [Diagnostics.Stopwatch]::StartNew()
-    $arguments = @{
-        QueuePath = Join-Path $StateDirectory 'queue.json'
-        InventoryPath = Join-Path $StateDirectory 'inventory.json'
-        FileGroupsPath = Join-Path $StateDirectory 'groups.json'
-    }
-    switch ($Operation) {
-        'File' {
-            $assessment = Read-WorkflowData -Kind assessment -Path $ItemPath
-            Set-ReviewFileAssessment @arguments -Assessment $assessment
-        }
-        'Batch' {
-            $batch = ConvertFrom-JsonVerbatim -Text ([IO.File]::ReadAllText($ItemPath))
-            Set-ReviewAssessmentBatch @arguments -ArtifactPath (Join-Path $StateDirectory 'findings.json') -Batch $batch | Out-Null
-        }
-        'Complete' { Complete-ReviewFileGroup -QueuePath $arguments.QueuePath -GroupId $GroupId | Out-Null }
-    }
-    $measurement = [ordered]@{
-        schemaVersion = 1; mode = if ($Operation -ceq 'Batch') { 'Batch' } else { 'PerFile' }
-        processLaunches = 1; journalWrites = $script:JournalWrites
-        schemaValidationMilliseconds = $script:SchemaValidationMilliseconds
-        elapsedMilliseconds = $timer.Elapsed.TotalMilliseconds
-    }
-    & $script:ValidateWorkflow -Kind coverageMeasurement -Value $measurement
-    ConvertTo-JsonText -Value $measurement
-    return
-}
-
 New-Item -ItemType Directory -Path $StateDirectory -ErrorAction Stop | Out-Null
 $measurements = @(foreach ($mode in @('PerFile', 'Batch')) {
     $root = Join-Path $StateDirectory $mode
     [void] [IO.Directory]::CreateDirectory($root)
-    # Match the reported review size; include removal and rename-side entries without real files.
+    # Match the reported review size; removal and rename-side entries need no real files.
     $files = @(foreach ($index in 0..120) {
         @{ path = Join-Path $root "source-$index.rs"; sizeBytes = 1; change = if ($index -eq 0) { 'deleted' } elseif ($index -eq 1) { 'new' } else { 'modified' } }
     })
     $groups = @(for ($offset = 0; $offset -lt $files.Count; $offset += 20) {
-        # Use the permitted file-count bound from ss-review/docs/design.md, "Review coverage".
+        # Match the permitted file-count bound in the review coverage design.
         @{ groupId = "group-$offset"; files = @($files | Select-Object -Skip $offset -First 20) }
     })
-    $arguments = @{ QueuePath = Join-Path $root 'queue.json'; InventoryPath = Join-Path $root 'inventory.json'; FileGroupsPath = Join-Path $root 'groups.json' }
-    Write-PullRequestOutputFileAtomically -Path $arguments.InventoryPath -Content (ConvertTo-JsonText -Value $files)
-    Write-PullRequestOutputFileAtomically -Path $arguments.FileGroupsPath -Content (ConvertTo-JsonText -Value $groups)
-    New-ReviewFileGroupQueue @arguments | Out-Null
-    Write-FindingArtifact -Path (Join-Path $root 'findings.json') -Document (New-FindingArtifactDocument -Kind reviewer -ReviewerId focus-001 -FocusArea benchmark)
-    $script:SchemaValidationMilliseconds = 0.0
-    $script:JournalWrites = 0
-    $childValidation = 0.0
-    $childWrites = 0
-    $processes = 0
+    $inventory = Join-Path $root 'inventory.json'
+    $groupPath = Join-Path $root 'groups.json'
+    $queue = Join-Path $root 'queue.json'
+    $artifactDirectory = Join-Path $root 'findings'
+    Write-PullRequestOutputFileAtomically -Path $inventory -Content (ConvertTo-JsonText -Value $files)
+    Write-PullRequestOutputFileAtomically -Path $groupPath -Content (ConvertTo-JsonText -Value $groups)
+    $null = Invoke-CoverageOperation -Arguments @(
+        'initialize-review-queue', "--queue-path=$queue", "--inventory-path=$inventory", "--file-groups-path=$groupPath"
+    )
+    $artifact = Invoke-CoverageOperation -Arguments @(
+        'initialize-finding', "--output-directory=$artifactDirectory", '--reviewer-id=focus-001',
+        '--focus-area=benchmark', "--queue-path=$queue"
+    )
+    $script:ProcessLaunches = 0
+    $script:PersistenceProcessLaunches = 0
     $timer = [Diagnostics.Stopwatch]::StartNew()
     foreach ($group in $groups) {
-        $claim = Get-NextReviewWorkItem -QueuePath $arguments.QueuePath
+        $claim = Invoke-CoverageOperation -Arguments @('next-review-item', "--queue-path=$queue") -Measure
+        if ($claim.exhausted -or $claim.item.groupId -cne $group.groupId) {
+            throw 'Native claim did not return the expected group.'
+        }
         $assessments = @($claim.item.files | ForEach-Object {
             @{ groupId = $claim.item.groupId; path = $_.path; disposition = 'reviewed'; scope = ''; reason = '' }
         })
@@ -134,31 +100,32 @@ $measurements = @(foreach ($mode in @('PerFile', 'Batch')) {
         if ($mode -ceq 'PerFile') {
             foreach ($assessment in $assessments) {
                 [IO.File]::WriteAllText($draft, (ConvertTo-JsonText -Value $assessment))
-                $result = Invoke-CoverageMeasurementChild -Root $root -Action File -Draft $draft
-                $childValidation += $result.schemaValidationMilliseconds
-                $childWrites += $result.journalWrites
-                $processes += $result.processLaunches
+                $null = Invoke-CoverageOperation -Arguments @(
+                    'set-review-assessment', "--queue-path=$queue", "--inventory-path=$inventory",
+                    "--file-groups-path=$groupPath", "--assessment-path=$draft"
+                ) -Measure -Persistence
             }
-            $result = Invoke-CoverageMeasurementChild -Root $root -Action Complete -Group $group.groupId
+            $null = Invoke-CoverageOperation -Arguments @(
+                'complete-review-group', "--queue-path=$queue", "--group-id=$($group.groupId)"
+            ) -Measure -Persistence
         } else {
             $batch = @{ schemaVersion = 1; snapshot = $claim.snapshot; groupId = $claim.item.groupId; assessments = $assessments; findingIds = @() }
             [IO.File]::WriteAllText($draft, (ConvertTo-JsonText -Value $batch))
-            $result = Invoke-CoverageMeasurementChild -Root $root -Action Batch -Draft $draft
+            $null = Invoke-CoverageOperation -Arguments @(
+                'complete-review-batch', "--queue-path=$queue", "--inventory-path=$inventory",
+                "--file-groups-path=$groupPath", "--artifact-path=$($artifact.artifactPath)", "--batch-path=$draft"
+            ) -Measure -Persistence
         }
-        $childValidation += $result.schemaValidationMilliseconds
-        $childWrites += $result.journalWrites
-        $processes += $result.processLaunches
     }
     $timer.Stop()
     $measurement = [ordered]@{
-        schemaVersion = 1; mode = $mode; processLaunches = $processes
-        journalWrites = $script:JournalWrites + $childWrites
-        schemaValidationMilliseconds = $script:SchemaValidationMilliseconds + $childValidation
+        schemaVersion = 2; mode = $mode; processLaunches = $script:ProcessLaunches
+        persistenceProcessLaunches = $script:PersistenceProcessLaunches
         elapsedMilliseconds = $timer.Elapsed.TotalMilliseconds
     }
-    Assert-ReviewFileGroupQueueComplete -Path $arguments.QueuePath -Group $groups
-    if ((Read-ReviewQueueDocument -Path $arguments.QueuePath).assessments.Count -ne $files.Count) { throw 'Benchmark lost file coverage.' }
-    & $script:ValidateWorkflow -Kind coverageMeasurement -Value $measurement
+    Assert-ReviewFileGroupQueueComplete -Path $queue -Group $groups
+    if ((Read-ReviewQueueDocument -Path $queue).assessments.Count -ne $files.Count) { throw 'Benchmark lost file coverage.' }
+    Assert-WorkflowData -Kind coverageMeasurement -Value $measurement
     $measurement
 })
 ConvertTo-JsonText -Value $measurements
