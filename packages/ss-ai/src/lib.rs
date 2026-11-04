@@ -5,6 +5,7 @@ mod cargo;
 mod command;
 mod context;
 mod git;
+mod workflow;
 
 pub use cargo::run as run_cargo;
 pub use command::{run, run_in};
@@ -14,3 +15,4 @@ pub use ss_ai_review::{
     Clock, Http, HttpResponse, NativeHttp, NativeProcess, Process, ProcessOutput, SystemClock,
     classification,
 };
+pub use workflow::run as run_workflow;

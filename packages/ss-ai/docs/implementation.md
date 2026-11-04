@@ -13,6 +13,8 @@ The nonpublished workspace packages implement the utility-wide [design](design.m
 - `ss-ai-review` owns provider-backed review and reapproval operations.
 - `ss-ai-review-context` owns local captured evidence, bounded queries, saved
   requests, and input diagnostics.
+- `ss-ai-review-workflow` owns local finding artifacts, consolidation, and
+  their workflow plans.
 
 Dependencies flow from command composition toward focused operations and shared
 runtime boundaries, never back to the executable. Review selection, provider
@@ -21,6 +23,8 @@ decisions and transaction boundaries. Assessment owns the independent source
 and judgment model, while review retains provider-backed authority decisions.
 Local context operations do not require provider transport and do not make
 review or authorship judgments.
+Local finding operations use the same runtime transactions as PowerShell
+consumers, so hybrid runs preserve accepted updates and artifact history.
 The Cargo inventory has no provider or
 network dependency. The focused packages support targeted test builds and
 incremental reuse; a cold build of the complete executable still builds its
