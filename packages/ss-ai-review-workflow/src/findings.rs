@@ -531,16 +531,22 @@ fn validate_follow_up(finding: &Value, context: &Value) -> Result<(), AppError> 
     };
     let thread_id = text(follow_up.get("threadId"), "threadId")?;
     let comment_id = text(follow_up.get("commentId"), "commentId")?;
-    let thread = array(context.get("threads"), "threads")?
+    // The capture reader accepts a single object as well as an array.
+    let threads = match context.get("threads") {
+        Some(Value::Array(threads)) => threads.as_slice(),
+        Some(thread @ Value::Object(_)) => std::slice::from_ref(thread),
+        _ => return Err(invalid("Invalid capture threads")),
+    };
+    let thread = threads
         .iter()
-        .find(|thread| thread.get("id").and_then(Value::as_str) == Some(thread_id))
+        .find(|thread| matches_capture_id(thread.get("id"), thread_id))
         .ok_or_else(|| {
             fail(
                 "invalidInput",
                 format!("Follow-up thread '{thread_id}' is absent from capture"),
             )
         })?;
-    if thread.get("openingCommentId").and_then(Value::as_str) != Some(comment_id)
+    if !matches_capture_id(thread.get("openingCommentId"), comment_id)
         || thread.get("kind").and_then(Value::as_str) != Some("text")
     {
         return Err(invalid(
@@ -553,6 +559,15 @@ fn validate_follow_up(finding: &Value, context: &Value) -> Result<(), AppError> 
         }
         Some("gitHub" | "azureDevOps") => Ok(()),
         _ => Err(invalid("Unsupported capture platform")),
+    }
+}
+
+/// Matches authored string identifiers against the capture's provider identifiers.
+fn matches_capture_id(value: Option<&Value>, expected: &str) -> bool {
+    match value {
+        Some(Value::String(value)) => value == expected,
+        Some(Value::Number(value)) => value.to_string() == expected,
+        _ => false,
     }
 }
 
