@@ -776,6 +776,8 @@ fn bound_work_holds_operation_lock_and_snapshots_before_replacement() {
             .unwrap();
     let focus = workspace.path("focus-areas");
     let original = fs::read_to_string(focus.join("focus-rules.md")).unwrap();
+    // The artifact lock pauses initialization after it owns the operation lock;
+    // the finding lock pauses it again after it has snapshotted focus documents.
     let held_artifacts = FileTransaction::open(&focus, &clock).unwrap();
     let findings = workspace.path("artifacts");
     fs::create_dir_all(&findings).unwrap();
@@ -844,6 +846,7 @@ fn bound_work_holds_operation_lock_and_snapshots_before_replacement() {
         drop(held_artifacts);
         worker_retry_tx.send(()).unwrap();
         assert_eq!(worker_events_rx.recv().unwrap(), "contended");
+        // The writer must still be excluded after the snapshot, through publication.
         writer_retry_tx.send(()).unwrap();
         assert_eq!(writer_events_rx.recv().unwrap(), "contended");
         drop(held_finding);

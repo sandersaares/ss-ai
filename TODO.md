@@ -29,10 +29,10 @@ Improvement ideas to revisit when the repo matures.
   their callers migrate while preserving the hybrid workflow's records,
   transaction boundaries and authority gates.
 - **Type ss-review workflow errors.** Replace generic application errors at the
-  finding, plan, audit, projection, anchor, rendering and diff-validation
-  boundaries with typed invariant errors and aggregates, preserving command-level
-  error categories and diagnostics. Complete this when focused tests can
-  distinguish rejected invariants without matching prose.
+  finding, plan, audit, projection, anchor, rendering, diff-validation and focus
+  preparation boundaries with typed invariant errors and aggregates, preserving
+  command-level error categories and diagnostics. Complete this when focused
+  tests can distinguish rejected invariants without matching prose.
 - **Type validated finding artifacts.** Keep validated persisted artifacts
   distinct from raw JSON throughout finding mutations and consolidation.
   Complete this when those operations accept the validated representation rather
@@ -45,6 +45,9 @@ Improvement ideas to revisit when the repo matures.
   and mutually exclusive publication receipts in the internal generation
   record, while preserving the persisted format and its validation boundary.
   Complete this when each transition constructs only coherent state.
+- **Distinguish complete focus maps.** Represent partially validated worker
+  maps separately from completely validated maps. Complete this when final
+  rendering requires the complete representation without changing map records.
 - **Type the cache refresh interval.** Represent the positive refresh interval
   after input validation while retaining the existing CLI rejection behavior
   and upper bound.

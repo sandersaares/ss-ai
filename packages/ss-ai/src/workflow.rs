@@ -9,6 +9,8 @@ use clap::{Args, Parser, Subcommand, ValueEnum};
 use jiff::Timestamp;
 use ohno::AppError;
 use serde_json::json;
+use ss_ai_review_workflow::focus_area_map::MapOperation as NativeMapOperation;
+use ss_ai_review_workflow::focus_area_source::decode_text;
 use ss_ai_review_workflow::{
     anchors, approved, audit, findings, focus_area_expansion, focus_area_generation,
     focus_area_map, focus_cache, instruction_sources, markdown, review_work, worker_input,
@@ -676,66 +678,6 @@ fn focus_input(path: Option<PathBuf>, clock: &dyn Clock) -> Result<Vec<u8>, AppE
         .ok_or_else(|| fail("invalidInput", "Focus-area input is missing"))
 }
 
-/// Decodes the Unicode encodings accepted by the PowerShell workflow reader.
-fn focus_json_text(bytes: &[u8]) -> Result<String, AppError> {
-    let invalid = || fail("invalidInput", "Invalid Unicode focus-area input");
-    let utf32 = bytes
-        .strip_prefix(&[0xff, 0xfe, 0, 0])
-        .map(|bytes| (bytes, true))
-        .or_else(|| {
-            bytes
-                .strip_prefix(&[0, 0, 0xfe, 0xff])
-                .map(|bytes| (bytes, false))
-        });
-    if let Some((bytes, little)) = utf32 {
-        let (words, remainder) = bytes.as_chunks::<4>();
-        if !remainder.is_empty() {
-            return Err(invalid());
-        }
-        return words
-            .iter()
-            .map(|word| {
-                let scalar = if little {
-                    u32::from_le_bytes(*word)
-                } else {
-                    u32::from_be_bytes(*word)
-                };
-                char::from_u32(scalar).ok_or_else(invalid)
-            })
-            .collect();
-    }
-    let utf16 = bytes
-        .strip_prefix(&[0xff, 0xfe])
-        .map(|bytes| (bytes, true))
-        .or_else(|| {
-            bytes
-                .strip_prefix(&[0xfe, 0xff])
-                .map(|bytes| (bytes, false))
-        });
-    if let Some((bytes, little)) = utf16 {
-        let (words, remainder) = bytes.as_chunks::<2>();
-        if !remainder.is_empty() {
-            return Err(invalid());
-        }
-        let words: Vec<_> = words
-            .iter()
-            .map(|word| {
-                if little {
-                    u16::from_le_bytes(*word)
-                } else {
-                    u16::from_be_bytes(*word)
-                }
-            })
-            .collect();
-        return String::from_utf16(&words).map_err(|error| {
-            caused_by("invalidInput", "Invalid UTF-16 focus-area input", error).into()
-        });
-    }
-    let bytes = bytes.strip_prefix(&[0xef, 0xbb, 0xbf]).unwrap_or(bytes);
-    String::from_utf8(bytes.to_vec())
-        .map_err(|error| caused_by("invalidInput", "Invalid UTF-8 focus-area input", error).into())
-}
-
 /// Runs a local workflow command using the supplied external boundaries.
 pub fn run<I, T>(arguments: I, process: &dyn Process, clock: &dyn Clock) -> Result<String, AppError>
 where
@@ -816,23 +758,23 @@ where
                 ExpansionOperation::Register => {
                     let input = focus_input(input_path, clock)?;
                     let input = serde_json::from_str::<focus_area_expansion::ReferenceInput>(
-                        &focus_json_text(&input)?,
+                        &decode_text(&input)?,
                     )
                     .map_err(|error| caused_by("invalidInput", "Invalid reference input", error))?;
                     focus_area_expansion::Operation::Register(input)
                 }
                 ExpansionOperation::Complete | ExpansionOperation::Fail => {
                     let input = focus_input(input_path, clock)?;
-                    let result = serde_json::from_str::<focus_area_expansion::ReferenceResult>(
-                        &focus_json_text(&input)?,
+                    let input = serde_json::from_str::<focus_area_expansion::ReferenceResult>(
+                        &decode_text(&input)?,
                     )
                     .map_err(|error| {
                         caused_by("invalidInput", "Invalid reference result", error)
                     })?;
                     if matches!(operation, ExpansionOperation::Complete) {
-                        focus_area_expansion::Operation::Complete(result)
+                        focus_area_expansion::Operation::Complete(input)
                     } else {
-                        focus_area_expansion::Operation::Fail(result)
+                        focus_area_expansion::Operation::Fail(input)
                     }
                 }
                 ExpansionOperation::Finalize => focus_area_expansion::Operation::Finalize,
@@ -859,13 +801,11 @@ where
             title,
         }) => {
             let operation = match operation {
-                MapOperation::Append => {
-                    focus_area_map::MapOperation::Append(focus_input(input_path, clock)?)
-                }
+                MapOperation::Append => NativeMapOperation::Append(focus_input(input_path, clock)?),
                 MapOperation::Replace => {
-                    focus_area_map::MapOperation::Replace(focus_input(input_path, clock)?)
+                    NativeMapOperation::Replace(focus_input(input_path, clock)?)
                 }
-                MapOperation::Regroup => focus_area_map::MapOperation::Regroup {
+                MapOperation::Regroup => NativeMapOperation::Regroup {
                     category_id: category_id
                         .ok_or_else(|| fail("invalidInput", "Regroup requires category ID"))?,
                     new_category_id: new_category_id

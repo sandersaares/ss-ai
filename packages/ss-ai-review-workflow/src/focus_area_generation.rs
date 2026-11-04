@@ -812,9 +812,9 @@ fn canonical_session(path: &Path) -> Result<PathBuf, AppError> {
     if !path.is_absolute() {
         return Err(fail("invalidInput", "Session path must be absolute"));
     }
-    let canonical = fs::canonicalize(path)?;
-    ensure_existing_directory(&canonical)?;
-    Ok(canonical)
+    let path = fs::canonicalize(path)?;
+    ensure_existing_directory(&path)?;
+    Ok(path)
 }
 
 /// Creates or validates the private generation container.

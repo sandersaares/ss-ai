@@ -18,7 +18,8 @@ use jiff::Timestamp;
 use ohno::AppError;
 use serde_json::{Value, json};
 use ss_ai_review_workflow::{
-    findings, focus_area_expansion, focus_area_generation, worker_input, workflow_plan,
+    findings, focus_area_expansion, focus_area_generation, focus_area_map, focus_area_source,
+    focus_cache, instruction_sources, review_work, worker_input, workflow_plan,
 };
 use ss_ai_runtime::{Clock, FileTransaction, SystemClock, fail};
 
@@ -62,6 +63,18 @@ fn public_records_are_unwind_safe() {
     assert_traits::<focus_area_expansion::Expansion>();
     assert_traits::<focus_area_expansion::Operation>();
     assert_traits::<focus_area_generation::Generation>();
+    assert_traits::<focus_area_map::ValidatedMap>();
+    assert_traits::<focus_area_map::MapOperation>();
+    assert_traits::<focus_area_source::Span>();
+    assert_traits::<focus_area_source::SourceSnapshot>();
+    assert_traits::<focus_cache::CacheOptions<'static>>();
+    assert_traits::<focus_cache::CacheResult>();
+    assert_traits::<focus_cache::ArtifactValidation>();
+    assert_traits::<instruction_sources::InstructionSourceOptions<'static>>();
+    assert_traits::<instruction_sources::RepositoryInstructionSources<'static>>();
+    assert_traits::<instruction_sources::InstructionSourceSnapshot>();
+    assert_traits::<instruction_sources::InstructionSourceRoot>();
+    assert_traits::<review_work::PreparationBinding<'static>>();
     assert_traits::<worker_input::AssignmentOptions<'static>>();
     assert_traits::<workflow_plan::PlanKind>();
     assert_traits::<workflow_plan::Cluster>();

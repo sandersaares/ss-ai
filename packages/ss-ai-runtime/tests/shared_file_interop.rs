@@ -208,7 +208,7 @@ fn shared_owners_coexist_and_exclude_writers() {
 
     // Start the child before taking another lock so no lock descriptor is inherited.
     drop(reader);
-    let mut contender = PowerShell::start(&file.path, "shared-after-signal");
+    let mut contender = PowerShell::start(&file.path, "shared-contender");
     contender.expect("ready");
     let reader = ResourceLock::open(&file.path, LockMode::Shared, &NoWaitClock).unwrap();
     contender.send("acquire");
