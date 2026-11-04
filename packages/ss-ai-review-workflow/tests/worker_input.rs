@@ -9,7 +9,6 @@ use std::cell::Cell;
 use std::collections::BTreeSet;
 use std::fs;
 use std::path::{Path, PathBuf};
-#[cfg(unix)]
 use std::process::Command;
 use std::sync::mpsc::{self, Receiver, Sender};
 use std::thread;
@@ -579,7 +578,33 @@ fn invalid_offsets_changed_bytes_and_attempt_reuse_fail() {
 }
 
 #[test]
+#[cfg_attr(miri, ignore = "requires a separate process and real file locks")]
+#[cfg_attr(mutants, ignore = "the handshake requires all readers to progress")]
 fn concurrent_reads_preserve_diagnostics() {
+    // Other tests launch processes; isolate lock owners from their fork/exec windows.
+    let output = Command::new(std::env::current_exe().unwrap())
+        .args([
+            "--exact",
+            "concurrent_reads_child",
+            "--ignored",
+            "--nocapture",
+        ])
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(String::from_utf8_lossy(&output.stdout).contains("1 passed"));
+}
+
+#[test]
+#[ignore = "launched by the isolated concurrent read test"]
+#[cfg_attr(miri, ignore = "requires real file locks")]
+#[cfg_attr(mutants, ignore = "the handshake requires all readers to progress")]
+fn concurrent_reads_child() {
     let workspace = Workspace::new("concurrent");
     let scope = workspace.put("scope.md", "shared scope");
     let result = create(&workspace, "fileGroups", &scope);

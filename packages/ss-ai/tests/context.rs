@@ -170,6 +170,33 @@ impl Clock for DiagnosticClock<'_> {
     ignore = "the handshake requires both participants to progress"
 )]
 fn concurrent_native_diagnostic_updates_are_not_lost() {
+    // Other tests launch processes; isolate the lock holder from their fork/exec windows.
+    let output = Command::new(std::env::current_exe().unwrap())
+        .args([
+            "--exact",
+            "diagnostic_update_child",
+            "--ignored",
+            "--nocapture",
+        ])
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(String::from_utf8_lossy(&output.stdout).contains("1 passed"));
+}
+
+#[test]
+#[ignore = "launched by the isolated diagnostic overlap test"]
+#[cfg_attr(miri, ignore = "requires a native process and real file locks")]
+#[cfg_attr(
+    mutants,
+    ignore = "the handshake requires both participants to progress"
+)]
+fn diagnostic_update_child() {
     let fixture = Fixture::new();
     page(fixture.native(&[
         "diagnostics",

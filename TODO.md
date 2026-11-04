@@ -20,14 +20,6 @@ Improvement ideas to revisit when the repo matures.
   protection where needed; use disposable checkouts for standalone preparation.
 ## Skill design
 
-- **Detect hard-linked capture lock files.** Reject aliased retained sibling
-  locks before waiting when portable file identity can be checked without
-  interfering with other lock holders. A user decision is required before
-  changing the existing bounded-contention failure category.
-- **Clarify symlinked instruction references.** Decide whether local references
-  inside a symlinked instruction file use the link's directory or the target's
-  directory; this requires a user decision before changing the resolution
-  contract. Document and test the chosen behavior.
 - **Deduplicate the workspace-flag exception list** (`std`, `alloc`,
   `clap/default`, `argh/default`, ...). Currently described twice in
   [`skills/ss-cargo-deps-tidy/SKILL.md`](skills/ss-cargo-deps-tidy/SKILL.md)
@@ -41,6 +33,10 @@ Improvement ideas to revisit when the repo matures.
 
 ## Migration design decisions
 
+- Capture lock files are tool-owned. Detecting externally created hard-link
+  aliases is not needed for the supported lock creation workflow.
+- Instruction reference expansion uses the selected source location and its
+  root mapping. The snapshot producer does not resolve references.
 - The focus-cache refresh interval is checked against its complete positive
   range before its only division in `compute_descriptor`. A separate internal
   type would not remove a repeated check.
