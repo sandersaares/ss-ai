@@ -4,6 +4,13 @@ Improvement ideas to revisit when the repo matures.
 
 ## Tooling
 
+- **Investigate Windows atomic replacement error 1175.** The publication
+  integration test `native_git_assessment_and_guarded_publication_have_exact_effect_boundaries`
+  intermittently fails when `TEMP`, `TMP`, and `TMPDIR` point to a writable
+  directory inside the checkout. The default temporary directory passes.
+  Identify why `ReplaceFileW` cannot remove the destination before changing
+  `packages/ss-ai-runtime/src/file.rs`; error 1175 does not distinguish
+  contention from a permanent permission failure.
 - **Add PSScriptAnalyzer.** Ship a `PSScriptAnalyzerSettings.psd1` and
   a CI lint job for `skills/**/*.ps1`, `evals/**/*.ps1`, and
   `tests/**/*.ps1`. Cheap insurance for a repo whose product is
@@ -29,10 +36,11 @@ Improvement ideas to revisit when the repo matures.
   their callers migrate while preserving the hybrid workflow's records,
   transaction boundaries and authority gates.
 - **Type ss-review workflow errors.** Replace generic application errors at the
-  finding, plan, audit, projection, anchor, rendering, diff-validation and focus
-  preparation boundaries with typed invariant errors and aggregates, preserving
-  command-level error categories and diagnostics. Complete this when focused
-  tests can distinguish rejected invariants without matching prose.
+  finding, plan, audit, projection, anchor, rendering, diff-validation,
+  coverage, worker-input and focus preparation boundaries with typed invariant
+  errors and aggregates, preserving command-level error categories and
+  diagnostics. Complete this when focused tests can distinguish rejected
+  invariants without matching prose.
 - **Type validated finding artifacts.** Keep validated persisted artifacts
   distinct from raw JSON throughout finding mutations and consolidation.
   Complete this when those operations accept the validated representation rather

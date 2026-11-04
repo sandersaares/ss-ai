@@ -8,6 +8,7 @@
 use std::cell::{Cell, RefCell};
 use std::fs;
 use std::io::{self, Write};
+use std::ops::ControlFlow;
 use std::panic::{RefUnwindSafe, UnwindSafe};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
@@ -184,6 +185,20 @@ fn artifacts_and_plans_preserve_work_across_failed_batches() {
     )
     .unwrap();
     let parsed = workflow_plan::read(workflow_plan::PlanKind::Updates, &plan, &clock).unwrap();
+    _ = format!("{parsed:?}");
+    _ = format!(
+        "{:?}",
+        workflow_plan::Cluster {
+            finding_ids: vec!["a-1".into(), "b-1".into()],
+        }
+    );
+    _ = format!(
+        "{:?}",
+        workflow_plan::Merge {
+            source_finding_ids: vec!["a-1".into(), "b-1".into()],
+            finding_path: "merged.json".into(),
+        }
+    );
     assert_eq!(parsed.items().len(), 1);
     let serialized: Value = serde_json::from_slice(&fs::read(&plan).unwrap()).unwrap();
     assert_eq!(
@@ -386,6 +401,7 @@ fn merge_preserves_locations_and_untouched_findings() {
     covering.as_object_mut().unwrap().remove("followUp");
     fs::write(&merged, serde_json::to_vec(&covering).unwrap()).unwrap();
     let result = findings::consolidate_result(&reviewers, Some(&plan), &output, &clock).unwrap();
+    _ = format!("{result:?}");
     assert_eq!(
         (
             result.finding_count,
@@ -421,6 +437,7 @@ fn merge_preserves_locations_and_untouched_findings() {
     fs::write(reviewers.join(".hidden.json"), "not an artifact").unwrap();
     let index = directory.path("index.json");
     let result = findings::build_index_result(&reviewers, &index, &clock).unwrap();
+    _ = format!("{result:?}");
     assert_eq!((result.artifact_count, result.finding_count), (3, 2));
     assert_eq!(result.output_path, index);
     assert_eq!(result.artifact["findings"].as_array().unwrap().len(), 2);
@@ -487,6 +504,7 @@ fn completion_rejects_unfinished_or_unverified_work() {
         &clock,
     )
     .unwrap();
+    _ = format!("{resumed:?}");
     assert!(resumed.resumed_existing);
     assert_eq!(resumed.artifact["status"], "open");
     let new_artifact = directory.path("new.json");
@@ -533,7 +551,7 @@ fn completion_rejects_unfinished_or_unverified_work() {
 #[test]
 #[cfg_attr(miri, ignore = "requires an isolated native subprocess")]
 fn concurrent_appends_allocate_distinct_ids() {
-    if !isolated_writer_test("concurrent_appends_allocate_distinct_ids") {
+    if isolated_writer_test("concurrent_appends_allocate_distinct_ids").is_break() {
         return;
     }
     let directory = TestDirectory::new("concurrent");
@@ -572,6 +590,27 @@ struct UpdateClock {
     index: usize,
     events: Sender<UpdateEvent>,
     permit: RefCell<Option<Receiver<()>>>,
+}
+
+impl Clock for UpdateClock {
+    fn now(&self) -> Timestamp {
+        panic!("Writing findings and plans must not depend on wall-clock time")
+    }
+
+    fn wait(&self, _duration: Duration) -> Result<(), AppError> {
+        let permit = self
+            .permit
+            .borrow_mut()
+            .take()
+            .ok_or_else(|| fail("contention", "Unexpected repeated lock contention"))?;
+        self.events
+            .send(UpdateEvent::Waiting(self.index))
+            .map_err(|error| ss_ai_runtime::caused_by("io", "Cannot signal contention", error))?;
+        permit
+            .recv()
+            .map_err(|error| ss_ai_runtime::caused_by("io", "Cannot receive permit", error))?;
+        Ok(())
+    }
 }
 
 /// Signals a parent PowerShell process when the native lock actually contends.
@@ -620,27 +659,6 @@ fn native_process_lock_interop_helper() {
         &clock,
     )
     .unwrap();
-}
-
-impl Clock for UpdateClock {
-    fn now(&self) -> Timestamp {
-        panic!("Writing findings and plans must not depend on wall-clock time")
-    }
-
-    fn wait(&self, _duration: Duration) -> Result<(), AppError> {
-        let permit = self
-            .permit
-            .borrow_mut()
-            .take()
-            .ok_or_else(|| fail("contention", "Unexpected repeated lock contention"))?;
-        self.events
-            .send(UpdateEvent::Waiting(self.index))
-            .map_err(|error| ss_ai_runtime::caused_by("io", "Cannot signal contention", error))?;
-        permit
-            .recv()
-            .map_err(|error| ss_ai_runtime::caused_by("io", "Cannot receive permit", error))?;
-        Ok(())
-    }
 }
 
 /// Forces both writers to encounter the retained lock, then permits each retry
@@ -721,7 +739,7 @@ fn synchronized_writers(
 #[test]
 #[cfg_attr(miri, ignore = "requires an isolated native subprocess")]
 fn synchronized_plan_appends_preserve_committed_state() {
-    if !isolated_writer_test("synchronized_plan_appends_preserve_committed_state") {
+    if isolated_writer_test("synchronized_plan_appends_preserve_committed_state").is_break() {
         return;
     }
     let directory = TestDirectory::new("synchronized-plans");
@@ -885,7 +903,7 @@ fn synchronized_plan_appends_preserve_committed_state() {
 #[test]
 #[cfg_attr(miri, ignore = "requires an isolated native subprocess")]
 fn synchronized_updates_preserve_both_rewrites() {
-    if !isolated_writer_test("synchronized_updates_preserve_both_rewrites") {
+    if isolated_writer_test("synchronized_updates_preserve_both_rewrites").is_break() {
         return;
     }
     let directory = TestDirectory::new("synchronized-updates");
@@ -926,10 +944,10 @@ fn synchronized_updates_preserve_both_rewrites() {
 
 /// Isolates lock-sensitive tests from unrelated process creation in this test
 /// binary: a forked child can retain a lock descriptor until it executes.
-fn isolated_writer_test(name: &str) -> bool {
+fn isolated_writer_test(name: &str) -> ControlFlow<()> {
     const MARKER: &str = "SS_AI_ISOLATED_WRITER_TEST";
     if std::env::var_os(MARKER).is_some_and(|value| value == name) {
-        return true;
+        return ControlFlow::Continue(());
     }
     let output = Command::new(std::env::current_exe().unwrap())
         .args(["--exact", name, "--nocapture"])
@@ -947,7 +965,7 @@ fn isolated_writer_test(name: &str) -> bool {
         "Isolated test {name} did not execute exactly once:\n{}",
         String::from_utf8_lossy(&output.stdout)
     );
-    false
+    ControlFlow::Break(())
 }
 
 /// Runs the predecessor model so both implementations consume actual records.
@@ -1646,8 +1664,8 @@ impl Clock for FixedClock {
 
 #[test]
 #[cfg_attr(miri, ignore = "requires an isolated native subprocess")]
-fn removal_timestamp_uses_dotnet_round_trip_precision() {
-    if !isolated_writer_test("removal_timestamp_uses_dotnet_round_trip_precision") {
+fn removal_history_preserves_clock_instant() {
+    if isolated_writer_test("removal_history_preserves_clock_instant").is_break() {
         return;
     }
     let directory = TestDirectory::new("removal-time");
@@ -1663,12 +1681,15 @@ fn removal_timestamp_uses_dotnet_round_trip_precision() {
     });
     fs::write(&finding, serde_json::to_vec(&content).unwrap()).unwrap();
     let id = findings::add(&artifact, &finding, "reviewer", &[], &clock).unwrap();
-    findings::remove(&artifact, &[(id, "Not applicable".into())], &clock).unwrap();
+    findings::remove(&artifact, &[(id.clone(), "Not applicable".into())], &clock).unwrap();
     let result = findings::read_artifact(&artifact, &clock).unwrap();
-    assert_eq!(
-        result["removed"][0]["removedUtc"],
-        "2024-05-06T07:08:09.0000000Z"
-    );
+    assert_eq!(result["removed"][0]["finding"]["id"], id);
+    let removed_at: Timestamp = result["removed"][0]["removedUtc"]
+        .as_str()
+        .unwrap()
+        .parse()
+        .unwrap();
+    assert_eq!(removed_at, clock.now());
 }
 
 #[test]

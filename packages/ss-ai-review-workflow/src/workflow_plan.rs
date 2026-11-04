@@ -1,5 +1,6 @@
 //! Typed authoring and validation for finding workflow plans.
 
+use std::any::type_name;
 use std::collections::HashSet;
 use std::fmt;
 use std::path::{Component, Path, PathBuf};
@@ -44,7 +45,7 @@ impl PlanKind {
 }
 
 /// A candidate group whose members may overlap other candidate groups.
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[derive(Clone, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 #[expect(
     clippy::exhaustive_structs,
@@ -55,8 +56,16 @@ pub struct Cluster {
     pub finding_ids: Vec<String>,
 }
 
+impl fmt::Debug for Cluster {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct(type_name::<Self>())
+            .field("finding_count", &self.finding_ids.len())
+            .finish()
+    }
+}
+
 /// A merge group and the authored replacement finding.
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[derive(Clone, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 #[expect(
     clippy::exhaustive_structs,
@@ -67,6 +76,15 @@ pub struct Merge {
     pub source_finding_ids: Vec<String>,
     /// Path to authored finding content.
     pub finding_path: String,
+}
+
+impl fmt::Debug for Merge {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct(type_name::<Self>())
+            .field("source_finding_count", &self.source_finding_ids.len())
+            .field("finding_path", &self.finding_path)
+            .finish()
+    }
 }
 
 /// One replacement finding.
@@ -165,10 +183,19 @@ pub enum PlanItem {
 }
 
 /// Validated plan contents, including an explicitly empty list.
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Eq, PartialEq)]
 pub struct Plan {
     kind: PlanKind,
     items: Vec<PlanItem>,
+}
+
+impl fmt::Debug for Plan {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct(type_name::<Self>())
+            .field("kind", &self.kind)
+            .field("item_count", &self.items.len())
+            .finish()
+    }
 }
 
 impl Plan {

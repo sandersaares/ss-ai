@@ -134,6 +134,64 @@ BeforeAll {
             }
         }
     }
+
+    # Coordinates native writers through the injected contention clock while holding the PowerShell lock.
+    function Invoke-ContendedNativeFindingWriter {
+        param(
+            [string] $ArtifactPath,
+            [string[]] $FindingPath,
+            [string] $Executable
+        )
+
+        if ([string]::IsNullOrWhiteSpace($Executable) -or -not [IO.File]::Exists($Executable)) {
+            throw 'SS_AI_FINDING_TEST_EXECUTABLE must name the prepared native finding test executable.'
+        }
+        $processes = [Collections.Generic.List[object]]::new()
+        $lock = Open-PullRequestFileLock -Path $ArtifactPath
+        try {
+            foreach ($finding in $FindingPath) {
+                $start = [Diagnostics.ProcessStartInfo]::new($Executable)
+                $start.WorkingDirectory = Split-Path -Parent $PSScriptRoot
+                $start.UseShellExecute = $false
+                $start.RedirectStandardInput = $true
+                $start.RedirectStandardOutput = $true
+                $start.RedirectStandardError = $true
+                foreach ($argument in @('native_process_lock_interop_helper', '--exact', '--nocapture')) {
+                    $start.ArgumentList.Add($argument)
+                }
+                $start.Environment['SS_AI_TEST_INTEROP_ARTIFACT'] = $ArtifactPath
+                $start.Environment['SS_AI_TEST_INTEROP_FINDING'] = $finding
+                $process = [Diagnostics.Process]::Start($start)
+                $processes.Add(@{ process = $process; output = $process.StandardOutput.ReadToEndAsync() })
+            }
+            foreach ($item in $processes) {
+                $diagnostics = [Collections.Generic.List[string]]::new()
+                while ($null -ne ($line = $item.process.StandardError.ReadLine())) {
+                    if ($line -ceq 'lock-contended') { break }
+                    $diagnostics.Add($line)
+                }
+                if ($null -eq $line) { throw "Native child exited before lock contention: $($diagnostics -join [Environment]::NewLine)" }
+            }
+            $lock.Dispose()
+            foreach ($item in $processes) {
+                $item.process.StandardInput.WriteLine('retry')
+                $item.process.StandardInput.Close()
+                $errors = $item.process.StandardError.ReadToEnd()
+                $item.process.WaitForExit()
+                $item.process.ExitCode | Should -Be 0 -Because "$errors $($item.output.GetAwaiter().GetResult())"
+            }
+        } finally {
+            $lock.Dispose()
+            foreach ($item in $processes) { $item.process.StandardInput.Close() }
+            foreach ($item in $processes) {
+                if (-not $item.process.HasExited) {
+                    try { $item.process.Kill($true) } catch [InvalidOperationException] { }
+                }
+                $item.process.WaitForExit()
+                $item.process.Dispose()
+            }
+        }
+    }
 }
 
 Describe 'Shared workflow file transactions' {
@@ -237,55 +295,7 @@ Describe 'Shared workflow file transactions' {
             Write-PullRequestOutputFile -Path $findingPath -Content (ConvertTo-JsonText -Value $finding)
             $findingPath
         })
-        # The native helper signals from its injected contention clock, not a
-        # PowerShell Start-Sleep mock that cannot observe the native process.
-        $nativeTestExecutable = $env:SS_AI_FINDING_TEST_EXECUTABLE
-        if ([string]::IsNullOrWhiteSpace($nativeTestExecutable) -or
-            -not [IO.File]::Exists($nativeTestExecutable)) {
-            throw 'SS_AI_FINDING_TEST_EXECUTABLE must name the prepared native finding test executable.'
-        }
-        $processes = [Collections.Generic.List[object]]::new()
-        $lock = Open-PullRequestFileLock -Path $path
-        try {
-            foreach ($findingPath in $findings) {
-                $start = [Diagnostics.ProcessStartInfo]::new($nativeTestExecutable)
-                $start.WorkingDirectory = Split-Path -Parent $PSScriptRoot
-                $start.UseShellExecute = $false
-                $start.RedirectStandardInput = $true
-                $start.RedirectStandardOutput = $true
-                $start.RedirectStandardError = $true
-                foreach ($argument in @('native_process_lock_interop_helper', '--exact', '--nocapture')) {
-                    $start.ArgumentList.Add($argument)
-                }
-                $start.Environment['SS_AI_TEST_INTEROP_ARTIFACT'] = $path
-                $start.Environment['SS_AI_TEST_INTEROP_FINDING'] = $findingPath
-                $process = [Diagnostics.Process]::Start($start)
-                $processes.Add(@{ process = $process; output = $process.StandardOutput.ReadToEndAsync() })
-            }
-            foreach ($item in $processes) {
-                $diagnostics = [Collections.Generic.List[string]]::new()
-                while ($null -ne ($line = $item.process.StandardError.ReadLine())) {
-                    if ($line -ceq 'lock-contended') { break }
-                    $diagnostics.Add($line)
-                }
-                if ($null -eq $line) { throw "Native child exited before lock contention: $($diagnostics -join [Environment]::NewLine)" }
-            }
-            $lock.Dispose()
-            foreach ($item in $processes) {
-                $item.process.StandardInput.WriteLine('retry')
-                $item.process.StandardInput.Close()
-                $errors = $item.process.StandardError.ReadToEnd()
-                $item.process.WaitForExit()
-                $item.process.ExitCode | Should -Be 0 -Because "$errors $($item.output.GetAwaiter().GetResult())"
-            }
-        } finally {
-            $lock.Dispose()
-            foreach ($item in $processes) { $item.process.StandardInput.Close() }
-            foreach ($item in $processes) {
-                $item.process.WaitForExit()
-                $item.process.Dispose()
-            }
-        }
+        Invoke-ContendedNativeFindingWriter -ArtifactPath $path -FindingPath $findings -Executable $env:SS_AI_FINDING_TEST_EXECUTABLE
         $saved = Read-FindingArtifact -Path $path
         @($saved.findings.title) | Should -Be @('alpha', 'beta', 'gamma')
         @($saved.findings.id | Sort-Object -Unique).Count | Should -Be $findings.Count

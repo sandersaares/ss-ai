@@ -27,6 +27,7 @@ $library = Join-Path $PSScriptRoot '../../../skills/ss-review/scripts/lib'
 . (Join-Path $library 'PullRequestModel.ps1')
 . (Join-Path $library 'WorkflowData.ps1')
 . (Join-Path $library 'FindingModel.ps1')
+. (Join-Path $library 'FindingIdentifiers.ps1')
 . (Join-Path $library 'ReviewWork.ps1')
 
 switch -CaseSensitive ($CommandName) {

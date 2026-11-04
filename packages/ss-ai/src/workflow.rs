@@ -1,6 +1,8 @@
 //! CLI translation for local review workflow operations.
 
+use std::any::type_name;
 use std::ffi::OsString;
+use std::fmt::{self, Debug, Formatter};
 use std::path::{PathBuf, absolute};
 use std::time::Duration;
 
@@ -244,7 +246,7 @@ enum ReviewCommand {
 }
 
 /// Selects worker input and rendering operations.
-#[derive(Debug, Subcommand)]
+#[derive(Subcommand)]
 enum WorkerCommand {
     /// Prepare a bounded worker assignment from installed skill assets.
     WorkerAssignment {
@@ -297,8 +299,26 @@ enum WorkerCommand {
     },
 }
 
+impl Debug for WorkerCommand {
+    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
+        let variant = match self {
+            Self::WorkerAssignment { .. } => "WorkerAssignment",
+            Self::WorkerDocument { .. } => "WorkerDocument",
+            Self::Render { .. } => "Render",
+            Self::RenderMarkdownFiles { .. } => "RenderMarkdownFiles",
+            Self::ResolveAnchor { .. } => "ResolveAnchor",
+        };
+        let mut debug = f.debug_struct(type_name::<Self>());
+        debug.field("variant", &variant);
+        if let Self::WorkerAssignment { phase, .. } = self {
+            debug.field("phase", phase);
+        }
+        debug.finish_non_exhaustive()
+    }
+}
+
 /// Selects audit and approved-set operations.
-#[derive(Debug, Subcommand)]
+#[derive(Subcommand)]
 enum AuditCommand {
     /// Append an audit decision batch.
     AuditAddDecisions {
@@ -383,7 +403,7 @@ enum AuditCommand {
 }
 
 /// Selects plan and finding artifact operations.
-#[derive(Debug, Subcommand)]
+#[derive(Subcommand)]
 enum FindingCommand {
     /// Create an empty workflow plan.
     PlanInitialize {
@@ -602,6 +622,231 @@ enum ApprovedCommand {
         #[arg(long)]
         request_path: PathBuf,
     },
+}
+
+impl Debug for AuditCommand {
+    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
+        let mut debug = f.debug_struct(type_name::<Self>());
+        match self {
+            Self::AuditAddDecisions {
+                path,
+                plan_path,
+                audit_feedback_path,
+                policy_classification,
+                recorded_utc,
+            } => {
+                debug
+                    .field("operation", &"AuditAddDecisions")
+                    .field("path", path)
+                    .field("plan_path", plan_path)
+                    .field("audit_feedback_path", audit_feedback_path)
+                    .field("policy_classification", policy_classification)
+                    .field("recorded_utc", recorded_utc);
+            }
+            Self::AuditPollClassification {
+                artifact_path,
+                decisions_path,
+            } => {
+                debug
+                    .field("operation", &"AuditPollClassification")
+                    .field("artifact_path", artifact_path)
+                    .field("decisions_path", decisions_path);
+            }
+            Self::AuditAddFeedback {
+                path,
+                findings_path,
+                response_id,
+                finding_id,
+                text_path,
+            } => {
+                debug
+                    .field("operation", &"AuditAddFeedback")
+                    .field("path", path)
+                    .field("findings_path", findings_path)
+                    .field("response_id", response_id)
+                    .field("finding_id", finding_id)
+                    .field("text_path", text_path);
+            }
+            Self::AuditGetFeedback { path, finding_id } => {
+                debug
+                    .field("operation", &"AuditGetFeedback")
+                    .field("path", path)
+                    .field("finding_id", finding_id);
+            }
+            Self::AuditTestMergeApproval {
+                path,
+                pull_request_url,
+                source_commit,
+            } => {
+                debug
+                    .field("operation", &"AuditTestMergeApproval")
+                    .field("path", path)
+                    .field("pull_request_url", pull_request_url)
+                    .field("source_commit", source_commit);
+            }
+            Self::AuditSetMergeApproval {
+                path,
+                context_path,
+                approve,
+                carry_forward,
+                previous_context_path,
+            } => {
+                debug
+                    .field("operation", &"AuditSetMergeApproval")
+                    .field("path", path)
+                    .field("context_path", context_path)
+                    .field("approve", approve)
+                    .field("carry_forward", carry_forward)
+                    .field("previous_context_path", previous_context_path);
+            }
+            Self::AuditSetMergeApprovalValues {
+                path,
+                context_path,
+                approve,
+                carry_forward,
+                previous_context_path,
+            } => {
+                debug
+                    .field("operation", &"AuditSetMergeApprovalValues")
+                    .field("path", path)
+                    .field("context_path", context_path)
+                    .field("approve", approve)
+                    .field("carry_forward", carry_forward)
+                    .field("previous_context_path", previous_context_path);
+            }
+            Self::Approved { command } => {
+                debug
+                    .field("operation", &"Approved")
+                    .field("command", command);
+            }
+        }
+        debug.finish()
+    }
+}
+
+impl Debug for FindingCommand {
+    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
+        let mut debug = f.debug_struct(type_name::<Self>());
+        match self {
+            Self::PlanInitialize { kind, path } => {
+                debug
+                    .field("operation", &"PlanInitialize")
+                    .field("kind", kind)
+                    .field("path", path);
+            }
+            Self::PlanAppend {
+                kind,
+                path,
+                item_path,
+                replace_index,
+            } => {
+                debug
+                    .field("operation", &"PlanAppend")
+                    .field("kind", kind)
+                    .field("path", path)
+                    .field("item_path", item_path)
+                    .field("replace_index", replace_index);
+            }
+            Self::InitializeFinding {
+                output_directory,
+                reviewer_id,
+                focus_area,
+                force,
+                resume,
+                queue_path,
+            } => {
+                debug
+                    .field("operation", &"InitializeFinding")
+                    .field("output_directory", output_directory)
+                    .field("reviewer_id", reviewer_id)
+                    .field("focus_area", focus_area)
+                    .field("force", force)
+                    .field("resume", resume)
+                    .field("queue_path", queue_path);
+            }
+            Self::AddFinding {
+                artifact_path,
+                finding_path,
+                context_path,
+                origin,
+                source_id,
+            } => {
+                debug
+                    .field("operation", &"AddFinding")
+                    .field("artifact_path", artifact_path)
+                    .field("finding_path", finding_path)
+                    .field("context_path", context_path)
+                    .field("origin", origin)
+                    .field("source_id_count", &source_id.len());
+            }
+            Self::CompleteFinding {
+                artifact_path,
+                queue_path,
+            } => {
+                debug
+                    .field("operation", &"CompleteFinding")
+                    .field("artifact_path", artifact_path)
+                    .field("queue_path", queue_path);
+            }
+            Self::ValidateCandidates { path, index_path } => {
+                debug
+                    .field("operation", &"ValidateCandidates")
+                    .field("path", path)
+                    .field("index_path", index_path);
+            }
+            Self::ValidateFindings { path, reviewer_id } => {
+                debug
+                    .field("operation", &"ValidateFindings")
+                    .field("path", path)
+                    .field("reviewer_id_count", &reviewer_id.len());
+            }
+            Self::FindingIndex {
+                reviewer_directory,
+                output_path,
+            } => {
+                debug
+                    .field("operation", &"FindingIndex")
+                    .field("reviewer_directory", reviewer_directory)
+                    .field("output_path", output_path);
+            }
+            Self::ConsolidateFindings {
+                reviewer_directory,
+                output_path,
+                plan_path,
+            } => {
+                debug
+                    .field("operation", &"ConsolidateFindings")
+                    .field("reviewer_directory", reviewer_directory)
+                    .field("output_path", output_path)
+                    .field("plan_path", plan_path);
+            }
+            Self::UpdateFinding {
+                artifact_path,
+                finding_id,
+                finding_path,
+                plan_path,
+            } => {
+                debug
+                    .field("operation", &"UpdateFinding")
+                    .field("artifact_path", artifact_path)
+                    .field("finding_id", finding_id)
+                    .field("finding_path", finding_path)
+                    .field("plan_path", plan_path);
+            }
+            Self::RemoveFinding {
+                artifact_path,
+                plan_path,
+                now_utc,
+            } => {
+                debug
+                    .field("operation", &"RemoveFinding")
+                    .field("artifact_path", artifact_path)
+                    .field("plan_path", plan_path)
+                    .field("now_utc", now_utc);
+            }
+        }
+        debug.finish()
+    }
 }
 
 /// Matches the plan kind names used by existing callers.
@@ -1442,5 +1687,47 @@ impl Clock for FixedTimestampClock<'_> {
 
     fn wait(&self, duration: Duration) -> Result<(), AppError> {
         self.clock.wait(duration)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use clap::Parser;
+
+    use super::WorkflowCli;
+
+    /// Formatting collection-bearing commands must not panic.
+    #[test]
+    fn workflow_command_debug_smoke() {
+        for arguments in [
+            vec![
+                "ss-ai workflow",
+                "add-finding",
+                "--artifact-path",
+                "artifact.json",
+                "--finding-path",
+                "finding.json",
+                "--origin",
+                "reviewer",
+                "--source-id",
+                "first",
+                "--source-id",
+                "second",
+            ],
+            vec![
+                "ss-ai workflow",
+                "validate-findings",
+                "--path",
+                "reviewers",
+                "--reviewer-id",
+                "first",
+                "--reviewer-id",
+                "second",
+            ],
+        ] {
+            let cli = WorkflowCli::try_parse_from(arguments).unwrap();
+            _ = format!("{:?}", cli.command);
+            _ = format!("{cli:?}");
+        }
     }
 }

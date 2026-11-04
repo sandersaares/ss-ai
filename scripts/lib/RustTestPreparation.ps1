@@ -108,10 +108,14 @@ function Get-RustTestIdentity {
             }
         }
 
-        # Manifest parser tests embed these seeds; generated fuzz corpora are not build inputs.
+        # These inputs are embedded outside scanned packages; generated corpora are not build inputs.
         foreach ($seed in @(
+            'packages/ss-ai-assessment-fuzz/seeds/completion.txt',
+            'packages/ss-ai-assessment-fuzz/seeds/discussion-completion.txt',
             'packages/ss-ai-cargo-fuzz/seeds/dependencies.toml',
-            'packages/ss-ai-cargo-fuzz/seeds/malformed.toml'
+            'packages/ss-ai-cargo-fuzz/seeds/malformed.toml',
+            'tests/fixtures/ss-review-query-capture.json',
+            'tests/fixtures/ss-review-query-expected.json'
         )) {
             $path = Join-Path $RepositoryRoot $seed
             if (Test-Path -LiteralPath $path -PathType Leaf) {
@@ -472,6 +476,42 @@ function New-RustTestCargoStartInfo {
     return $start
 }
 
+# Stream Cargo's output without letting either redirected pipe block the other.
+function Write-RustTestCargoOutput {
+    param($StandardOutput, $StandardError)
+
+    # Stdout retains native pipeline line semantics; diagnostics retain their exact text.
+    $stdout = $StandardOutput.ReadLineAsync()
+    # A small buffer allows diagnostics to flow even before a newline or process exit.
+    $errorBuffer = [char[]]::new(4096)
+    $stderr = $StandardError.ReadAsync($errorBuffer, 0, $errorBuffer.Length)
+    while ($null -ne $stdout -or $null -ne $stderr) {
+        $pending = @($stdout, $stderr | Where-Object { $null -ne $_ })
+        [void][Threading.Tasks.Task]::WaitAny([Threading.Tasks.Task[]] $pending)
+
+        if ($null -ne $stdout -and $stdout.IsCompleted) {
+            $line = $stdout.GetAwaiter().GetResult()
+            if ($null -eq $line) {
+                $stdout = $null
+            } else {
+                Write-Output $line
+                $stdout = $StandardOutput.ReadLineAsync()
+            }
+        }
+
+        if ($null -ne $stderr -and $stderr.IsCompleted) {
+            $count = $stderr.GetAwaiter().GetResult()
+            if ($count -eq 0) {
+                $stderr = $null
+            } else {
+                [Console]::Error.Write($errorBuffer, 0, $count)
+                [Console]::Error.Flush()
+                $stderr = $StandardError.ReadAsync($errorBuffer, 0, $errorBuffer.Length)
+            }
+        }
+    }
+}
+
 # Keep native output and exit status separate so execution can aggregate test and doctest failures.
 function Invoke-RustTestCargo {
     param([string[]] $ArgumentList, [string] $PrerequisitePath)
@@ -480,16 +520,8 @@ function Invoke-RustTestCargo {
     $process.StartInfo = New-RustTestCargoStartInfo -ArgumentList $ArgumentList -PrerequisitePath $PrerequisitePath
     try {
         if (-not $process.Start()) { throw 'Could not start Cargo tests.' }
-        # Drain both pipes concurrently: either stream can exceed the operating system pipe buffer.
-        $stdout = $process.StandardOutput.ReadToEndAsync()
-        $stderr = $process.StandardError.ReadToEndAsync()
+        Write-RustTestCargoOutput -StandardOutput $process.StandardOutput -StandardError $process.StandardError
         $process.WaitForExit()
-        [Console]::Error.Write($stderr.GetAwaiter().GetResult())
-        $output = $stdout.GetAwaiter().GetResult()
-        if ($output.Length -gt 0) {
-            # Native pipeline output contains lines, not a trailing synthetic empty record.
-            ($output -replace '\r?\n$', '') -split '\r?\n'
-        }
         $global:LASTEXITCODE = $process.ExitCode
     } finally {
         $process.Dispose()
