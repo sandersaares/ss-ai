@@ -128,9 +128,12 @@ the same pull request and reuses matching classification decisions. The JSON
 result contains bounded counts and change summaries. Creation does not publish
 comments or change approvals.
 
-`ss-ai context set-authorship` records a classification batch against a reading
-snapshot, using either `--classification` or `--classification-path`. It leaves
-the capture itself unchanged.
+`ss-ai context set-authorship` records a classification batch using either
+`--classification` or `--classification-path`. The reading snapshot is the
+`snapshotId` returned by the bounded reader for the effective capture read by
+the caller; pass that exact value as `--snapshot-id`. The
+[classification recipe](../../skills/ss-review/pwsh-calls/classify-comment-authorship.md)
+describes the batch and read-then-write process. The capture itself remains unchanged.
 
 ```powershell
 #Requires -Version 7.6

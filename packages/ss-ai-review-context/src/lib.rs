@@ -5,6 +5,7 @@
 mod authorship;
 mod capture;
 mod diagnostics;
+mod error;
 mod json;
 mod producer;
 mod query;

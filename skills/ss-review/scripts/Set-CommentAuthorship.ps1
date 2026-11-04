@@ -47,10 +47,22 @@ if (-not $PSBoundParameters.ContainsKey('Classification') -and -not $PSBoundPara
     throw 'Supply the classifications with -Classification or -ClassificationPath.'
 }
 
+# Resolve provider syntax before crossing the native process boundary.
+function Resolve-CaptureFileSystemPath {
+    param([string] $Path)
+    $provider = $null
+    $drive = $null
+    $resolved = $ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath($Path, [ref] $provider, [ref] $drive)
+    if ($provider.Name -ne 'FileSystem') { throw "Expected a filesystem path: $Path" }
+    $resolved
+}
+
 $arguments = [Collections.Generic.List[string]]::new()
 $arguments.Add('set-authorship')
-$arguments.Add("--path=$Path")
+$arguments.Add("--path=$(Resolve-CaptureFileSystemPath -Path $Path)")
 $arguments.Add("--snapshot-id=$SnapshotId")
 if ($PSBoundParameters.ContainsKey('Classification')) { $arguments.Add("--classification=$Classification") }
-if ($PSBoundParameters.ContainsKey('ClassificationPath')) { $arguments.Add("--classification-path=$ClassificationPath") }
+if ($PSBoundParameters.ContainsKey('ClassificationPath')) {
+    $arguments.Add("--classification-path=$(Resolve-CaptureFileSystemPath -Path $ClassificationPath)")
+}
 Invoke-NativeCaptureContext -Arguments $arguments.ToArray()

@@ -1,5 +1,6 @@
 //! Provider-backed review and reapproval operations for skills.
 #![cfg_attr(docsrs, feature(doc_cfg))]
+#![cfg_attr(coverage_nightly, feature(coverage_attribute))]
 
 mod ado_approval;
 mod ado_capture;
@@ -40,4 +41,5 @@ pub use ss_ai_runtime::{
 pub use transport::{Http, HttpResponse, NativeHttp};
 
 #[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
 mod tests;

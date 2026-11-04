@@ -26,6 +26,17 @@ Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 $PSNativeCommandUseErrorActionPreference = $true
 
+# Translate PowerShell drive and location syntax before passing paths to native code.
+function Resolve-ContextFileSystemPath {
+    param([AllowEmptyString()][string] $Path)
+    if ($Path -ceq '') { return '' }
+    $provider = $null
+    $drive = $null
+    $resolved = $ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath($Path, [ref] $provider, [ref] $drive)
+    if ($provider.Name -ne 'FileSystem') { throw "Expected a filesystem path: $Path" }
+    $resolved
+}
+
 # Match the query excerpt limit because parser errors can include captured evidence.
 function Get-NativeContextErrorExcerpt {
     param([AllowEmptyString()][string] $Text)
@@ -67,17 +78,31 @@ function Invoke-NativeContext {
 }
 
 $arguments = [Collections.Generic.List[string]]::new()
-foreach ($argument in @('prepare', "--path=$Path", "--request-path=$RequestPath",
-    "--diagnostics-path=$DiagnosticsPath", "--query=$Query", "--scope=$Scope", "--page-size=$PageSize")) {
+foreach ($argument in @('prepare', "--path=$(Resolve-ContextFileSystemPath -Path $Path)",
+    "--request-path=$(Resolve-ContextFileSystemPath -Path $RequestPath)",
+    "--diagnostics-path=$(Resolve-ContextFileSystemPath -Path $DiagnosticsPath)",
+    "--query=$Query", "--scope=$Scope", "--page-size=$PageSize")) {
     $arguments.Add($argument)
 }
 foreach ($entry in @(
     @('Field', 'field'), @('Kind', 'kind'), @('Resolution', 'resolution'),
     @('ThreadId', 'thread-id'), @('CommentId', 'comment-id'), @('Authorship', 'authorship'),
-    @('Text', 'text'), @('TextPath', 'text-path'), @('ComparePath', 'compare-path')
+    @('Text', 'text')
 )) {
     if ($PSBoundParameters.ContainsKey($entry[0])) {
         $arguments.Add("--$($entry[1])=$($PSBoundParameters[$entry[0]])")
+    }
+}
+foreach ($entry in @(@('TextPath', 'text-path'), @('ComparePath', 'compare-path'))) {
+    if ($PSBoundParameters.ContainsKey($entry[0])) {
+        $value = $PSBoundParameters[$entry[0]]
+        # Native preparation records the conflicting-selector failure in diagnostics.
+        if ($entry[0] -eq 'TextPath' -and $PSBoundParameters.ContainsKey('Text')) {
+            $resolved = $value
+        } else {
+            $resolved = Resolve-ContextFileSystemPath -Path $value
+        }
+        $arguments.Add("--$($entry[1])=$resolved")
     }
 }
 if ($PSBoundParameters.ContainsKey('Files') -and $Files.Count -eq 0) {

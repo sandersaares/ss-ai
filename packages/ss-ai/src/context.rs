@@ -14,8 +14,8 @@ use ohno::AppError;
 use serde_json::{Value, json};
 use ss_ai_review::{capture_target, collect_capture};
 use ss_ai_review_context::{
-    increment_diagnostic, normalize_options, prepare, prepare_capture, prepare_failure, query,
-    read_capture, read_diagnostics, read_saved, write_comment_authorship,
+    decode_file_text, increment_diagnostic, normalize_options, prepare, prepare_capture,
+    prepare_failure, query, read_capture, read_diagnostics, read_saved, write_comment_authorship,
 };
 use ss_ai_runtime::{Clock, caused_by, fail};
 
@@ -273,7 +273,7 @@ where
             classification_path,
         } => {
             let text = match classification_path {
-                Some(path) => read_utf8(&path)?,
+                Some(path) => decode_file_text(&fs::read(path)?),
                 None => classification.unwrap_or_default(),
             };
             let value: Value = serde_json::from_str(&text)

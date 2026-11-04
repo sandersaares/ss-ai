@@ -170,6 +170,20 @@ Describe 'Saved PR query requests' {
         Write-PullRequestOutputFileAtomically -Path $script:Capture -Content (ConvertTo-JsonText -Value $script:Document)
     }
 
+    It 'records a conflicting text selector before resolving its non-filesystem path' {
+        $result = Invoke-QueryExecutable -ScriptName New-PullRequestQueryRequest.ps1 -Arguments @(
+            '-Path', $script:Capture, '-RequestPath', $script:Request, '-DiagnosticsPath', $script:Diagnostics,
+            '-Query', 'search', '-Text', 'widget', '-TextPath', 'Env:PATH'
+        )
+        $result.exitCode | Should -Not -Be 0
+        $result.output | Should -BeNullOrEmpty
+        $result.error | Should -Match 'Query preparation failed'
+        Test-Path -LiteralPath $script:Request | Should -BeFalse
+        $diagnostics = Get-Content -Raw -LiteralPath $script:Diagnostics | ConvertFrom-Json
+        $diagnostics.counts.setupCalls | Should -Be 1
+        $diagnostics.counts.malformedQueryFailures | Should -Be 1
+    }
+
     It 'recovers from using the request output as the capture input by correcting only the input path' {
         $captureBefore = [IO.File]::ReadAllBytes($script:Capture)
         $failed = Invoke-QueryExecutable -ScriptName New-PullRequestQueryRequest.ps1 -Arguments @(
@@ -885,6 +899,16 @@ Describe 'Bounded query executable' {
             '-FilesJson', $json, '-FilesPath', $filesPath
         )
 
+        $result.exitCode | Should -Not -Be 0
+        $result.output | Should -BeNullOrEmpty
+        $result.error | Should -Match 'Supply either -FilesJson or -FilesPath, not both'
+    }
+
+    It 'rejects conflicting file selectors before resolving a non-filesystem path' {
+        $result = Invoke-QueryExecutable @(
+            '-Path', $script:CapturePath, '-Query', 'threads',
+            '-FilesJson', '["src/a.rs"]', '-FilesPath', 'Env:PATH'
+        )
         $result.exitCode | Should -Not -Be 0
         $result.output | Should -BeNullOrEmpty
         $result.error | Should -Match 'Supply either -FilesJson or -FilesPath, not both'

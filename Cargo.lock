@@ -1566,6 +1566,7 @@ dependencies = [
  "serde_json",
  "sha2",
  "ss-ai-runtime",
+ "static_assertions",
 ]
 
 [[package]]
