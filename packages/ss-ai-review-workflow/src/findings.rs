@@ -118,14 +118,7 @@ pub fn validate_artifacts(
             let entry_path = entry.path();
             let name = entry.file_name();
             let name = name.to_string_lossy();
-            if hidden_entry(&entry)?
-                || (entry_path.is_file()
-                    && (name
-                        .get(name.len().saturating_sub(".json.lock".len())..)
-                        .is_some_and(|suffix| suffix.eq_ignore_ascii_case(".json.lock"))
-                        || powershell_staging_name(&name)
-                        || native_staging_name(&name)))
-            {
+            if hidden_entry(&entry)? || auxiliary_artifact_entry(&entry)? {
                 continue;
             }
             if !entry_path.is_file()
@@ -713,6 +706,26 @@ fn validate_index(index: &Value) -> Result<HashSet<String>, AppError> {
         }
     }
     Ok(ids)
+}
+
+/// Ignores known writer files using the directory entry observed during enumeration.
+fn auxiliary_artifact_entry(entry: &fs::DirEntry) -> Result<bool, AppError> {
+    let name = entry.file_name();
+    let name = name.to_string_lossy();
+    if !name
+        .get(name.len().saturating_sub(".json.lock".len())..)
+        .is_some_and(|suffix| suffix.eq_ignore_ascii_case(".json.lock"))
+        && !powershell_staging_name(&name)
+        && !native_staging_name(&name)
+    {
+        return Ok(false);
+    }
+    let file_type = entry
+        .file_type()
+        .map_err(|error| ss_ai_runtime::caused_by("io", "Cannot inspect artifact entry", error))?;
+    // On Windows this uses the enumerated entry even if publication moved the file.
+    // Preserve the existing treatment of links to regular files.
+    Ok(file_type.is_file() || (file_type.is_symlink() && entry.path().is_file()))
 }
 
 /// Recognizes the sibling names used by the PowerShell atomic file writer.
@@ -1699,7 +1712,50 @@ fn invalid(message: &str) -> AppError {
 #[cfg(test)]
 #[cfg_attr(coverage_nightly, coverage(off))]
 mod staging_tests {
-    use super::{native_staging_name, powershell_staging_name};
+    use std::fs;
+    use std::path::PathBuf;
+
+    use super::{auxiliary_artifact_entry, native_staging_name, powershell_staging_name};
+
+    /// Keeps the enumerated test entries isolated from concurrent test processes.
+    struct Directory(PathBuf);
+
+    impl Drop for Directory {
+        fn drop(&mut self) {
+            fs::remove_dir_all(&self.0).unwrap();
+        }
+    }
+
+    #[test]
+    fn moved_staging_files_remain_ignored_after_enumeration() {
+        let directory = Directory(
+            PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                .join(format!(".staging-entry-test-{}", std::process::id())),
+        );
+        #[expect(clippy::create_dir, reason = "The test directory must be exclusive")]
+        fs::create_dir(&directory.0).unwrap();
+        for name in [
+            ".reviewer.json.0123456789abcdef0123456789abcdef.tmp",
+            ".ss-ai-transaction-aB1234567890abcdefgh1234.tmp",
+        ] {
+            let path = directory.0.join(name);
+            fs::write(&path, "partial").unwrap();
+            let entry = fs::read_dir(&directory.0).unwrap().next().unwrap().unwrap();
+            fs::remove_file(path).unwrap();
+            assert!(auxiliary_artifact_entry(&entry).unwrap());
+        }
+
+        let path = directory
+            .0
+            .join(".ss-ai-transaction-aB1234567890abcdefgh1234.tmp");
+        #[expect(
+            clippy::create_dir,
+            reason = "A directory must not be treated as staging"
+        )]
+        fs::create_dir(&path).unwrap();
+        let entry = fs::read_dir(&directory.0).unwrap().next().unwrap().unwrap();
+        assert!(!auxiliary_artifact_entry(&entry).unwrap());
+    }
 
     #[test]
     fn only_powershell_json_staging_names_match() {
