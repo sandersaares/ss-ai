@@ -21,13 +21,13 @@ use crate::github_approval::Evidence as GitHubEvidence;
 use crate::journal::FileJournal;
 use crate::json::{array, field, identifier, text};
 use crate::publication::{Input, Scope, hash};
-use crate::renewal::{Anchor, Audit, State as AuditState};
+use crate::renewal::Anchor;
 use crate::target::{Platform, Target};
 
-/// Separate syntax prevents a discussion notice from becoming a renewal audit.
+/// Separate syntax identifies account-owned review notices in discussion.
 const MARKER: &str = "<!-- ss-autoreapprove-needs-review ";
 
-/// Service-authenticated creation time controls whether an external approval resets a notice.
+/// Service-authenticated creation time controls whether an approval resets a notice.
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub(crate) struct Notice {
@@ -36,19 +36,9 @@ pub(crate) struct Notice {
     pub(crate) rationale: String,
 }
 
-/// Summary metadata distinguishes automatic approvals from independent reviews.
-#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
-pub(crate) struct AutomaticApproval {
-    pub(crate) approval_event_id: String,
-    pub(crate) approved_at: String,
-}
-
-/// Provider-derived positive events retain their external-versus-automatic origin.
+/// A provider-derived positive event can supersede an older notice.
 pub(crate) struct ApprovalEvent {
-    pub(crate) id: String,
     pub(crate) at: Timestamp,
-    pub(crate) automatic: bool,
 }
 
 /// The marker binds the refusal to its authenticated scope and completed assessment.
@@ -114,22 +104,22 @@ impl Marker {
     }
 
     fn validate(&self) -> Result<(), AppError> {
-        // Reuse the renewal identity and digest contract without treating this as an approval.
-        Audit {
-            schema_version: self.schema_version,
-            operation_id: self.operation_id.clone(),
-            repository_id: self.scope.repository_id.clone(),
-            account_id: self.scope.account_id.clone(),
-            pull_request_id: self.scope.pull_request_id,
-            anchor: self.anchor.clone(),
-            source_commit: self.source_commit.clone(),
-            policy_digest: self.policy_digest.clone(),
-            assessment_digest: self.assessment_digest.clone(),
-            state: AuditState::Submitted,
+        if self.schema_version != 1
+            || Uuid::parse_str(&self.operation_id).is_err()
+            || self.scope.repository_id.trim().is_empty()
+            || self.scope.account_id.trim().is_empty()
+            || self.scope.pull_request_id == 0
+            || self.anchor.review_id.trim().is_empty()
+            || self.rationale.trim().is_empty()
+        {
+            return Err(fail("service", "Invalid needs-review marker"));
         }
-        .validate()?;
-        if self.rationale.trim().is_empty() {
-            return Err(fail("service", "Needs-review marker has no rationale"));
+        github_approval::commit(&self.anchor.source_commit)?;
+        github_approval::commit(&self.source_commit)?;
+        for digest in [&self.policy_digest, &self.assessment_digest] {
+            if digest.len() != 64 || !digest.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+                return Err(fail("service", "Invalid needs-review marker digest"));
+            }
         }
         Ok(())
     }
@@ -160,14 +150,8 @@ fn approvals(
                                     == Some("APPROVED")
                         });
                 if approved {
-                    // Only interpretable audits supply reset metadata; the provider validates standing.
-                    let Ok(audit) = Audit::parse(text(field(review, "body")?)?) else {
-                        continue;
-                    };
                     events.push(ApprovalEvent {
-                        id: id.to_owned(),
                         at: timestamp(text(field(review, "submitted_at")?)?)?,
-                        automatic: audit.is_some(),
                     });
                 }
             }
@@ -293,6 +277,43 @@ fn parse_notices(
     Ok(found)
 }
 
+/// Exact bytes and an authenticated author identify the intended prior comment.
+fn matching_notice(
+    attempt: &Attempt,
+    platform: Platform,
+    scope: &Scope,
+    comments: &[Value],
+    now: Timestamp,
+) -> Result<Notice, AppError> {
+    if attempt.state == State::Refused {
+        return Err(fail(
+            "invalidState",
+            "Needs-review comment was refused; start a fresh run",
+        ));
+    }
+    let found = parse_notices(
+        comments,
+        platform,
+        scope,
+        now,
+        None,
+        Some(&attempt.marker.operation_id),
+    )?;
+    let matching = found
+        .iter()
+        .filter(|(marker, _, body)| {
+            marker.operation_id == attempt.marker.operation_id && body == &attempt.body
+        })
+        .collect::<Vec<_>>();
+    let [(_, notice, _)] = matching.as_slice() else {
+        return Err(fail(
+            "ambiguousWrite",
+            "No unique owned needs-review comment; publication was not replayed",
+        ));
+    };
+    Ok(notice.clone())
+}
+
 /// Notice effects need fenced discussion, not source refs or current approval authority.
 fn capture_comments(
     api: &mut Api<'_>,
@@ -350,7 +371,7 @@ fn observe_comments(
     }
 }
 
-/// A later external approval resets every older notice, but a renewal never does.
+/// A later provider approval resets older notices for the same account.
 pub(crate) fn apply(
     evidence: &Evidence,
     decision: Decision,
@@ -364,16 +385,15 @@ pub(crate) fn apply(
         repository_id: repository.to_owned(),
         pull_request_id: number,
     };
-    let external = approvals(evidence, &scope, now)?
+    let approval = approvals(evidence, &scope, now)?
         .into_iter()
-        .filter(|event| !event.automatic)
         .map(|event| event.at)
         .max();
-    let notices = notices(evidence, &scope, now, external, None)?;
+    let notices = notices(evidence, &scope, now, approval, None)?;
     let mut active = None;
     for (_, notice, _) in notices {
         let at = timestamp(&notice.created_at)?;
-        if external.is_none_or(|external| external <= at)
+        if approval.is_none_or(|approval| approval <= at)
             && active.as_ref().is_none_or(|(latest, _)| *latest < at)
         {
             active = Some((at, notice));
@@ -385,35 +405,6 @@ pub(crate) fn apply(
         return Ok(Decision::NeedsReview { notice });
     }
     Ok(decision)
-}
-
-/// Resolves the timestamp only for the current standing automatic approval.
-pub(crate) fn automatic_approval(
-    evidence: &Evidence,
-    scope: &Scope,
-    now: Timestamp,
-) -> Result<Option<AutomaticApproval>, AppError> {
-    let platform = match evidence {
-        Evidence::GitHub(_) => Platform::GitHub,
-        Evidence::AzureDevOps(_) => Platform::AzureDevOps,
-    };
-    let decision = evidence.decide(
-        platform,
-        &scope.account_id,
-        &scope.repository_id,
-        scope.pull_request_id,
-        now,
-    )?;
-    let Decision::AlreadyValid { approval_event_id } = decision else {
-        return Ok(None);
-    };
-    Ok(approvals(evidence, scope, now)?
-        .into_iter()
-        .find(|event| event.id == approval_event_id && event.automatic)
-        .map(|event| AutomaticApproval {
-            approval_event_id: event.id,
-            approved_at: event.at.to_string(),
-        }))
 }
 
 impl<'a> Store<'a> {
@@ -575,6 +566,9 @@ impl<'a> Store<'a> {
                 "Notice explanation or attribution conflicts with its reserved marker",
             ));
         }
+        if let Some(deadline) = input.effect_deadline {
+            deadline.check(clock)?;
+        }
         self.record.attempts.push(Attempt {
             run_id: input.run_id.to_owned(),
             marker,
@@ -631,33 +625,7 @@ impl<'a> Store<'a> {
             .attempts
             .get(index)
             .ok_or_else(|| fail("invalidState", "Missing needs-review intent"))?;
-        if attempt.state == State::Refused {
-            return Err(fail(
-                "invalidState",
-                "Needs-review comment was refused; start a fresh run",
-            ));
-        }
-        let found = parse_notices(
-            comments,
-            platform,
-            &self.record.scope,
-            now,
-            None,
-            Some(&attempt.marker.operation_id),
-        )?;
-        let matching = found
-            .iter()
-            .filter(|(marker, _, body)| {
-                marker.operation_id == attempt.marker.operation_id && body == &attempt.body
-            })
-            .collect::<Vec<_>>();
-        let [(_, notice, _)] = matching.as_slice() else {
-            return Err(fail(
-                "ambiguousWrite",
-                "No unique owned needs-review comment; publication was not replayed",
-            ));
-        };
-        let notice = notice.clone();
+        let notice = matching_notice(attempt, platform, &self.record.scope, comments, now)?;
         self.save_state(index, State::Verified)?;
         Ok(notice)
     }
@@ -701,12 +669,12 @@ mod tests {
     use serde_json::{Value, json};
     use uuid::Uuid;
 
-    use super::{Marker, notices};
+    use super::{Attempt, Marker, State, matching_notice, notices};
     use crate::ado_approval::Evidence as AdoEvidence;
     use crate::approval::{Decision, Evidence};
     use crate::clock::timestamp;
     use crate::publication::Scope;
-    use crate::renewal::{Anchor, Audit, State};
+    use crate::renewal::Anchor;
     use crate::target::Platform;
 
     /// Supplies the same complete provider history used by approval authority tests.
@@ -748,6 +716,66 @@ mod tests {
         }
     }
 
+    #[test]
+    fn readback_requires_one_exact_owned_comment_on_each_provider() {
+        let marker = marker();
+        let body = format!(
+            "Notice\n\n<!-- ss-autoreapprove-needs-review {} -->",
+            serde_json::to_string(&marker).unwrap()
+        );
+        let attempt = Attempt {
+            run_id: Uuid::new_v4().to_string(),
+            marker: marker.clone(),
+            body: body.clone(),
+            state: State::Intent,
+        };
+        let now = timestamp("2026-01-10T00:00:00Z").unwrap();
+        for platform in [Platform::GitHub, Platform::AzureDevOps] {
+            let comment = if platform == Platform::GitHub {
+                json!({"id": 60, "user": {"id": 42}, "created_at": "2026-01-09T00:00:00Z",
+                    "updated_at": "2026-01-09T00:00:00Z", "body": body})
+            } else {
+                json!({"id": 1, "comments": [{"id": 60, "commentType": "text",
+                    "author": {"id": "42"}, "publishedDate": "2026-01-09T00:00:00Z",
+                    "lastContentUpdatedDate": "2026-01-09T00:00:00Z", "content": body}]})
+            };
+            let notice = matching_notice(
+                &attempt,
+                platform,
+                &marker.scope,
+                std::slice::from_ref(&comment),
+                now,
+            )
+            .unwrap();
+            assert_eq!(notice.comment_id, "60");
+            let error = matching_notice(&attempt, platform, &marker.scope, &[], now).unwrap_err();
+            assert_eq!(crate::classification(&error), "ambiguousWrite");
+            let error = matching_notice(
+                &attempt,
+                platform,
+                &marker.scope,
+                &[comment.clone(), comment.clone()],
+                now,
+            )
+            .unwrap_err();
+            assert_eq!(crate::classification(&error), "ambiguousWrite");
+            let mut changed = comment.clone();
+            if platform == Platform::GitHub {
+                changed["user"]["id"] = json!(99);
+            } else {
+                changed["comments"][0]["author"]["id"] = json!("99");
+            }
+            matching_notice(&attempt, platform, &marker.scope, &[changed], now).unwrap_err();
+            let mut changed = comment;
+            if platform == Platform::GitHub {
+                changed["body"] = json!(format!("Changed {body}"));
+            } else {
+                changed["comments"][0]["content"] = json!(format!("Changed {body}"));
+            }
+            matching_notice(&attempt, platform, &marker.scope, &[changed], now).unwrap_err();
+        }
+    }
+
     fn add_notice(evidence: &mut Value, at: &str, id: u32) {
         evidence["comments"].as_array_mut().unwrap().push(json!({
             "id": id, "user": {"id": 42}, "created_at": at, "updated_at": at,
@@ -755,25 +783,13 @@ mod tests {
         }));
     }
 
-    /// Positive events vary only their service author, submission time, and renewal origin.
+    /// Approval body content does not change the provider's approval event.
     fn add_approval(evidence: &mut Value, at: &str, owned: bool, automatic: bool) {
-        let audit = Audit {
-            schema_version: 1,
-            operation_id: Uuid::new_v4().to_string(),
-            repository_id: "123".into(),
-            account_id: "42".into(),
-            pull_request_id: 1,
-            anchor: marker().anchor,
-            source_commit: "b".repeat(40),
-            policy_digest: "c".repeat(64),
-            assessment_digest: "d".repeat(64),
-            state: State::Submitted,
-        };
         evidence["reviews"].as_array_mut().unwrap().push(json!({
             "id": 50, "node_id": "new-approval",
             "user": if owned { json!({"id": 42, "node_id": "user-42"}) } else { json!({"id": 99, "node_id": "user-99"}) },
             "state": "APPROVED", "submitted_at": at, "commit_id": "b".repeat(40),
-            "body": if automatic { format!("<!-- ss-autoreapprove {} -->", serde_json::to_string(&audit).unwrap()) } else { "External approval".into() }
+            "body": if automatic { "Automatic approval" } else { "Approval" }
         }));
         evidence["timeline"].as_array_mut().unwrap().push(json!({
             "__typename": "PullRequestReview", "id": "new-approval", "state": "APPROVED"
@@ -781,12 +797,12 @@ mod tests {
     }
 
     #[test]
-    fn only_strictly_later_owned_external_approvals_expire_notices() {
+    fn only_strictly_later_owned_approvals_expire_notices() {
         for (at, owned, automatic, expected) in [
             ("2026-01-08T23:00:00Z", true, false, "needsReview"),
             ("2026-01-09T00:00:00Z", true, false, "needsReview"),
             ("2026-01-09T01:00:00Z", false, false, "needsReview"),
-            ("2026-01-09T01:00:00Z", true, true, "needsReview"),
+            ("2026-01-09T01:00:00Z", true, true, "alreadyValid"),
             ("2026-01-09T01:00:00Z", true, false, "alreadyValid"),
         ] {
             let mut evidence = fixture();
@@ -874,12 +890,12 @@ mod tests {
         assert_eq!(decide(&evidence).unwrap().status(), "alreadyValid");
     }
 
-    /// Superseded invalid audits cannot block a later independent approval or expire notices.
+    /// Provider approval events, not body markers, determine notice expiry.
     #[test]
-    fn later_external_approval_supersedes_malformed_audit_without_granting_authority() {
+    fn approval_body_markers_do_not_change_provider_authority() {
         let mut evidence = fixture();
         evidence["reviews"][1]["body"] = json!("<!-- ss-autoreapprove malformed -->");
-        decide(&evidence).unwrap_err();
+        assert_eq!(decide(&evidence).unwrap().status(), "assessmentRequired");
         add_approval(&mut evidence, "2026-01-09T01:00:00Z", true, false);
         assert_eq!(decide(&evidence).unwrap().status(), "alreadyValid");
         add_notice(&mut evidence, "2026-01-09T00:00:00Z", 60);
@@ -889,7 +905,7 @@ mod tests {
             .unwrap()
             .last_mut()
             .unwrap()["body"] = json!("<!-- ss-autoreapprove malformed -->");
-        decide(&evidence).unwrap_err();
+        assert_eq!(decide(&evidence).unwrap().status(), "alreadyValid");
     }
 
     /// Deleted discussion must neither break scanning nor satisfy notice readback.

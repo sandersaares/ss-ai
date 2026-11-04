@@ -58,10 +58,19 @@ BeforeAll {
 
 Describe 'prepared helper' {
     It 'receives the prebuilt test executable' {
-        $env:SS_AI_FINDING_TEST_EXECUTABLE | Should -Not -BeNullOrEmpty
-        Test-Path -LiteralPath $env:SS_AI_FINDING_TEST_EXECUTABLE -PathType Leaf | Should -BeTrue
-        $env:SS_AI_AUDIT_TEST_EXECUTABLE | Should -Not -BeNullOrEmpty
-        Test-Path -LiteralPath $env:SS_AI_AUDIT_TEST_EXECUTABLE -PathType Leaf | Should -BeTrue
+        foreach ($helper in @(
+            @{ copy = $env:SS_AI_FINDING_TEST_EXECUTABLE; source = 'finding_plans-helper' }
+            @{ copy = $env:SS_AI_AUDIT_TEST_EXECUTABLE; source = 'audit-helper' }
+        )) {
+            $copy = $helper.copy
+            $source = Join-Path $PSScriptRoot $helper.source
+            $copy | Should -Not -BeNullOrEmpty
+            Test-Path -LiteralPath $copy -PathType Leaf | Should -BeTrue
+            $copy | Should -Not -BeExactly $source
+            [IO.File]::ReadAllText($copy) | Should -BeExactly 'fixture'
+            [IO.File]::WriteAllText($source, 'replacement')
+            [IO.File]::ReadAllText($copy) | Should -BeExactly 'fixture'
+        }
     }
 }
 '@)

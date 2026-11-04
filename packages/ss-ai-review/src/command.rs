@@ -24,6 +24,10 @@ use crate::selection::{self, State, valid_session};
 use crate::target::{Platform, Target, escape};
 use crate::transport::Transport;
 use crate::{Clock, Http, Process};
+use ss_ai_assessment::{
+    BatchJudgmentRequest, BatchReadRequest, ContextRequest, FinalSynthesis, GroupedConclusions,
+    Note, SourceSide,
+};
 
 /// Named-input command hierarchy used by the installed skills.
 ///
@@ -94,6 +98,8 @@ enum Autoreapprove {
     },
     /// Fetch exact source objects and initialize a bounded assessment assignment.
     Prepare(WorkInput),
+    /// Reserve one assessment worker before dispatch.
+    StartWorker(WorkInput),
     /// Page through complete changed-path metadata.
     Assessment {
         #[command(flatten)]
@@ -102,7 +108,93 @@ enum Autoreapprove {
         after: usize,
         #[arg(long, default_value = "10")]
         limit: NonZeroUsize,
+        /// Omit optional side metadata; required patches retain complete bindings.
+        #[arg(long)]
+        compact: bool,
     },
+    /// Page immutable evidence units without their text.
+    Units {
+        #[command(flatten)]
+        input: WorkInput,
+        #[arg(long)]
+        reference: Option<String>,
+        #[arg(long, default_value = "0")]
+        after: usize,
+        #[arg(long, default_value = "10")]
+        limit: NonZeroUsize,
+        /// Omit ranges from unit metadata; the evidence page retains bindings.
+        #[arg(long)]
+        compact: bool,
+    },
+    /// Plan bounded, independently readable windows of a single evidence document.
+    UnitReadPlan {
+        #[command(flatten)]
+        input: WorkInput,
+        #[arg(long)]
+        reference: String,
+        #[arg(long, default_value = "0")]
+        after: usize,
+        #[arg(long, default_value = "100")]
+        limit: NonZeroUsize,
+    },
+    /// Deliver one planned window of evidence units.
+    ReadUnits {
+        #[command(flatten)]
+        input: WorkInput,
+        #[arg(long)]
+        reference: String,
+        #[arg(long)]
+        after: usize,
+        #[arg(long)]
+        count: NonZeroUsize,
+        #[arg(long)]
+        read_token: String,
+    },
+    /// Page recorded concern and interaction references.
+    Checks {
+        #[command(flatten)]
+        input: WorkInput,
+        #[arg(long, default_value = "0")]
+        after: usize,
+        #[arg(long, default_value = "10")]
+        limit: NonZeroUsize,
+    },
+    /// Record unit observations or the discussion aggregate, never approval authority.
+    Note {
+        #[command(flatten)]
+        input: WorkInput,
+        #[arg(long)]
+        unit_id: String,
+        #[arg(long)]
+        observations: String,
+        #[arg(long)]
+        interfaces: String,
+        #[arg(long)]
+        concern: Vec<String>,
+        #[arg(long)]
+        interaction: Vec<String>,
+        #[arg(long, required = true)]
+        evidence: Vec<String>,
+        #[arg(long)]
+        previous_digest: Option<String>,
+    },
+    /// Give an evidence-backed disposition to a recorded concern or interaction.
+    Resolve {
+        #[command(flatten)]
+        input: WorkInput,
+        #[arg(long)]
+        check_id: String,
+        #[arg(long)]
+        disposition: Disposition,
+        #[arg(long)]
+        rationale: String,
+        #[arg(long, required = true)]
+        evidence: Vec<String>,
+        #[arg(long)]
+        previous_digest: Option<String>,
+    },
+    /// Accept a planned handoff only after newly completed immutable work.
+    Checkpoint(WorkInput),
     /// Read contiguous bounded policy, discussion, or changed-source text.
     Read {
         #[command(flatten)]
@@ -113,6 +205,65 @@ enum Autoreapprove {
         offset: usize,
         #[arg(long, default_value = "4096")]
         limit: NonZeroUsize,
+    },
+    /// Deliver multiple independently addressable evidence pages atomically.
+    ReadBatch {
+        #[command(flatten)]
+        input: WorkInput,
+        #[arg(long)]
+        batch_json: String,
+    },
+    /// Deliver the next native-sized batch of required evidence.
+    ReadNext {
+        #[command(flatten)]
+        input: WorkInput,
+        #[arg(long)]
+        read_token: String,
+        #[arg(long)]
+        change_id: Vec<String>,
+    },
+    /// Record concise grouped conclusions with native evidence bookkeeping.
+    Conclude {
+        #[command(flatten)]
+        input: WorkInput,
+        #[arg(long)]
+        conclusions_json: String,
+    },
+    /// Record the final synthesis and complete atomically after native validation.
+    Synthesize {
+        #[command(flatten)]
+        input: WorkInput,
+        #[arg(long)]
+        synthesis_json: String,
+    },
+    /// Record multiple changed-path judgments in one conditional transaction.
+    JudgeBatch {
+        #[command(flatten)]
+        input: WorkInput,
+        #[arg(long)]
+        batch_json: String,
+    },
+    /// Register required captured-source context and return its first bounded page.
+    SourceContext {
+        #[command(flatten)]
+        input: WorkInput,
+        #[arg(long)]
+        change_id: String,
+        #[arg(long)]
+        side: SourceSide,
+        #[arg(long)]
+        start_line: NonZeroUsize,
+        #[arg(long)]
+        line_count: NonZeroUsize,
+        #[arg(long, default_value = "4096")]
+        limit: NonZeroUsize,
+    },
+    /// Register multiple captured-source ranges before delivering their text.
+    SourceContextBatch {
+        #[command(flatten)]
+        input: WorkInput,
+        #[arg(long)]
+        batch_json: String,
     },
     /// Record one change judgment, or the cumulative judgment.
     Judge {
@@ -127,10 +278,23 @@ enum Autoreapprove {
         #[arg(long, required = true)]
         evidence: Vec<String>,
         #[arg(long)]
+        concern: Vec<String>,
+        #[arg(long)]
+        interaction: Vec<String>,
+        #[arg(long)]
         previous_digest: Option<String>,
     },
     /// Require exact coverage and freeze the assessment.
     Complete(WorkInput),
+    /// Complete a supported significant refusal without claiming full coverage.
+    CompletePartial {
+        #[command(flatten)]
+        input: WorkInput,
+        #[arg(long)]
+        change_id: String,
+        #[arg(long)]
+        rationale: String,
+    },
     /// Enumerate open PRs and persist the shared commit-recency result.
     Discover {
         #[arg(long)]
@@ -432,10 +596,26 @@ fn execute(
                 )?
             }
             action @ (Autoreapprove::Prepare(_)
+            | Autoreapprove::StartWorker(_)
             | Autoreapprove::Assessment { .. }
+            | Autoreapprove::Units { .. }
+            | Autoreapprove::UnitReadPlan { .. }
+            | Autoreapprove::ReadUnits { .. }
+            | Autoreapprove::Checks { .. }
+            | Autoreapprove::Note { .. }
+            | Autoreapprove::Resolve { .. }
+            | Autoreapprove::Checkpoint(_)
             | Autoreapprove::Read { .. }
+            | Autoreapprove::ReadBatch { .. }
+            | Autoreapprove::JudgeBatch { .. }
+            | Autoreapprove::ReadNext { .. }
+            | Autoreapprove::Conclude { .. }
+            | Autoreapprove::Synthesize { .. }
+            | Autoreapprove::SourceContext { .. }
+            | Autoreapprove::SourceContextBatch { .. }
             | Autoreapprove::Judge { .. }
-            | Autoreapprove::Complete(_)) => work(action, process, clock)?,
+            | Autoreapprove::Complete(_)
+            | Autoreapprove::CompletePartial { .. }) => work(action, process, clock)?,
             Autoreapprove::Discover {
                 repository_url,
                 state_path,
@@ -565,6 +745,12 @@ fn execute(
             api.register(&target, &identity)?
         }
     };
+    render_result(value)
+}
+
+/// Review results retain sorted dynamic objects without changing context output.
+fn render_result(mut value: Value) -> Result<String, AppError> {
+    value.sort_all_objects();
     Ok(serde_json::to_string(&value)?)
 }
 
@@ -576,11 +762,113 @@ fn work(
 ) -> Result<Value, AppError> {
     let (input, action) = match command {
         Autoreapprove::Prepare(input) => (input, WorkAction::Prepare),
+        Autoreapprove::StartWorker(input) => (input, WorkAction::StartWorker),
         Autoreapprove::Assessment {
             input,
             after,
             limit,
-        } => (input, WorkAction::View { after, limit }),
+            compact,
+        } => (
+            input,
+            WorkAction::View {
+                after,
+                limit,
+                compact,
+            },
+        ),
+        Autoreapprove::Units {
+            input,
+            reference,
+            after,
+            limit,
+            compact,
+        } => (
+            input,
+            WorkAction::Units {
+                reference,
+                after,
+                limit,
+                compact,
+            },
+        ),
+        Autoreapprove::UnitReadPlan {
+            input,
+            reference,
+            after,
+            limit,
+        } => (
+            input,
+            WorkAction::UnitReadPlan {
+                reference,
+                after,
+                limit,
+            },
+        ),
+        Autoreapprove::ReadUnits {
+            input,
+            reference,
+            after,
+            count,
+            read_token,
+        } => (
+            input,
+            WorkAction::ReadUnits {
+                reference,
+                after,
+                count,
+                read_token,
+            },
+        ),
+        Autoreapprove::Checks {
+            input,
+            after,
+            limit,
+        } => (input, WorkAction::Checks { after, limit }),
+        Autoreapprove::Checkpoint(input) => (input, WorkAction::Checkpoint),
+        Autoreapprove::Note {
+            input,
+            unit_id,
+            observations,
+            interfaces,
+            concern,
+            interaction,
+            evidence,
+            previous_digest,
+        } => (
+            input,
+            WorkAction::Note {
+                id: unit_id,
+                note: Note {
+                    observations,
+                    interfaces,
+                    concerns: concern,
+                    interactions: interaction,
+                    evidence,
+                },
+                previous_digest,
+            },
+        ),
+        Autoreapprove::Resolve {
+            input,
+            check_id,
+            disposition,
+            rationale,
+            evidence,
+            previous_digest,
+        } => (
+            input,
+            WorkAction::Resolve {
+                id: check_id,
+                judgment: Judgment {
+                    disposition,
+                    rationale,
+                    evidence,
+                    concerns: Vec::new(),
+                    interactions: Vec::new(),
+                },
+                previous_digest,
+            },
+        ),
         Autoreapprove::Read {
             input,
             reference,
@@ -594,12 +882,104 @@ fn work(
                 limit,
             },
         ),
+        Autoreapprove::ReadBatch { input, batch_json } => (
+            input,
+            WorkAction::ReadBatch {
+                request: serde_json::from_str::<BatchReadRequest>(&batch_json).map_err(
+                    |error| {
+                        crate::error::caused_by(
+                            "invalidInput",
+                            "Malformed evidence batch".to_owned(),
+                            error,
+                        )
+                    },
+                )?,
+            },
+        ),
+        Autoreapprove::ReadNext {
+            input,
+            read_token,
+            change_id,
+        } => (
+            input,
+            WorkAction::ReadNext {
+                read_token,
+                changes: change_id,
+            },
+        ),
+        Autoreapprove::Conclude {
+            input,
+            conclusions_json,
+        } => (
+            input,
+            WorkAction::Conclude {
+                request: serde_json::from_str::<GroupedConclusions>(&conclusions_json)?,
+            },
+        ),
+        Autoreapprove::Synthesize {
+            input,
+            synthesis_json,
+        } => (
+            input,
+            WorkAction::Synthesize {
+                synthesis: serde_json::from_str::<FinalSynthesis>(&synthesis_json)?,
+            },
+        ),
+        Autoreapprove::JudgeBatch { input, batch_json } => (
+            input,
+            WorkAction::JudgeBatch {
+                request: serde_json::from_str::<BatchJudgmentRequest>(&batch_json).map_err(
+                    |error| {
+                        crate::error::caused_by(
+                            "invalidInput",
+                            "Malformed judgment batch".to_owned(),
+                            error,
+                        )
+                    },
+                )?,
+            },
+        ),
+        Autoreapprove::SourceContext {
+            input,
+            change_id,
+            side,
+            start_line,
+            line_count,
+            limit,
+        } => (
+            input,
+            WorkAction::SourceContext {
+                request: ContextRequest {
+                    change_id,
+                    side,
+                    start_line,
+                    line_count,
+                },
+                limit,
+            },
+        ),
+        Autoreapprove::SourceContextBatch { input, batch_json } => (
+            input,
+            WorkAction::SourceContextBatch {
+                requests: serde_json::from_str::<Vec<ContextRequest>>(&batch_json).map_err(
+                    |error| {
+                        crate::error::caused_by(
+                            "invalidInput",
+                            "Malformed source context batch".to_owned(),
+                            error,
+                        )
+                    },
+                )?,
+            },
+        ),
         Autoreapprove::Judge {
             input,
             change_id,
             disposition,
             rationale,
             evidence,
+            concern,
+            interaction,
             previous_digest,
         } => (
             input,
@@ -610,10 +990,23 @@ fn work(
                     disposition,
                     rationale,
                     evidence,
+                    concerns: concern,
+                    interactions: interaction,
                 },
             },
         ),
         Autoreapprove::Complete(input) => (input, WorkAction::Complete),
+        Autoreapprove::CompletePartial {
+            input,
+            change_id,
+            rationale,
+        } => (
+            input,
+            WorkAction::CompletePartial {
+                change_id,
+                rationale,
+            },
+        ),
         _ => return Err(fail("invalidInput", "Not an assessment operation")),
     };
     discovery::work(
@@ -624,4 +1017,16 @@ fn work(
         process,
         clock,
     )
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn review_result_bytes_sort_nested_dynamic_objects() {
+        let value = serde_json::from_str(r#"{"z":[{"z":2,"a":1}],"a":0}"#).unwrap();
+        assert_eq!(
+            super::render_result(value).unwrap(),
+            r#"{"a":0,"z":[{"a":1,"z":2}]}"#
+        );
+    }
 }
