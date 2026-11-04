@@ -16,7 +16,7 @@ use std::time::Duration;
 
 use jiff::Timestamp;
 use ohno::AppError;
-use serde_json::{Value, json};
+use serde_json::{Value, json, to_vec};
 use ss_ai_review_workflow::audit::{
     add_decision, add_decisions, add_feedback, get_feedback, last_decision, poll_classification,
     read_decisions, set_merge_approval, set_merge_approval_from_files, test_merge_approval,
@@ -63,7 +63,7 @@ impl Workspace {
 
     fn put(&self, name: &str, value: &Value) -> PathBuf {
         let path = self.path(name);
-        fs::write(&path, serde_json::to_vec(value).unwrap()).unwrap();
+        fs::write(&path, to_vec(value).unwrap()).unwrap();
         path
     }
 }
@@ -443,7 +443,7 @@ fn invalid_journal_entries_reject_appends_without_losing_history() {
         json!({"findingId":"F-1","decision":"approved","recordedUtc":timestamp,"extra":true}),
     ] {
         let document = json!({"schemaVersion":1,"decisions":[record]});
-        fs::write(&journal, serde_json::to_vec(&document).unwrap()).unwrap();
+        fs::write(&journal, to_vec(&document).unwrap()).unwrap();
         let before = fs::read(&journal).unwrap();
         assert!(read_decisions(&journal, &clock).is_err());
         assert!(add_decisions(&journal, &input, None, false, timestamp, &clock).is_err());

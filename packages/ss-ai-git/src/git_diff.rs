@@ -354,6 +354,8 @@ fn parse_hunk(line: &str) -> Result<Hunk, AppError> {
 
 #[cfg(test)]
 mod tests {
+    use ss_ai_runtime::classification;
+
     use super::*;
 
     #[test]
@@ -414,7 +416,7 @@ mod tests {
             "@@ -1,0 +4294967295,2 @@\n+new\n+new",
         ] {
             let error = parse(&format!("{prefix}{header}")).unwrap_err();
-            assert_eq!(ss_ai_runtime::classification(&error), "invalidInput");
+            assert_eq!(classification(&error), "invalidInput");
             assert!(error.to_string().contains("Invalid Git diff line range"));
         }
         let files = parse(&format!("{prefix}@@ -4294967295,0 +4294967295 @@\n+new")).unwrap();

@@ -58,31 +58,6 @@ struct ValidatedContent(Value);
 /// Owns persisted JSON after validation and limits changes to finding operations.
 struct ValidatedArtifact(Value);
 
-/// Carries validated reviewer identity and record data through consolidation.
-struct ReviewerSource {
-    metadata: Value,
-    finding: Value,
-    id: String,
-}
-
-// Transparent error wrappers keep the existing classified diagnostics and cause
-// chains intact while allowing callers to distinguish these invariants.
-/// Marks rejected persisted artifact bytes while preserving their original cause.
-#[ohno::error]
-struct MalformedFindingArtifact;
-
-/// Identifies a merge reference absent from the source snapshot.
-#[ohno::error]
-struct UnknownMergeSource;
-
-/// Identifies a source claimed by more than one merge.
-#[ohno::error]
-struct ConflictingMergeSource;
-
-/// Identifies an update whose target is absent from the artifact.
-#[ohno::error]
-struct UnknownUpdateTarget;
-
 impl ValidatedArtifact {
     /// Establishes the artifact invariant without changing its serialized form.
     fn new(value: Value) -> Result<Self, AppError> {
@@ -241,6 +216,31 @@ impl ValidatedArtifact {
         publish(transaction, &self.0)
     }
 }
+
+/// Carries validated reviewer identity and record data through consolidation.
+struct ReviewerSource {
+    metadata: Value,
+    finding: Value,
+    id: String,
+}
+
+// Transparent error wrappers keep the existing classified diagnostics and cause
+// chains intact while allowing callers to distinguish these invariants.
+/// Marks rejected persisted artifact bytes while preserving their original cause.
+#[ohno::error]
+struct MalformedFindingArtifact;
+
+/// Identifies a merge reference absent from the source snapshot.
+#[ohno::error]
+struct UnknownMergeSource;
+
+/// Identifies a source claimed by more than one merge.
+#[ohno::error]
+struct ConflictingMergeSource;
+
+/// Identifies an update whose target is absent from the artifact.
+#[ohno::error]
+struct UnknownUpdateTarget;
 
 /// Reads a strictly validated finding artifact.
 ///
@@ -1854,13 +1854,13 @@ mod artifact_tests {
     use std::collections::{HashMap, HashSet};
     use std::path::Path;
 
-    use serde_json::{Value, json};
-    use ss_ai_runtime::classification;
+    use serde_json::{Error, Value, json, to_string, to_vec};
+    use ss_ai_runtime::{Failure, caused_by, classification};
 
     use super::{
         ConflictingMergeSource, MalformedFindingArtifact, UnknownMergeSource, UnknownUpdateTarget,
-        ValidatedArtifact, parse_artifact, resolve_merge_source, validate_artifact,
-        validated_content,
+        ValidatedArtifact, make_record, parse_artifact, parse_json, resolve_merge_source,
+        validate_artifact, validated_content,
     };
 
     /// Supplies authored content without adding defaults to the persisted input.
@@ -1878,9 +1878,9 @@ mod artifact_tests {
             "schemaVersion": 1, "kind": "reviewer", "reviewerId": "reviewer name",
             "focusArea": "focus", "status": "open", "findings": []
         });
-        let serialized = serde_json::to_string(&value).unwrap();
+        let serialized = to_string(&value).unwrap();
         let mut artifact = parse_artifact(serialized.as_bytes(), Path::new("source.json")).unwrap();
-        assert_eq!(serde_json::to_string(&artifact.0).unwrap(), serialized);
+        assert_eq!(to_string(&artifact.0).unwrap(), serialized);
 
         let original = validated_content(content("Original")).unwrap();
         let id = artifact
@@ -1901,8 +1901,8 @@ mod artifact_tests {
             "anchor":{"kind":"line", "path":"src/./file.rs", "startLine":1}
         });
         assert_eq!(
-            serde_json::to_string(&records[0]).unwrap(),
-            serde_json::to_string(&expected).unwrap()
+            to_string(&records[0]).unwrap(),
+            to_string(&expected).unwrap()
         );
         artifact.remove(&id, "not applicable", "timestamp").unwrap();
         assert_eq!(
@@ -1920,8 +1920,8 @@ mod artifact_tests {
 
     #[test]
     fn parsing_retains_the_original_json_error_and_classification() {
-        let cause = crate::workflow_plan::parse_json(b"{").unwrap_err();
-        let expected = ss_ai_runtime::caused_by(
+        let cause = parse_json(b"{").unwrap_err();
+        let expected = caused_by(
             "invalidInput",
             format!("Finding artifact 'source.json': {cause}"),
             cause,
@@ -1933,27 +1933,27 @@ mod artifact_tests {
         assert_eq!(classification(&error), "invalidInput");
         assert_eq!(error.to_string(), expected);
         assert!(error.find_source::<MalformedFindingArtifact>().is_some());
-        assert!(error.find_source::<serde_json::Error>().is_some());
+        assert!(error.find_source::<Error>().is_some());
     }
 
     #[test]
     fn malformed_artifact_shape_keeps_its_classified_validation_cause() {
         let value = json!({"schemaVersion":2,"kind":"consolidated","findings":[]});
         let cause = validate_artifact(&value).unwrap_err();
-        let expected = ss_ai_runtime::caused_by(
+        let expected = caused_by(
             "invalidInput",
             format!("Finding artifact 'source.json': {cause}"),
             cause,
         )
         .to_string();
-        let bytes = serde_json::to_vec(&value).unwrap();
+        let bytes = to_vec(&value).unwrap();
         let Err(error) = parse_artifact(&bytes, Path::new("source.json")) else {
             panic!("malformed artifact was accepted");
         };
         assert_eq!(error.to_string(), expected);
         assert_eq!(classification(&error), "invalidInput");
         assert!(error.find_source::<MalformedFindingArtifact>().is_some());
-        assert!(error.find_source::<ss_ai_runtime::Failure>().is_some());
+        assert!(error.find_source::<Failure>().is_some());
     }
 
     #[test]
@@ -2008,7 +2008,7 @@ mod artifact_tests {
             "schemaVersion":1, "kind":"consolidated", "findings":[], "removed":[]
         }))
         .unwrap();
-        let historical = super::make_record(&content, "F2147483647", "reviewer", &[]).unwrap();
+        let historical = make_record(&content, "F2147483647", "reviewer", &[]).unwrap();
         artifact.0["removed"] = json!([{
             "finding":historical, "reason":"historical", "removedUtc":"timestamp"
         }]);

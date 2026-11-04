@@ -4,9 +4,9 @@
     reason = "The expected result and fixture shapes are fixed by these tests"
 )]
 
-use serde_json::{Value, json};
+use serde_json::{Value, from_value, json, to_value};
 use ss_ai_git::{FileDiff, parse};
-use ss_ai_review_workflow::anchors::resolve_request;
+use ss_ai_review_workflow::anchors::{resolve_anchor, resolve_request};
 use ss_ai_runtime::classification;
 
 /// Represents separated hunks on a renamed file with different side positions.
@@ -112,9 +112,9 @@ fn deserialization_enforces_file_and_hunk_invariants() {
         "status": "modified",
         "hunks": [{"oldStart": 0, "oldCount": 0, "newStart": u32::MAX, "newCount": 1}]
     });
-    let parsed: FileDiff = serde_json::from_value(file.clone()).unwrap();
+    let parsed: FileDiff = from_value(file.clone()).unwrap();
     parsed.validate().unwrap();
-    assert_eq!(serde_json::to_value(&parsed).unwrap(), file);
+    assert_eq!(to_value(&parsed).unwrap(), file);
     assert!(parsed.contains_range(u32::MAX, u32::MAX, false));
     assert!(!parsed.contains_range(1, 1, true));
 
@@ -140,7 +140,7 @@ fn deserialization_enforces_file_and_hunk_invariants() {
                 json!(2)
             };
         }
-        let error = serde_json::from_value::<FileDiff>(malformed.clone()).unwrap_err();
+        let error = from_value::<FileDiff>(malformed.clone()).unwrap_err();
         assert!(error.to_string().contains(message), "{error}");
         let error = resolve_request(&json!({
             "anchor": {"kind": "file", "path": "file"},
@@ -154,7 +154,7 @@ fn deserialization_enforces_file_and_hunk_invariants() {
     let mut unknown = file;
     unknown["hunks"][0]["unexpected"] = json!(true);
     assert!(
-        serde_json::from_value::<FileDiff>(unknown)
+        from_value::<FileDiff>(unknown)
             .unwrap_err()
             .to_string()
             .contains("unknown field")
@@ -192,6 +192,6 @@ fn full_diff_validation_and_path_matching_remain_unchanged() {
     }
 
     let parsed = parse("diff --git a/Case/File b/Case/File\n").unwrap();
-    let result = ss_ai_review_workflow::anchors::resolve_anchor(&anchor, &parsed[0]).unwrap();
+    let result = resolve_anchor(&anchor, &parsed[0]).unwrap();
     assert_eq!(result["path"], "Case/File");
 }

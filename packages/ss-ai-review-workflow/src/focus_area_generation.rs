@@ -1131,7 +1131,7 @@ mod tests {
     use std::path::{Path, PathBuf};
 
     use ohno::AppError;
-    use serde_json::{Value, json};
+    use serde_json::{Value, from_value, json, to_value, to_vec};
     use ss_ai_runtime::fail;
 
     use super::{ActiveGeneration, ActiveGenerationRecord, OUTPUTS, Swap, swap_with};
@@ -1150,18 +1150,22 @@ mod tests {
                 "receipt": present(4).then_some(&digest),
                 "hitReceipt": present(5).then_some(&digest),
             });
+            // The persisted optional-field combinations require preparation identity
+            // and source digest together. Other work requires preparation; a
+            // generation receipt requires a generation ID, while a restore receipt
+            // excludes it. Accepted records retain their flat JSON and bytes.
             let expected = present(0) == present(2)
                 && (present(0) || !(present(1) || present(3) || present(4) || present(5)))
                 && (present(1) || !present(4))
                 && (!present(1) || !present(5));
-            let wire: ActiveGenerationRecord = serde_json::from_value(record.clone()).unwrap();
-            let wire_bytes = serde_json::to_vec(&wire).unwrap();
+            let wire: ActiveGenerationRecord = from_value(record.clone()).unwrap();
+            let wire_bytes = to_vec(&wire).unwrap();
             let active = ActiveGeneration::from_record(wire);
             assert_eq!(active.is_ok(), expected, "record: {record}");
             if let Ok(active) = active {
                 let serialized_record = active.to_record();
-                assert_eq!(serde_json::to_vec(&serialized_record).unwrap(), wire_bytes);
-                let serialized = serde_json::to_value(serialized_record).unwrap();
+                assert_eq!(to_vec(&serialized_record).unwrap(), wire_bytes);
+                let serialized = to_value(serialized_record).unwrap();
                 assert_eq!(serialized, record);
             }
         }
@@ -1179,27 +1183,23 @@ mod tests {
         ] {
             let original = record.get(field).unwrap().clone();
             *record.get_mut(field).unwrap() = invalid;
-            let wire: ActiveGenerationRecord = serde_json::from_value(record.clone()).unwrap();
+            let wire: ActiveGenerationRecord = from_value(record.clone()).unwrap();
             assert!(ActiveGeneration::from_record(wire).is_err(), "{field}");
             *record.get_mut(field).unwrap() = original;
         }
         *record.get_mut("generationId").unwrap() = json!("generation-1");
         *record.get_mut("receipt").unwrap() = json!("bad");
-        assert!(
-            ActiveGeneration::from_record(serde_json::from_value(record.clone()).unwrap()).is_err()
-        );
+        assert!(ActiveGeneration::from_record(from_value(record.clone()).unwrap()).is_err());
         *record.get_mut("generationId").unwrap() = Value::Null;
         *record.get_mut("receipt").unwrap() = Value::Null;
         *record.get_mut("hitReceipt").unwrap() = json!("bad");
-        assert!(
-            ActiveGeneration::from_record(serde_json::from_value(record.clone()).unwrap()).is_err()
-        );
+        assert!(ActiveGeneration::from_record(from_value(record.clone()).unwrap()).is_err());
         *record.get_mut("hitReceipt").unwrap() = Value::Null;
         record
             .as_object_mut()
             .unwrap()
             .insert("unexpected".into(), Value::Bool(true));
-        assert!(serde_json::from_value::<ActiveGenerationRecord>(record).is_err());
+        assert!(from_value::<ActiveGenerationRecord>(record).is_err());
     }
 
     /// Simulates the filesystem while injecting one or more rename failures.

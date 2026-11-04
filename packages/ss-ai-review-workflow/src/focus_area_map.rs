@@ -31,32 +31,6 @@ pub struct ValidatedMap {
     map: Map,
 }
 
-/// A map checked for complete raw input coverage before publication.
-pub(crate) struct CompleteMap(ValidatedMap);
-
-impl CompleteMap {
-    /// Performs complete validation before allowing publication rendering.
-    pub(crate) fn parse(bytes: &[u8], sources: &SourceSnapshot) -> Result<Self, AppError> {
-        ValidatedMap::parse(bytes, sources, true).map(Self)
-    }
-
-    /// Checks the authored alternatives against the finalized expansion.
-    pub(crate) fn validate_reference_alternatives(
-        &self,
-        expansion: &Expansion,
-    ) -> Result<(), AppError> {
-        self.0.validate_reference_alternatives(expansion)
-    }
-
-    /// Renders the complete map for publication.
-    pub(crate) fn render(
-        &self,
-        sources: &SourceSnapshot,
-    ) -> Result<BTreeMap<String, String>, AppError> {
-        self.0.render(sources)
-    }
-}
-
 /// Agent-assigned category and chapter data.
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -270,21 +244,38 @@ impl ValidatedMap {
         }
         Ok(())
     }
+}
 
-    /// Renders the catalog and digest-bound reviewer documents.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error if serialization or source lookup fails.
-    pub fn render(&self, sources: &SourceSnapshot) -> Result<BTreeMap<String, String>, AppError> {
+/// A map checked for complete raw input coverage before publication.
+pub(crate) struct CompleteMap(ValidatedMap);
+
+impl CompleteMap {
+    /// Performs complete validation before allowing publication rendering.
+    pub(crate) fn parse(bytes: &[u8], sources: &SourceSnapshot) -> Result<Self, AppError> {
+        ValidatedMap::parse(bytes, sources, true).map(Self)
+    }
+
+    /// Checks the authored alternatives against the finalized expansion.
+    pub(crate) fn validate_reference_alternatives(
+        &self,
+        expansion: &Expansion,
+    ) -> Result<(), AppError> {
+        self.0.validate_reference_alternatives(expansion)
+    }
+
+    /// Renders the catalog and digest-bound reviewer documents for publication.
+    pub(crate) fn render(
+        &self,
+        sources: &SourceSnapshot,
+    ) -> Result<BTreeMap<String, String>, AppError> {
         let mut documents = BTreeMap::new();
         let mut catalog = vec!["# Guideline categories".to_owned()];
-        for (index, category) in self.map.categories.iter().enumerate() {
+        for (index, category) in self.0.map.categories.iter().enumerate() {
             let heading = format!("# {}", category.title);
             catalog.push(format!("{heading}\n\nCategory: {}", category.id));
             let mut sections = vec![heading];
             let mut chapter_values = Vec::new();
-            for (chapter_index, chapter) in self.map.chapters.iter().enumerate() {
+            for (chapter_index, chapter) in self.0.map.chapters.iter().enumerate() {
                 if chapter.category_id != category.id {
                     continue;
                 }
@@ -311,11 +302,11 @@ impl ValidatedMap {
                         lines[heading_lines..].join("\n")
                     ));
                 }
-                chapter_values.push(self.value["chapters"][chapter_index].clone());
+                chapter_values.push(self.0.value["chapters"][chapter_index].clone());
             }
             let content = normalize_newlines(&format!("{}\n", sections.join("\n\n")));
             let metadata = json!({"schemaVersion": 1, "contentSha256": bytes_hash(content.as_bytes()),
-                "map": {"schemaVersion": 1, "categories": [self.value["categories"][index].clone()], "chapters": chapter_values}});
+                "map": {"schemaVersion": 1, "categories": [self.0.value["categories"][index].clone()], "chapters": chapter_values}});
             let encoded = base64(powershell_json(&metadata)?.as_bytes());
             let path = format!("focus-areas/focus-{}.md", category.id);
             documents.insert(
@@ -1168,7 +1159,7 @@ mod tests {
 
     use jiff::Timestamp;
     use ohno::AppError;
-    use serde_json::{Value, json};
+    use serde_json::{Value, json, to_vec};
     use ss_ai_runtime::Clock;
 
     use super::{
@@ -1497,14 +1488,14 @@ mod tests {
     #[test]
     fn complete_coverage_renders_bound_metadata_without_inventing_scope() {
         let (sources, value) = fixture();
-        let map = ValidatedMap::from_value(value.clone(), &sources, true).unwrap();
+        let map = CompleteMap::parse(&to_vec(&value).unwrap(), &sources).unwrap();
         let docs = map.render(&sources).unwrap();
         let rendered = &docs["focus-areas/focus-scripts.md"];
         assert!(rendered.starts_with("<!-- ss-review applicability "));
         assert!(rendered.contains("# Rule\n\n<!-- ss-review scope metadata -->"));
         assert!(rendered.contains("Scope: scripts"));
         assert!(rendered.contains("Keep it."));
-        assert_eq!(map.value(), &value);
+        assert_eq!(map.0.value(), &value);
         assert_eq!(base64(b"abcde"), "YWJjZGU=");
         assert_eq!(quote("```"), "````\n```\n````");
     }
@@ -1528,7 +1519,7 @@ mod tests {
                 "sources":[span("instruction-set-source")],"applicability":[{
                     "effectiveScope":"Agent judgment","declarations":[span("instruction-set-raw")],
                     "origins":[],"uncertainties":[]}]}]});
-        let map = ValidatedMap::from_value(map, &sources, true).unwrap();
+        let map = CompleteMap::parse(&to_vec(&map).unwrap(), &sources).unwrap();
         let documents = map.render(&sources).unwrap();
         assert!(documents["focus-areas/focus-rules.md"].contains(&format!("````\n{text}\n````")));
     }
@@ -1540,7 +1531,7 @@ mod tests {
         value["chapters"][0]["applicability"][0]["pathScope"] = Value::Null;
         assert!(ValidatedMap::from_value(value.clone(), &sources, false).is_ok());
         assert!(ValidatedMap::from_value(value.clone(), &sources, true).is_err());
-        assert!(CompleteMap::parse(&serde_json::to_vec(&value).unwrap(), &sources).is_err());
+        assert!(CompleteMap::parse(&to_vec(&value).unwrap(), &sources).is_err());
         value["chapters"][0]["applicability"][0]["pathScope"] =
             json!({"base":".","include":["**/*.ps1"]});
         assert!(ValidatedMap::from_value(value.clone(), &sources, false).is_err());
@@ -1552,15 +1543,14 @@ mod tests {
     }
 
     #[test]
-    fn complete_map_renders_the_same_documents_as_the_validated_map() {
+    fn complete_map_preserves_the_authored_document_for_rendering() {
         let (sources, value) = fixture();
-        let bytes = serde_json::to_vec(&value).unwrap();
+        let bytes = to_vec(&value).unwrap();
         let complete = CompleteMap::parse(&bytes, &sources).unwrap();
-        let validated = ValidatedMap::parse(&bytes, &sources, true).unwrap();
-        assert_eq!(
-            complete.render(&sources).unwrap(),
-            validated.render(&sources).unwrap()
-        );
+        assert_eq!(complete.0.value(), &value);
+        let documents = complete.render(&sources).unwrap();
+        assert!(documents["instruction-set-categories.md"].contains("Category: scripts"));
+        assert!(documents["focus-areas/focus-scripts.md"].contains("Keep it."));
     }
 
     #[test]
@@ -1779,8 +1769,7 @@ mod tests {
                     "parentId":"parent","source":span("instruction-set-raw","parent.md",2,2),
                     "scope":"Nested","declarations":[]}]}
         ]});
-        let expansion =
-            Expansion::parse(&serde_json::to_vec(&manifest).unwrap(), &sources, true).unwrap();
+        let expansion = Expansion::parse(&to_vec(&manifest).unwrap(), &sources, true).unwrap();
         let alternative = |origins, declaration| {
             json!({
                 "effectiveScope":"Agent-authored judgment","declarations":[declaration],
@@ -1854,8 +1843,7 @@ mod tests {
             {"parentId":null,"source":first,"scope":"A","declarations":[first]},
             {"parentId":null,"source":both,"scope":"B","declarations":[both]}
         ]}]});
-        let expansion =
-            Expansion::parse(&serde_json::to_vec(&manifest).unwrap(), &sources, true).unwrap();
+        let expansion = Expansion::parse(&to_vec(&manifest).unwrap(), &sources, true).unwrap();
         let applicability = |declarations, uncertainty| {
             json!({
                 "effectiveScope":"Agent judgment","origins":["same/target.md"],
@@ -1870,7 +1858,7 @@ mod tests {
                 applicability(json!([both]),json!([])),
                 applicability(json!([first]),json!([{"reason":"Uncertain","evidence":[first]}]))
             ]}]});
-        let validated = ValidatedMap::from_value(map, &sources, true).unwrap();
+        let validated = CompleteMap::parse(&to_vec(&map).unwrap(), &sources).unwrap();
         validated
             .validate_reference_alternatives(&expansion)
             .unwrap();
@@ -1907,8 +1895,7 @@ mod tests {
             {"parentId":null,"source":span("instruction-set-source","source.md",2),
                 "scope":"Second","declarations":[]}
         ]}]});
-        let expansion =
-            Expansion::parse(&serde_json::to_vec(&manifest).unwrap(), &sources, true).unwrap();
+        let expansion = Expansion::parse(&to_vec(&manifest).unwrap(), &sources, true).unwrap();
         let alternative = json!({"effectiveScope":"Agent judgment","declarations":[],
             "origins":["https://example.invalid/target"],"uncertainties":[],"pathScope":null});
         let mut map = json!({"schemaVersion":1,"categories":[{"id":"rules","title":"Rules"}],
@@ -1925,8 +1912,7 @@ mod tests {
         let mut repeated = manifest;
         repeated["references"][0]["referrers"][1] =
             repeated["references"][0]["referrers"][0].clone();
-        let repeated =
-            Expansion::parse(&serde_json::to_vec(&repeated).unwrap(), &sources, true).unwrap();
+        let repeated = Expansion::parse(&to_vec(&repeated).unwrap(), &sources, true).unwrap();
         ValidatedMap::from_value(map.clone(), &sources, true)
             .unwrap()
             .validate_reference_alternatives(&repeated)

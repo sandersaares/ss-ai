@@ -40,10 +40,6 @@ pub struct SourceSnapshot {
     files: BTreeMap<(String, String), Vec<String>>,
 }
 
-/// Groups source-selection failures without changing CLI recovery categories.
-#[ohno::error]
-struct SourceSelectionError;
-
 // Keep the classified diagnostic in the cause chain so callers retain their
 // existing recovery category while tests can identify the rejected invariant.
 macro_rules! selection_error {
@@ -53,10 +49,7 @@ macro_rules! selection_error {
 
         impl $name {
             fn classified() -> AppError {
-                SourceSelectionError::caused_by(Self::caused_by(
-                    fail("invalidInput", $message).into_std_error(),
-                ))
-                .into()
+                Self::caused_by(fail("invalidInput", $message).into_std_error()).into()
             }
         }
     };
@@ -118,11 +111,7 @@ impl SourceSnapshot {
             .and_then(|line| line.checked_sub(1))
             .ok_or_else(InvalidSourceLine::classified)?;
         let end = usize::try_from(span.end_line).map_err(|error| {
-            SourceSelectionError::caused_by(InvalidSourceLine::caused_by(caused_by(
-                "invalidInput",
-                "Invalid source line",
-                error,
-            )))
+            InvalidSourceLine::caused_by(caused_by("invalidInput", "Invalid source line", error))
         })?;
         let selected = lines
             .get(start..end)

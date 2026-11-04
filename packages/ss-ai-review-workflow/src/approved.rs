@@ -398,6 +398,7 @@ fn invalid(message: impl Into<String>) -> AppError {
 }
 
 #[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
     use ss_ai_runtime::{classification, fail};
 
