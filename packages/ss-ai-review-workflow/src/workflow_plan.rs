@@ -11,6 +11,10 @@ use serde_json::{Map, Number, Value};
 use ss_ai_review_context::decode_workflow_text;
 use ss_ai_runtime::{Clock, FileTransaction, caused_by, fail, read_bytes};
 
+/// Identifies an item that conflicts with an existing plan entry.
+#[ohno::error]
+struct ConflictingPlanItem;
+
 /// Selects the schema and list in a workflow plan.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 #[expect(
@@ -414,22 +418,7 @@ pub fn append(
         if replace_index.is_none() && existing == &item {
             return Ok(());
         }
-        let conflict = match (existing, &item) {
-            (PlanItem::Merge(a), PlanItem::Merge(b)) => a
-                .source_finding_ids
-                .iter()
-                .any(|id| b.source_finding_ids.contains(id)),
-            (PlanItem::Update(a), PlanItem::Update(b)) => a.finding_id == b.finding_id,
-            (PlanItem::Removal(a), PlanItem::Removal(b)) => a.finding_id == b.finding_id,
-            (PlanItem::Decision(a), PlanItem::Decision(b)) => a.finding_id == b.finding_id,
-            _ => false,
-        };
-        if conflict {
-            return Err(fail(
-                "invalidInput",
-                "Workflow item conflicts with an existing item",
-            ));
-        }
+        check_item_conflict(existing, &item)?;
     }
     if let Some(index) = replace_index {
         let slot = plan
@@ -441,6 +430,31 @@ pub fn append(
         plan.items.push(item);
     }
     write_plan(&transaction, &plan)
+}
+
+/// Distinguishes conflicting plan entries from other validation failures.
+fn check_item_conflict(existing: &PlanItem, item: &PlanItem) -> Result<(), AppError> {
+    let conflict = match (existing, item) {
+        (PlanItem::Merge(a), PlanItem::Merge(b)) => a
+            .source_finding_ids
+            .iter()
+            .any(|id| b.source_finding_ids.contains(id)),
+        (PlanItem::Update(a), PlanItem::Update(b)) => a.finding_id == b.finding_id,
+        (PlanItem::Removal(a), PlanItem::Removal(b)) => a.finding_id == b.finding_id,
+        (PlanItem::Decision(a), PlanItem::Decision(b)) => a.finding_id == b.finding_id,
+        _ => false,
+    };
+    if conflict {
+        return Err(ConflictingPlanItem::caused_by(
+            fail(
+                "invalidInput",
+                "Workflow item conflicts with an existing item",
+            )
+            .into_std_error(),
+        )
+        .into());
+    }
+    Ok(())
 }
 
 /// Makes references independent of subsequent plan relocation.
@@ -489,7 +503,29 @@ fn write_plan(transaction: &FileTransaction<'_>, plan: &Plan) -> Result<(), AppE
 mod tests {
     use ss_ai_runtime::classification;
 
-    use super::{PlanItem, PlanKind, parse_json, parse_plan};
+    use super::{
+        ConflictingPlanItem, Merge, PlanItem, PlanKind, check_item_conflict, parse_json, parse_plan,
+    };
+
+    #[test]
+    fn overlapping_merge_items_report_a_conflict_cause() {
+        let existing = PlanItem::Merge(Merge {
+            source_finding_ids: vec!["F-1".into(), "F-2".into()],
+            finding_path: "first.md".into(),
+        });
+        let overlapping = PlanItem::Merge(Merge {
+            source_finding_ids: vec!["F-2".into(), "F-3".into()],
+            finding_path: "second.md".into(),
+        });
+        let distinct = PlanItem::Merge(Merge {
+            source_finding_ids: vec!["F-4".into(), "F-5".into()],
+            finding_path: "third.md".into(),
+        });
+        let error = check_item_conflict(&existing, &overlapping).unwrap_err();
+        assert_eq!(classification(&error), "invalidInput");
+        assert!(error.find_source::<ConflictingPlanItem>().is_some());
+        check_item_conflict(&existing, &distinct).unwrap();
+    }
 
     /// Builds the BOM-marked forms accepted by the shared PowerShell reader.
     fn encoded(text: &str) -> Vec<Vec<u8>> {
