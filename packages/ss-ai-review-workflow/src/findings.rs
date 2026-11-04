@@ -648,8 +648,11 @@ pub fn validate_candidates(
         let PlanItem::Cluster(cluster) = item else {
             return Err(invalid("Invalid candidate plan"));
         };
-        if cluster.finding_ids.iter().any(|id| !ids.contains(id)) {
-            return Err(invalid("Candidate names unknown finding"));
+        if let Some(id) = cluster.finding_ids.iter().find(|id| !ids.contains(*id)) {
+            return Err(fail(
+                "invalidInput",
+                format!("Candidate names unknown finding {id:?}"),
+            ));
         }
     }
     Ok(plan.items().len())
@@ -880,9 +883,12 @@ pub fn consolidate_result(
             let mut first = usize::MAX;
             let mut replacements = Vec::new();
             for id in &group.source_finding_ids {
-                let position = *positions
-                    .get(id)
-                    .ok_or_else(|| invalid("Merge references unknown finding"))?;
+                let position = *positions.get(id).ok_or_else(|| {
+                    fail(
+                        "invalidInput",
+                        format!("Merge references unknown finding {id:?}"),
+                    )
+                })?;
                 if !claimed.insert(id.clone()) {
                     return Err(fail(
                         "invalidInput",
