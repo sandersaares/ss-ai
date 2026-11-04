@@ -37,13 +37,11 @@ $PSNativeCommandUseErrorActionPreference = $true
 
 if ($PSCmdlet.ParameterSetName -eq 'Identifiers') {
     . "$PSScriptRoot\lib\NativeWorkflowBridge.ps1"
+    . "$PSScriptRoot\lib\FindingIdentifiers.ps1"
     $fullPath = $ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath($Path)
     $arguments = @('validate-findings', "--path=$fullPath")
-    foreach ($entry in $ExpectedReviewerId) {
-        foreach ($part in $entry.Split(',')) {
-            $id = $part.Trim()
-            if ($id) { $arguments += "--reviewer-id=$id" }
-        }
+    foreach ($id in (ConvertTo-FindingIdentifierList -Value $ExpectedReviewerId)) {
+        $arguments += "--reviewer-id=$id"
     }
     $output = Invoke-NativeReviewWorkflow -Arguments $arguments
     $valid = (ConvertFrom-Json -InputObject $output -AsHashtable)['isValid']

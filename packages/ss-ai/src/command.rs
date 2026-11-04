@@ -52,7 +52,7 @@ fn dispatch(
         .get(1)
         .is_some_and(|argument| argument == "workflow")
     {
-        return workflow::run(local_arguments(arguments), process, clock);
+        return workflow::run(local_arguments(arguments), clock);
     }
     match directory {
         Some(directory) => ss_ai_review::run_in(arguments, process, http, clock, directory),

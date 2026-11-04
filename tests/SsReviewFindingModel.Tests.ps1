@@ -10,6 +10,7 @@ BeforeAll {
     . (Join-Path $script:LibraryRoot 'PullRequestModel.ps1')
     . (Join-Path $script:LibraryRoot 'WorkflowData.ps1')
     . (Join-Path $script:LibraryRoot 'FindingModel.ps1')
+    . (Join-Path $script:LibraryRoot 'FindingIdentifiers.ps1')
 
     # The host running this suite stands in for the executables it launches. Naming the running
     # executable rather than the command 'pwsh' keeps the child on the same build as the parent and
@@ -711,6 +712,11 @@ Describe 'Identifier lists' {
 
     It 'reads identifiers supplied as an array' {
         $identifiers = ConvertTo-FindingIdentifierList -Value @('g1-1', 'g2-3')
+        $identifiers | Should -Be @('g1-1', 'g2-3')
+    }
+
+    It 'trims entries and ignores empty comma-separated parts across array values' {
+        $identifiers = ConvertTo-FindingIdentifierList -Value @(' , g1-1, ', '', ' g2-3 ,,')
         $identifiers | Should -Be @('g1-1', 'g2-3')
     }
 
@@ -1688,7 +1694,7 @@ Describe 'Finding executables' {
             '-ArtifactPath', $script:ArtifactPath
             '-FindingPath', (New-TestFindingFile -Name 'synthesis.json')
             '-Origin', 'synthesis'
-            '-SourceFindingId', 'g2-1,g3-4'
+            '-SourceFindingId', ' , g2-1, , g3-4, '
         )
 
         $result['exitCode'] | Should -Be 0
@@ -1933,7 +1939,7 @@ Describe 'Finding executables' {
 
         $result = Invoke-SkillExecutable -Name 'Test-FindingArtifact.ps1' -ArgumentList @(
             '-Path', $script:FindingsDirectory
-            '-ExpectedReviewerId', 'g1-correctness,g1-security'
+            '-ExpectedReviewerId', ' , g1-correctness, , g1-security, '
         )
 
         $result['exitCode'] | Should -Not -Be 0

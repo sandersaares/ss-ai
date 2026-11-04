@@ -58,8 +58,14 @@ BeforeAll {
 
 Describe 'prepared helper' {
     It 'receives the prebuilt test executable' {
-        $env:SS_AI_FINDING_TEST_EXECUTABLE | Should -Not -BeNullOrEmpty
-        Test-Path -LiteralPath $env:SS_AI_FINDING_TEST_EXECUTABLE -PathType Leaf | Should -BeTrue
+        $copy = $env:SS_AI_FINDING_TEST_EXECUTABLE
+        $source = Join-Path $PSScriptRoot 'finding-helper'
+        $copy | Should -Not -BeNullOrEmpty
+        Test-Path -LiteralPath $copy -PathType Leaf | Should -BeTrue
+        $copy | Should -Not -BeExactly $source
+        [IO.File]::ReadAllText($copy) | Should -BeExactly 'fixture'
+        [IO.File]::WriteAllText($source, 'replacement')
+        [IO.File]::ReadAllText($copy) | Should -BeExactly 'fixture'
     }
 }
 '@)

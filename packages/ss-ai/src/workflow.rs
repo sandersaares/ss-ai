@@ -1,6 +1,8 @@
 //! CLI translation for local review workflow operations.
 
+use std::any::type_name;
 use std::ffi::OsString;
+use std::fmt::{self, Debug, Formatter};
 use std::path::{PathBuf, absolute};
 use std::time::Duration;
 
@@ -10,7 +12,7 @@ use jiff::Timestamp;
 use ohno::AppError;
 use serde_json::json;
 use ss_ai_review_workflow::{findings, workflow_plan};
-use ss_ai_runtime::{Clock, Process, caused_by, fail};
+use ss_ai_runtime::{Clock, caused_by, fail};
 
 /// Exposes local workflow operations without provider access.
 #[derive(Debug, Parser)]
@@ -21,7 +23,7 @@ struct WorkflowCli {
 }
 
 /// Selects an operation and its file-based inputs.
-#[derive(Debug, Subcommand)]
+#[derive(Subcommand)]
 enum WorkflowCommand {
     /// Create an empty workflow plan.
     PlanInitialize {
@@ -128,6 +130,131 @@ enum WorkflowCommand {
     },
 }
 
+impl Debug for WorkflowCommand {
+    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
+        let mut debug = f.debug_struct(type_name::<Self>());
+        match self {
+            Self::PlanInitialize { kind, path } => {
+                debug
+                    .field("operation", &"PlanInitialize")
+                    .field("kind", kind)
+                    .field("path", path);
+            }
+            Self::PlanAppend {
+                kind,
+                path,
+                item_path,
+                replace_index,
+            } => {
+                debug
+                    .field("operation", &"PlanAppend")
+                    .field("kind", kind)
+                    .field("path", path)
+                    .field("item_path", item_path)
+                    .field("replace_index", replace_index);
+            }
+            Self::InitializeFinding {
+                output_directory,
+                reviewer_id,
+                focus_area,
+                force,
+                resume,
+                queue_path,
+            } => {
+                debug
+                    .field("operation", &"InitializeFinding")
+                    .field("output_directory", output_directory)
+                    .field("reviewer_id", reviewer_id)
+                    .field("focus_area", focus_area)
+                    .field("force", force)
+                    .field("resume", resume)
+                    .field("queue_path", queue_path);
+            }
+            Self::AddFinding {
+                artifact_path,
+                finding_path,
+                context_path,
+                origin,
+                source_id,
+            } => {
+                debug
+                    .field("operation", &"AddFinding")
+                    .field("artifact_path", artifact_path)
+                    .field("finding_path", finding_path)
+                    .field("context_path", context_path)
+                    .field("origin", origin)
+                    .field("source_id_count", &source_id.len());
+            }
+            Self::CompleteFinding {
+                artifact_path,
+                queue_path,
+            } => {
+                debug
+                    .field("operation", &"CompleteFinding")
+                    .field("artifact_path", artifact_path)
+                    .field("queue_path", queue_path);
+            }
+            Self::ValidateCandidates { path, index_path } => {
+                debug
+                    .field("operation", &"ValidateCandidates")
+                    .field("path", path)
+                    .field("index_path", index_path);
+            }
+            Self::ValidateFindings { path, reviewer_id } => {
+                debug
+                    .field("operation", &"ValidateFindings")
+                    .field("path", path)
+                    .field("reviewer_id_count", &reviewer_id.len());
+            }
+            Self::FindingIndex {
+                reviewer_directory,
+                output_path,
+            } => {
+                debug
+                    .field("operation", &"FindingIndex")
+                    .field("reviewer_directory", reviewer_directory)
+                    .field("output_path", output_path);
+            }
+            Self::ConsolidateFindings {
+                reviewer_directory,
+                output_path,
+                plan_path,
+            } => {
+                debug
+                    .field("operation", &"ConsolidateFindings")
+                    .field("reviewer_directory", reviewer_directory)
+                    .field("output_path", output_path)
+                    .field("plan_path", plan_path);
+            }
+            Self::UpdateFinding {
+                artifact_path,
+                finding_id,
+                finding_path,
+                plan_path,
+            } => {
+                debug
+                    .field("operation", &"UpdateFinding")
+                    .field("artifact_path", artifact_path)
+                    .field("finding_id", finding_id)
+                    .field("finding_path", finding_path)
+                    .field("plan_path", plan_path);
+            }
+            Self::RemoveFinding {
+                artifact_path,
+                plan_path,
+                now_utc,
+            } => {
+                debug
+                    .field("operation", &"RemoveFinding")
+                    .field("artifact_path", artifact_path)
+                    .field("plan_path", plan_path)
+                    .field("now_utc", now_utc);
+            }
+        }
+        debug.finish()
+    }
+}
+
 /// Matches the plan kind names used by existing callers.
 #[derive(Clone, Copy, Debug, ValueEnum)]
 enum PlanKind {
@@ -164,11 +291,7 @@ impl PlanKind {
 }
 
 /// Runs a local workflow command using the supplied external boundaries.
-pub fn run<I, T>(
-    arguments: I,
-    _process: &dyn Process,
-    clock: &dyn Clock,
-) -> Result<String, AppError>
+pub fn run<I, T>(arguments: I, clock: &dyn Clock) -> Result<String, AppError>
 where
     I: IntoIterator<Item = T>,
     T: Into<OsString> + Clone,
@@ -421,5 +544,47 @@ impl Clock for FixedTimestampClock<'_> {
 
     fn wait(&self, duration: Duration) -> Result<(), AppError> {
         self.clock.wait(duration)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use clap::Parser;
+
+    use super::WorkflowCli;
+
+    /// Formatting collection-bearing commands must not panic.
+    #[test]
+    fn workflow_command_debug_smoke() {
+        for arguments in [
+            vec![
+                "ss-ai workflow",
+                "add-finding",
+                "--artifact-path",
+                "artifact.json",
+                "--finding-path",
+                "finding.json",
+                "--origin",
+                "reviewer",
+                "--source-id",
+                "first",
+                "--source-id",
+                "second",
+            ],
+            vec![
+                "ss-ai workflow",
+                "validate-findings",
+                "--path",
+                "reviewers",
+                "--reviewer-id",
+                "first",
+                "--reviewer-id",
+                "second",
+            ],
+        ] {
+            let cli = WorkflowCli::try_parse_from(arguments).unwrap();
+            _ = format!("{:?}", cli.command);
+            _ = format!("{cli:?}");
+        }
     }
 }

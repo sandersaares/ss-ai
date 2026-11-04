@@ -3,6 +3,8 @@
 use std::cell::{Cell, RefCell};
 use std::fs;
 use std::io::{BufRead, BufReader, Write};
+#[cfg(windows)]
+use std::os::windows::fs::OpenOptionsExt;
 use std::path::{Path, PathBuf};
 use std::process::{Child, ChildStdin, ChildStdout, Command, Stdio};
 use std::time::Duration;
@@ -11,6 +13,8 @@ use jiff::Timestamp;
 use ohno::AppError;
 use ss_ai_runtime::{Clock, FileTransaction};
 use tempfile::{NamedTempFile, TempPath};
+#[cfg(windows)]
+use windows_sys::Win32::Storage::FileSystem::{FILE_SHARE_READ, FILE_SHARE_WRITE};
 
 /// Keeps each test's file and sibling lock within the checkout.
 struct TestFile {
@@ -207,10 +211,6 @@ fn complete_publications_are_readable_in_both_directions() {
 #[test]
 #[cfg_attr(miri, ignore = "requires Windows file sharing and replacement")]
 fn native_staging_names_identify_a_blocked_transaction() {
-    use std::os::windows::fs::OpenOptionsExt;
-
-    use windows_sys::Win32::Storage::FileSystem::{FILE_SHARE_READ, FILE_SHARE_WRITE};
-
     struct Directory(PathBuf);
     impl Drop for Directory {
         fn drop(&mut self) {
