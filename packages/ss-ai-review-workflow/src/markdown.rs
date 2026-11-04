@@ -108,14 +108,13 @@ pub fn render(request: &Value) -> Result<Value, String> {
             )?))
         }
         "trackerItem" => {
-            let finding = required(request, "finding")?;
-            validate_finding(finding)?;
+            let finding = TrackerFinding::new(required(request, "finding")?)?;
             let context = context(request)?;
             let direct = direct_urls(request)?;
             if context.is_some() && direct.is_some() {
                 return Err("direct URLs cannot be combined with context".into());
             }
-            tracker_item_with_urls(finding, context, direct)
+            render_tracker_item(&finding, context, direct)
         }
         "findingRender" => {
             let finding = required(request, "finding")?;
@@ -612,6 +611,26 @@ fn tracker_item(finding: &Value, context: Option<&Value>) -> Result<Value, Strin
     tracker_item_with_urls(finding, context, None)
 }
 
+/// Holds a finding that has passed the tracker renderer's field checks.
+pub(crate) struct TrackerFinding<'a>(&'a Value);
+
+impl<'a> TrackerFinding<'a> {
+    /// Validates a finding before resolving its publication context.
+    pub(crate) fn new(finding: &'a Value) -> Result<Self, String> {
+        validate_finding(finding)?;
+        Ok(Self(finding))
+    }
+}
+
+/// Renders a checked finding for JSON dispatch or tracker planning.
+pub(crate) fn render_tracker_item(
+    finding: &TrackerFinding<'_>,
+    context: Option<&Value>,
+    direct: Option<(&str, &str)>,
+) -> Result<Value, String> {
+    tracker_item_with_urls(finding.0, context, direct)
+}
+
 /// Uses resolved links when the caller already has provenance.
 fn tracker_item_with_urls(
     finding: &Value,
@@ -792,7 +811,12 @@ fn destination(request: &Value) -> Result<&str, String> {
 
 /// Checks the captured fields that can affect tracker provenance.
 fn context(request: &Value) -> Result<Option<&Value>, String> {
-    match request.get("context") {
+    validate_tracker_context(request.get("context"))
+}
+
+/// Checks a borrowed capture before rendering tracker items from it.
+pub(crate) fn validate_tracker_context(context: Option<&Value>) -> Result<Option<&Value>, String> {
+    match context {
         None | Some(Value::Null) => Ok(None),
         Some(context) => {
             object(context, "context")?;

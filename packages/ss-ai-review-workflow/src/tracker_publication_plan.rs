@@ -8,7 +8,7 @@ use ss_ai_review_context::read_capture;
 use ss_ai_runtime::{Clock, fail, read_bytes};
 
 use crate::approved::{check_approved_value, identifier_matches};
-use crate::markdown::render;
+use crate::markdown::{TrackerFinding, render, render_tracker_item, validate_tracker_context};
 use crate::review_publication_plan::read_approved;
 use crate::workflow_plan::parse_json;
 
@@ -83,7 +83,7 @@ fn render_plan(
         .and_then(Value::as_array)
         .ok_or_else(|| invalid("Missing findings"))?;
     // Tracker creation follows the same stable presentation order as the audit.
-    let ordered =
+    let mut ordered =
         findings
             .iter()
             .filter(|finding| finding.get("origin").and_then(Value::as_str) == Some("synthesis"))
@@ -91,24 +91,15 @@ fn render_plan(
                 finding.get("origin").and_then(Value::as_str) != Some("synthesis")
             }));
     let mut items = Vec::with_capacity(findings.len());
-    // The capture is identical for every item, so copy it only once.
-    let mut request = json!({"operation": "trackerItem", "finding": null, "context": context});
-    for finding in ordered {
-        request
-            .get_mut("finding")
-            .ok_or_else(|| invalid("Missing finding in tracker item request"))?
-            .clone_from(finding);
-        let item = render(&request).map_err(invalid)?;
-        for field in ["findingId", "title", "body"] {
-            if item
-                .get(field)
-                .and_then(Value::as_str)
-                .is_none_or(|text| text.trim().is_empty())
-            {
-                return Err(invalid(format!("Rendered tracker item has no {field}")));
-            }
+    if let Some(first) = ordered.next() {
+        // The first finding's errors precede context errors; an empty plan never uses context.
+        let first = TrackerFinding::new(first).map_err(invalid)?;
+        let context = validate_tracker_context(context).map_err(invalid)?;
+        items.push(render_tracker_item(&first, context, None).map_err(invalid)?);
+        for finding in ordered {
+            let finding = TrackerFinding::new(finding).map_err(invalid)?;
+            items.push(render_tracker_item(&finding, context, None).map_err(invalid)?);
         }
-        items.push(item);
     }
     let summary = render(&json!({
         "operation": "summary", "findings": findings, "platform": platform,
@@ -173,17 +164,19 @@ mod tests {
     use super::{render, render_plan};
 
     #[test]
-    fn reused_request_preserves_rendered_items_and_summary() {
+    fn planner_matches_json_rendering_for_items_and_summary() {
         let findings = json!([
             {"id":"F1", "origin":"reviewer", "title":"First", "description":"Problem",
              "reasoning":"Reason", "consequence":"Impact", "recommendedAction":"Fix",
-             "anchor":{"kind":"file","path":"src/a.rs"}},
+             "anchor":{"kind":"file","path":"src/a.rs"},
+             "followUp":{"threadId":"T","commentId":"C"}},
             {"id":"F2", "origin":"synthesis", "title":"Second", "description":"Problem",
              "reasoning":"Reason", "consequence":"Impact", "recommendedAction":"Fix",
              "anchor":{"kind":"file","path":"src/b.rs"}}
         ]);
         let approved = json!({"findings": findings});
-        let context = json!({"target":{"platform":"gitHub"}, "threads":[]});
+        let context = json!({"pullRequestUrl":"https://example.invalid/pr",
+            "threads":[{"id":"T","comments":[{"id":"C","url":"https://example.invalid/comment"}]}]});
         let diagnostics = json!({});
         for context in [None, Some(&context)] {
             let result = render_plan(&approved, context, &diagnostics, "gitHub", 0).unwrap();
@@ -206,5 +199,51 @@ mod tests {
                 .unwrap()
             );
         }
+    }
+
+    #[test]
+    fn planner_checks_context_and_each_finding_before_returning() {
+        let first = json!({"id":"F1", "origin":"reviewer", "title":"First",
+            "description":"Problem", "reasoning":"Reason", "consequence":"Impact",
+            "recommendedAction":"Fix", "anchor":{"kind":"file","path":"src/a.rs"}});
+        let mut second = first.clone();
+        second["id"] = json!("F2");
+        second["description"] = json!("bad\rtext");
+        let approved = json!({"findings":[first, second]});
+        let error = render_plan(&approved, None, &json!({}), "gitHub", 0)
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("description contains a disallowed control character"));
+
+        let context = json!({"threads":[{"id":"T","comments":[{"id":"C","url":42}]}]});
+        let error = render_plan(&approved, Some(&context), &json!({}), "gitHub", 0)
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("url must be a string"));
+    }
+
+    #[test]
+    fn planner_preserves_finding_and_context_error_order_and_empty_plan() {
+        let valid = json!({"id":"F1", "origin":"reviewer", "title":"First",
+            "description":"Problem", "reasoning":"Reason", "consequence":"Impact",
+            "recommendedAction":"Fix", "anchor":{"kind":"file","path":"src/a.rs"}});
+        let mut invalid = valid.clone();
+        invalid["title"] = json!("bad\rtitle");
+        let context = json!({"threads":[{"id":"T","comments":[{"id":"C","url":42}]}]});
+        let request = json!({"operation":"trackerItem", "finding":invalid, "context":context,
+            "followUpUrl":42});
+        let expected = render(&request).unwrap_err();
+        assert!(expected.contains("title contains a disallowed control character"));
+        let approved = json!({"findings":[invalid, valid]});
+        let error = render_plan(&approved, Some(&context), &json!({}), "gitHub", 0)
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains(&expected));
+
+        let empty = json!({"findings":[]});
+        assert_eq!(
+            render_plan(&empty, Some(&context), &json!({}), "gitHub", 0).unwrap(),
+            render_plan(&empty, None, &json!({}), "gitHub", 0).unwrap()
+        );
     }
 }

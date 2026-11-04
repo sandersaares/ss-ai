@@ -23,7 +23,7 @@ use ohno::AppError;
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 use ss_ai_review_workflow::{findings, review_work};
-use ss_ai_runtime::{Clock, FileTransaction, fail};
+use ss_ai_runtime::{Clock, FileTransaction, classification, fail};
 
 /// Supplies a reproducible removal timestamp and refuses unexpected contention.
 struct FixedClock;
@@ -135,6 +135,179 @@ impl BatchFixture {
 
     fn journal(&self) -> Value {
         serde_json::from_slice(&fs::read(&self.queue).unwrap()).unwrap()
+    }
+}
+
+#[test]
+fn assessment_shape_is_checked_at_draft_batch_and_journal_boundaries() {
+    let fixture = BatchFixture::new("assessment-boundaries");
+    review_work::next(&fixture.queue, &FixedClock).unwrap();
+    let initial = fs::read(&fixture.queue).unwrap();
+    let original: Value = serde_json::from_slice(&initial).unwrap();
+    let good = fixture.batch("rename", &[0])["assessments"][0].clone();
+    let invalid = [
+        (json!(null), "assessment object"),
+        (
+            json!({"groupId":"rename","path":fixture.files[0]["path"],"disposition":"reviewed","scope":"","reason":"","extra":true}),
+            "extra",
+        ),
+        (
+            json!({"path":fixture.files[0]["path"],"disposition":"reviewed","scope":"","reason":""}),
+            "groupId",
+        ),
+        (
+            json!({"groupId":"bad id","path":fixture.files[0]["path"],"disposition":"reviewed","scope":"","reason":""}),
+            "group identifier",
+        ),
+        (
+            json!({"groupId":"réname","path":fixture.files[0]["path"],"disposition":"reviewed","scope":"","reason":""}),
+            "group identifier",
+        ),
+        (
+            json!({"groupId":"rename","path":"relative","disposition":"reviewed","scope":"","reason":""}),
+            "absolute path",
+        ),
+        (
+            json!({"groupId":"rename","path":null,"disposition":"reviewed","scope":"","reason":""}),
+            "path",
+        ),
+        (
+            json!({"groupId":"rename","path":"  ","disposition":"reviewed","scope":"","reason":""}),
+            "non-empty string 'path'",
+        ),
+        (
+            json!({"groupId":"rename","path":fixture.files[0]["path"],"disposition":" ","scope":"","reason":""}),
+            "non-empty string 'disposition'",
+        ),
+        (
+            json!({"groupId":"rename","path":fixture.files[0]["path"],"disposition":"reviewed","scope":null,"reason":""}),
+            "scope",
+        ),
+        (
+            json!({"groupId":"rename","path":fixture.files[0]["path"],"disposition":"reviewed","scope":"","reason":null}),
+            "reason",
+        ),
+        (
+            json!({"groupId":"rename","path":fixture.files[0]["path"],"disposition":"other","scope":"","reason":""}),
+            "disposition",
+        ),
+        (
+            json!({"groupId":"rename","path":fixture.files[0]["path"],"disposition":"excluded","scope":" ","reason":"reason"}),
+            "scope and reason",
+        ),
+        (
+            json!({"groupId":"rename","path":fixture.files[0]["path"],"disposition":"excluded","scope":"scope","reason":" "}),
+            "scope and reason",
+        ),
+    ];
+
+    for (assessment, detail) in invalid {
+        let error = review_work::set_assessment(
+            &fixture.queue,
+            &fixture.inventory,
+            &fixture.groups,
+            &assessment,
+            &FixedClock,
+        )
+        .unwrap_err();
+        assert_eq!(classification(&error), "invalidInput");
+        assert!(error.to_string().contains(detail), "{error}");
+        assert_eq!(fs::read(&fixture.queue).unwrap(), initial);
+
+        let mut batch = fixture.batch("rename", &[0, 1]);
+        batch["assessments"][0] = assessment.clone();
+        let error = fixture.complete(&batch).unwrap_err();
+        assert_eq!(classification(&error), "invalidInput");
+        assert!(error.to_string().contains(detail), "{error}");
+        assert_eq!(fs::read(&fixture.queue).unwrap(), initial);
+
+        let mut journal = original.clone();
+        journal["assessments"] = json!([assessment]);
+        let bytes = serde_json::to_vec(&journal).unwrap();
+        fs::write(&fixture.queue, &bytes).unwrap();
+        let error = review_work::next(&fixture.queue, &FixedClock).unwrap_err();
+        assert_eq!(classification(&error), "invalidInput");
+        assert!(error.to_string().contains(detail), "{error}");
+        assert_eq!(fs::read(&fixture.queue).unwrap(), bytes);
+        fs::write(&fixture.queue, &initial).unwrap();
+    }
+
+    // Reviewed records may have blank evidence, while exclusions require both fields.
+    for assessment in [
+        good.clone(),
+        json!({"groupId":"rename","path":fixture.files[0]["path"],"disposition":"excluded","scope":"scope","reason":"reason"}),
+    ] {
+        let mut journal = original.clone();
+        journal["assessments"] = json!([assessment.clone()]);
+        fs::write(&fixture.queue, serde_json::to_vec(&journal).unwrap()).unwrap();
+        review_work::next(&fixture.queue, &FixedClock).unwrap();
+        fs::write(&fixture.queue, &initial).unwrap();
+        review_work::set_assessment(
+            &fixture.queue,
+            &fixture.inventory,
+            &fixture.groups,
+            &assessment,
+            &FixedClock,
+        )
+        .unwrap();
+        fs::write(&fixture.queue, &initial).unwrap();
+    }
+
+    // The journal schema accepts the identifier vocabulary and preserves absolute
+    // path spelling without requiring that the path exist.
+    for assessment in [
+        json!({"groupId":"0_-Z","path":fixture.workspace.path("folder").join("..").join("é script.rs"),"disposition":"reviewed","scope":" ","reason":" "}),
+        json!({"groupId":"_","path":fixture.files[0]["path"],"disposition":"excluded","scope":" scope ","reason":" reason "}),
+    ] {
+        let mut journal = original.clone();
+        journal["assessments"] = json!([assessment]);
+        fs::write(&fixture.queue, serde_json::to_vec(&journal).unwrap()).unwrap();
+        review_work::next(&fixture.queue, &FixedClock).unwrap();
+    }
+
+    let mut journal = original;
+    journal["assessments"] = json!([good, good]);
+    fs::write(&fixture.queue, serde_json::to_vec(&journal).unwrap()).unwrap();
+    let error = review_work::next(&fixture.queue, &FixedClock).unwrap_err();
+    assert_eq!(classification(&error), "invalidInput");
+    assert!(error.to_string().contains("Duplicate assessment path"));
+}
+
+#[test]
+fn malformed_journal_reports_earliest_assessment_field() {
+    let fixture = BatchFixture::new("assessment-error-order");
+    let mut journal = fixture.journal();
+    // Each record has multiple faults so the diagnostic identifies the first
+    // actionable field in the persisted assessment schema.
+    for (record, detail) in [
+        (
+            json!({"groupId":"bad id","path":"relative","disposition":null,"scope":null}),
+            "group identifier",
+        ),
+        (
+            json!({"groupId":"rename","path":"relative","disposition":null,"scope":null}),
+            "absolute path",
+        ),
+        (
+            json!({"groupId":"rename","path":fixture.files[0]["path"],"disposition":null,"scope":null}),
+            "non-empty string 'disposition'",
+        ),
+        (
+            json!({"groupId":"rename","path":fixture.files[0]["path"],"disposition":"other","scope":null,"reason":null}),
+            "assessment scope",
+        ),
+        (
+            json!({"groupId":"rename","path":fixture.files[0]["path"],"disposition":"other","scope":"","reason":null}),
+            "assessment reason",
+        ),
+    ] {
+        journal["assessments"] = json!([record]);
+        let bytes = serde_json::to_vec(&journal).unwrap();
+        fs::write(&fixture.queue, &bytes).unwrap();
+        let error = review_work::next(&fixture.queue, &FixedClock).unwrap_err();
+        assert_eq!(classification(&error), "invalidInput");
+        assert!(error.to_string().contains(detail), "{error}");
+        assert_eq!(fs::read(&fixture.queue).unwrap(), bytes);
     }
 }
 

@@ -10,6 +10,7 @@ use ohno::AppError;
 use serde_json::{Map, Value, json};
 use ss_ai_runtime::{Clock, FileTransaction, caused_by, fail, read_bytes};
 
+use crate::review_work::validate_assessment;
 use crate::workflow_plan::{PlanItem, PlanKind, parse_json};
 
 /// Describes the artifact created or resumed under its lock.
@@ -1416,28 +1417,9 @@ pub(crate) fn validate_queue(
     }
     let mut assessed = HashSet::new();
     for assessment in array(fields.get("assessments"), "assessments")? {
-        let assessment = object(
-            assessment,
-            &["groupId", "path", "disposition", "scope", "reason"],
-        )?;
-        schema_id(text(assessment.get("groupId"), "groupId")?)?;
-        let path = text(assessment.get("path"), "path")?;
-        if !Path::new(path).is_absolute() || !assessed.insert(path.to_owned()) {
-            return Err(invalid("Invalid or duplicate assessment path"));
-        }
-        let disposition = text(assessment.get("disposition"), "disposition")?;
-        let scope = assessment
-            .get("scope")
-            .and_then(Value::as_str)
-            .ok_or_else(|| invalid("Invalid assessment scope"))?;
-        let reason = assessment
-            .get("reason")
-            .and_then(Value::as_str)
-            .ok_or_else(|| invalid("Invalid assessment reason"))?;
-        if !matches!(disposition, "reviewed" | "excluded")
-            || (disposition == "excluded" && (scope.trim().is_empty() || reason.trim().is_empty()))
-        {
-            return Err(invalid("Invalid assessment disposition"));
+        let path = validate_assessment(assessment)?;
+        if !assessed.insert(path) {
+            return Err(invalid("Duplicate assessment path"));
         }
     }
     let mut receipt_groups = HashSet::new();
