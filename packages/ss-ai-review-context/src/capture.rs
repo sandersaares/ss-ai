@@ -17,6 +17,20 @@ const CAPTURE_VERSION: i64 = 3;
 const POLICY_VERSION: &str = "2";
 const CLASSIFICATION_EVIDENCE: &str = "classification:reviewed";
 
+/// Binds operations on preloaded capture values to the supported capture schema.
+///
+/// # Errors
+///
+/// Rejects values that do not use the supported capture schema version.
+pub fn validate_capture_version(document: &Value) -> Result<(), AppError> {
+    if !document.is_object()
+        || document.get("schemaVersion").and_then(Value::as_i64) != Some(CAPTURE_VERSION)
+    {
+        return Err(fail("invalidInput", "Unsupported capture schema version"));
+    }
+    Ok(())
+}
+
 /// Reads a local capture and applies its validated semantic decisions.
 ///
 /// Field names consulted by the reader must use canonical casing.
@@ -33,11 +47,7 @@ pub fn read_capture(path: &Path, clock: &dyn Clock) -> Result<Value, AppError> {
     })?;
     let mut document = parse_file(&bytes)?;
     validate_capture_keys(&document)?;
-    if !document.is_object()
-        || document.get("schemaVersion").and_then(Value::as_i64) != Some(CAPTURE_VERSION)
-    {
-        return Err(fail("invalidInput", "Unsupported capture schema version"));
-    }
+    validate_capture_version(&document)?;
     validate_capture_structure(&document)?;
 
     let mut sidecar = path.as_os_str().to_os_string();

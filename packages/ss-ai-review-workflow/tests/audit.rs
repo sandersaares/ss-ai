@@ -699,7 +699,7 @@ fn in_memory_merge_contexts_use_the_same_binding_and_authority_checks() {
     let first = "a".repeat(40);
     let second = "b".repeat(40);
     let context = |commit: &str, authored: Value| {
-        json!({"pullRequestUrl":"https://example.test/pr/1",
+        json!({"schemaVersion":3, "pullRequestUrl":"https://example.test/pr/1",
             "pullRequest":{"reviewedSourceCommit":commit, "isAuthoredBySelf":authored}})
     };
     let old = workspace.put("old.json", &context(&first, json!(false)));
@@ -722,6 +722,41 @@ fn in_memory_merge_contexts_use_the_same_binding_and_authority_checks() {
     );
     fs::write(&new, br#"{"pullRequestUrl":"a","pullRequestUrl":"b"}"#).unwrap();
     assert!(set_merge_approval_from_files(&record, &new, false, None, false, &clock).is_err());
+}
+
+#[test]
+fn in_memory_merge_contexts_reject_unsupported_versions_before_writing() {
+    let workspace = Workspace::new("merge-context-versions");
+    let first = "a".repeat(40);
+    let second = "b".repeat(40);
+    let context = |commit: &str| {
+        json!({"schemaVersion":3, "pullRequestUrl":"https://example.test/pr/1",
+            "pullRequest":{"reviewedSourceCommit":commit, "isAuthoredBySelf":false}})
+    };
+    let old = workspace.put("old.json", &context(&first));
+    let new = workspace.put("new.json", &context(&second));
+    let mut invalid_current = context(&second);
+    invalid_current["schemaVersion"] = json!(2);
+    let invalid_current = workspace.put("invalid-current.json", &invalid_current);
+    let mut invalid_previous = context(&first);
+    invalid_previous["schemaVersion"] = json!(2);
+    let invalid_previous = workspace.put("invalid-previous.json", &invalid_previous);
+    let record = workspace.path("approval.json");
+    let clock = SystemClock::default();
+
+    set_merge_approval_from_files(&record, &old, true, None, false, &clock).unwrap();
+    let before = fs::read(&record).unwrap();
+
+    assert!(
+        set_merge_approval_from_files(&record, &invalid_current, true, None, false, &clock)
+            .is_err()
+    );
+    assert_eq!(fs::read(&record).unwrap(), before);
+    assert!(
+        set_merge_approval_from_files(&record, &new, false, Some(&invalid_previous), true, &clock)
+            .is_err()
+    );
+    assert_eq!(fs::read(&record).unwrap(), before);
 }
 
 #[test]
