@@ -818,7 +818,12 @@ fn reviewer_sources(
     let mut result = Vec::new();
     let mut ids = HashSet::new();
     for path in paths {
-        let artifact = read_artifact(&path, clock)?;
+        let artifact = read_artifact(&path, clock).map_err(|error| {
+            fail(
+                ss_ai_runtime::classification(&error),
+                format!("{}: {error}", path.display()),
+            )
+        })?;
         if artifact.get("kind") != Some(&json!("reviewer")) {
             return Err(invalid("Expected reviewer artifact"));
         }
