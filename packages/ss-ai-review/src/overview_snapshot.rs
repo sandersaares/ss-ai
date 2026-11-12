@@ -8,7 +8,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use regex::Regex;
-use serde_json::{Value, from_str, from_value, json, to_vec_pretty};
+use serde_json::{Map, Value, from_str, from_value, json, to_vec_pretty};
 use sha2::{Digest, Sha256};
 use ss_ai_runtime::{Clock, FileTransaction, decode_text_with_bom, read_bytes};
 use uuid::Uuid;
@@ -76,6 +76,185 @@ impl fmt::Debug for ValidatedContext<'_> {
     }
 }
 
+/// Carries a frozen Markdown record after its stored bytes have been verified.
+///
+/// The provider boundary uses this type so path, run identity, and content hash
+/// come from a snapshot validated before any publication intent is journaled.
+pub(crate) struct FrozenSnapshot {
+    record: Map<String, Value>,
+    run_id: String,
+    markdown_path: String,
+    markdown_hash: String,
+}
+
+impl FrozenSnapshot {
+    /// Returns the unchanged JSON record used by the publication journal.
+    pub(crate) fn record(&self) -> Value {
+        Value::Object(self.record.clone())
+    }
+
+    /// Returns the frozen report's run identity.
+    pub(crate) fn run_id(&self) -> &str {
+        &self.run_id
+    }
+
+    /// Returns the path of the immutable Markdown bytes.
+    pub(crate) fn markdown_path(&self) -> &str {
+        &self.markdown_path
+    }
+
+    /// Returns the digest of the immutable Markdown bytes.
+    pub(crate) fn markdown_hash(&self) -> &str {
+        &self.markdown_hash
+    }
+
+    /// Builds typed fields from a record already validated by its caller.
+    fn from_record(record: Value) -> Result<Self, SnapshotError> {
+        let invalid = || SnapshotError::invalid_state("Invalid or modified overview snapshot");
+        let Value::Object(record) = record else {
+            return Err(invalid());
+        };
+        let run_id = record
+            .get("runId")
+            .and_then(Value::as_str)
+            .filter(|value| value.len() == 32 && value.bytes().all(|byte| byte.is_ascii_hexdigit()))
+            .ok_or_else(invalid)?
+            .to_owned();
+        let markdown_path = record
+            .get("markdownPath")
+            .and_then(Value::as_str)
+            .filter(|value| !value.is_empty())
+            .map(str::to_owned)
+            .ok_or_else(invalid)?;
+        let markdown_hash = record
+            .get("markdownHash")
+            .and_then(Value::as_str)
+            .filter(|value| hash_shape(value))
+            .ok_or_else(invalid)?
+            .to_owned();
+        Ok(Self {
+            record,
+            run_id,
+            markdown_path,
+            markdown_hash,
+        })
+    }
+}
+
+/// Carries a frozen snapshot only after the ADO HTML and archive are prepared.
+pub(crate) struct PreparedAdoSnapshot {
+    frozen: FrozenSnapshot,
+    html_path: String,
+    html_hash: String,
+    archive_path: String,
+    archive_hash: String,
+}
+
+impl PreparedAdoSnapshot {
+    /// Adds the renderer's complete artifact identity to the interoperable record.
+    pub(crate) fn from_render(
+        frozen: FrozenSnapshot,
+        html_path: String,
+        html_hash: String,
+        archive_path: String,
+        archive_hash: String,
+    ) -> Result<Self, SnapshotError> {
+        let invalid = || SnapshotError::invalid_state("Invalid prepared overview artifacts");
+        if html_path.is_empty()
+            || archive_path.is_empty()
+            || !hash_shape(&html_hash)
+            || !hash_shape(&archive_hash)
+        {
+            return Err(invalid());
+        }
+        Ok(Self {
+            frozen,
+            html_path,
+            html_hash,
+            archive_path,
+            archive_hash,
+        })
+    }
+
+    /// Returns the frozen Markdown snapshot used by GitHub-side checks.
+    pub(crate) fn frozen(&self) -> &FrozenSnapshot {
+        &self.frozen
+    }
+
+    /// Returns the unchanged journal record plus ADO artifact identity.
+    pub(crate) fn record(&self) -> Value {
+        let mut record = self.frozen.record.clone();
+        record.insert("htmlPath".into(), json!(&self.html_path));
+        record.insert("htmlHash".into(), json!(&self.html_hash));
+        record.insert("archivePath".into(), json!(&self.archive_path));
+        record.insert("archiveHash".into(), json!(&self.archive_hash));
+        Value::Object(record)
+    }
+
+    /// Returns the prepared archive path.
+    pub(crate) fn archive_path(&self) -> &str {
+        &self.archive_path
+    }
+
+    /// Returns the prepared archive digest.
+    pub(crate) fn archive_hash(&self) -> &str {
+        &self.archive_hash
+    }
+}
+
+/// Distinguishes provider-ready snapshots while retaining one journal record shape.
+pub(crate) enum PreparedSnapshot {
+    /// A frozen Markdown report is sufficient for GitHub publication.
+    GitHub(FrozenSnapshot),
+    /// Azure DevOps requires both rendered HTML and its prepared archive.
+    AzureDevOps(PreparedAdoSnapshot),
+}
+
+impl PreparedSnapshot {
+    /// Returns the exact record to persist at the existing JSON boundary.
+    pub(crate) fn record(&self) -> Value {
+        match self {
+            Self::GitHub(snapshot) => snapshot.record(),
+            Self::AzureDevOps(snapshot) => snapshot.record(),
+        }
+    }
+}
+
+/// Supplies a structurally valid frozen snapshot to transaction boundary tests.
+#[cfg(test)]
+pub(crate) fn frozen_snapshot_for_test(
+    run_id: &str,
+    markdown_path: &str,
+    markdown_hash: &str,
+) -> FrozenSnapshot {
+    FrozenSnapshot::from_record(json!({
+        "schemaVersion": 1,
+        "runId": run_id,
+        "markdownPath": markdown_path,
+        "markdownHash": markdown_hash,
+    }))
+    .expect("test frozen snapshot has valid identity fields")
+}
+
+/// Supplies a fully prepared ADO snapshot to provider boundary tests.
+#[cfg(test)]
+pub(crate) fn prepared_ado_snapshot_for_test(
+    run_id: &str,
+    markdown_path: &str,
+    markdown_hash: &str,
+    archive_path: &str,
+    archive_hash: &str,
+) -> PreparedAdoSnapshot {
+    PreparedAdoSnapshot::from_render(
+        frozen_snapshot_for_test(run_id, markdown_path, markdown_hash),
+        format!("{archive_path}.html"),
+        "0".repeat(64),
+        archive_path.to_owned(),
+        archive_hash.to_owned(),
+    )
+    .expect("test ADO snapshot has complete artifact identities")
+}
+
 /// Publishes or reuses the immutable report under the caller's retained lock.
 ///
 /// The transaction must own `output_directory/overview-snapshot.json` for the
@@ -89,7 +268,7 @@ pub(crate) fn freeze_overview(
     refresh_unpublished: bool,
     snapshot_transaction: &FileTransaction<'_>,
     clock: &dyn Clock,
-) -> Result<Value, SnapshotError> {
+) -> Result<FrozenSnapshot, SnapshotError> {
     let loaded;
     let context = match context {
         ContextInput::Json(context) => context,
@@ -110,9 +289,9 @@ pub(crate) fn freeze_overview(
     let source_hash = hash(overview.as_bytes());
     if let Some(bytes) = existing {
         let snapshot = parse_json(&bytes, true)?;
-        validate_snapshot(&snapshot, context.url, context.target_json, clock)?;
+        let snapshot = validate_snapshot(snapshot, context.url, context.target_json, clock)?;
         if !refresh_unpublished
-            || snapshot.get("sourceHash").and_then(Value::as_str) == Some(&source_hash)
+            || snapshot.record().get("sourceHash").and_then(Value::as_str) == Some(&source_hash)
         {
             return Ok(snapshot);
         }
@@ -152,7 +331,7 @@ pub(crate) fn freeze_overview(
     snapshot_transaction
         .write_bytes(&bytes)
         .map_err(|error| SnapshotError::io_caused_by(error.to_string(), error.into_std_error()))?;
-    Ok(snapshot)
+    FrozenSnapshot::from_record(snapshot)
 }
 
 /// Keeps the overview's internal line endings and Unicode in the frozen report.
@@ -233,11 +412,11 @@ pub(crate) fn validate_context(context: &Value) -> Result<ValidatedContext<'_>, 
 
 /// Checks a complete stored record and hashes the actual frozen bytes.
 fn validate_snapshot(
-    snapshot: &Value,
+    snapshot: Value,
     url: &str,
     target: &Value,
     clock: &dyn Clock,
-) -> Result<(), SnapshotError> {
+) -> Result<FrozenSnapshot, SnapshotError> {
     let invalid = || SnapshotError::invalid_state("Invalid or modified overview snapshot");
     if snapshot.get("schemaVersion").and_then(Value::as_u64) != Some(1)
         || snapshot.get("pullRequestUrl").and_then(Value::as_str) != Some(url)
@@ -278,7 +457,7 @@ fn validate_snapshot(
     if snapshot.get("markdownHash").and_then(Value::as_str) != Some(&hash(&bytes)) {
         return Err(invalid());
     }
-    Ok(())
+    FrozenSnapshot::from_record(snapshot)
 }
 
 /// Applies the same ordered heading, placeholder, and private-path gate as PowerShell.
@@ -463,8 +642,9 @@ mod tests {
     use serde_json::{Error as JsonError, Value, json};
 
     use super::{
-        InvalidInput, InvalidState, SnapshotError, SnapshotIo, commit, hash, hash_shape,
-        make_report, parse_json, validate_context, validate_overview,
+        FrozenSnapshot, InvalidInput, InvalidState, PreparedAdoSnapshot, SnapshotError, SnapshotIo,
+        commit, frozen_snapshot_for_test, hash, hash_shape, make_report, parse_json,
+        validate_context, validate_overview,
     };
     use crate::{OverviewInput, OverviewRender};
 
@@ -576,7 +756,10 @@ mod tests {
     fn capture_binds_url_target_pr_and_inspected_commits() {
         let valid = capture();
         let context = validate_context(&valid).unwrap();
-        let _ = format!("{context:?}");
+        let debug = format!("{context:?}");
+        assert!(debug.contains("url:"));
+        assert!(debug.contains("source:"));
+        assert!(!debug.contains("target_json"));
         for (pointer, value) in [
             ("/pullRequest/id", json!(43)),
             ("/target/pullRequestId", json!(43)),
@@ -595,6 +778,137 @@ mod tests {
         *changed.pointer_mut("/target/webUrl").unwrap() =
             json!("https://example.com/owner/repo/pull/42");
         validate_context(&changed).unwrap_err();
+    }
+
+    #[test]
+    fn frozen_snapshot_requires_typed_identity_fields() {
+        for record in [
+            json!({"markdownPath":"report.md","markdownHash":"0".repeat(64)}),
+            json!({"runId":"0123456789abcdef0123456789abcdef","markdownHash":"0".repeat(64)}),
+            json!({"runId":"0123456789abcdef0123456789abcdef","markdownPath":"report.md"}),
+        ] {
+            assert!(FrozenSnapshot::from_record(record).is_err());
+        }
+
+        let snapshot = frozen_snapshot_for_test(
+            "0123456789abcdef0123456789abcdef",
+            "report.md",
+            &"0".repeat(64),
+        );
+        assert_eq!(snapshot.run_id(), "0123456789abcdef0123456789abcdef");
+        assert_eq!(snapshot.markdown_path(), "report.md");
+        assert_eq!(snapshot.markdown_hash(), "0".repeat(64));
+    }
+
+    #[test]
+    fn ado_preparation_requires_complete_artifact_identity_and_keeps_journal_shape() {
+        let frozen = frozen_snapshot_for_test(
+            "0123456789abcdef0123456789abcdef",
+            "report.md",
+            &"0".repeat(64),
+        );
+        for (html_path, html_hash, archive_path, archive_hash) in [
+            (
+                String::new(),
+                "0".repeat(64),
+                "report.zip".to_owned(),
+                "1".repeat(64),
+            ),
+            (
+                "report.html".to_owned(),
+                "bad".to_owned(),
+                "report.zip".to_owned(),
+                "1".repeat(64),
+            ),
+            (
+                "report.html".to_owned(),
+                "0".repeat(64),
+                String::new(),
+                "1".repeat(64),
+            ),
+            (
+                "report.html".to_owned(),
+                "0".repeat(64),
+                "report.zip".to_owned(),
+                "bad".to_owned(),
+            ),
+        ] {
+            let frozen = FrozenSnapshot::from_record(json!({
+                "schemaVersion": 1,
+                "runId": "0123456789abcdef0123456789abcdef",
+                "markdownPath": "report.md",
+                "markdownHash": "0".repeat(64),
+            }))
+            .unwrap();
+            assert!(
+                PreparedAdoSnapshot::from_render(
+                    frozen,
+                    html_path,
+                    html_hash,
+                    archive_path,
+                    archive_hash,
+                )
+                .is_err()
+            );
+        }
+
+        let prepared = PreparedAdoSnapshot::from_render(
+            frozen,
+            "report.html".to_owned(),
+            "0".repeat(64),
+            "report.zip".to_owned(),
+            "1".repeat(64),
+        )
+        .unwrap();
+        let record = prepared.record();
+        assert_eq!(
+            record
+                .get("schemaVersion")
+                .expect("schema version is recorded"),
+            1
+        );
+        assert_eq!(
+            record
+                .get("markdownPath")
+                .and_then(Value::as_str)
+                .expect("Markdown path is recorded"),
+            "report.md"
+        );
+        assert_eq!(
+            record
+                .get("markdownHash")
+                .and_then(Value::as_str)
+                .expect("Markdown hash is recorded"),
+            "0".repeat(64)
+        );
+        assert_eq!(
+            record
+                .get("htmlPath")
+                .and_then(Value::as_str)
+                .expect("HTML path is recorded"),
+            "report.html"
+        );
+        assert_eq!(
+            record
+                .get("htmlHash")
+                .and_then(Value::as_str)
+                .expect("HTML hash is recorded"),
+            "0".repeat(64)
+        );
+        assert_eq!(
+            record
+                .get("archivePath")
+                .and_then(Value::as_str)
+                .expect("archive path is recorded"),
+            "report.zip"
+        );
+        assert_eq!(
+            record
+                .get("archiveHash")
+                .and_then(Value::as_str)
+                .expect("archive hash is recorded"),
+            "1".repeat(64)
+        );
     }
 
     #[test]

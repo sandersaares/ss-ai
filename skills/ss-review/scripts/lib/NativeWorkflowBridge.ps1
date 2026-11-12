@@ -35,9 +35,30 @@ function Invoke-NativeReviewWorkflow {
 function Invoke-NativeReviewMarkdown {
     param([Parameter(Mandatory)][System.Collections.IDictionary] $Request)
 
+    ConvertTo-NativeReviewRenderingRequest -Request $Request
     $output = Invoke-NativeReviewWorkflowWithJson -Arguments @('render') -PathOption 'request-path' -Value $Request
     $result = ConvertFrom-JsonVerbatim -Text $output
     if ($result -is [array]) { , $result } else { $result }
+}
+
+# Preserve PowerShell ValidateSet's case-insensitive inputs at the native rendering boundary.
+function ConvertTo-NativeReviewRenderingRequest {
+    param([Parameter(Mandatory)][System.Collections.IDictionary] $Request)
+
+    $values = @{
+        destination = @('pullRequest', 'tracker')
+        platform = @('gitHub', 'azureDevOps')
+    }
+    foreach ($name in $values.Keys) {
+        if ($Request.Contains($name)) {
+            foreach ($value in $values[$name]) {
+                if ($Request[$name] -eq $value) {
+                    $Request[$name] = $value
+                    break
+                }
+            }
+        }
+    }
 }
 
 # Keeps structured prose out of process arguments and removes each private request after use.

@@ -112,15 +112,6 @@ pub struct NativeProcess {
     directory: PathBuf,
 }
 
-/// Carries child-only execution context through the common launcher.
-#[derive(Clone, Copy)]
-struct LaunchOptions<'a> {
-    isolated_git: bool,
-    oauth: Option<(&'a str, &'a str)>,
-    directory: &'a Path,
-    path: Option<&'a OsStr>,
-}
-
 impl NativeProcess {
     /// Binds provider execution to the caller-selected working directory.
     #[must_use]
@@ -278,6 +269,15 @@ impl Process for NativeProcess {
             },
         )
     }
+}
+
+/// Carries child-only execution context through the common launcher.
+#[derive(Clone, Copy)]
+struct LaunchOptions<'a> {
+    isolated_git: bool,
+    oauth: Option<(&'a str, &'a str)>,
+    directory: &'a Path,
+    path: Option<&'a OsStr>,
 }
 
 /// Drains both output pipes while feeding input, preserving an early provider refusal.

@@ -11,7 +11,7 @@ Chrome does not install its Ubuntu system packages.
 | Component | Requirement |
 | --- | --- |
 | PowerShell | The stable release line required by the skill scripts, currently 7.6. Use `pwsh`, not Windows PowerShell. |
-| ss-ai | Install the native executable and active skill together using the repository's root `Install.ps1`. |
+| ss-ai | Install the native executable and active skill together using the repository's root [`Install.ps1` procedure](../../README.md#install-agent-material). |
 | Node.js and npm | A supported Node.js LTS release with npm; the locked Puppeteer dependency requires Node.js 22.12.0 or later. Mermaid CLI's own lower Node requirement is not sufficient. |
 | Pandoc | 3.8 or later with `--syntax-highlighting` support. The portable installer pins 3.11. Ubuntu's repository version may be too old; the render probe checks the actual executable. |
 | JavaScript packages | The active skill's `tools/package-lock.json`, installed user-wide with `npm ci` and strict engine checking. Skill copies with the same lockfile share an installation. Do not substitute an unrelated Mermaid CLI, install a different Puppeteer version, or regenerate the lockfile. |

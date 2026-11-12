@@ -139,8 +139,10 @@ function Write-ReviewHtml {
 
     # A PowerShell-held lock cannot transfer to the native process, which acquires its own.
     if ($InstallationLocked) { throw 'Report rendering cannot reuse a PowerShell installation lock.' }
-    # Resolve relative to the PowerShell location, as the native child uses that location too.
+    # Native paths must reflect PowerShell provider and location semantics.
+    $source = $ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath($Path)
     $output = $ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath($OutputPath)
+    $skill = $ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath($SkillRoot)
     $directory = [IO.Path]::GetDirectoryName($output)
     [void] [IO.Directory]::CreateDirectory($directory)
     # Keep title prose out of process arguments without changing the renderer's working directory.
@@ -160,8 +162,8 @@ function Write-ReviewHtml {
             $bytes = [Text.UTF8Encoding]::new($false).GetBytes($Title)
             $stream.Write($bytes, 0, $bytes.Length)
         } finally { $stream.Dispose() }
-        $json = Invoke-NativeReviewWorkflow -Arguments @('render-review-html', "--path=$Path",
-            "--output-path=$OutputPath", "--skill-root=$SkillRoot", "--tools-directory=$(Get-ReportToolsDirectory)",
+        $json = Invoke-NativeReviewWorkflow -Arguments @('render-review-html', "--path=$source",
+            "--output-path=$output", "--skill-root=$skill", "--tools-directory=$(Get-ReportToolsDirectory)",
             "--title-path=$titlePath")
         ConvertFrom-Json -InputObject $json -AsHashtable -NoEnumerate -ErrorAction Stop
     } finally {

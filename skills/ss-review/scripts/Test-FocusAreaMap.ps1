@@ -10,5 +10,7 @@ Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 $PSNativeCommandUseErrorActionPreference = $true
 . "$PSScriptRoot\lib\NativeWorkflowBridge.ps1"
+$SessionStateDirectory = $ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath($SessionStateDirectory)
+$MapPath = $ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath($MapPath)
 
 Invoke-NativeReviewWorkflow -Arguments @('validate-focus-area-map', "--session-state=$SessionStateDirectory", "--map-path=$MapPath")

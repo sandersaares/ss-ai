@@ -52,14 +52,27 @@ $ErrorActionPreference = 'Stop'
 $PSNativeCommandUseErrorActionPreference = $true
 . "$PSScriptRoot\lib\NativeCaptureBridge.ps1"
 
+# PowerShell paths can name drives and locations that native programs cannot interpret.
+function Resolve-CaptureFileSystemPath {
+    param([string] $Path)
+    $provider = $null
+    $drive = $null
+    $resolved = $ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath($Path, [ref] $provider, [ref] $drive)
+    if ($provider.Name -ne 'FileSystem') { throw "Expected a filesystem path: $Path" }
+    $resolved
+}
+
 $arguments = [Collections.Generic.List[string]]::new()
 $arguments.Add('create')
-$arguments.Add("--output-directory=$OutputDirectory")
+$arguments.Add("--output-directory=$(Resolve-CaptureFileSystemPath -Path $OutputDirectory)")
 $arguments.Add("--output-prefix=$OutputPrefix")
+if ($PSBoundParameters.ContainsKey('ComparePath')) {
+    $arguments.Add("--compare-path=$(Resolve-CaptureFileSystemPath -Path $ComparePath)")
+}
 foreach ($entry in @(
     @('Url', 'url'), @('Platform', 'platform'), @('Organization', 'organization'),
     @('Project', 'project'), @('Repository', 'repository'), @('PullRequestId', 'pull-request-id'),
-    @('CollectionUrl', 'collection-url'), @('ComparePath', 'compare-path'), @('Tenant', 'tenant')
+    @('CollectionUrl', 'collection-url'), @('Tenant', 'tenant')
 )) {
     if ($PSBoundParameters.ContainsKey($entry[0])) { $arguments.Add("--$($entry[1])=$($PSBoundParameters[$entry[0]])") }
 }

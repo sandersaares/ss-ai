@@ -3,7 +3,7 @@
 [CmdletBinding(PositionalBinding = $false)]
 param(
     [Parameter(Mandatory)][string] $Path,
-    [Parameter(Mandatory)][ValidateSet('exclusive-owner', 'shared-owner', 'exclusive-contender', 'shared-contender', 'shared-after-signal', 'publication')]
+    [Parameter(Mandatory)][ValidateSet('exclusive-owner', 'shared-owner', 'exclusive-contender', 'shared-contender', 'publication')]
     [string] $Scenario
 )
 
@@ -36,12 +36,6 @@ switch ($Scenario) {
         [Console]::WriteLine('ready')
         if ([Console]::ReadLine() -cne 'acquire') { throw 'Expected acquire signal.' }
         $lock = Open-PullRequestFileLock -Path $Path -Shared:($_ -eq 'shared-contender')
-        try { [Console]::WriteLine('acquired') } finally { $lock.Dispose() }
-    }
-    'shared-after-signal' {
-        [Console]::WriteLine('ready')
-        if ([Console]::ReadLine() -cne 'acquire') { throw 'Expected acquire signal.' }
-        $lock = Open-PullRequestFileLock -Path $Path -Shared
         try { [Console]::WriteLine('acquired') } finally { $lock.Dispose() }
     }
     'publication' {

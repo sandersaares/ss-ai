@@ -375,8 +375,30 @@ fn transform(node: &mut Value, renderer: &mut DiagramRenderer<'_>) -> Result<(),
     Ok(())
 }
 
+/// Carries checked metadata to HTML presentation; a missing description differs from an empty one.
+struct SvgInspection {
+    description: Option<String>,
+    dimensions: String,
+}
+
 /// Checks the SVG before embedding it as an inert image and preserving its source.
 fn diagram_html(source: &str, svg: &str) -> Result<String, AppError> {
+    let inspection = inspect_svg(svg)?;
+    let alt = inspection
+        .description
+        .as_deref()
+        .unwrap_or("Mermaid diagram");
+    Ok(format!(
+        "<figure class=\"diagram\"><div class=\"diagram-scroll\"><img alt=\"{}\"{} src=\"data:image/svg+xml;base64,{}\"></div><details><summary>Diagram source</summary><pre><code>{}</code></pre></details></figure>",
+        html_escape(alt),
+        inspection.dimensions,
+        STANDARD.encode(svg.as_bytes()),
+        html_escape(source)
+    ))
+}
+
+/// Validates SVG content and extracts metadata used by its reading-view image.
+fn inspect_svg(svg: &str) -> Result<SvgInspection, AppError> {
     static EXTERNAL: OnceLock<Result<BytesRegex, regex::Error>> = OnceLock::new();
     // XML entities must be resolved before inspecting CSS, or encoded URLs can evade checks.
     let decoded =
@@ -412,25 +434,28 @@ fn diagram_html(source: &str, svg: &str) -> Result<String, AppError> {
             .map_err(|error| caused_by("invalidInput", "Malformed SVG", error))?
         {
             Event::Start(element) => {
-                let name = element.local_name().as_ref().to_owned();
+                let local_name = element.local_name();
+                let name = local_name.as_ref();
                 if depth == 0 {
                     if root_seen || name != "svg" {
                         return Err(invalid("Mermaid did not produce one SVG document"));
                     }
                     root_seen = true;
                 }
-                if matches!(
-                    name.to_ascii_lowercase().as_str(),
-                    "script"
-                        | "foreignobject"
-                        | "image"
-                        | "iframe"
-                        | "animate"
-                        | "animatemotion"
-                        | "animatetransform"
-                        | "set"
-                        | "discard"
-                ) {
+                if [
+                    "script",
+                    "foreignobject",
+                    "image",
+                    "iframe",
+                    "animate",
+                    "animatemotion",
+                    "animatetransform",
+                    "set",
+                    "discard",
+                ]
+                .iter()
+                .any(|blocked| name.eq_ignore_ascii_case(blocked))
+                {
                     return Err(invalid("SVG contains unsupported active content"));
                 }
                 inspect_svg_attributes(&element, depth == 0, &mut dimensions)?;
@@ -458,29 +483,22 @@ fn diagram_html(source: &str, svg: &str) -> Result<String, AppError> {
             }
             Event::Text(text) => {
                 let text = text.xml10_content();
+                // Formatting whitespace outside the root is harmless; non-whitespace text is not.
                 if depth == 0 && !text.trim().is_empty() {
                     return Err(invalid("Text outside SVG root"));
                 }
-                if style_depth.is_some() && text.contains('\\') {
-                    return Err(invalid("SVG style contains unsupported escapes"));
-                }
-                if desc_depth.is_some() {
-                    description.push_str(&text);
-                }
+                inspect_svg_text(&text, desc_depth, style_depth, &mut description)?;
             }
             Event::CData(text) => {
                 let text = text.xml10_content();
+                // CDATA represents explicit content, so reject it outside the root even when empty.
                 if depth == 0 {
                     return Err(invalid("Text outside SVG root"));
                 }
-                if style_depth.is_some() && text.contains('\\') {
-                    return Err(invalid("SVG style contains unsupported escapes"));
-                }
-                if desc_depth.is_some() {
-                    description.push_str(&text);
-                }
+                inspect_svg_text(&text, desc_depth, style_depth, &mut description)?;
             }
             Event::GeneralRef(reference) => {
+                // References also represent explicit content and are never allowed outside the root.
                 if depth == 0 {
                     return Err(invalid("Text outside SVG root"));
                 }
@@ -490,12 +508,7 @@ fn diagram_html(source: &str, svg: &str) -> Result<String, AppError> {
                     let reference = unescape(&reference).map_err(|error| {
                         caused_by("invalidInput", "Invalid SVG reference", error)
                     })?;
-                    if style_depth.is_some() && reference.contains('\\') {
-                        return Err(invalid("SVG style contains unsupported escapes"));
-                    }
-                    if desc_depth.is_some() {
-                        description.push_str(&reference);
-                    }
+                    inspect_svg_text(&reference, desc_depth, style_depth, &mut description)?;
                 }
             }
             Event::DocType(_) | Event::PI(_) => {
@@ -511,18 +524,26 @@ fn diagram_html(source: &str, svg: &str) -> Result<String, AppError> {
     if !root_seen || depth != 0 {
         return Err(invalid("Malformed SVG document"));
     }
-    let alt = if desc_seen {
-        &description
-    } else {
-        "Mermaid diagram"
-    };
-    Ok(format!(
-        "<figure class=\"diagram\"><div class=\"diagram-scroll\"><img alt=\"{}\"{} src=\"data:image/svg+xml;base64,{}\"></div><details><summary>Diagram source</summary><pre><code>{}</code></pre></details></figure>",
-        html_escape(alt),
+    Ok(SvgInspection {
+        description: desc_seen.then_some(description),
         dimensions,
-        STANDARD.encode(svg.as_bytes()),
-        html_escape(source)
-    ))
+    })
+}
+
+/// Applies the style-escape and description rules shared by SVG text events.
+fn inspect_svg_text(
+    text: &str,
+    desc_depth: Option<usize>,
+    style_depth: Option<usize>,
+    description: &mut String,
+) -> Result<(), AppError> {
+    if style_depth.is_some() && text.contains('\\') {
+        return Err(invalid("SVG style contains unsupported escapes"));
+    }
+    if desc_depth.is_some() {
+        description.push_str(text);
+    }
+    Ok(())
 }
 
 /// Validates SVG attributes and captures the renderer's intrinsic dimensions.
@@ -534,20 +555,24 @@ fn inspect_svg_attributes(
     for attribute in element.attributes() {
         let attribute = attribute
             .map_err(|error| caused_by("invalidInput", "Malformed SVG attribute", error))?;
-        let name = attribute.key.local_name().as_ref().to_ascii_lowercase();
+        let local_name = attribute.key.local_name();
+        let name = local_name.as_ref();
         let value = attribute
             .normalized_value(XmlVersion::Implicit1_0)
             .map_err(|error| caused_by("invalidInput", "Invalid SVG attribute", error))?;
         if value.contains('\\')
             || attribute.key.as_ref().eq_ignore_ascii_case("xml:base")
-            || name.starts_with("on")
-            || (matches!(name.as_str(), "href" | "src") && !value.starts_with('#'))
+            || name
+                .get(..2)
+                .is_some_and(|prefix| prefix.eq_ignore_ascii_case("on"))
+            || ((name.eq_ignore_ascii_case("href") || name.eq_ignore_ascii_case("src"))
+                && !value.starts_with('#'))
         {
             return Err(invalid(
                 "SVG contains active or externally referenced content",
             ));
         }
-        if root && name == "viewbox" && !value.is_empty() {
+        if root && name.eq_ignore_ascii_case("viewbox") && !value.is_empty() {
             let mut coordinates = value
                 .split(|c: char| c.is_whitespace() || c == ',')
                 .filter(|part| !part.is_empty());

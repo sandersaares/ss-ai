@@ -12,5 +12,9 @@ Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 $PSNativeCommandUseErrorActionPreference = $true
 . "$PSScriptRoot\lib\NativeWorkflowBridge.ps1"
+$QueuePath = $ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath($QueuePath)
+$InventoryPath = $ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath($InventoryPath)
+$FileGroupsPath = $ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath($FileGroupsPath)
+$AssessmentPath = $ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath($AssessmentPath)
 Invoke-NativeReviewWorkflow -Arguments @('set-review-assessment', "--queue-path=$QueuePath",
     "--inventory-path=$InventoryPath", "--file-groups-path=$FileGroupsPath", "--assessment-path=$AssessmentPath")

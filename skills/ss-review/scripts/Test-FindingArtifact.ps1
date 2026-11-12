@@ -38,13 +38,11 @@ $PSNativeCommandUseErrorActionPreference = $true
 if ($PSCmdlet.ParameterSetName -eq 'Identifiers') {
     . "$PSScriptRoot\lib\JsonValue.ps1"
     . "$PSScriptRoot\lib\NativeWorkflowBridge.ps1"
+    . "$PSScriptRoot\lib\FindingIdentifiers.ps1"
     $fullPath = $ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath($Path)
     $arguments = @('validate-findings', "--path=$fullPath")
-    foreach ($entry in $ExpectedReviewerId) {
-        foreach ($part in $entry.Split(',')) {
-            $id = $part.Trim()
-            if ($id) { $arguments += "--reviewer-id=$id" }
-        }
+    foreach ($id in (ConvertTo-FindingIdentifierList -Value $ExpectedReviewerId)) {
+        $arguments += "--reviewer-id=$id"
     }
     $output = Invoke-NativeReviewWorkflow -Arguments $arguments
     $valid = (ConvertFrom-JsonVerbatim -Text $output)['isValid']
@@ -54,6 +52,8 @@ if ($PSCmdlet.ParameterSetName -eq 'Identifiers') {
 }
 
 . "$PSScriptRoot\lib\NativeWorkflowBridge.ps1"
+$ManifestPath = $ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath($ManifestPath)
+$Path = $ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath($Path)
 $output = Invoke-NativeReviewWorkflow -Arguments @('validate-review-work', "--manifest-path=$ManifestPath", "--artifact-directory=$Path")
 $result = ConvertFrom-Json -InputObject $output -AsHashtable
 Write-Output $output

@@ -10,7 +10,9 @@ use serde_json::{Value, json};
 use ss_ai_runtime::FileTransaction;
 
 use crate::error::{caused_by, fail};
-use crate::overview_snapshot::{self, ContextInput};
+use crate::overview_snapshot::{
+    self, ContextInput, FrozenSnapshot, PreparedAdoSnapshot, PreparedSnapshot,
+};
 use crate::overview_transaction::{self, EffectError, OverviewEffects};
 use crate::target::{Platform, Target};
 use crate::transport::Transport;
@@ -222,13 +224,13 @@ impl OverviewEffects for Effects<'_, '_> {
         .map_err(effect_error)
     }
 
-    fn freeze(&mut self, _clock: &dyn Clock) -> Result<Value, EffectError> {
+    fn freeze(&mut self, _clock: &dyn Clock) -> Result<PreparedSnapshot, EffectError> {
         let lock = FileTransaction::open(
             &self.input.output_directory.join("overview-snapshot.json"),
             self.clock,
         )
         .map_err(effect_error)?;
-        let mut snapshot = overview_snapshot::freeze_overview(
+        let snapshot = overview_snapshot::freeze_overview(
             ContextInput::Json(self.input.capture),
             self.input.overview_path,
             self.input.output_directory,
@@ -240,9 +242,9 @@ impl OverviewEffects for Effects<'_, '_> {
         .map_err(|error| local_error(error.to_string()))?;
         self.snapshot_lock = Some(lock);
         if self.target.platform == Platform::AzureDevOps {
-            let preparation = (self.render)(&snapshot).map_err(|error| {
+            let preparation = (self.render)(&snapshot.record()).map_err(|error| {
                 let mut error = effect_error(error);
-                error.snapshot = Some(snapshot.clone());
+                error.snapshot = Some(snapshot.record());
                 error.render_failed = true;
                 error
             })?;
@@ -254,22 +256,32 @@ impl OverviewEffects for Effects<'_, '_> {
                     archive_hash,
                 } => {
                     let html_path = unicode_path(&html_path)
-                        .map_err(|message| render_error(message, &snapshot))?;
+                        .map_err(|message| render_error(message, &snapshot))?
+                        .to_owned();
                     let archive_path = unicode_path(&archive_path)
-                        .map_err(|message| render_error(message, &snapshot))?;
+                        .map_err(|message| render_error(message, &snapshot))?
+                        .to_owned();
                     if !hash_shape(&html_hash) || !hash_shape(&archive_hash) {
                         return Err(render_error(
                             "Overview artifact has an invalid hash".to_owned(),
                             &snapshot,
                         ));
                     }
-                    let object = snapshot.as_object_mut().ok_or_else(|| {
-                        local_error("Overview snapshot is not an object".to_owned())
+                    let frozen_record = snapshot.record();
+                    let prepared = PreparedAdoSnapshot::from_render(
+                        snapshot,
+                        html_path,
+                        html_hash,
+                        archive_path,
+                        archive_hash,
+                    )
+                    .map_err(|error| {
+                        let mut error = local_error(error.to_string());
+                        error.snapshot = Some(frozen_record);
+                        error.render_failed = true;
+                        error
                     })?;
-                    object.insert("htmlPath".into(), json!(html_path));
-                    object.insert("htmlHash".into(), json!(html_hash));
-                    object.insert("archivePath".into(), json!(archive_path));
-                    object.insert("archiveHash".into(), json!(archive_hash));
+                    return Ok(PreparedSnapshot::AzureDevOps(prepared));
                 }
                 OverviewRender::MissingTools {
                     missing,
@@ -294,43 +306,63 @@ impl OverviewEffects for Effects<'_, '_> {
                             .take(MAX_DIAGNOSTIC_ENTRIES)
                             .map(|name| name.chars().take(MAX_DIAGNOSTIC_CHARS).collect())
                             .collect(),
-                        snapshot: Some(snapshot),
+                        snapshot: Some(snapshot.record()),
                         render_failed: true,
                     });
                 }
             }
         }
-        Ok(snapshot)
+        Ok(PreparedSnapshot::GitHub(snapshot))
     }
 
-    fn upload(&mut self, snapshot: &Value) -> Result<Value, EffectError> {
-        match self.target.platform {
-            Platform::GitHub => {
+    fn upload(&mut self, snapshot: &PreparedSnapshot) -> Result<Value, EffectError> {
+        match (self.target.platform, snapshot) {
+            (Platform::GitHub, PreparedSnapshot::GitHub(snapshot)) => {
                 overview_github::upload(&mut self.transport, &self.target, snapshot)
             }
-            Platform::AzureDevOps => {
+            (Platform::AzureDevOps, PreparedSnapshot::AzureDevOps(snapshot)) => {
                 overview_ado::upload(&mut self.transport, &self.target, snapshot)
+            }
+            _ => {
+                return Err(local_error(
+                    "Prepared overview does not match provider".to_owned(),
+                ));
             }
         }
         .map_err(|error| write_error(error, self.target.platform))
     }
 
-    fn verify_artifact(&mut self, snapshot: &Value, receipt: &Value) -> Result<Value, EffectError> {
-        match self.target.platform {
-            Platform::GitHub => overview_github::verify_artifact(
-                &mut self.transport,
-                &self.target,
-                snapshot,
-                receipt,
-            ),
-            Platform::AzureDevOps => {
+    fn verify_artifact(
+        &mut self,
+        snapshot: &PreparedSnapshot,
+        receipt: &Value,
+    ) -> Result<Value, EffectError> {
+        match (self.target.platform, snapshot) {
+            (Platform::GitHub, PreparedSnapshot::GitHub(snapshot)) => {
+                overview_github::verify_artifact(
+                    &mut self.transport,
+                    &self.target,
+                    snapshot,
+                    receipt,
+                )
+            }
+            (Platform::AzureDevOps, PreparedSnapshot::AzureDevOps(snapshot)) => {
                 overview_ado::verify_artifact(&mut self.transport, &self.target, snapshot, receipt)
+            }
+            _ => {
+                return Err(local_error(
+                    "Prepared overview does not match provider".to_owned(),
+                ));
             }
         }
         .map_err(effect_error)
     }
 
-    fn comment(&mut self, _snapshot: &Value, payload: &Value) -> Result<Value, EffectError> {
+    fn comment(
+        &mut self,
+        _snapshot: &PreparedSnapshot,
+        payload: &Value,
+    ) -> Result<Value, EffectError> {
         match self.target.platform {
             Platform::GitHub => {
                 overview_github::comment(&mut self.transport, &self.target, payload)
@@ -342,7 +374,11 @@ impl OverviewEffects for Effects<'_, '_> {
         .map_err(|error| write_error(error, self.target.platform))
     }
 
-    fn verify_comment(&mut self, _snapshot: &Value, payload: &Value) -> Result<(), EffectError> {
+    fn verify_comment(
+        &mut self,
+        _snapshot: &PreparedSnapshot,
+        payload: &Value,
+    ) -> Result<(), EffectError> {
         match self.target.platform {
             Platform::GitHub => {
                 overview_github::verify_comment(&mut self.transport, &self.target, payload)
@@ -371,9 +407,9 @@ fn unicode_path(path: &Path) -> Result<&str, String> {
 }
 
 /// Keeps the frozen snapshot visible after local rendering fails.
-fn render_error(message: String, snapshot: &Value) -> EffectError {
+fn render_error(message: String, snapshot: &FrozenSnapshot) -> EffectError {
     let mut error = local_error(message);
-    error.snapshot = Some(snapshot.clone());
+    error.snapshot = Some(snapshot.record());
     error.render_failed = true;
     error
 }

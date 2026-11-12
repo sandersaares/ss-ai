@@ -202,6 +202,14 @@ pub(crate) struct Transport<'a> {
     pub(crate) clock: &'a dyn Clock,
 }
 
+/// Selects whether a provider refusal can safely be retried.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum RequestPolicy {
+    Standard,
+    WriteOnce,
+    ApprovalOnce,
+}
+
 impl<'a> Transport<'a> {
     /// Binds provider coordinates and dependencies without acquiring credentials.
     ///
@@ -242,7 +250,7 @@ impl<'a> Transport<'a> {
         body: Option<&Value>,
     ) -> Result<Value, AppError> {
         match self.platform {
-            Platform::GitHub => self.github(path, method, body, false, true),
+            Platform::GitHub => self.github(path, method, body, false, RequestPolicy::Standard),
             Platform::AzureDevOps => {
                 let page = self.ado(path, method, body, &[], "7.1")?;
                 if page.continuation.is_some() {
@@ -272,14 +280,25 @@ impl<'a> Transport<'a> {
             "GET",
             None,
             false,
-            true,
+            RequestPolicy::Standard,
             GithubResponseMode::OptionalNotFound,
         )
     }
 
     /// Renewal writes cannot retry even an explicit rate refusal without a new freshness check.
     pub(crate) fn github_write_once(&self, path: &str, body: &Value) -> Result<Value, AppError> {
-        self.github(path, "POST", Some(body), false, false)
+        self.github(path, "POST", Some(body), false, RequestPolicy::WriteOnce)
+    }
+
+    /// Dismissal is a separate, nonreplayable decision effect, not an approval rollback.
+    pub(crate) fn github_dismiss_once(&self, path: &str, body: &Value) -> Result<Value, AppError> {
+        self.github(path, "PUT", Some(body), false, RequestPolicy::WriteOnce)
+    }
+
+    /// Approval success requires no response metadata and is never replayed.
+    pub(crate) fn github_approve_once(&self, path: &str, body: &Value) -> Result<(), AppError> {
+        self.github(path, "POST", Some(body), false, RequestPolicy::ApprovalOnce)?;
+        Ok(())
     }
 
     /// Distinguishes an explicit HTTP 429 from other single-attempt failures.
@@ -296,7 +315,7 @@ impl<'a> Transport<'a> {
             "POST",
             Some(body),
             false,
-            false,
+            RequestPolicy::WriteOnce,
             GithubResponseMode::ExplicitRefusal,
         )?
         .ok_or_else(|| fail("service", "Unexpected absent GitHub response"))
@@ -309,7 +328,14 @@ impl<'a> Transport<'a> {
         method: &str,
         body: &Value,
     ) -> Result<Value, AppError> {
-        let page = self.ado_request(path, method, Some(body), &[], "7.1", false)?;
+        let page = self.ado_request(
+            path,
+            method,
+            Some(body),
+            &[],
+            "7.1",
+            RequestPolicy::WriteOnce,
+        )?;
         if page.continuation.is_some() {
             return Err(fail("ambiguousWrite", "Unexpected ADO write continuation"));
         }
@@ -323,11 +349,31 @@ impl<'a> Transport<'a> {
         method: &str,
         body: &Value,
     ) -> Result<Value, AppError> {
-        let page = self.ado_request(path, method, Some(body), &[], "7.1", true)?;
+        let page = self.ado_request(
+            path,
+            method,
+            Some(body),
+            &[],
+            "7.1",
+            RequestPolicy::Standard,
+        )?;
         if page.continuation.is_some() {
             return Err(fail("ambiguousWrite", "Unexpected ADO write continuation"));
         }
         Ok(page.payload)
+    }
+
+    /// A successful vote needs no response payload and is never replayed.
+    pub(crate) fn ado_approve_once(&mut self, path: &str, body: &Value) -> Result<(), AppError> {
+        self.ado_request(
+            path,
+            "PUT",
+            Some(body),
+            &[],
+            "7.1",
+            RequestPolicy::ApprovalOnce,
+        )?;
+        Ok(())
     }
 
     /// Reads GitHub slurped REST pages or a checked ADO list envelope.
@@ -340,7 +386,7 @@ impl<'a> Transport<'a> {
                     "GET",
                     None,
                     true,
-                    true,
+                    RequestPolicy::Standard,
                 )?;
                 let Value::Array(pages) = pages else {
                     return Err(fail("service", "Expected an array in service evidence"));
@@ -374,7 +420,7 @@ impl<'a> Transport<'a> {
             "POST",
             Some(&json!({ "query": query, "variables": variables })),
             false,
-            true,
+            RequestPolicy::Standard,
         )?;
         if value
             .get("errors")
@@ -401,14 +447,14 @@ impl<'a> Transport<'a> {
         method: &str,
         body: Option<&Value>,
         paginated: bool,
-        retry_refusals: bool,
+        policy: RequestPolicy,
     ) -> Result<Value, AppError> {
         self.github_optional(
             path,
             method,
             body,
             paginated,
-            retry_refusals,
+            policy,
             GithubResponseMode::Standard,
         )?
         .ok_or_else(|| fail("service", "Unexpected absent GitHub response"))
@@ -421,7 +467,7 @@ impl<'a> Transport<'a> {
         method: &str,
         body: Option<&Value>,
         paginated: bool,
-        retry_refusals: bool,
+        policy: RequestPolicy,
         response_mode: GithubResponseMode,
     ) -> Result<Option<Value>, AppError> {
         let mut arguments = vec![
@@ -453,6 +499,9 @@ impl<'a> Transport<'a> {
                         error,
                     )
                 })?;
+            if policy == RequestPolicy::ApprovalOnce && output.success {
+                return Ok(Some(Value::Null));
+            }
             let stdout = String::from_utf8(output.stdout).map_err(|error| {
                 crate::error::caused_by(
                     if read { "service" } else { "ambiguousWrite" },
@@ -484,7 +533,7 @@ impl<'a> Transport<'a> {
             let json = serde_json::from_str::<Value>(payload);
             let rate_limited = github_rate_limit(&status_text, &error_text, json.as_ref().ok());
             if rate_limited {
-                if !retry_refusals {
+                if policy != RequestPolicy::Standard {
                     return Err(fail(
                         "rateLimited",
                         "GitHub refused the renewal for rate limiting; no write was retried",
@@ -620,7 +669,7 @@ impl<'a> Transport<'a> {
         query: &[(&str, String)],
         version: &str,
     ) -> Result<Page, AppError> {
-        self.ado_request(path, method, body, query, version, true)
+        self.ado_request(path, method, body, query, version, RequestPolicy::Standard)
     }
 
     /// Keeps ordinary transport recovery separate from freshness-bound publication.
@@ -631,7 +680,7 @@ impl<'a> Transport<'a> {
         body: Option<&Value>,
         query: &[(&str, String)],
         version: &str,
-        retry_refusals: bool,
+        policy: RequestPolicy,
     ) -> Result<Page, AppError> {
         let body = body.map(serde_json::to_vec).transpose()?;
         let response = self.ado_response(
@@ -640,9 +689,27 @@ impl<'a> Transport<'a> {
             body.as_deref(),
             query,
             version,
-            AdoRequestKind::Json { retry_refusals },
+            AdoRequestKind::Json { policy },
         )?;
         let read = method == "GET";
+        if policy == RequestPolicy::ApprovalOnce {
+            let text = String::from_utf8_lossy(&response.body);
+            if response
+                .headers
+                .get("content-type")
+                .is_some_and(|value| value.to_ascii_lowercase().contains("text/html"))
+                || text.trim_start().starts_with('<')
+            {
+                return Err(fail(
+                    "ambiguousWrite",
+                    "Azure DevOps returned a sign-in document; authenticate with the collection's tenant",
+                ));
+            }
+            return Ok(Page {
+                payload: Value::Null,
+                continuation: None,
+            });
+        }
         let text = String::from_utf8(response.body).map_err(|error| {
             crate::error::caused_by(
                 if read { "service" } else { "ambiguousWrite" },
@@ -751,9 +818,9 @@ impl<'a> Transport<'a> {
         );
         let read = method == "GET";
         let binary = matches!(kind, AdoRequestKind::Binary);
-        let retry_refusals = match kind {
-            AdoRequestKind::Json { retry_refusals } => retry_refusals,
-            AdoRequestKind::Binary => true,
+        let policy = match kind {
+            AdoRequestKind::Json { policy } => policy,
+            AdoRequestKind::Binary => RequestPolicy::Standard,
         };
         let mut transient_attempt = 0_u32;
         let mut rate_attempt = 0_u32;
@@ -785,7 +852,7 @@ impl<'a> Transport<'a> {
                 }
             };
             if response.status == 429 {
-                if !retry_refusals {
+                if policy != RequestPolicy::Standard {
                     return Err(fail(
                         "rateLimited",
                         "ADO publication was rate limited; write not replayed",
@@ -861,7 +928,7 @@ enum GithubResponseMode {
 #[derive(Clone, Copy)]
 enum AdoRequestKind {
     /// JSON requests select whether a refusal may be replayed.
-    Json { retry_refusals: bool },
+    Json { policy: RequestPolicy },
     /// Attachments may retry explicit throttling refusals, not uncertain writes.
     Binary,
 }
@@ -1478,5 +1545,71 @@ mod tests {
             .unwrap_err();
         assert_eq!(classification(&error), "rateLimited");
         assert_eq!(process.calls.get(), 5);
+    }
+
+    #[test]
+    fn github_approval_accepts_acknowledgement_without_parsing_or_replaying() {
+        struct ApprovalProcess {
+            response: RefCell<Option<ProcessOutput>>,
+            calls: Cell<usize>,
+        }
+
+        impl Process for ApprovalProcess {
+            fn execute(&self, program: &str, _: &[String], _: &[u8]) -> io::Result<ProcessOutput> {
+                assert_eq!(program, "gh");
+                self.calls.set(self.calls.get() + 1);
+                Ok(self.response.borrow_mut().take().expect("single request"))
+            }
+        }
+
+        let process = ApprovalProcess {
+            response: RefCell::new(Some(ProcessOutput::new(true, b"not JSON".to_vec(), vec![]))),
+            calls: Cell::new(0),
+        };
+        let fixture = Fixture::new(vec![]);
+        let target = Target::pull_request("https://github.com/org/repo/pull/42", None).unwrap();
+        let transport = Transport::new(&target, None, &process, &fixture, &fixture);
+        transport
+            .github_approve_once("repos/org/repo/pulls/42/reviews", &json!({}))
+            .unwrap();
+        assert_eq!(process.calls.get(), 1);
+    }
+
+    #[test]
+    fn provider_approvals_accept_status_acknowledgements_but_reject_refusals() {
+        let target = target();
+        for body in [&b""[..], &b"not JSON"[..], &b"\xff"[..]] {
+            let fixture = Fixture::new(vec![response(200, body)]);
+            let mut transport = Transport::new(&target, None, &fixture, &fixture, &fixture);
+            transport
+                .ado_approve_once("reviewers/1", &json!({"vote":10}))
+                .unwrap();
+            assert_eq!(fixture.calls.borrow().len(), 1);
+            assert!(fixture.waits.borrow().is_empty());
+        }
+
+        let fixture = Fixture::new(vec![response(429, b"limited")]);
+        let mut transport = Transport::new(&target, None, &fixture, &fixture, &fixture);
+        let error = transport
+            .ado_approve_once("reviewers/1", &json!({"vote":10}))
+            .unwrap_err();
+        assert_eq!(classification(&error), "rateLimited");
+        assert_eq!(fixture.calls.borrow().len(), 1);
+        assert!(fixture.waits.borrow().is_empty());
+
+        let mut headers = BTreeMap::new();
+        headers.insert("content-type".to_owned(), "text/html".to_owned());
+        let fixture = Fixture::new(vec![Ok(HttpResponse::new(
+            200,
+            headers,
+            b"sign in".to_vec(),
+        ))]);
+        let mut transport = Transport::new(&target, None, &fixture, &fixture, &fixture);
+        let error = transport
+            .ado_approve_once("reviewers/1", &json!({"vote":10}))
+            .unwrap_err();
+        assert_eq!(classification(&error), "ambiguousWrite");
+        assert_eq!(fixture.calls.borrow().len(), 1);
+        assert!(fixture.waits.borrow().is_empty());
     }
 }

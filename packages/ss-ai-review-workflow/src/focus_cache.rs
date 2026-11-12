@@ -241,6 +241,8 @@ pub fn restore(
         LockMode::Exclusive,
         clock,
     )?;
+    focus_area_generation::validate_session_records_locked(&session, clock)?;
+    read_snapshot(&session, clock)?;
     let snapshot_valid =
         focus_area_generation::verify_snapshot_locked(&session, expected_snapshot_identity, clock);
     focus_area_generation::invalidate_locked(&session, clock)?;
@@ -524,6 +526,7 @@ pub fn generator_build_fingerprint() -> &'static str {
 fn write_snapshot(session: &Path, key: Option<&str>, clock: &dyn Clock) -> Result<(), AppError> {
     let transaction =
         FileTransaction::open(&session.join("focus-area-cache-identity.json"), clock)?;
+    read_snapshot_record(&transaction)?;
     let snapshot = Snapshot {
         schema_version: SCHEMA,
         key: key.map(str::to_owned),
@@ -535,6 +538,11 @@ fn write_snapshot(session: &Path, key: Option<&str>, clock: &dyn Clock) -> Resul
 fn read_snapshot(session: &Path, clock: &dyn Clock) -> Result<Option<Snapshot>, AppError> {
     let transaction =
         FileTransaction::open(&session.join("focus-area-cache-identity.json"), clock)?;
+    read_snapshot_record(&transaction)
+}
+
+/// Validates the existing cache identity under its retained record lock.
+fn read_snapshot_record(transaction: &FileTransaction<'_>) -> Result<Option<Snapshot>, AppError> {
     let Some(bytes) = transaction.read_bytes()? else {
         return Ok(None);
     };

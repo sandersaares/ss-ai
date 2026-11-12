@@ -13,6 +13,7 @@ use uuid::Uuid;
 use crate::Process;
 use crate::error::fail;
 use crate::json::{array, boolean, field, text};
+use crate::overview_snapshot::FrozenSnapshot;
 use crate::target::{Platform, Target};
 use crate::transport::Transport;
 
@@ -48,18 +49,17 @@ pub(crate) fn is_open(transport: &mut Transport<'_>, target: &Target) -> Result<
 pub(crate) fn upload(
     transport: &mut Transport<'_>,
     target: &Target,
-    snapshot: &Value,
+    snapshot: &FrozenSnapshot,
 ) -> Result<Value, AppError> {
     check_target(transport, target)?;
-    let path = text(field(snapshot, "markdownPath")?)?;
-    let bytes = fs::read(path)?;
+    let bytes = fs::read(snapshot.markdown_path())?;
     upload_bytes(transport, snapshot, &bytes)
 }
 
 /// Keeps the file boundary separate from the single non-idempotent request.
 fn upload_bytes(
     transport: &Transport<'_>,
-    snapshot: &Value,
+    snapshot: &FrozenSnapshot,
     bytes: &[u8],
 ) -> Result<Value, AppError> {
     check_hash(snapshot, bytes)?;
@@ -70,7 +70,7 @@ fn upload_bytes(
             error,
         )
     })?;
-    let run = text(field(snapshot, "runId")?)?;
+    let run = snapshot.run_id();
     // This metadata budget permits compatible identifiers beyond generated UUIDs
     // without treating the bound as a Gist provider restriction.
     if run.is_empty() || run.len() > 128 {
@@ -97,11 +97,11 @@ fn upload_bytes(
 pub(crate) fn verify_artifact(
     transport: &mut Transport<'_>,
     target: &Target,
-    snapshot: &Value,
+    snapshot: &FrozenSnapshot,
     payload: &Value,
 ) -> Result<Value, AppError> {
     check_target(transport, target)?;
-    let parent = Path::new(text(field(snapshot, "markdownPath")?)?)
+    let parent = Path::new(snapshot.markdown_path())
         .parent()
         .ok_or_else(|| fail("invalidState", "Overview path has no parent"))?;
     verify_artifact_with(transport, snapshot, payload, |transport, id, revision| {
@@ -112,7 +112,7 @@ pub(crate) fn verify_artifact(
 /// Separates revision retrieval from API interpretation for injected offline tests.
 fn verify_artifact_with(
     transport: &mut Transport<'_>,
-    snapshot: &Value,
+    snapshot: &FrozenSnapshot,
     payload: &Value,
     read_revision: impl FnOnce(&Transport<'_>, &str, &str) -> Result<Vec<u8>, AppError>,
 ) -> Result<Value, AppError> {
@@ -261,8 +261,8 @@ fn gist_url(value: &str, id: &str) -> Result<String, AppError> {
 }
 
 /// Compares the exact report bytes with the frozen lowercase SHA-256 digest.
-fn check_hash(snapshot: &Value, bytes: &[u8]) -> Result<(), AppError> {
-    let expected = text(field(snapshot, "markdownHash")?)?;
+fn check_hash(snapshot: &FrozenSnapshot, bytes: &[u8]) -> Result<(), AppError> {
+    let expected = snapshot.markdown_hash();
     if expected != format!("{:x}", Sha256::digest(bytes)) {
         return Err(fail(
             "service",
@@ -371,6 +371,7 @@ mod tests {
         comment, comment_id, git_revision, is_open, upload_bytes, verify_artifact_with,
         verify_comment,
     };
+    use crate::overview_snapshot::frozen_snapshot_for_test;
     use crate::target::Target;
     use crate::transport::Transport;
     use crate::{Clock, Http, HttpResponse, Process, ProcessOutput, classification};
@@ -468,8 +469,12 @@ mod tests {
         }
     }
 
-    fn snapshot(bytes: &[u8]) -> Value {
-        json!({"runId":"run", "markdownHash":format!("{:x}", Sha256::digest(bytes))})
+    fn snapshot(bytes: &[u8]) -> crate::overview_snapshot::FrozenSnapshot {
+        frozen_snapshot_for_test(
+            "0123456789abcdef0123456789abcdef",
+            "report.md",
+            &format!("{:x}", Sha256::digest(bytes)),
+        )
     }
 
     fn gist(content: &str, truncated: bool) -> Value {
@@ -510,7 +515,7 @@ mod tests {
                 "gists",
                 "POST",
                 Some(
-                    json!({"public":false, "description":"ss-review initial overview run",
+                    json!({"public":false, "description":"ss-review initial overview 0123456789abcdef0123456789abcdef",
                 "files":{"overview.md":{"content":str::from_utf8(bytes).unwrap()}}}),
                 ),
                 json!({"id":"abc123","html_url":"https://gist.github.com/alice/abc123"}),
@@ -683,7 +688,7 @@ mod tests {
     fn write_failure_is_not_replayed_and_acknowledgement_retains_id() {
         let target = Target::pull_request("https://github.com/acme/repo/pull/42", None).unwrap();
         let bytes = b"content";
-        let expected = json!({"public":false,"description":"ss-review initial overview run","files":{"overview.md":{"content":"content"}}});
+        let expected = json!({"public":false,"description":"ss-review initial overview 0123456789abcdef0123456789abcdef","files":{"overview.md":{"content":"content"}}});
         let fixture = script(vec![(
             "gists",
             "POST",
@@ -780,7 +785,7 @@ mod tests {
                 "gists",
                 "POST",
                 Some(
-                    json!({"public":false,"description":"ss-review initial overview run",
+                    json!({"public":false,"description":"ss-review initial overview 0123456789abcdef0123456789abcdef",
                     "files":{"overview.md":{"content":"content"}}}),
                 ),
                 json!({"__status":429}),

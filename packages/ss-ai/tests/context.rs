@@ -1,4 +1,6 @@
 //! Real-process compatibility between native and PowerShell context readers.
+#![cfg_attr(coverage_nightly, feature(coverage_attribute))]
+#![cfg_attr(coverage_nightly, coverage(off))]
 #![allow(
     clippy::indexing_slicing,
     clippy::arithmetic_side_effects,
@@ -760,6 +762,117 @@ fn unicode_search_crosses_the_process_boundary() {
     assert_eq!(result["totalCount"], 1);
     assert_eq!(result["items"][0]["matchOffset"], 3);
     assert_eq!(result["items"][0]["excerpt"], "a🤖É suffix");
+}
+
+#[test]
+#[cfg_attr(miri, ignore = "requires a native subprocess")]
+fn authorship_classification_files_accept_powershell_text_encodings() {
+    let text = r#"[{"threadId":"Té🤖","commentId":"Cé🤖","kind":"human"}]"#;
+    let utf16 = |little: bool| {
+        let mut bytes = if little {
+            vec![0xff, 0xfe]
+        } else {
+            vec![0xfe, 0xff]
+        };
+        for word in text.encode_utf16() {
+            bytes.extend(if little {
+                word.to_le_bytes()
+            } else {
+                word.to_be_bytes()
+            });
+        }
+        bytes
+    };
+    let utf32 = |little: bool| {
+        let mut bytes = if little {
+            vec![0xff, 0xfe, 0, 0]
+        } else {
+            vec![0, 0, 0xfe, 0xff]
+        };
+        for character in text.chars() {
+            let word = u32::from(character);
+            bytes.extend(if little {
+                word.to_le_bytes()
+            } else {
+                word.to_be_bytes()
+            });
+        }
+        bytes
+    };
+    let mut utf8_bom = vec![0xef, 0xbb, 0xbf];
+    utf8_bom.extend(text.as_bytes());
+    for bytes in [
+        text.as_bytes().to_vec(),
+        utf8_bom,
+        utf16(true),
+        utf16(false),
+        utf32(true),
+        utf32(false),
+    ] {
+        let fixture = Fixture::new();
+        let mut capture: Value =
+            serde_json::from_slice(&fs::read(&fixture.capture).unwrap()).unwrap();
+        capture["threads"][0]["id"] = json!("Té🤖");
+        capture["threads"][0]["openingCommentId"] = json!("Cé🤖");
+        capture["threads"][0]["comments"][0]["id"] = json!("Cé🤖");
+        fs::write(&fixture.capture, serde_json::to_vec(&capture).unwrap()).unwrap();
+        let capture = Fixture::path(&fixture.capture);
+        let before = page(fixture.native(&[
+            "read",
+            "--path",
+            capture,
+            "--query",
+            "comments",
+            "--thread-id",
+            "Té🤖",
+        ]));
+        let classification = fixture.root.join("classification.json");
+        fs::write(&classification, bytes).unwrap();
+        page(fixture.native(&[
+            "set-authorship",
+            "--path",
+            capture,
+            "--snapshot-id",
+            before["snapshotId"].as_str().unwrap(),
+            "--classification-path",
+            Fixture::path(&classification),
+        ]));
+        let after = page(fixture.native(&[
+            "read",
+            "--path",
+            capture,
+            "--query",
+            "comments",
+            "--thread-id",
+            "Té🤖",
+        ]));
+        assert_eq!(after["items"][0]["authorship"], "human");
+        assert_eq!(after["items"][0]["threadId"], "Té🤖");
+        assert_eq!(after["items"][0]["commentId"], "Cé🤖");
+    }
+}
+
+#[test]
+#[cfg_attr(miri, ignore = "requires a native subprocess")]
+fn malformed_classification_files_report_invalid_input_without_writing() {
+    let fixture = Fixture::new();
+    let classification = fixture.root.join("classification.json");
+    fs::write(&classification, [0xff, 0xfe, b'[', 0, b'{', 0]).unwrap();
+    let output = fixture.native(&[
+        "set-authorship",
+        "--path",
+        Fixture::path(&fixture.capture),
+        "--snapshot-id",
+        "unused",
+        "--classification-path",
+        Fixture::path(&classification),
+    ]);
+    assert!(!output.status.success());
+    assert!(output.stdout.is_empty());
+    let error = String::from_utf8(output.stderr).unwrap();
+    assert!(error.contains("invalidInput"), "{error}");
+    assert!(error.contains("Invalid classification JSON"), "{error}");
+    assert!(!PathBuf::from(format!("{}.authorship.json", fixture.capture.display())).exists());
 }
 
 #[test]

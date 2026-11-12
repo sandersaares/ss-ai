@@ -25,6 +25,7 @@ param(
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 $PSNativeCommandUseErrorActionPreference = $true
+. "$PSScriptRoot/lib/NativeContextPath.ps1"
 
 # Match the query excerpt limit because parser errors can include captured evidence.
 function Get-NativeContextErrorExcerpt {
@@ -67,6 +68,9 @@ function Invoke-NativeContext {
 }
 
 $arguments = [Collections.Generic.List[string]]::new()
+$Path = Resolve-NativeContextFilePath -Path $Path
+$RequestPath = Resolve-NativeContextFilePath -Path $RequestPath
+$DiagnosticsPath = Resolve-NativeContextFilePath -Path $DiagnosticsPath
 foreach ($argument in @('prepare', "--path=$Path", "--request-path=$RequestPath",
     "--diagnostics-path=$DiagnosticsPath", "--query=$Query", "--scope=$Scope", "--page-size=$PageSize")) {
     $arguments.Add($argument)
@@ -74,10 +78,23 @@ foreach ($argument in @('prepare', "--path=$Path", "--request-path=$RequestPath"
 foreach ($entry in @(
     @('Field', 'field'), @('Kind', 'kind'), @('Resolution', 'resolution'),
     @('ThreadId', 'thread-id'), @('CommentId', 'comment-id'), @('Authorship', 'authorship'),
-    @('Text', 'text'), @('TextPath', 'text-path'), @('ComparePath', 'compare-path')
+    @('Text', 'text')
 )) {
     if ($PSBoundParameters.ContainsKey($entry[0])) {
         $arguments.Add("--$($entry[1])=$($PSBoundParameters[$entry[0]])")
+    }
+}
+foreach ($entry in @(@('TextPath', 'text-path'), @('ComparePath', 'compare-path'))) {
+    if ($PSBoundParameters.ContainsKey($entry[0])) {
+        $value = $PSBoundParameters[$entry[0]]
+        # Native preparation records the conflicting-selector failure in diagnostics.
+        if ([string]::IsNullOrEmpty($value) -or
+            ($entry[0] -eq 'TextPath' -and $PSBoundParameters.ContainsKey('Text'))) {
+            $resolved = $value
+        } else {
+            $resolved = Resolve-NativeContextFilePath -Path $value
+        }
+        $arguments.Add("--$($entry[1])=$resolved")
     }
 }
 if ($PSBoundParameters.ContainsKey('Files') -and $Files.Count -eq 0) {
