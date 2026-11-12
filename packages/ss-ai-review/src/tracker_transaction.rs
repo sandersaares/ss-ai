@@ -28,6 +28,9 @@ use crate::error::fail;
 use crate::tracker_body::{AcceptedRewrite, BodyVerdict, compare_ado_body};
 use crate::tracker_target::TrackerTarget;
 
+/// Separates native tracker journal records from legacy skill-produced records.
+const JOURNAL_SCHEMA_VERSION: u64 = 2;
+
 #[cfg(any(test, feature = "private-fuzz"))]
 pub use fuzz::fuzz_tracker_transaction;
 
@@ -299,7 +302,7 @@ fn nullable_string(value: Option<&Value>) -> bool {
 fn validate_record(record: &Value) -> Result<(), AppError> {
     let invalid = || fail("invalidState", "Invalid tracker publication journal");
     if !record.is_object()
-        || record["schemaVersion"] != 1
+        || record["schemaVersion"] != JOURNAL_SCHEMA_VERSION
         || validate_target(&record["target"]).is_err()
         || record["platform"] != record["target"]["platform"]
         || !nonempty(&record["startedUtc"])
@@ -443,6 +446,11 @@ fn validate_record(record: &Value) -> Result<(), AppError> {
             || !adjudication["storedExcerpt"].is_string()
             || !valid_hash(&adjudication["expectedBodyHash"])
             || !valid_hash(&adjudication["storedBodyHash"])
+            || adjudication
+                .get("firstDifference")
+                .and_then(Value::as_u64)
+                .and_then(|value| usize::try_from(value).ok())
+                .is_none()
             || !creates.iter().any(|op| {
                 op["outcome"] == "succeeded"
                     && op["itemId"] == adjudication["itemId"]
@@ -600,7 +608,7 @@ pub(crate) fn paused_fixture(target: &Value, state: &Value, plan: &[Value]) -> V
     record["adjudication"] = json!({
         "findingId":first["findingId"], "itemId":"1", "title":first["title"],
         "expectedBodyHash":hash(first["body"].as_str().unwrap()),
-        "storedBodyHash":hash("stored rewrite"), "similarity":null,
+        "storedBodyHash":hash("stored rewrite"), "similarity":null, "firstDifference":0,
         "sentExcerpt":"approved", "storedExcerpt":"stored"
     });
     record
@@ -637,7 +645,7 @@ fn new_record(target: &Value, state: &Value, plan: &[Value], now: &str) -> Value
         json!({"operation":"verifyItems", "findingId":null, "title":null, "outcome":"pending",
         "itemId":null, "itemNodeId":null, "url":null, "message":null}),
     );
-    json!({"schemaVersion":1, "startedUtc":now, "platform":target["platform"], "target":target,
+    json!({"schemaVersion":JOURNAL_SCHEMA_VERSION, "startedUtc":now, "platform":target["platform"], "target":target,
         "trackerUrl":target["webUrl"], "workItemType":metadata(state,"workItemType"),
         "areaPath":metadata(state,"areaPath"), "descriptionField":metadata(state,"descriptionField"),
         "parentItemId":metadata(state,"parentItemId"), "planHash":plan_hash(plan), "status":"inProgress",
@@ -1574,7 +1582,7 @@ mod tests {
     }
 
     #[test]
-    fn legacy_paused_record_is_accepted_but_inconsistent_state_is_not() {
+    fn legacy_paused_record_is_rejected_without_changing_the_journal() {
         let (mut journal, mut provider) = setup();
         provider.rewrite = true;
         let paused = call(&mut journal, &mut provider, "azureDevOps", &plan(), None).unwrap();
@@ -1584,16 +1592,25 @@ mod tests {
             expected_body_hash: a["expectedBodyHash"].as_str().unwrap(),
             stored_body_hash: a["storedBodyHash"].as_str().unwrap(),
         };
-        let mut legacy: Value = serde_json::from_slice(journal.bytes.as_ref().unwrap()).unwrap();
+        let native: Value = serde_json::from_slice(journal.bytes.as_ref().unwrap()).unwrap();
+        let mut legacy = native.clone();
+        legacy["schemaVersion"] = json!(1);
         legacy["adjudication"]
             .as_object_mut()
             .unwrap()
             .remove("firstDifference");
-        journal.bytes = Some(serde_json::to_vec(&legacy).unwrap());
-        _ = check_prior_inner(&mut journal, &target("azureDevOps"), Some(&acceptance)).unwrap();
-        legacy["operations"][1]["outcome"] = json!("ambiguous");
-        journal.bytes = Some(serde_json::to_vec(&legacy).unwrap());
-        _ = check_prior_inner(&mut journal, &target("azureDevOps"), Some(&acceptance)).unwrap_err();
+        let mut incomplete_native = native;
+        incomplete_native["adjudication"]
+            .as_object_mut()
+            .unwrap()
+            .remove("firstDifference");
+        for record in [legacy, incomplete_native] {
+            let bytes = serde_json::to_vec(&record).unwrap();
+            journal.bytes = Some(bytes.clone());
+            _ = check_prior_inner(&mut journal, &target("azureDevOps"), Some(&acceptance))
+                .unwrap_err();
+            assert_eq!(journal.bytes.as_deref(), Some(bytes.as_slice()));
+        }
         assert_eq!(provider.calls, ["create first", "read 1"]);
     }
 

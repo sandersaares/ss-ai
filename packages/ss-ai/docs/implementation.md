@@ -50,6 +50,8 @@ Accepted Azure body rewrites become durable before the transaction records a
 new creation intent. If saving that intent fails, the same accepted decision
 can continue; after the intent is durable, the possible provider write requires
 reconciliation instead of automatic replay.
+Native tracker journals use their own schema identity and require the complete
+adjudication evidence produced by the native utility.
 The Cargo inventory has no provider or
 network dependency. The focused packages support targeted test builds and
 incremental reuse; a cold build of the complete executable still builds its
