@@ -12,6 +12,8 @@ Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 $PSNativeCommandUseErrorActionPreference = $true
 . "$PSScriptRoot\lib\NativeWorkflowBridge.ps1"
+$SessionStateDirectory = $ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath($SessionStateDirectory)
+if ($InputPath) { $InputPath = $ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath($InputPath) }
 
 $arguments = @('update-focus-area-expansion', "--session-state=$SessionStateDirectory", "--operation=$($Operation.ToLowerInvariant())")
 if ($InputPath) { $arguments += "--input-path=$InputPath" }

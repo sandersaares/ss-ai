@@ -30,6 +30,7 @@ $FocusAreaDirectory = $ExecutionContext.SessionState.Path.GetUnresolvedProviderP
 $OutputDirectory = $ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath($OutputDirectory)
 if ($RepositoryRoot) { $RepositoryRoot = $ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath($RepositoryRoot) }
 if ($ArtifactDirectory) { $ArtifactDirectory = $ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath($ArtifactDirectory) }
+if ($SessionStateDirectory) { $SessionStateDirectory = $ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath($SessionStateDirectory) }
 $arguments = @('create-review-work', "--inventory-path=$InventoryPath", "--file-groups-path=$FileGroupsPath",
     "--focus-area-directory=$FocusAreaDirectory", "--output-directory=$OutputDirectory")
 if ($RepositoryRoot) { $arguments += "--repository-root=$RepositoryRoot" }

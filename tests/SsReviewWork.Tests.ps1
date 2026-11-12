@@ -239,7 +239,9 @@ Describe 'Review work initialization' {
                 '-FocusAreaDirectory', $script:Areas, '-OutputDirectory', $script:Work,
                 '-SessionStateDirectory', $script:Root, '-PreparationIdentity', $identity
             )
+            $script:AlternatePaths = $true
             $result = Invoke-WorkScript -Name 'New-ReviewWork.ps1' -ArgumentList $arguments
+            $script:AlternatePaths = $false
             $result.exitCode | Should -Be 0 -Because $result.errors
             $manifestPath = ($result.output | ConvertFrom-Json).manifestPath
             $reviewer = (Get-Content -LiteralPath $manifestPath -Raw | ConvertFrom-Json).reviewers[0]
