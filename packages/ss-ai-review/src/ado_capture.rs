@@ -11,7 +11,7 @@ use crate::error::fail;
 use crate::identity::Identity;
 use crate::json::{array, field, identifier, text};
 use crate::target::{Platform, Target, escape};
-use crate::transport::{Transport, ado_items};
+use crate::transport::Transport;
 
 /// Reads the provider's complete discussion and iteration evidence.
 pub(crate) fn collect(transport: &mut Transport<'_>, target: &Target) -> Result<Value, AppError> {
@@ -109,9 +109,9 @@ pub(crate) fn collect(transport: &mut Transport<'_>, target: &Target) -> Result<
             optional_text(commit, "commitId")?;
         }
     }
-    let iterations = list(transport, &format!("{path}/iterations"))?;
-    let reviewers = list(transport, &format!("{path}/reviewers"))?;
-    let threads = list(transport, &format!("{path}/threads"))?;
+    let iterations = transport.ado_list(&format!("{path}/iterations"))?;
+    let reviewers = transport.ado_list(&format!("{path}/reviewers"))?;
+    let threads = transport.ado_list(&format!("{path}/threads"))?;
 
     let mut revision_ids = HashSet::new();
     let mut latest: Option<(NonZeroU64, Value)> = None;
@@ -196,26 +196,6 @@ pub(crate) fn collect(transport: &mut Transport<'_>, target: &Target) -> Result<
         "revisions": revisions,
         "threads": converted_threads
     }))
-}
-
-/// Follows each continuation token and rejects cycles instead of truncating evidence.
-fn list(transport: &mut Transport<'_>, path: &str) -> Result<Vec<Value>, AppError> {
-    let mut token: Option<String> = None;
-    let mut seen = HashSet::new();
-    let mut result = Vec::new();
-    loop {
-        let query = token
-            .as_ref()
-            .map(|value| vec![("continuationToken", value.clone())])
-            .unwrap_or_default();
-        let page = transport.ado(path, "GET", None, &query, "7.1")?;
-        result.extend(ado_items(&page.payload)?);
-        match page.continuation {
-            None => return Ok(result),
-            Some(next) if seen.insert(next.clone()) => token = Some(next),
-            Some(_) => return Err(fail("service", "Azure DevOps continuation token repeated")),
-        }
-    }
 }
 
 /// Distinguishes absent optional flags from malformed service data.
@@ -603,7 +583,7 @@ mod tests {
     use ss_ai_runtime::Failure;
     use url::Url;
 
-    use super::{collect, list as collect_pages};
+    use super::collect;
     use crate::clock::timestamp;
     use crate::target::{Platform, Target};
     use crate::transport::Transport;
@@ -861,9 +841,9 @@ mod tests {
             );
             let mut transport = Transport::new(&target, None, &recording, &recording, &TestClock);
             for endpoint in endpoints {
-                let values =
-                    collect_pages(&mut transport, &format!("{}/{endpoint}", target.pr_api()))
-                        .unwrap();
+                let values = transport
+                    .ado_list(&format!("{}/{endpoint}", target.pr_api()))
+                    .unwrap();
                 let expected = if endpoint == "reviewers" {
                     json!(["reviewer-1", "reviewer-2"])
                 } else {
@@ -873,6 +853,28 @@ mod tests {
             }
             recording.assert_complete();
         }
+    }
+
+    #[test]
+    fn ado_list_rejects_repeated_continuation_tokens() {
+        let target = target();
+        let recording = Recording::new(
+            &target,
+            BTreeMap::from([(
+                "threads",
+                VecDeque::from([
+                    (None, list(json!([])), Some("repeat")),
+                    (Some("repeat"), list(json!([])), Some("repeat")),
+                ]),
+            )]),
+        );
+        let mut transport = Transport::new(&target, None, &recording, &recording, &TestClock);
+        let error = transport
+            .ado_list(&format!("{}/threads", target.pr_api()))
+            .unwrap_err();
+
+        assert_eq!(classification(&error), "service");
+        assert_eq!(recording.requests.borrow().len(), 2);
     }
 
     #[test]

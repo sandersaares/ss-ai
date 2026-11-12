@@ -420,6 +420,7 @@ impl PublicationProvider {
         }
     }
 
+    /// Recorded GitHub fixtures establish preflight evidence; writes supply later readbacks.
     fn github_response(&self, route: &str, input: &[u8]) -> Value {
         let responses = &self.responses;
         if route == "graphql" {
@@ -597,6 +598,7 @@ impl Http for PublicationProvider {
     ) -> Result<HttpResponse, AppError> {
         assert!(!self.github, "GitHub must not use ADO HTTP");
         assert_eq!(token, "fixture-token");
+        // Recorded ADO lists establish preflight evidence; writes supply later readbacks.
         let responses = &self.responses;
         let response = if method == "PUT" && url.contains("/reviewers/runner?") {
             assert!(self.approval_expected.get());

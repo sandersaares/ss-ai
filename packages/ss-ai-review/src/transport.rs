@@ -4,7 +4,7 @@
 //! preserves raw responses until it can classify refusal, failure, or success.
 //! See `docs/implementation/transport.md` for recovery and credential boundaries.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashSet};
 use std::sync::LazyLock;
 use std::time::Duration;
 
@@ -350,6 +350,28 @@ impl<'a> Transport<'a> {
         }
     }
 
+    /// Reads every Azure DevOps list page and rejects continuation cycles.
+    pub(crate) fn ado_list(&mut self, path: &str) -> Result<Vec<Value>, AppError> {
+        let mut token: Option<String> = None;
+        let mut seen = HashSet::new();
+        let mut result = Vec::new();
+        loop {
+            let query = token
+                .as_ref()
+                .map(|value| vec![("continuationToken", value.clone())])
+                .unwrap_or_default();
+            let page = self.ado(path, "GET", None, &query, "7.1")?;
+            result.extend(ado_items(&page.payload)?);
+            match page.continuation {
+                None => return Ok(result),
+                Some(next) if seen.insert(next.clone()) => token = Some(next),
+                Some(_) => {
+                    return Err(fail("service", "Azure DevOps continuation token repeated"));
+                }
+            }
+        }
+    }
+
     /// Executes a read-only GraphQL query while preserving complete evidence.
     ///
     /// Variables travel as JSON on stdin. Callers use this for queries, not
@@ -399,7 +421,10 @@ impl<'a> Transport<'a> {
         {
             return Err(fail(
                 "ambiguousWrite",
-                "GraphQL mutation returned incomplete evidence",
+                format!(
+                    "GraphQL mutation returned incomplete evidence: {}",
+                    diagnostic(&value.to_string())
+                ),
             ));
         }
         Ok(value)
@@ -1499,7 +1524,7 @@ mod tests {
                 ProcessOutput::new(true, b"HTTP/2 200\n\nnot-json".to_vec(), vec![]),
                 ProcessOutput::new(
                     true,
-                    b"HTTP/2 200\n\n{\"errors\":[{\"type\":\"RATE_LIMITED\"}]}".to_vec(),
+                    b"HTTP/2 200\n\n{\"errors\":[{\"message\":\"invalid anchor\"}]}".to_vec(),
                     vec![],
                 ),
                 ProcessOutput::new(false, vec![], b"HTTP 403 gh auth login".to_vec()),
@@ -1523,6 +1548,9 @@ mod tests {
                 .graphql_mutation("mutation { test }", &json!({}))
                 .unwrap_err();
             assert_eq!(classification(&error), "ambiguousWrite");
+            if expected_calls == 3 {
+                assert!(error.to_string().contains("invalid anchor"));
+            }
             assert_eq!(process.calls.get(), expected_calls);
         }
         let response = transport

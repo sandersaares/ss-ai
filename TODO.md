@@ -58,6 +58,11 @@ Improvement ideas to revisit when the repo matures.
   and mutually exclusive publication receipts in the internal generation
   record, while preserving the persisted format and its validation boundary.
   Complete this when each transition constructs only coherent state.
+- **Type prepared final-review publication plans.** Replace repeated JSON shape
+  recovery with a shared typed representation across planning and publication.
+  Complete this when provider payloads and journal records serialize the typed
+  operations at their external boundaries. Tracked by
+  [ss-ai#53](https://github.com/sandersaares/ss-ai/issues/53).
 - **Type the cache refresh interval.** Represent the positive refresh interval
   after input validation while retaining the existing CLI rejection behavior
   and upper bound.

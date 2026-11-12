@@ -146,6 +146,18 @@ Describe 'Native final review publication adapter' -Skip:$IsWindows {
         $result.record.arguments[0] | Should -BeExactly 'review'
         $result.record.arguments[1] | Should -BeExactly 'publish-final-review'
         $named = @($result.record.arguments | Select-Object -Skip 2)
+        $nowArguments = @($named | Where-Object { $_ -like '--now-utc=*' })
+        $nowArguments.Count | Should -Be 1
+        $forwardedNow = [DateTimeOffset]::Parse(
+            $nowArguments[0].Substring('--now-utc='.Length),
+            [Globalization.CultureInfo]::InvariantCulture
+        )
+        $inputNow = [DateTimeOffset]::Parse(
+            '2026-03-12T10:11:12+02:00',
+            [Globalization.CultureInfo]::InvariantCulture
+        )
+        ($forwardedNow - $inputNow).Ticks | Should -Be 0
+        $otherNamed = @($named | Where-Object { $_ -notlike '--now-utc=*' })
         $expected = @(
             '--url=https://github.com/owner/repo/pull/42',
             '--approved-findings-path=approved findings 雪.json',
@@ -154,12 +166,11 @@ Describe 'Native final review publication adapter' -Skip:$IsWindows {
             '--repository-path=repository with spaces',
             '--output-directory=publication output',
             '--discard-pending-review', '--publish-to-closed-pull-request',
-            '--merge-approval-path=merge approval 雪.json', '--tenant=tenant name',
-            '--now-utc=2026-03-12T08:11:12.0000000+00:00'
+            '--merge-approval-path=merge approval 雪.json', '--tenant=tenant name'
         )
-        $named.Count | Should -Be $expected.Count -Because ($named | ConvertTo-Json -Compress)
+        $otherNamed.Count | Should -Be $expected.Count -Because ($otherNamed | ConvertTo-Json -Compress)
         foreach ($argument in $expected) {
-            @($named | Where-Object { $_ -ceq $argument }).Count | Should -Be 1 -Because $argument
+            @($otherNamed | Where-Object { $_ -ceq $argument }).Count | Should -Be 1 -Because $argument
         }
         $parsed = ConvertFrom-Json -InputObject $result.output -AsHashtable
         $parsed.message | Should -BeExactly 'café 🤖'

@@ -12,7 +12,7 @@ use crate::error::fail;
 use crate::identity::Identity;
 use crate::json::{array, field, identifier, text};
 use crate::target::{Platform, Target, escape};
-use crate::transport::{Transport, ado_items};
+use crate::transport::Transport;
 
 /// Resolves incomplete coordinates before constructing repository-scoped routes.
 fn resolve(transport: &mut Transport<'_>, target: &Target) -> Result<Target, AppError> {
@@ -58,26 +58,6 @@ fn resolve(transport: &mut Transport<'_>, target: &Target) -> Result<Target, App
     Ok(resolved)
 }
 
-/// Follows all list pages and rejects continuation cycles.
-fn list(transport: &mut Transport<'_>, path: &str) -> Result<Vec<Value>, AppError> {
-    let mut result = Vec::new();
-    let mut token: Option<String> = None;
-    let mut seen = HashSet::new();
-    loop {
-        let query = token
-            .as_ref()
-            .map(|s| vec![("continuationToken", s.clone())])
-            .unwrap_or_default();
-        let page = transport.ado(path, "GET", None, &query, "7.1")?;
-        result.extend(ado_items(&page.payload)?);
-        match page.continuation {
-            None => return Ok(result),
-            Some(next) if seen.insert(next.clone()) => token = Some(next),
-            Some(_) => return Err(fail("service", "Azure DevOps continuation token repeated")),
-        }
-    }
-}
-
 /// Obtains the authenticated account from the preview connection endpoint.
 fn account(transport: &mut Transport<'_>) -> Result<Identity, AppError> {
     let page = transport.ado("_apis/connectionData", "GET", None, &[], "7.1-preview")?;
@@ -117,7 +97,7 @@ pub(crate) fn state(transport: &mut Transport<'_>, target: &Target) -> Result<Va
     }
     let mut latest: Option<(u64, Value)> = None;
     let mut ids = HashSet::new();
-    for iteration in list(transport, &format!("{path}/iterations"))? {
+    for iteration in transport.ado_list(&format!("{path}/iterations"))? {
         let id = positive(field(&iteration, "id")?)?;
         if !ids.insert(id) {
             return Err(fail("service", "Duplicate Azure DevOps iteration"));
@@ -446,7 +426,7 @@ pub(crate) fn approve(transport: &mut Transport<'_>, target: &Target) -> Result<
         .ok_or_else(|| fail("authentication", "Approval requires an account ID"))?;
     let path = format!("{}/reviewers", target.pr_api());
     let mut required = false;
-    for reviewer in list(transport, &path)? {
+    for reviewer in transport.ado_list(&path)? {
         if Identity::from_account(Platform::AzureDevOps, &reviewer)?.may_match(&identity) {
             required = match reviewer.get("isRequired") {
                 None | Some(Value::Null) => false,
@@ -610,7 +590,7 @@ fn verify_core(
 ) -> Result<Value, AppError> {
     let target = resolve(transport, target)?;
     let mut threads = HashMap::new();
-    for thread in list(transport, &format!("{}/threads", target.pr_api()))? {
+    for thread in transport.ado_list(&format!("{}/threads", target.pr_api()))? {
         let id = identifier(field(&thread, "id")?)?;
         if threads.insert(id, thread).is_some() {
             return Err(fail("service", "Duplicate thread identifier"));

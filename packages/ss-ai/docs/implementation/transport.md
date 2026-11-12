@@ -39,8 +39,9 @@ permitted.
 
 HTTP replies retain status, normalized headers, and raw bytes until transport
 classifies them. GitHub failures use captured CLI diagnostics and explicit
-rate-limit evidence. Neither path treats an uncertain write as permission to
-try again; journal reconciliation belongs to the calling workflow.
+rate-limit evidence. GraphQL mutation errors retain bounded, credential-scrubbed
+provider details for recovery. Neither path treats an uncertain write as
+permission to try again; journal reconciliation belongs to the calling workflow.
 
 Approval publication uses explicit single-attempt methods for both providers,
 including ADO's reviewer PUT and audit-thread POST. These methods do not wait
