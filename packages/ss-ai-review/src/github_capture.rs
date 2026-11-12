@@ -6,12 +6,118 @@ use ohno::AppError;
 use serde_json::{Value, json};
 use ss_ai_assessment::commit;
 
+use crate::capture::classified_capture_error;
 use crate::clock::timestamp;
-use crate::error::fail;
 use crate::identity::Identity;
 use crate::json::{array, boolean, field, identifier, nullable_field, text};
 use crate::target::{Platform, Target, escape};
 use crate::transport::Transport;
+
+classified_capture_error!(
+    MissingThreadOpener,
+    "service",
+    "GitHub review thread has no opener"
+);
+classified_capture_error!(
+    AmbiguousThreadOpener,
+    "service",
+    "GitHub review thread has an ambiguous opener"
+);
+classified_capture_error!(
+    ReplyCycle,
+    "service",
+    "GitHub review thread has a reply cycle"
+);
+classified_capture_error!(
+    MissingReplyParent,
+    "service",
+    "GitHub review reply has a missing parent"
+);
+classified_capture_error!(
+    UnreachableThreadOpener,
+    "service",
+    "GitHub review reply cannot reach its opener"
+);
+classified_capture_error!(
+    InvalidGitHubTarget,
+    "invalidInput",
+    "A GitHub PR target is required"
+);
+classified_capture_error!(
+    WrongPullRequest,
+    "service",
+    "GitHub returned another pull request"
+);
+classified_capture_error!(UnknownReviewState, "service", "Unknown GitHub review state");
+classified_capture_error!(
+    RepeatedReviewComment,
+    "service",
+    "GitHub repeated a review comment across threads"
+);
+classified_capture_error!(
+    UnknownReviewCommentState,
+    "service",
+    "Unknown GitHub review comment state"
+);
+classified_capture_error!(
+    MissingReviewMetadata,
+    "service",
+    "Review metadata is missing"
+);
+classified_capture_error!(
+    MissingIssueMetadata,
+    "service",
+    "Issue comment metadata is missing"
+);
+classified_capture_error!(
+    MissingGitHubIdentity,
+    "authentication",
+    "GitHub did not identify the authenticated account"
+);
+classified_capture_error!(
+    WrongRepository,
+    "service",
+    "GitHub returned a PR from another repository"
+);
+classified_capture_error!(
+    MissingMergeBase,
+    "service",
+    "GitHub could not resolve the merge base"
+);
+classified_capture_error!(MissingConnection, "service", "Missing GitHub connection");
+classified_capture_error!(
+    RepeatedCursor,
+    "service",
+    "GitHub repeated a pagination cursor"
+);
+classified_capture_error!(
+    PageLimitExceeded,
+    "service",
+    "GitHub connection exceeded the page limit"
+);
+classified_capture_error!(EmptyIdentifier, "service", "Empty GitHub identifier");
+classified_capture_error!(
+    InvalidReviewCommentCount,
+    "service",
+    "GitHub review lacks a valid comment count"
+);
+classified_capture_error!(
+    UnexpectedTimelineEvent,
+    "service",
+    "Unexpected GitHub timeline event"
+);
+classified_capture_error!(
+    MissingRequestedReviewers,
+    "service",
+    "Missing GitHub requested reviewers page"
+);
+classified_capture_error!(MissingTeamSlug, "service", "Missing team slug");
+classified_capture_error!(
+    MissingReviewerIdentity,
+    "service",
+    "Missing reviewer identity"
+);
+classified_capture_error!(DuplicateIdentifier, "service", "Duplicate GitHub {}", field);
 
 // Nested connections multiply their requested sizes, so stay below GitHub's node limit.
 const PAGE_SIZE: u32 = 50;
@@ -58,11 +164,11 @@ pub(crate) fn collect(transport: &mut Transport<'_>, target: &Target) -> Result<
         || target.organization.trim().is_empty()
         || target.repository.trim().is_empty()
     {
-        return Err(fail("invalidInput", "A GitHub PR target is required"));
+        return Err(InvalidGitHubTarget::classified());
     }
     let pr = transport.request(&target.pr_api(), "GET", None)?;
     if identifier(field(&pr, "number")?)? != target.pull_request_id.to_string() {
-        return Err(fail("service", "GitHub returned another pull request"));
+        return Err(WrongPullRequest::classified());
     }
     let reviews = transport.list(&format!("{}/reviews", target.pr_api()))?;
     let issue_comments = transport.list(&format!(
@@ -78,7 +184,7 @@ pub(crate) fn collect(transport: &mut Transport<'_>, target: &Target) -> Result<
             "APPROVED" | "CHANGES_REQUESTED" | "COMMENTED" | "DISMISSED" => {
                 submitted.push(review);
             }
-            _ => return Err(fail("service", "Unknown GitHub review state")),
+            _ => return Err(UnknownReviewState::classified()),
         }
     }
     unique(&submitted, "node_id")?;
@@ -113,14 +219,11 @@ pub(crate) fn collect(transport: &mut Transport<'_>, target: &Target) -> Result<
                 "PENDING" => {}
                 "SUBMITTED" => {
                     if !comment_ids.insert(nonempty(field(&comment, "id")?)?.to_owned()) {
-                        return Err(fail(
-                            "service",
-                            "GitHub repeated a review comment across threads",
-                        ));
+                        return Err(RepeatedReviewComment::classified());
                     }
                     visible.push(comment);
                 }
-                _ => return Err(fail("service", "Unknown GitHub review comment state")),
+                _ => return Err(UnknownReviewCommentState::classified()),
             }
         }
         if !visible.is_empty() {
@@ -158,7 +261,7 @@ pub(crate) fn collect(transport: &mut Transport<'_>, target: &Target) -> Result<
         let body = body(review, "body")?;
         let meta = review_metadata
             .get(nonempty(field(review, "node_id")?)?)
-            .ok_or_else(|| fail("service", "Review metadata is missing"))?;
+            .ok_or_else(MissingReviewMetadata::classified)?;
         if state == "COMMENTED" && body.trim().is_empty() {
             continue;
         }
@@ -167,7 +270,7 @@ pub(crate) fn collect(transport: &mut Transport<'_>, target: &Target) -> Result<
     for comment in &issue_comments {
         let meta = issue_metadata
             .get(nonempty(field(comment, "node_id")?)?)
-            .ok_or_else(|| fail("service", "Issue comment metadata is missing"))?;
+            .ok_or_else(MissingIssueMetadata::classified)?;
         threads.push(issue_thread(comment, meta)?);
     }
     for push in &pushes {
@@ -176,20 +279,14 @@ pub(crate) fn collect(transport: &mut Transport<'_>, target: &Target) -> Result<
     let reviewers = reviewers(&submitted, &requested)?;
     let authenticated = rest_identity(&transport.request("user", "GET", None)?)?;
     if authenticated.id.is_none() {
-        return Err(fail(
-            "authentication",
-            "GitHub did not identify the authenticated account",
-        ));
+        return Err(MissingGitHubIdentity::classified());
     }
     let base = field(&pr, "base")?;
     let head = field(&pr, "head")?;
     let base_repo = field(base, "repo")?;
     let expected_repository = format!("{}/{}", target.organization, target.repository);
     if !text(field(base_repo, "full_name")?)?.eq_ignore_ascii_case(&expected_repository) {
-        return Err(fail(
-            "service",
-            "GitHub returned a PR from another repository",
-        ));
+        return Err(WrongRepository::classified());
     }
     let base_sha = text(field(base, "sha")?)?;
     let head_sha = text(field(head, "sha")?)?;
@@ -262,7 +359,7 @@ fn merge_base(
     } else {
         transport
             .github_get_if_found(&format!("{compare}{}...{}", escape(base), escape(head)))?
-            .ok_or_else(|| fail("service", "GitHub could not resolve the merge base"))?
+            .ok_or_else(MissingMergeBase::classified)?
     };
     let sha = text(field(field(&comparison, "merge_base_commit")?, "sha")?)?;
     commit(sha)?;
@@ -292,7 +389,7 @@ fn connection(
             response
                 .pointer(path)
                 .cloned()
-                .ok_or_else(|| fail("service", "Missing GitHub connection"))?
+                .ok_or_else(MissingConnection::classified)?
         };
         nodes.extend_from_slice(array(field(&page, "nodes")?)?);
         let page_info = field(&page, "pageInfo")?;
@@ -305,11 +402,11 @@ fn connection(
         }
         let next = nonempty(end_cursor)?.to_owned();
         if !seen.insert(next.clone()) {
-            return Err(fail("service", "GitHub repeated a pagination cursor"));
+            return Err(RepeatedCursor::classified());
         }
         cursor = Some(next);
     }
-    Err(fail("service", "GitHub connection exceeded the page limit"))
+    Err(PageLimitExceeded::classified())
 }
 
 /// Keeps case-sensitive node identifiers unique at each service boundary.
@@ -317,7 +414,7 @@ fn unique(nodes: &[Value], key: &str) -> Result<(), AppError> {
     let mut seen = HashSet::new();
     for node in nodes {
         if !seen.insert(nonempty(field(node, key)?)?) {
-            return Err(fail("service", format!("Duplicate GitHub {key}")));
+            return Err(DuplicateIdentifier::classified(key));
         }
     }
     Ok(())
@@ -339,7 +436,7 @@ fn metadata(nodes: Vec<Value>) -> Result<HashMap<String, Value>, AppError> {
 fn nonempty(value: &Value) -> Result<&str, AppError> {
     let value = text(value)?;
     if value.trim().is_empty() {
-        Err(fail("service", "Empty GitHub identifier"))
+        Err(EmptyIdentifier::classified())
     } else {
         Ok(value)
     }
@@ -439,52 +536,12 @@ fn review_thread(node: &Value, comments: &[Value]) -> Result<Value, AppError> {
     let mut roots = canonical
         .iter()
         .filter(|comment| comment["parentId"].is_null());
-    let root = roots
-        .next()
-        .ok_or_else(|| fail("service", "GitHub review thread has no opener"))?;
+    let root = roots.next().ok_or_else(MissingThreadOpener::classified)?;
     if roots.next().is_some() {
-        return Err(fail(
-            "service",
-            "GitHub review thread has an ambiguous opener",
-        ));
+        return Err(AmbiguousThreadOpener::classified());
     }
     let opener = field(root, "id")?.clone();
-    // Every reply must reach the unique opener; missing parents and cycles do not
-    // establish ownership of a thread even when all comment bodies are present.
-    let parents: HashMap<_, _> = canonical
-        .iter()
-        .map(|comment| {
-            Ok((
-                nonempty(field(comment, "id")?)?,
-                nullable_field(comment, "parentId")?,
-            ))
-        })
-        .collect::<Result<_, AppError>>()?;
-    let mut seen = HashSet::new();
-    for comment in &canonical {
-        let mut current = nonempty(field(comment, "id")?)?;
-        seen.clear();
-        let mut reached_root = false;
-        for _ in 0..=canonical.len() {
-            if !seen.insert(current) {
-                return Err(fail("service", "GitHub review thread has a reply cycle"));
-            }
-            let parent = parents
-                .get(current)
-                .ok_or_else(|| fail("service", "GitHub review reply has a missing parent"))?;
-            if parent.is_null() {
-                reached_root = true;
-                break;
-            }
-            current = nonempty(parent)?;
-        }
-        if !reached_root {
-            return Err(fail(
-                "service",
-                "GitHub review reply cannot reach its opener",
-            ));
-        }
-    }
+    validate_reply_ancestry(&canonical)?;
     // The connection order is not ownership evidence; a reply can precede its
     // opener in a returned page, so the opener supplies the thread's event.
     let published = nullable_field(root, "publishedUtc")?.clone();
@@ -540,6 +597,44 @@ fn review_thread(node: &Value, comments: &[Value]) -> Result<Value, AppError> {
     )
 }
 
+/// Checks every reply reaches the already established unique opener.
+fn validate_reply_ancestry(canonical: &[Value]) -> Result<(), AppError> {
+    // Every reply must reach the unique opener; missing parents and cycles do not
+    // establish ownership of a thread even when all comment bodies are present.
+    let parents: HashMap<_, _> = canonical
+        .iter()
+        .map(|comment| {
+            Ok((
+                nonempty(field(comment, "id")?)?,
+                nullable_field(comment, "parentId")?,
+            ))
+        })
+        .collect::<Result<_, AppError>>()?;
+    let mut seen = HashSet::new();
+    for comment in canonical {
+        let mut current = nonempty(field(comment, "id")?)?;
+        seen.clear();
+        let mut reached_root = false;
+        for _ in 0..=canonical.len() {
+            if !seen.insert(current) {
+                return Err(ReplyCycle::classified());
+            }
+            let parent = parents
+                .get(current)
+                .ok_or_else(MissingReplyParent::classified)?;
+            if parent.is_null() {
+                reached_root = true;
+                break;
+            }
+            current = nonempty(parent)?;
+        }
+        if !reached_root {
+            return Err(UnreachableThreadOpener::classified());
+        }
+    }
+    Ok(())
+}
+
 /// Converts REST discussion text using its independently joined edit evidence.
 fn text_thread(node: &Value, meta: &Value, review: bool) -> Result<Value, AppError> {
     let identity = rest_identity(nullable_field(node, "user")?)?;
@@ -555,7 +650,7 @@ fn text_thread(node: &Value, meta: &Value, review: bool) -> Result<Value, AppErr
     {
         let count = field(field(meta, "comments")?, "totalCount")?
             .as_u64()
-            .ok_or_else(|| fail("service", "GitHub review lacks a valid comment count"))?;
+            .ok_or_else(InvalidReviewCommentCount::classified)?;
         if count == 0 {
             "human".clone_into(&mut author_kind);
             evidence.push("review:voteOnly".to_owned());
@@ -608,7 +703,7 @@ fn issue_thread(comment: &Value, metadata: &Value) -> Result<Value, AppError> {
 /// Preserves explicit before/after commit evidence for branch rewrites.
 fn force_push(node: &Value) -> Result<Value, AppError> {
     if text(field(node, "__typename")?)? != "HeadRefForcePushedEvent" {
-        return Err(fail("service", "Unexpected GitHub timeline event"));
+        return Err(UnexpectedTimelineEvent::classified());
     }
     let id = nonempty(field(node, "id")?)?;
     let identity = actor_identity(nullable_field(node, "actor")?)?;
@@ -642,7 +737,7 @@ fn reviewers(reviews: &[Value], pages: &[Value]) -> Result<Vec<Value>, AppError>
         add_reviewer(&mut identities, identity, false)?;
     }
     if pages.is_empty() {
-        return Err(fail("service", "Missing GitHub requested reviewers page"));
+        return Err(MissingRequestedReviewers::classified());
     }
     for page in pages {
         for user in array(field(page, "users")?)? {
@@ -665,10 +760,10 @@ fn add_reviewer(
     team: bool,
 ) -> Result<(), AppError> {
     if team && identity.unique_name.is_none() {
-        return Err(fail("service", "Missing team slug"));
+        return Err(MissingTeamSlug::classified());
     }
     if identity.id.is_none() && identity.descriptor.is_none() && identity.unique_name.is_none() {
-        return Err(fail("service", "Missing reviewer identity"));
+        return Err(MissingReviewerIdentity::classified());
     }
     if result
         .iter()
@@ -701,6 +796,7 @@ fn same_reviewer(left: &Identity, right: &Identity) -> bool {
     clippy::needless_pass_by_value,
     reason = "Tests use bounded JSON fixtures and consume values through the JSON macro"
 )]
+#[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
     use std::cell::RefCell;
     use std::collections::VecDeque;
@@ -960,14 +1056,42 @@ mod tests {
 
     #[test]
     fn shared_fixture_matches_powershell_pre_document() {
-        let fixture: Value = from_str(include_str!(
+        assert_shared_fixture(None);
+    }
+
+    #[test]
+    fn null_pr_description_matches_retained_powershell_pre_document() {
+        assert_shared_fixture(Some(Value::Null));
+    }
+
+    #[test]
+    fn pr_description_matches_powershell_empty_and_unicode_bodies() {
+        assert_shared_fixture(Some(json!("")));
+        assert_shared_fixture(Some(json!("é\r\n")));
+        super::body(&json!({"body": 1}), "body").unwrap_err();
+        super::body(&json!({}), "body").unwrap_err();
+    }
+
+    /// Reuses all retained PowerShell fixture evidence when varying the PR body.
+    fn assert_shared_fixture(description: Option<Value>) {
+        let mut fixture: Value = from_str(include_str!(
             "../../../tests/fixtures/ss-review-native-capture/github.json"
         ))
         .unwrap();
-        let expected: Value = from_str(include_str!(
+        let mut expected: Value = from_str(include_str!(
             "../../../tests/fixtures/ss-review-native-capture/github-context.json"
         ))
         .unwrap();
+        if let Some(description) = description {
+            fixture["responses"]["pullRequest"]["body"] = description.clone();
+            // The retained adapter supplies an empty string for a null body;
+            // publication hashes that exact value, not JSON null.
+            expected["pullRequest"]["description"] = if description.is_null() {
+                json!("")
+            } else {
+                description
+            };
+        }
         let target: Target = from_value(fixture["target"].clone()).unwrap();
         let responses = &fixture["responses"];
         let script = Recording {
@@ -1288,10 +1412,15 @@ mod tests {
         assert_eq!(thread["comments"].as_array().unwrap().len(), 3);
 
         let missing = comment("missing-parent", json!({"id":"absent"}));
-        review_thread(&node, &[root.clone(), missing]).unwrap_err();
+        let error = review_thread(&node, &[root.clone(), missing]).unwrap_err();
+        assert!(error.find_source::<super::MissingReplyParent>().is_some());
+        assert_eq!(crate::classification(&error), "service");
         let cycle_a = comment("a", json!({"id":"b"}));
         let cycle_b = comment("b", json!({"id":"a"}));
-        review_thread(&node, &[root, cycle_a, cycle_b]).unwrap_err();
+        let error = review_thread(&node, &[root, cycle_a, cycle_b]).unwrap_err();
+        assert!(error.find_source::<super::ReplyCycle>().is_some());
+        assert!(error.find_source::<super::MissingReplyParent>().is_none());
+        assert_eq!(crate::classification(&error), "service");
     }
 
     #[test]

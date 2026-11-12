@@ -13,6 +13,24 @@ BeforeAll {
     $script:Work = Join-Path $script:Scratch 'working directory é'
     [void] [IO.Directory]::CreateDirectory($script:Bin)
     [void] [IO.Directory]::CreateDirectory($script:Work)
+    $script:Launcher = Join-Path $script:Scratch 'launch-publisher.ps1'
+    $launcher = @'
+#Requires -Version 7.6
+[CmdletBinding(PositionalBinding = $false)]
+param()
+Set-StrictMode -Version Latest
+$ErrorActionPreference = 'Stop'
+$PSNativeCommandUseErrorActionPreference = $true
+# A PSDrive belongs to this PowerShell session, not to the child native process.
+New-PSDrive -Name ReviewFixture -PSProvider FileSystem -Root $env:FAKE_OVERVIEW_DRIVE_ROOT | Out-Null
+$arguments = ConvertFrom-Json -InputObject $env:FAKE_OVERVIEW_ARGUMENTS -NoEnumerate
+$parameters = @{}
+for ($index = 0; $index -lt $arguments.Count; $index += 2) {
+    $parameters[$arguments[$index].TrimStart('-')] = $arguments[$index + 1]
+}
+& $env:FAKE_OVERVIEW_PUBLISHER @parameters
+'@
+    [IO.File]::WriteAllText($script:Launcher, $launcher, [Text.UTF8Encoding]::new($false))
     if (-not $IsWindows) {
         $fake = @'
 #!/usr/bin/env pwsh
@@ -50,7 +68,7 @@ if ($env:FAKE_OVERVIEW_FAIL -eq 'yes') {
 
     # Launch a separate caller so stdout and environment match the agent-facing executable boundary.
     function Invoke-OverviewCaller {
-        param([string[]] $Arguments, [string] $Output, [switch] $Fail, [switch] $MissingCli, [switch] $CleanupFail)
+        param([string[]] $Arguments, [string] $Output, [switch] $Fail, [switch] $MissingCli, [switch] $CleanupFail, [switch] $UseScratchHome)
         $record = Join-Path $script:Scratch ('record-' + [guid]::NewGuid().ToString('N') + '.json')
         $start = [Diagnostics.ProcessStartInfo]::new($script:PowerShell)
         $start.WorkingDirectory = $script:Work
@@ -63,9 +81,13 @@ if ($env:FAKE_OVERVIEW_FAIL -eq 'yes') {
         $start.Environment['FAKE_OVERVIEW_OUTPUT'] = $Output
         $start.Environment['FAKE_OVERVIEW_FAIL'] = if ($Fail) { 'yes' } else { 'no' }
         $start.Environment['FAKE_OVERVIEW_CLEANUP_FAIL'] = if ($CleanupFail) { 'yes' } else { 'no' }
+        $start.Environment['FAKE_OVERVIEW_PUBLISHER'] = $script:Publisher
+        $start.Environment['FAKE_OVERVIEW_DRIVE_ROOT'] = $script:Scratch
+        $start.Environment['FAKE_OVERVIEW_ARGUMENTS'] = ConvertTo-Json -InputObject $Arguments -Compress
+        if ($UseScratchHome) { $start.Environment['HOME'] = $script:Scratch }
         if ($MissingCli) { $start.Environment['PATH'] = $script:Work }
         else { $start.Environment['PATH'] = $script:Bin + [IO.Path]::PathSeparator + $env:PATH }
-        foreach ($argument in @('-NoProfile', '-NonInteractive', '-File', $script:Publisher) + $Arguments) {
+        foreach ($argument in @('-NoProfile', '-NonInteractive', '-File', $script:Launcher)) {
             $start.ArgumentList.Add($argument)
         }
         $process = [Diagnostics.Process]::Start($start)
@@ -108,8 +130,9 @@ Describe 'Native overview publisher caller' -Skip:$IsWindows {
         $result.record.arguments[1] | Should -BeExactly 'publish-overview'
         $namedArguments = @($result.record.arguments | Select-Object -Skip 2)
         $expectedNamedArguments = @(
-            '--context-path=missing context.json', '--overview-path=missing overview.md',
-            '--output-directory=output directory', "--skill-root=$script:SkillRoot",
+            "--context-path=$(Join-Path $script:Work 'missing context.json')",
+            "--overview-path=$(Join-Path $script:Work 'missing overview.md')",
+            "--output-directory=$(Join-Path $script:Work 'output directory')", "--skill-root=$script:SkillRoot",
             "--comment-prefix-path=$($result.record.prefixPath)", '--tenant=tenant name'
         )
         $namedArguments.Count | Should -Be $expectedNamedArguments.Count
@@ -118,6 +141,42 @@ Describe 'Native overview publisher caller' -Skip:$IsWindows {
         }
         $result.record.prefixBytes | Should -BeExactly ([Convert]::ToBase64String([Text.UTF8Encoding]::new($false).GetBytes($prefix)))
         $result.record.mode | Should -Be ([int] ([IO.UnixFileMode]::UserRead -bor [IO.UnixFileMode]::UserWrite))
+        [IO.File]::Exists($result.record.prefixPath) | Should -BeFalse
+    }
+
+    It 'resolves home-relative paths before handing them to the native process' {
+        $arguments = @('-ContextPath', '~/missing context.json', '-OverviewPath', '~/missing overview.md', '-OutputDirectory', '~/new output')
+        $result = Invoke-OverviewCaller -Arguments $arguments -Output $script:ExpectedJson -UseScratchHome
+        $result.exitCode | Should -Be 0 -Because $result.error
+        $result.record.arguments | Should -Contain "--context-path=$(Join-Path $script:Scratch 'missing context.json')"
+        $result.record.arguments | Should -Contain "--overview-path=$(Join-Path $script:Scratch 'missing overview.md')"
+        $result.record.arguments | Should -Contain "--output-directory=$(Join-Path $script:Scratch 'new output')"
+        [IO.Path]::GetDirectoryName($result.record.prefixPath) | Should -BeExactly (Join-Path $script:Scratch 'new output')
+        [IO.File]::Exists($result.record.prefixPath) | Should -BeFalse
+    }
+
+    It 'resolves filesystem PSDrive paths including a nonexistent output directory' {
+        $arguments = @('-ContextPath', 'ReviewFixture:/missing context.json', '-OverviewPath', 'ReviewFixture:/missing overview.md', '-OutputDirectory', 'ReviewFixture:/drive output')
+        $result = Invoke-OverviewCaller -Arguments $arguments -Output $script:ExpectedJson
+        $result.exitCode | Should -Be 0 -Because $result.error
+        $result.record.arguments | Should -Contain "--context-path=$(Join-Path $script:Scratch 'missing context.json')"
+        $result.record.arguments | Should -Contain "--overview-path=$(Join-Path $script:Scratch 'missing overview.md')"
+        $result.record.arguments | Should -Contain "--output-directory=$(Join-Path $script:Scratch 'drive output')"
+        [IO.Path]::GetDirectoryName($result.record.prefixPath) | Should -BeExactly (Join-Path $script:Scratch 'drive output')
+        [IO.File]::Exists($result.record.prefixPath) | Should -BeFalse
+    }
+
+    It 'passes absolute filesystem paths through to the native process' {
+        $contextPath = Join-Path $script:Scratch 'absolute context.json'
+        $overviewPath = Join-Path $script:Scratch 'absolute overview.md'
+        $outputPath = Join-Path $script:Scratch 'absolute output'
+        $arguments = @('-ContextPath', $contextPath, '-OverviewPath', $overviewPath, '-OutputDirectory', $outputPath)
+        $result = Invoke-OverviewCaller -Arguments $arguments -Output $script:ExpectedJson
+        $result.exitCode | Should -Be 0 -Because $result.error
+        $result.record.arguments | Should -Contain "--context-path=$contextPath"
+        $result.record.arguments | Should -Contain "--overview-path=$overviewPath"
+        $result.record.arguments | Should -Contain "--output-directory=$outputPath"
+        [IO.Path]::GetDirectoryName($result.record.prefixPath) | Should -BeExactly $outputPath
         [IO.File]::Exists($result.record.prefixPath) | Should -BeFalse
     }
 
@@ -186,6 +245,7 @@ Describe 'Native overview publisher caller' -Skip:$IsWindows {
         $result.exitCode | Should -Not -Be 0
         $result.output | Should -BeNullOrEmpty
         $result.record | Should -BeNullOrEmpty
+        $result.error | Should -Match 'ss-ai'
         @(Get-ChildItem -LiteralPath (Join-Path $script:Work $script:OutputDirectory) -Filter '.overview-prefix-*' -Force).Count | Should -Be 0
     }
 }

@@ -14,7 +14,10 @@ $PSNativeCommandUseErrorActionPreference = $true
 
 $skillRoot = Split-Path -Parent $PSScriptRoot
 $workingDirectory = (Get-Location).ProviderPath
-$outputPath = [IO.Path]::GetFullPath($OutputDirectory, $workingDirectory)
+# Resolve PowerShell paths before handing them to the native process, which does not know PSDrives or ~.
+$contextPath = $ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath($ContextPath)
+$overviewPath = $ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath($OverviewPath)
+$outputPath = $ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath($OutputDirectory)
 [void] [IO.Directory]::CreateDirectory($outputPath)
 $prefixPath = Join-Path $outputPath ('.overview-prefix-' + [guid]::NewGuid().ToString('N'))
 
@@ -60,8 +63,8 @@ try {
     $start.StandardErrorEncoding = [Text.UTF8Encoding]::new($false, $true)
     $arguments = [Collections.Generic.List[string]]::new()
     foreach ($argument in @(
-        'review', 'publish-overview', "--context-path=$ContextPath", "--overview-path=$OverviewPath",
-        "--output-directory=$OutputDirectory", "--skill-root=$skillRoot", "--comment-prefix-path=$prefixPath"
+        'review', 'publish-overview', "--context-path=$contextPath", "--overview-path=$overviewPath",
+        "--output-directory=$outputPath", "--skill-root=$skillRoot", "--comment-prefix-path=$prefixPath"
     )) { $arguments.Add($argument) }
     if ($PSBoundParameters.ContainsKey('Tenant')) { $arguments.Add("--tenant=$Tenant") }
     foreach ($argument in $arguments) { $start.ArgumentList.Add($argument) }

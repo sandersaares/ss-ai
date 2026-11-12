@@ -14,21 +14,34 @@ use serde_json::{Value, json};
 use ss_ai_runtime::FileTransaction;
 
 use crate::Clock;
+use crate::overview_snapshot::PreparedSnapshot;
 
 /// Provider and local preparation operations supplied by the composition root.
 ///
-/// Freeze includes the ADO HTML and archive preparation. It acquires the snapshot
-/// lock after the result lock and permits refreshing an unpublished snapshot:
+/// Freeze returns a provider-ready snapshot type, including ADO HTML and archive
+/// preparation. It acquires the snapshot lock after the result lock and permits refreshing an unpublished snapshot:
 /// the transaction calls it only after validating that no write may have occurred.
 /// Write errors must mark a definite refusal only when the service proved that
 /// no write occurred.
 pub(crate) trait OverviewEffects {
     fn is_open(&mut self) -> Result<bool, EffectError>;
-    fn freeze(&mut self, clock: &dyn Clock) -> Result<Value, EffectError>;
-    fn upload(&mut self, snapshot: &Value) -> Result<Value, EffectError>;
-    fn verify_artifact(&mut self, snapshot: &Value, receipt: &Value) -> Result<Value, EffectError>;
-    fn comment(&mut self, snapshot: &Value, payload: &Value) -> Result<Value, EffectError>;
-    fn verify_comment(&mut self, snapshot: &Value, payload: &Value) -> Result<(), EffectError>;
+    fn freeze(&mut self, clock: &dyn Clock) -> Result<PreparedSnapshot, EffectError>;
+    fn upload(&mut self, snapshot: &PreparedSnapshot) -> Result<Value, EffectError>;
+    fn verify_artifact(
+        &mut self,
+        snapshot: &PreparedSnapshot,
+        receipt: &Value,
+    ) -> Result<Value, EffectError>;
+    fn comment(
+        &mut self,
+        snapshot: &PreparedSnapshot,
+        payload: &Value,
+    ) -> Result<Value, EffectError>;
+    fn verify_comment(
+        &mut self,
+        snapshot: &PreparedSnapshot,
+        payload: &Value,
+    ) -> Result<(), EffectError>;
 }
 
 /// Carries diagnostics and the evidence needed to decide whether to retry.
@@ -288,14 +301,9 @@ fn execute(
     }
     result["stage"] = json!("freeze");
     let snapshot = effects.freeze(clock)?;
-    if !snapshot.is_object() {
-        return Err(local_error("Freeze did not return a snapshot object"));
-    }
-    result["snapshot"] = snapshot.clone();
+    result["snapshot"] = snapshot.record();
     result["stage"] = json!("upload");
-    let artifact = write_effect(journal, result, "upload", |result| {
-        effects.upload(&result["snapshot"])
-    })?;
+    let artifact = write_effect(journal, result, "upload", |_| effects.upload(&snapshot))?;
     result["stage"] = json!("verifyArtifact");
     let verified = effects.verify_artifact(&snapshot, &artifact)?;
     result["artifact"] = verified.clone();
@@ -439,6 +447,7 @@ mod tests {
     use serde_json::{Value, json};
 
     use super::{Clock, EffectError, Journal, OverviewEffects, new_result, run};
+    use crate::overview_snapshot::{PreparedSnapshot, frozen_snapshot_for_test};
 
     const URL: &str = "https://example.test/pr/1";
 
@@ -572,12 +581,16 @@ mod tests {
             Ok(!self.closed)
         }
 
-        fn freeze(&mut self, _: &dyn Clock) -> Result<Value, EffectError> {
+        fn freeze(&mut self, _: &dyn Clock) -> Result<PreparedSnapshot, EffectError> {
             self.step("freeze")?;
-            Ok(json!({ "runId": "frozen" }))
+            Ok(PreparedSnapshot::GitHub(frozen_snapshot_for_test(
+                "0123456789abcdef0123456789abcdef",
+                "report.md",
+                &"0".repeat(64),
+            )))
         }
 
-        fn upload(&mut self, _: &Value) -> Result<Value, EffectError> {
+        fn upload(&mut self, _: &PreparedSnapshot) -> Result<Value, EffectError> {
             self.step("upload")?;
             Ok(if self.missing_id {
                 json!({ "id": null, "url": null })
@@ -586,19 +599,27 @@ mod tests {
             })
         }
 
-        fn verify_artifact(&mut self, _: &Value, receipt: &Value) -> Result<Value, EffectError> {
+        fn verify_artifact(
+            &mut self,
+            _: &PreparedSnapshot,
+            receipt: &Value,
+        ) -> Result<Value, EffectError> {
             self.step("verifyArtifact")?;
             assert_eq!(receipt["id"], "artifact-id");
             Ok(json!({ "id": "artifact-id", "url": "https://example.test/report" }))
         }
 
-        fn comment(&mut self, _: &Value, payload: &Value) -> Result<Value, EffectError> {
+        fn comment(&mut self, _: &PreparedSnapshot, payload: &Value) -> Result<Value, EffectError> {
             self.step("comment")?;
             self.body = payload["body"].as_str().map(str::to_owned);
             Ok(json!({ "id": 47, "url": null }))
         }
 
-        fn verify_comment(&mut self, _: &Value, payload: &Value) -> Result<(), EffectError> {
+        fn verify_comment(
+            &mut self,
+            _: &PreparedSnapshot,
+            payload: &Value,
+        ) -> Result<(), EffectError> {
             self.step("verifyComment")?;
             assert_eq!(payload["body"].as_str(), self.body.as_deref());
             assert_eq!(payload["comment"]["id"], 47);
@@ -630,6 +651,14 @@ mod tests {
         };
         let result = publish(&mut journal, &mut effects, "prefix\nexact");
         assert_eq!(result["status"], "succeeded");
+        assert_eq!(result["snapshot"]["schemaVersion"], 1);
+        assert_eq!(
+            result["snapshot"]["runId"],
+            "0123456789abcdef0123456789abcdef"
+        );
+        assert_eq!(result["snapshot"]["markdownPath"], "report.md");
+        assert_eq!(result["snapshot"]["markdownHash"], "0".repeat(64));
+        assert!(result["snapshot"].get("prepared").is_none());
         assert_eq!(
             effects.body.as_deref(),
             Some(

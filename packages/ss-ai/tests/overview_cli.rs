@@ -8,8 +8,9 @@
     reason = "The bounded test fixtures favor concise assertions and setup"
 )]
 
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::collections::BTreeMap;
+use std::env;
 use std::ffi::OsString;
 use std::fs;
 use std::io;
@@ -28,6 +29,9 @@ use ss_ai_review::{Clock, OverviewInput, OverviewRender, publish_overview};
 use ss_ai_runtime::FileTransaction;
 use tempfile::{Builder, TempDir};
 
+#[cfg(unix)]
+use std::os::unix::fs::{PermissionsExt, symlink};
+
 /// Keeps fake provider state local to an individual publication.
 #[derive(Default)]
 struct Provider {
@@ -36,7 +40,8 @@ struct Provider {
     comment: RefCell<String>,
     reject_comment_readback: bool,
     fail_upload: bool,
-    refuse_upload: bool,
+    refuse_upload: Cell<bool>,
+    refuse_comment: Cell<bool>,
 }
 
 impl Process for Provider {
@@ -50,7 +55,17 @@ impl Process for Provider {
         let route = &arguments[1];
         let method = &arguments[arguments.iter().position(|v| v == "--method").unwrap() + 1];
         self.requests.borrow_mut().push(format!("{method} {route}"));
-        if self.refuse_upload && method == "POST" && route == "gists" {
+        if method == "POST" && route == "gists" && self.refuse_upload.replace(false) {
+            return Ok(ProcessOutput::new(
+                false,
+                b"HTTP/1.1 429 Too Many Requests\r\n\r\n".to_vec(),
+                Vec::new(),
+            ));
+        }
+        if method == "POST"
+            && route == "repos/owner/repo/issues/42/comments"
+            && self.refuse_comment.replace(false)
+        {
             return Ok(ProcessOutput::new(
                 false,
                 b"HTTP/1.1 429 Too Many Requests\r\n\r\n".to_vec(),
@@ -242,21 +257,46 @@ fn github_unproven_rate_limit_does_not_authorize_replay() {
 }
 
 #[test]
-fn github_explicit_rate_refusal_allows_retry() {
-    let fixture = fixture();
-    prepare(fixture.path());
-    let refused = Provider {
-        refuse_upload: true,
+fn github_explicit_rate_refusals_retry_without_reconciliation() {
+    let upload_fixture = fixture();
+    prepare(upload_fixture.path());
+    let upload_refused = Provider {
+        refuse_upload: Cell::new(true),
         ..Provider::default()
     };
-    let args = arguments(fixture.path());
+    let args = arguments(upload_fixture.path());
     let result: Value =
-        from_str(&run(&args, &refused, &refused, &SystemClock::default()).unwrap()).unwrap();
-    assert_eq!(result["operations"][0]["status"], "failed", "{result}");
-    let accepted = Provider::default();
-    let result: Value =
-        from_str(&run(&args, &accepted, &accepted, &SystemClock::default()).unwrap()).unwrap();
+        from_str(&run(&args, &upload_refused, &upload_refused, &TestClock).unwrap()).unwrap();
     assert_eq!(result["status"], "succeeded", "{result}");
+    assert_eq!(
+        upload_refused
+            .requests
+            .borrow()
+            .iter()
+            .filter(|request| request.as_str() == "POST gists")
+            .count(),
+        2
+    );
+
+    let comment_fixture = fixture();
+    prepare(comment_fixture.path());
+    let comment_refused = Provider {
+        refuse_comment: Cell::new(true),
+        ..Provider::default()
+    };
+    let args = arguments(comment_fixture.path());
+    let result: Value =
+        from_str(&run(&args, &comment_refused, &comment_refused, &TestClock).unwrap()).unwrap();
+    assert_eq!(result["status"], "succeeded", "{result}");
+    assert_eq!(
+        comment_refused
+            .requests
+            .borrow()
+            .iter()
+            .filter(|request| request.as_str() == "POST repos/owner/repo/issues/42/comments")
+            .count(),
+        2
+    );
 }
 
 #[test]
@@ -325,7 +365,20 @@ struct Azure {
     requests: RefCell<Vec<String>>,
     archive: RefCell<Vec<u8>>,
     comment: RefCell<String>,
-    reject_upload: bool,
+    throttle_next_write: Cell<bool>,
+}
+
+/// Keeps rate-limit retries deterministic without waiting in real time.
+struct TestClock;
+
+impl Clock for TestClock {
+    fn now(&self) -> Timestamp {
+        Timestamp::UNIX_EPOCH
+    }
+
+    fn wait(&self, _: Duration) -> Result<(), AppError> {
+        Ok(())
+    }
 }
 
 impl Process for Azure {
@@ -348,6 +401,11 @@ impl Http for Azure {
         body: Option<&[u8]>,
     ) -> Result<HttpResponse, AppError> {
         self.requests.borrow_mut().push(format!("{method} {url}"));
+        if method == "POST" && self.throttle_next_write.replace(false) {
+            let mut headers = BTreeMap::new();
+            headers.insert("retry-after".to_owned(), "3".to_owned());
+            return Ok(HttpResponse::new(429, headers, Vec::new()));
+        }
         let response = if method == "POST" && url.contains("/threads?") {
             let body: Value = from_slice(body.unwrap()).unwrap();
             *self.comment.borrow_mut() =
@@ -373,12 +431,19 @@ impl Http for Azure {
         body: Option<&[u8]>,
     ) -> Result<HttpResponse, AppError> {
         self.requests.borrow_mut().push(format!("{method} {url}"));
-        if method == "POST" && self.reject_upload {
-            return Ok(HttpResponse::new(429, BTreeMap::new(), Vec::new()));
+        if method == "POST" && self.throttle_next_write.replace(false) {
+            let mut headers = BTreeMap::new();
+            headers.insert("retry-after".to_owned(), "3".to_owned());
+            return Ok(HttpResponse::new(429, headers, Vec::new()));
         }
         let bytes = if method == "POST" {
             *self.archive.borrow_mut() = body.unwrap().to_vec();
-            br#"{"id":3}"#.to_vec()
+            let id = url
+                .split("/attachments/")
+                .nth(1)
+                .and_then(|value| value.split('?').next())
+                .unwrap();
+            format!(r#"{{"id":"{id}"}}"#).into_bytes()
         } else {
             self.archive.borrow().clone()
         };
@@ -401,12 +466,22 @@ fn azure_capture() -> Value {
 /// Runs the provider transaction with a narrow local artifact renderer.
 fn azure_publish(root: &Path, provider: &Azure, missing_tools: bool) -> Value {
     let capture = azure_capture();
+    azure_publish_with_capture(root, provider, missing_tools, &capture)
+}
+
+/// Runs publication with a supplied capture to exercise inspected-commit freshness.
+fn azure_publish_with_capture(
+    root: &Path,
+    provider: &Azure,
+    missing_tools: bool,
+    capture: &Value,
+) -> Value {
     let overview_path = root.join("overview 雪.md");
     let output = root.join("output 雪");
     let skill = root.join("skill 雪");
-    let clock = SystemClock::default();
+    let clock = TestClock;
     let input = OverviewInput {
-        capture: &capture,
+        capture,
         overview_path: &overview_path,
         output_directory: &output,
         skill_root: &skill,
@@ -441,7 +516,12 @@ fn azure_publication_preserves_exact_archive_and_comment() {
     let provider = Azure::default();
     let result = azure_publish(fixture.path(), &provider, false);
     assert_eq!(result["status"], "succeeded", "{result}");
-    assert_eq!(result["artifact"]["id"], 3);
+    let expected_id = format!(
+        "ss-review-{}-{}.zip",
+        result["snapshot"]["runId"].as_str().unwrap(),
+        result["snapshot"]["archiveHash"].as_str().unwrap()
+    );
+    assert_eq!(result["artifact"]["id"], expected_id);
     assert_eq!(result["comment"]["id"], 5);
     assert_eq!(&*provider.archive.borrow(), b"archive");
     assert!(
@@ -475,15 +555,21 @@ fn missing_tools_report_snapshot_without_remote_writes() {
 fn azure_proven_rate_refusal_allows_retry() {
     let fixture = fixture();
     prepare(fixture.path());
-    let refused = Azure {
-        reject_upload: true,
+    let throttled = Azure {
+        throttle_next_write: Cell::new(true),
         ..Azure::default()
     };
-    let result = azure_publish(fixture.path(), &refused, false);
-    assert_eq!(result["operations"][0]["status"], "failed", "{result}");
-    let accepted = Azure::default();
-    let result = azure_publish(fixture.path(), &accepted, false);
+    let result = azure_publish(fixture.path(), &throttled, false);
     assert_eq!(result["status"], "succeeded", "{result}");
+    assert_eq!(
+        throttled
+            .requests
+            .borrow()
+            .iter()
+            .filter(|request| request.starts_with("POST ") && request.contains("/attachments/"))
+            .count(),
+        2
+    );
 }
 
 #[test]
@@ -514,6 +600,33 @@ fn changed_unpublished_overview_preserves_previous_generation() {
         fs::read(generation.join("report.html")).unwrap(),
         b"orphaned report"
     );
+}
+
+#[test]
+fn unpublished_snapshot_refreshes_when_inspected_commits_change() {
+    let fixture = fixture();
+    prepare(fixture.path());
+    let provider = Azure::default();
+    let first = azure_publish(fixture.path(), &provider, true);
+    let first_id = first["snapshot"]["runId"].as_str().unwrap();
+    let first_report = PathBuf::from(first["snapshot"]["markdownPath"].as_str().unwrap());
+    let first_report_bytes = fs::read(&first_report).unwrap();
+
+    let mut refreshed_capture = azure_capture();
+    let refreshed_source = "c".repeat(40);
+    refreshed_capture["pullRequest"]["reviewedSourceCommit"] = json!(refreshed_source);
+    let refreshed =
+        azure_publish_with_capture(fixture.path(), &provider, false, &refreshed_capture);
+
+    assert_eq!(refreshed["status"], "succeeded", "{refreshed}");
+    assert_ne!(refreshed["snapshot"]["runId"], first_id);
+    assert_eq!(refreshed["snapshot"]["sourceCommit"], refreshed_source);
+    assert_eq!(refreshed["snapshot"]["mergeBaseCommit"], "b".repeat(40));
+    assert_ne!(
+        refreshed["snapshot"]["markdownPath"],
+        first_report.to_str().unwrap()
+    );
+    assert_eq!(fs::read(first_report).unwrap(), first_report_bytes);
 }
 
 #[test]
@@ -567,6 +680,202 @@ fn cli_reuses_completed_retry_artifact_and_preserves_orphan() {
         b"orphaned output"
     );
     assert_eq!(&*provider.archive.borrow(), b"archive");
+}
+
+/// Exercises the actual report renderer while replacing its external processes.
+struct OfflineRenderer {
+    browser: PathBuf,
+    render_calls: RefCell<usize>,
+}
+
+impl Process for OfflineRenderer {
+    fn execute(&self, program: &str, arguments: &[String], _: &[u8]) -> io::Result<ProcessOutput> {
+        if program == "az" {
+            return Ok(ProcessOutput::new(true, b"fixture-token".to_vec(), vec![]));
+        }
+        if arguments.first().is_some_and(|argument| argument == "-e") {
+            return Ok(ProcessOutput::new(
+                true,
+                self.browser.to_string_lossy().as_bytes().to_vec(),
+                vec![],
+            ));
+        }
+        assert_eq!(Path::new(program).file_stem().unwrap(), "pandoc");
+        *self.render_calls.borrow_mut() += 1;
+        let output = if arguments.iter().any(|argument| argument == "--to=json") {
+            br#"{"pandoc-api-version":[1,23],"meta":{},"blocks":[]}"#.to_vec()
+        } else {
+            concat!(
+                "<!DOCTYPE html><html><meta http-equiv=\"Content-Security-Policy\" ",
+                "content=\"default-src 'none'; img-src data:; style-src 'unsafe-inline'; ",
+                "base-uri 'none'; form-action 'none'\"><body>Overview</body></html>"
+            )
+            .as_bytes()
+            .to_vec()
+        };
+        Ok(ProcessOutput::new(true, output, vec![]))
+    }
+}
+
+/// Creates discovery fixtures without installing or running report tools.
+fn report_fixture_file(path: &Path, contents: &[u8]) {
+    fs::create_dir_all(path.parent().unwrap()).unwrap();
+    fs::write(path, contents).unwrap();
+}
+
+#[test]
+#[cfg_attr(miri, ignore = "requires a native subprocess")]
+fn cli_renders_parent_component_paths_with_offline_tools() {
+    let fixture = fixture();
+    let root = fixture.path();
+    let bin = root.join("bin");
+    for name in ["node", "pandoc"] {
+        let name = if cfg!(windows) {
+            format!("{name}.exe")
+        } else {
+            name.to_owned()
+        };
+        let path = bin.join(name);
+        report_fixture_file(&path, b"");
+        #[cfg(unix)]
+        fs::set_permissions(path, fs::Permissions::from_mode(0o755)).unwrap();
+    }
+    let output = Command::new(env::current_exe().unwrap())
+        .args([
+            "--exact",
+            "cli_renders_parent_component_paths_child",
+            "--ignored",
+            "--nocapture",
+        ])
+        .env("OVERVIEW_CLI_TEST_ROOT", root)
+        .env("PATH", &bin)
+        .env("HOME", root)
+        .env("LOCALAPPDATA", root.join("local"))
+        .env_remove("NVM_BIN")
+        .env_remove("NVM_SYMLINK")
+        .env_remove("NVM_DIR")
+        .env_remove("XDG_CONFIG_HOME")
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+/// Checks rendering, the manifest and retry using the CLI's actual composition.
+#[test]
+#[ignore = "launched with an isolated environment"]
+fn cli_renders_parent_component_paths_child() {
+    let root = PathBuf::from(env::var_os("OVERVIEW_CLI_TEST_ROOT").unwrap());
+    let lock = b"{\"lockfileVersion\":3}";
+    let tools = root.join("local/ss-review/tools");
+    let packages = tools
+        .join(format!("mermaid-{:x}", Sha256::digest(lock)))
+        .join("node_modules");
+    for (path, contents) in [
+        ("@mermaid-js/mermaid-cli/src/cli.js", &b""[..]),
+        ("puppeteer/install.mjs", &b""[..]),
+        ("puppeteer/package.json", &br#"{"main":"lib/main.js"}"#[..]),
+        ("puppeteer/lib/main.js", &b""[..]),
+    ] {
+        report_fixture_file(&packages.join(path), contents);
+    }
+    let browser = root.join("browser");
+    report_fixture_file(&browser, b"");
+    let renderer = OfflineRenderer {
+        browser,
+        render_calls: RefCell::new(0),
+    };
+
+    #[cfg(unix)]
+    let cases = [("ordinary", false), ("symlink", true)].as_slice();
+    #[cfg(not(unix))]
+    let cases = [("ordinary", false)].as_slice();
+    for &(name, use_symlink) in cases {
+        let case = root.join(name);
+        fs::create_dir_all(&case).unwrap();
+        prepare(&case);
+        fs::write(
+            case.join("capture 雪.json"),
+            to_vec(&azure_capture()).unwrap(),
+        )
+        .unwrap();
+        report_fixture_file(&case.join("skill 雪/tools/package-lock.json"), lock);
+        let output_parent = if use_symlink {
+            let destination = case.join("destination/nested");
+            fs::create_dir_all(&destination).unwrap();
+            #[cfg(unix)]
+            symlink(&destination, case.join("step")).unwrap();
+            case.join("destination")
+        } else {
+            fs::create_dir_all(case.join("step")).unwrap();
+            case.clone()
+        };
+        let requested_output = case.join("step/../output 雪");
+        let mut args = arguments(&case);
+        let argument = args
+            .iter_mut()
+            .find(|argument| {
+                argument
+                    .to_string_lossy()
+                    .starts_with("--output-directory=")
+            })
+            .unwrap();
+        *argument = OsString::from(format!("--output-directory={}", requested_output.display()));
+        let provider = Azure {
+            throttle_next_write: Cell::new(true),
+            ..Azure::default()
+        };
+        let before = *renderer.render_calls.borrow();
+        let first: Value =
+            from_str(&run(&args, &renderer, &provider, &TestClock).unwrap()).unwrap();
+        assert_eq!(first["status"], "succeeded", "{first}");
+        let after_first = *renderer.render_calls.borrow();
+        assert!(after_first > before);
+        let generation = output_parent
+            .join("output 雪/overview-publication")
+            .join(first["snapshot"]["runId"].as_str().unwrap());
+        let manifest_bytes = fs::read(generation.join("html.json")).unwrap();
+        let manifest: Value = from_slice(&manifest_bytes).unwrap();
+        assert_eq!(manifest["sourcePath"], first["snapshot"]["markdownPath"]);
+        let html_path = Path::new(manifest["htmlPath"].as_str().unwrap());
+        let archive_path = Path::new(manifest["archivePath"].as_str().unwrap());
+        assert_eq!(
+            html_path,
+            absolute(&requested_output)
+                .unwrap()
+                .join("overview-publication")
+                .join(first["snapshot"]["runId"].as_str().unwrap())
+                .join("report.html")
+        );
+        assert_eq!(
+            fs::read(html_path).unwrap(),
+            fs::read(generation.join("report.html")).unwrap()
+        );
+        assert_eq!(
+            manifest["htmlHash"],
+            format!("{:x}", Sha256::digest(fs::read(html_path).unwrap()))
+        );
+        assert_eq!(
+            manifest["archiveHash"],
+            format!("{:x}", Sha256::digest(fs::read(archive_path).unwrap()))
+        );
+        let second: Value =
+            from_str(&run(&args, &renderer, &provider, &TestClock).unwrap()).unwrap();
+        assert_eq!(second["status"], "succeeded", "{second}");
+        assert_eq!(*renderer.render_calls.borrow(), after_first);
+        assert_eq!(
+            fs::read(generation.join("html.json")).unwrap(),
+            manifest_bytes
+        );
+        assert_eq!(*provider.archive.borrow(), fs::read(archive_path).unwrap());
+        if use_symlink {
+            assert!(!case.join("output 雪").exists());
+        }
+    }
 }
 
 /// Coordinates a paused provider write and observed real lock contention.

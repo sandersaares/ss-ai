@@ -10,6 +10,7 @@ BeforeAll {
     . (Join-Path $script:LibraryRoot 'PullRequestModel.ps1')
     . (Join-Path $script:LibraryRoot 'WorkflowData.ps1')
     . (Join-Path $script:LibraryRoot 'FindingModel.ps1')
+    . (Join-Path $script:LibraryRoot 'FindingIdentifiers.ps1')
 
     # The host running this suite stands in for the executables it launches. Naming the running
     # executable rather than the command 'pwsh' keeps the child on the same build as the parent and
@@ -711,6 +712,11 @@ Describe 'Identifier lists' {
 
     It 'reads identifiers supplied as an array' {
         $identifiers = ConvertTo-FindingIdentifierList -Value @('g1-1', 'g2-3')
+        $identifiers | Should -Be @('g1-1', 'g2-3')
+    }
+
+    It 'trims entries and ignores empty comma-separated parts across array values' {
+        $identifiers = ConvertTo-FindingIdentifierList -Value @(' , g1-1, ', '', ' g2-3 ,,')
         $identifiers | Should -Be @('g1-1', 'g2-3')
     }
 
@@ -1662,6 +1668,51 @@ Describe 'Finding executables' {
         (Get-SingleLineErrorText -Text $refused['standardError']) | Should -BeLike "*'RT_typo'*"
     }
 
+    It 'checks follow-ups against <Case> capture identifiers' -ForEach @(
+        @{ Case = 'singleton GitHub'; Platform = 'gitHub'; Singleton = $true; Numeric = $false }
+        @{ Case = 'array Azure DevOps'; Platform = 'azureDevOps'; Singleton = $false; Numeric = $true }
+        @{ Case = 'singleton Azure DevOps'; Platform = 'azureDevOps'; Singleton = $true; Numeric = $true }
+    ) {
+        Initialize-TestArtifact | Out-Null
+        $threadId = if ($Numeric) { '42' } else { 'RT_kw1' }
+        $commentId = if ($Numeric) { '7' } else { 'PRRC_1' }
+        $thread = New-CaptureThread -Id $threadId -Kind 'text' -OpeningCommentId $commentId -ThreadContext (New-CaptureThreadContext)
+        if ($Numeric) {
+            $thread['id'] = 42
+            $thread['openingCommentId'] = 7
+        }
+        $capture = New-CaptureDocument -Platform $Platform -Thread @($thread)
+        if ($Singleton) { $capture['threads'] = $thread }
+        $capturePath = Join-Path $script:WorkRoot 'follow-up-context.json'
+        Write-TestJsonFile -Path $capturePath -Value $capture | Out-Null
+
+        foreach ($comment in @($commentId, 'wrong')) {
+            $findingPath = New-TestFindingFile -Name "$comment.json" -Override @{
+                followUp = [ordered]@{ threadId = $threadId; commentId = $comment }
+            }
+            $result = Invoke-SkillExecutable -Name 'Add-Finding.ps1' -ArgumentList @(
+                '-ArtifactPath', $script:ArtifactPath
+                '-FindingPath', $findingPath
+                '-ContextPath', $capturePath
+            )
+            if ($comment -ceq $commentId) {
+                $result['exitCode'] | Should -Be 0
+            } else {
+                $result['exitCode'] | Should -Not -Be 0
+            }
+        }
+        $missingThread = New-TestFindingFile -Name 'missing-thread.json' -Override @{
+            followUp = [ordered]@{ threadId = 'wrong'; commentId = $commentId }
+        }
+        $result = Invoke-SkillExecutable -Name 'Add-Finding.ps1' -ArgumentList @(
+            '-ArtifactPath', $script:ArtifactPath
+            '-FindingPath', $missingThread
+            '-ContextPath', $capturePath
+        )
+        $result['exitCode'] | Should -Not -Be 0
+        (Get-JsonArrayProperty -Node (Read-FindingArtifact -Path $script:ArtifactPath) -Name 'findings').Count | Should -Be 1
+    }
+
     It 'rejects malformed captured discussion without coercing fields' {
         Initialize-TestArtifact | Out-Null
         $capture = New-CaptureDocument -Platform 'gitHub' -Thread @(
@@ -1688,7 +1739,7 @@ Describe 'Finding executables' {
             '-ArtifactPath', $script:ArtifactPath
             '-FindingPath', (New-TestFindingFile -Name 'synthesis.json')
             '-Origin', 'synthesis'
-            '-SourceFindingId', 'g2-1,g3-4'
+            '-SourceFindingId', ' , g2-1, , g3-4, '
         )
 
         $result['exitCode'] | Should -Be 0
@@ -1933,7 +1984,7 @@ Describe 'Finding executables' {
 
         $result = Invoke-SkillExecutable -Name 'Test-FindingArtifact.ps1' -ArgumentList @(
             '-Path', $script:FindingsDirectory
-            '-ExpectedReviewerId', 'g1-correctness,g1-security'
+            '-ExpectedReviewerId', ' , g1-correctness, , g1-security, '
         )
 
         $result['exitCode'] | Should -Not -Be 0

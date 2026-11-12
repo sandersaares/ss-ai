@@ -170,6 +170,20 @@ Describe 'Saved PR query requests' {
         Write-PullRequestOutputFileAtomically -Path $script:Capture -Content (ConvertTo-JsonText -Value $script:Document)
     }
 
+    It 'records a conflicting text selector before resolving its non-filesystem path' {
+        $result = Invoke-QueryExecutable -ScriptName New-PullRequestQueryRequest.ps1 -Arguments @(
+            '-Path', $script:Capture, '-RequestPath', $script:Request, '-DiagnosticsPath', $script:Diagnostics,
+            '-Query', 'search', '-Text', 'widget', '-TextPath', 'Env:PATH'
+        )
+        $result.exitCode | Should -Not -Be 0
+        $result.output | Should -BeNullOrEmpty
+        $result.error | Should -Match 'Query preparation failed'
+        Test-Path -LiteralPath $script:Request | Should -BeFalse
+        $diagnostics = Get-Content -Raw -LiteralPath $script:Diagnostics | ConvertFrom-Json
+        $diagnostics.counts.setupCalls | Should -Be 1
+        $diagnostics.counts.malformedQueryFailures | Should -Be 1
+    }
+
     It 'recovers from using the request output as the capture input by correcting only the input path' {
         $captureBefore = [IO.File]::ReadAllBytes($script:Capture)
         $failed = Invoke-QueryExecutable -ScriptName New-PullRequestQueryRequest.ps1 -Arguments @(
@@ -214,6 +228,59 @@ Describe 'Saved PR query requests' {
         $result = ConvertFrom-JsonVerbatim -Text $page.output
         $result.items.Count | Should -Be 1
         $result.items[0].commentId | Should -BeExactly Root
+    }
+
+    It 'resolves filesystem PSDrive paths for native context operations' {
+        $driveRoot = Join-Path $TestDrive ([guid]::NewGuid().ToString('N'))
+        $working = Join-Path $TestDrive ([guid]::NewGuid().ToString('N'))
+        $null = [IO.Directory]::CreateDirectory($driveRoot)
+        $null = [IO.Directory]::CreateDirectory($working)
+        [IO.File]::Copy($script:Capture, (Join-Path $driveRoot 'capture.json'))
+        [IO.File]::Copy($script:Capture, (Join-Path $driveRoot 'baseline.json'))
+        [IO.File]::WriteAllText((Join-Path $driveRoot 'search.txt'), 'Widget')
+        [IO.File]::WriteAllText((Join-Path $driveRoot 'files.json'), '["src/a.rs"]')
+
+        $output = & pwsh -NoProfile -NonInteractive -Command {
+            param($scripts, $root, $workingDirectory)
+            if ($PSVersionTable.PSVersion -lt [version]'7.6') { throw 'PowerShell 7.6 is required.' }
+            Set-StrictMode -Version Latest
+            $ErrorActionPreference = 'Stop'
+            $PSNativeCommandUseErrorActionPreference = $true
+            Set-Location -LiteralPath $workingDirectory
+            $null = New-PSDrive -Name ReviewEvidence -PSProvider FileSystem -Root $root -Scope Global
+            $prepare = Join-Path $scripts 'New-PullRequestQueryRequest.ps1'
+            $read = Join-Path $scripts 'Read-PullRequestContext.ps1'
+            $diagnostics = Join-Path $scripts 'Get-ReviewInputDiagnostics.ps1'
+            $null = & $prepare -Path 'ReviewEvidence:\capture.json' `
+                -RequestPath 'ReviewEvidence:\request.json' -DiagnosticsPath 'ReviewEvidence:\diagnostics.json' `
+                -Query search -TextPath 'ReviewEvidence:\search.txt' -Files @('src/a.rs')
+            $null = & $prepare -Path 'ReviewEvidence:\capture.json' `
+                -RequestPath 'ReviewEvidence:\changes-request.json' -DiagnosticsPath 'ReviewEvidence:\diagnostics.json' `
+                -Query changes -ComparePath 'ReviewEvidence:\baseline.json'
+            $saved = [IO.File]::ReadAllText((Join-Path $root 'request.json')) | ConvertFrom-Json -AsHashtable
+            if ($saved.options.files[0] -cne 'src/a.rs') { throw 'A repository selector was changed.' }
+            & $read -RequestPath 'ReviewEvidence:\request.json'
+            & $read -RequestPath 'ReviewEvidence:\changes-request.json'
+            & $read -Path 'ReviewEvidence:\capture.json' -Query threads -FilesPath 'ReviewEvidence:\files.json'
+            & $read -Path 'ReviewEvidence:\capture.json' -Query changes -ComparePath 'ReviewEvidence:\baseline.json'
+            $counts = (& $diagnostics -Path 'ReviewEvidence:\diagnostics.json' -Record SetupCalls |
+                ConvertFrom-Json -AsHashtable).counts
+            if ($counts.setupCalls -ne 3) { throw 'Diagnostic counter casing was not preserved.' }
+            $nonFilesystemRejected = $false
+            try { & $diagnostics -Path 'Env:\TEMP' | Out-Null }
+            catch { $nonFilesystemRejected = $_.Exception.Message -like '*FileSystem provider*' }
+            if (-not $nonFilesystemRejected) { throw 'A non-filesystem path was not rejected.' }
+        } -args (Join-Path $script:SkillScripts '.'), $driveRoot, $working
+        $LASTEXITCODE | Should -Be 0
+        $pages = @($output | ForEach-Object { ConvertFrom-JsonVerbatim -Text $_ })
+        $pages.Count | Should -Be 4
+        $pages[0].totalCount | Should -BeGreaterThan 0
+        $pages[1].totalCount | Should -Be 0
+        $pages[2].totalCount | Should -Be 1
+        $pages[3].totalCount | Should -Be 0
+        Test-Path -LiteralPath (Join-Path $driveRoot 'request.json') | Should -BeTrue
+        Test-Path -LiteralPath (Join-Path $driveRoot 'diagnostics.json') | Should -BeTrue
+        Test-Path -LiteralPath (Join-Path $working 'ReviewEvidence:\request.json') | Should -BeFalse
     }
 
     It 'binds typed file arrays through a noninteractive PowerShell script block' {
@@ -885,6 +952,16 @@ Describe 'Bounded query executable' {
             '-FilesJson', $json, '-FilesPath', $filesPath
         )
 
+        $result.exitCode | Should -Not -Be 0
+        $result.output | Should -BeNullOrEmpty
+        $result.error | Should -Match 'Supply either -FilesJson or -FilesPath, not both'
+    }
+
+    It 'rejects conflicting file selectors before resolving a non-filesystem path' {
+        $result = Invoke-QueryExecutable @(
+            '-Path', $script:CapturePath, '-Query', 'threads',
+            '-FilesJson', '["src/a.rs"]', '-FilesPath', 'Env:PATH'
+        )
         $result.exitCode | Should -Not -Be 0
         $result.output | Should -BeNullOrEmpty
         $result.error | Should -Match 'Supply either -FilesJson or -FilesPath, not both'

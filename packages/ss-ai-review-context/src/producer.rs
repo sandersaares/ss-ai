@@ -9,18 +9,31 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 use ohno::AppError;
 use serde_json::{Value, json};
-use ss_ai_runtime::{Clock, FileTransaction, caused_by, fail, read_bytes};
+use ss_ai_runtime::{Clock, FileTransaction, caused_by, read_bytes};
 
+use crate::authorship::CommentIndex;
 use crate::capture::{
     CAPTURE_VERSION, POLICY_VERSION, apply_decisions, array_property, comment_input_hash,
-    last_matching, parse_file, property, property_values, selected, string_id,
-    validate_capture_keys, validate_capture_structure, validate_decisions,
+    parse_file, property, property_values, selected, string_id, validate_capture_keys,
+    validate_capture_structure, validate_decisions,
+};
+use crate::error::{
+    AliasedCaptureOutput, ComparisonTargetMismatch, ExistingCaptureOutput, InvalidAuthorshipRecord,
+    InvalidOutputLockName, InvalidProviderArray, InvalidProviderComment, InvalidProviderComments,
+    InvalidProviderThread, MissingComparisonCapture, MissingComparisonLock,
+    MissingComparisonSidecarTarget, MissingPathName, MissingPathParent, MissingProviderIdentity,
+    MissingProviderPlatform, MissingProviderTargetField, MissingProviderUrl, MissingPullRequest,
+    ProviderTargetMismatch, StagingNamesExhausted, UnsupportedCaptureVersion,
+    UnsupportedProviderPlatform,
 };
 use crate::query::capture_delta;
 use crate::request::{full_path, path_string};
 use crate::{document_hash, powershell_json};
 
 /// Retains the destination lock and the checked baseline across provider reads.
+///
+/// The retained transactions borrow a clock that may use interior mutable state,
+/// so this handle does not promise unwind safety.
 pub struct CapturePreparation<'a> {
     path: PathBuf,
     sidecar: FileTransaction<'a>,
@@ -40,190 +53,24 @@ impl fmt::Debug for CapturePreparation<'_> {
     }
 }
 
-/// Checks immutable output and comparison evidence before provider access.
-pub fn prepare_capture<'a>(
-    path: &Path,
-    compare: Option<&Path>,
-    target_url: &str,
-    clock: &'a dyn Clock,
-) -> Result<CapturePreparation<'a>, AppError> {
-    let path = full_path(path)?;
-    let output_sidecar = sidecar_path(&path);
-    if let Some(compare) = compare {
-        let compare = full_path(compare)?;
-        let compare_sidecar = sidecar_path(&compare);
-        // Even an absent sidecar is reserved for the comparison's decisions.
-        for baseline in [&compare, &compare_sidecar] {
-            for output in [&path, &output_sidecar] {
-                if same_existing_path(baseline, output)? {
-                    return Err(fail(
-                        "invalidInput",
-                        "Give the capture a distinct -OutputPrefix",
-                    ));
-                }
-            }
-        }
-    }
-    let (previous, previous_raw, decisions) = if let Some(compare) = compare {
-        let compare = full_path(compare)?;
-        let compare_sidecar = sidecar_path(&compare);
-        let lock = FileTransaction::open(&compare_sidecar, clock)?;
-        // The retained lock exists even when the sidecar does not, so the
-        // filesystem can resolve case and directory aliases without creating
-        // or modifying the sidecar itself.
-        for output in [&path, &output_sidecar] {
-            if same_lock_path(&compare_sidecar, output)? {
-                return Err(fail(
-                    "invalidInput",
-                    "Give the capture a distinct -OutputPrefix",
-                ));
-            }
-        }
-        let bytes = read_bytes(&compare, clock)?
-            .ok_or_else(|| fail("invalidInput", "Comparison capture is missing"))?;
-        let raw = parse_file(&bytes)?;
-        validate_capture_keys(&raw)?;
-        if property(&raw, "schemaVersion").as_i64() != Some(CAPTURE_VERSION) {
-            return Err(fail(
-                "invalidInput",
-                format!(
-                    "Unsupported capture schema version {}. Capture the pull request again.",
-                    property(&raw, "schemaVersion")
-                ),
-            ));
-        }
-        validate_capture_structure(&raw)?;
-        let decisions = match lock.read_bytes()? {
-            Some(bytes) => Some(parse_file(&bytes)?),
-            None => {
-                // A dangling link is not an absent sidecar: publishing its
-                // target could make the baseline acquire unrelated decisions.
-                match fs::symlink_metadata(&compare_sidecar) {
-                    Ok(_) => {
-                        return Err(fail(
-                            "invalidInput",
-                            "Comparison authorship sidecar points to a missing file",
-                        ));
-                    }
-                    Err(error) if error.kind() == io::ErrorKind::NotFound => None,
-                    Err(error) => {
-                        return Err(caused_by(
-                            "io",
-                            format!("Cannot inspect {}", compare_sidecar.display()),
-                            error,
-                        )
-                        .into());
-                    }
-                }
-            }
-        };
-        let mut previous = raw.clone();
-        if let Some(decisions) = &decisions {
-            apply_decisions(&mut previous, decisions)?;
-        }
-        if !matches_target(&previous, target_url) {
-            return Err(fail(
-                "invalidInput",
-                "Cannot compare captures of different pull requests",
-            ));
-        }
-        (Some(previous), Some(raw), decisions)
-    } else {
-        (None, None, None)
-    };
-    let sidecar = FileTransaction::open(&output_sidecar, clock)?;
-    let capture = FileTransaction::open(&path, clock)?;
-    if sidecar.read_bytes()?.is_some() || capture.read_bytes()?.is_some() {
-        return Err(fail(
-            "invalidInput",
-            "Capture output already exists; choose a new prefix",
-        ));
-    }
-    Ok(CapturePreparation {
-        path,
-        sidecar,
-        capture,
-        previous,
-        previous_raw,
-        decisions,
-        target_url: target_url.to_owned(),
-    })
-}
-
 impl CapturePreparation<'_> {
     /// Validates and publishes the sidecar before making the capture visible.
     pub fn publish(self, context: &Value, fetched_utc: &str) -> Result<Value, AppError> {
         let mut document = validated_document(context, fetched_utc)?;
-        if !matches_target(&document, &self.target_url) {
-            return Err(fail(
-                "invalidInput",
-                "Provider returned a different pull request",
-            ));
-        }
-        if let Some(previous) = &self.previous
-            && property(previous, "pullRequestUrl") != property(&document, "pullRequestUrl")
-        {
-            return Err(fail(
-                "invalidInput",
-                "Provider returned a different pull request",
-            ));
-        }
+        validate_provider_target(&document, self.previous.as_ref(), &self.target_url)?;
         let raw_text = powershell_json(&document)?;
         let mut decisions = json!({"schemaVersion": 1, "policyVersion": POLICY_VERSION, "captureHash": document_hash(&document)?, "decisions": []});
-        let mut reused = Vec::new();
-        if let Some(previous) = &self.decisions
+        let reused = if let Some(previous) = &self.decisions
             && let Some(previous_raw) = &self.previous_raw
             && property(previous, "policyVersion").as_str() == Some(POLICY_VERSION)
         {
-            for entry in array_property(previous, "decisions") {
-                let thread_id = property(&entry, "threadId").as_str().unwrap_or_default();
-                let comment_id = property(&entry, "commentId").as_str().unwrap_or_default();
-                // A stale decision must match both the baseline and the new capture.
-                let Some((is_array, index)) =
-                    last_matching(property(previous_raw, "threads"), thread_id)
-                else {
-                    continue;
-                };
-                let thread = selected(property(previous_raw, "threads"), is_array, index);
-                let Some((is_array, index)) =
-                    last_matching(property(thread, "comments"), comment_id)
-                else {
-                    continue;
-                };
-                let comment = selected(property(thread, "comments"), is_array, index);
-                if property(comment, "authorship").as_str() != Some("indeterminate")
-                    || property(&entry, "inputHash").as_str()
-                        != Some(&comment_input_hash(previous_raw, thread_id, comment)?)
-                {
-                    continue;
-                }
-                let Some((is_array, index)) =
-                    last_matching(property(&document, "threads"), thread_id)
-                else {
-                    continue;
-                };
-                let thread = selected(property(&document, "threads"), is_array, index);
-                let Some((is_array, index)) =
-                    last_matching(property(thread, "comments"), comment_id)
-                else {
-                    continue;
-                };
-                let comment = selected(property(thread, "comments"), is_array, index);
-                if property(comment, "authorship").as_str() == Some("indeterminate")
-                    && property(&entry, "inputHash").as_str()
-                        == Some(&comment_input_hash(&document, thread_id, comment)?)
-                {
-                    reused.push(json!({
-                        "threadId": thread_id, "commentId": comment_id,
-                        "kind": property(&entry, "kind"),
-                        "inputHash": property(&entry, "inputHash"), "origin": "reused"
-                    }));
-                }
-            }
-        }
+            reuse_decisions(previous_raw, &document, previous)?
+        } else {
+            Vec::new()
+        };
         decisions
             .as_object_mut()
-            .ok_or_else(|| fail("invalidInput", "Invalid authorship record"))?
+            .ok_or_else(InvalidAuthorshipRecord::classified)?
             .insert("decisions".to_owned(), json!(reused));
         validate_decisions(&decisions)?;
         apply_decisions(&mut document, &decisions)?;
@@ -265,10 +112,7 @@ impl CapturePreparation<'_> {
             "delta": delta
         });
         if self.sidecar.read_bytes()?.is_some() || self.capture.read_bytes()?.is_some() {
-            return Err(fail(
-                "invalidInput",
-                "Capture output already exists; choose a new prefix",
-            ));
+            return Err(ExistingCaptureOutput::classified().into());
         }
         publish_new(
             &sidecar_path(&self.path),
@@ -288,6 +132,165 @@ impl CapturePreparation<'_> {
     }
 }
 
+/// Checks immutable output and comparison evidence before provider access.
+pub fn prepare_capture<'a>(
+    path: &Path,
+    compare: Option<&Path>,
+    target_url: &str,
+    clock: &'a dyn Clock,
+) -> Result<CapturePreparation<'a>, AppError> {
+    let path = full_path(path)?;
+    let output_sidecar = sidecar_path(&path);
+    if let Some(compare) = compare {
+        let compare = full_path(compare)?;
+        let compare_sidecar = sidecar_path(&compare);
+        // Even an absent sidecar is reserved for the comparison's decisions.
+        for baseline in [&compare, &compare_sidecar] {
+            for output in [&path, &output_sidecar] {
+                if same_existing_path(baseline, output)? {
+                    return Err(AliasedCaptureOutput::classified().into());
+                }
+            }
+        }
+    }
+    let (previous, previous_raw, decisions) = if let Some(compare) = compare {
+        let compare = full_path(compare)?;
+        let compare_sidecar = sidecar_path(&compare);
+        let lock = FileTransaction::open(&compare_sidecar, clock)?;
+        // The retained lock exists even when the sidecar does not, so the
+        // filesystem can resolve case and directory aliases without creating
+        // or modifying the sidecar itself.
+        for output in [&path, &output_sidecar] {
+            if same_lock_path(&compare_sidecar, output)? {
+                return Err(AliasedCaptureOutput::classified().into());
+            }
+        }
+        let bytes =
+            read_bytes(&compare, clock)?.ok_or_else(MissingComparisonCapture::classified)?;
+        let raw = parse_file(&bytes)?;
+        validate_capture_keys(&raw)?;
+        if property(&raw, "schemaVersion").as_i64() != Some(CAPTURE_VERSION) {
+            return Err(UnsupportedCaptureVersion::classified(format!(
+                "Unsupported capture schema version {}. Capture the pull request again.",
+                property(&raw, "schemaVersion")
+            ))
+            .into());
+        }
+        validate_capture_structure(&raw)?;
+        let decisions = match lock.read_bytes()? {
+            Some(bytes) => Some(parse_file(&bytes)?),
+            None => {
+                // A dangling link is not an absent sidecar: publishing its
+                // target could make the baseline acquire unrelated decisions.
+                match fs::symlink_metadata(&compare_sidecar) {
+                    Ok(_) => {
+                        return Err(MissingComparisonSidecarTarget::classified().into());
+                    }
+                    Err(error) if error.kind() == io::ErrorKind::NotFound => None,
+                    Err(error) => {
+                        return Err(caused_by(
+                            "io",
+                            format!("Cannot inspect {}", compare_sidecar.display()),
+                            error,
+                        )
+                        .into());
+                    }
+                }
+            }
+        };
+        let mut previous = raw.clone();
+        if let Some(decisions) = &decisions {
+            apply_decisions(&mut previous, decisions)?;
+        }
+        if !matches_target(&previous, target_url) {
+            return Err(ComparisonTargetMismatch::classified().into());
+        }
+        (Some(previous), Some(raw), decisions)
+    } else {
+        (None, None, None)
+    };
+    let sidecar = FileTransaction::open(&output_sidecar, clock)?;
+    let capture = FileTransaction::open(&path, clock)?;
+    if sidecar.read_bytes()?.is_some() || capture.read_bytes()?.is_some() {
+        return Err(ExistingCaptureOutput::classified().into());
+    }
+    Ok(CapturePreparation {
+        path,
+        sidecar,
+        capture,
+        previous,
+        previous_raw,
+        decisions,
+        target_url: target_url.to_owned(),
+    })
+}
+
+/// Reuses a decision only when its input matches both immutable captures.
+fn reuse_decisions(
+    previous_raw: &Value,
+    document: &Value,
+    decisions: &Value,
+) -> Result<Vec<Value>, AppError> {
+    let previous_index = CommentIndex::new(previous_raw);
+    let current_index = CommentIndex::new(document);
+    let mut reused = Vec::new();
+    for entry in property_values(decisions, "decisions") {
+        let thread_id = property(entry, "threadId").as_str().unwrap_or_default();
+        let comment_id = property(entry, "commentId").as_str().unwrap_or_default();
+        let Some((thread_array, thread_index, comment_array, comment_index)) =
+            previous_index.find(thread_id, comment_id)
+        else {
+            continue;
+        };
+        let thread = selected(
+            property(previous_raw, "threads"),
+            thread_array,
+            thread_index,
+        );
+        let comment = selected(property(thread, "comments"), comment_array, comment_index);
+        if property(comment, "authorship").as_str() != Some("indeterminate")
+            || property(entry, "inputHash").as_str()
+                != Some(&comment_input_hash(previous_raw, thread_id, comment)?)
+        {
+            continue;
+        }
+        let Some((thread_array, thread_index, comment_array, comment_index)) =
+            current_index.find(thread_id, comment_id)
+        else {
+            continue;
+        };
+        let thread = selected(property(document, "threads"), thread_array, thread_index);
+        let comment = selected(property(thread, "comments"), comment_array, comment_index);
+        if property(comment, "authorship").as_str() == Some("indeterminate")
+            && property(entry, "inputHash").as_str()
+                == Some(&comment_input_hash(document, thread_id, comment)?)
+        {
+            reused.push(json!({
+                "threadId": thread_id, "commentId": comment_id,
+                "kind": property(entry, "kind"),
+                "inputHash": property(entry, "inputHash"), "origin": "reused"
+            }));
+        }
+    }
+    Ok(reused)
+}
+
+/// Prevents publication when provider evidence belongs to another request.
+fn validate_provider_target(
+    document: &Value,
+    previous: Option<&Value>,
+    target_url: &str,
+) -> Result<(), AppError> {
+    if !matches_target(document, target_url)
+        || previous.is_some_and(|previous| {
+            property(previous, "pullRequestUrl") != property(document, "pullRequestUrl")
+        })
+    {
+        return Err(ProviderTargetMismatch::classified().into());
+    }
+    Ok(())
+}
+
 /// Detects aliases of existing files or absent names in the same directory.
 fn same_existing_path(left: &Path, right: &Path) -> Result<bool, AppError> {
     if left == right {
@@ -300,12 +303,8 @@ fn same_existing_path(left: &Path, right: &Path) -> Result<bool, AppError> {
 
 /// Resolves directory aliases while preserving actual filesystem errors.
 fn resolved_path(path: &Path) -> Result<Option<PathBuf>, AppError> {
-    let parent = path
-        .parent()
-        .ok_or_else(|| fail("invalidInput", "File path requires a parent"))?;
-    let name = path
-        .file_name()
-        .ok_or_else(|| fail("invalidInput", "File path requires a name"))?;
+    let parent = path.parent().ok_or_else(MissingPathParent::classified)?;
+    let name = path.file_name().ok_or_else(MissingPathName::classified)?;
     let Some(parent) = canonical_path(parent)? else {
         return Ok(None);
     };
@@ -345,8 +344,8 @@ fn same_lock_path(baseline: &Path, output: &Path) -> Result<bool, AppError> {
         PathBuf::from(name)
     };
     let baseline_lock_path = lock_name(baseline);
-    let baseline_lock = canonical_path(&baseline_lock_path)?
-        .ok_or_else(|| fail("io", "Comparison sidecar lock disappeared"))?;
+    let baseline_lock =
+        canonical_path(&baseline_lock_path)?.ok_or_else(MissingComparisonLock::classified)?;
     if canonical_path(&lock_name(output))?.as_ref() == Some(&baseline_lock) {
         return Ok(true);
     }
@@ -362,7 +361,7 @@ fn same_lock_path(baseline: &Path, output: &Path) -> Result<bool, AppError> {
     }
     let suffix = name
         .strip_prefix(trimmed)
-        .ok_or_else(|| fail("io", "Cannot compare output lock name"))?;
+        .ok_or_else(InvalidOutputLockName::classified)?;
     let mut probe = baseline_lock_path.as_os_str().to_os_string();
     probe.push(suffix);
     if canonical_path(Path::new(&probe))?.as_ref() != Some(&baseline_lock) {
@@ -378,7 +377,8 @@ fn same_lock_path(baseline: &Path, output: &Path) -> Result<bool, AppError> {
 fn publish_new(path: &Path, bytes: &[u8]) -> Result<(), AppError> {
     static NEXT: AtomicU64 = AtomicU64::new(0);
     // A crashed process can leave a staging file whose PID is later reused.
-    // Bound attempts while never deleting or replacing another creator's file.
+    // The arbitrary budget provides bounded headroom for stale staging names
+    // while never deleting or replacing another creator's file.
     let mut created = None;
     for _ in 0..64 {
         // The counter only supplies distinct staging names; locks guard shared state.
@@ -407,10 +407,10 @@ fn publish_new(path: &Path, bytes: &[u8]) -> Result<(), AppError> {
         }
     }
     let (staging, mut file) = created.ok_or_else(|| {
-        fail(
-            "io",
-            format!("Cannot allocate staging file for {}", path.display()),
-        )
+        StagingNamesExhausted::classified(format!(
+            "Cannot allocate staging file for {}",
+            path.display()
+        ))
     })?;
     let result = (|| -> Result<(), AppError> {
         file.write_all(bytes).map_err(|error| {
@@ -517,29 +517,26 @@ fn validated_document(context: &Value, fetched_utc: &str) -> Result<Value, AppEr
 fn document(context: &Value, fetched_utc: &str) -> Result<Value, AppError> {
     for name in ["reviewers", "revisions", "threads"] {
         if !property(context, name).is_array() {
-            return Err(fail(
-                "invalidInput",
-                format!("Provider context requires an array for {name}"),
-            ));
+            return Err(InvalidProviderArray::classified(format!(
+                "Provider context requires an array for {name}"
+            ))
+            .into());
         }
     }
     if !property(context, "authenticatedIdentity").is_object() {
-        return Err(fail(
-            "invalidInput",
-            "Provider context requires an authenticated identity",
-        ));
+        return Err(MissingProviderIdentity::classified().into());
     }
     let target = property(context, "target");
     let url = property(target, "webUrl")
         .as_str()
-        .ok_or_else(|| fail("invalidInput", "Provider target has no URL"))?;
+        .ok_or_else(MissingProviderUrl::classified)?;
     let platform = property(target, "platform")
         .as_str()
-        .ok_or_else(|| fail("invalidInput", "Provider target has no platform"))?;
+        .ok_or_else(MissingProviderPlatform::classified)?;
     let component = |name| -> Result<String, AppError> {
-        let value = property(target, name)
-            .as_str()
-            .ok_or_else(|| fail("invalidInput", format!("Provider target requires {name}")))?;
+        let value = property(target, name).as_str().ok_or_else(|| {
+            MissingProviderTargetField::classified(format!("Provider target requires {name}"))
+        })?;
         Ok(escape_uri_component(value))
     };
     let repository_url = if platform == "gitHub" {
@@ -549,42 +546,43 @@ fn document(context: &Value, fetched_utc: &str) -> Result<Value, AppError> {
             component("repository")?
         )
     } else if platform == "azureDevOps" {
-        let collection = property(target, "collectionUrl")
-            .as_str()
-            .ok_or_else(|| fail("invalidInput", "Provider target requires collectionUrl"))?;
+        let collection = property(target, "collectionUrl").as_str().ok_or_else(|| {
+            MissingProviderTargetField::classified("Provider target requires collectionUrl")
+        })?;
         format!(
             "{collection}/{}/_git/{}",
             component("project")?,
             component("repository")?
         )
     } else {
-        return Err(fail("invalidInput", "Unsupported provider platform"));
+        return Err(UnsupportedProviderPlatform::classified().into());
     };
     let identity = property(context, "authenticatedIdentity");
     let mut pull_request = property(context, "pullRequest").clone();
     let self_authored = identity_matches(property(&pull_request, "author"), identity);
     pull_request
         .as_object_mut()
-        .ok_or_else(|| fail("invalidInput", "Missing pull request"))?
+        .ok_or_else(MissingPullRequest::classified)?
         .insert("isAuthoredBySelf".to_owned(), json!(self_authored));
     let mut threads = array_property(context, "threads");
     for thread in &mut threads {
         if !property(thread, "comments").is_array() {
-            return Err(fail(
-                "invalidInput",
-                "Provider thread requires a comments array",
-            ));
+            return Err(InvalidProviderComments::classified().into());
         }
-        let mut comments = array_property(thread, "comments");
+        let comments = thread
+            .get_mut("comments")
+            .and_then(Value::as_array_mut)
+            .ok_or_else(InvalidProviderComments::classified)?;
         comments.sort_by_cached_key(|comment| sort_key(comment, "publishedUtc"));
-        for comment in &mut comments {
+        for comment in comments.iter_mut() {
             let authored = identity_matches(property(comment, "author"), identity);
             comment
                 .as_object_mut()
-                .ok_or_else(|| fail("invalidInput", "Invalid comment"))?
+                .ok_or_else(InvalidProviderComment::classified)?
                 .insert("isAuthoredBySelf".to_owned(), json!(authored));
         }
         let opener = string_id(property(thread, "openingCommentId"));
+        let comments = property_values(thread, "comments");
         let author = comments
             .iter()
             .find(|comment| !opener.is_empty() && string_id(property(comment, "id")) == opener)
@@ -594,8 +592,7 @@ fn document(context: &Value, fetched_utc: &str) -> Result<Value, AppError> {
         let authored = identity_matches(author, identity);
         let object = thread
             .as_object_mut()
-            .ok_or_else(|| fail("invalidInput", "Invalid thread"))?;
-        object.insert("comments".to_owned(), json!(comments));
+            .ok_or_else(InvalidProviderThread::classified)?;
         object.insert("isAuthoredBySelf".to_owned(), json!(authored));
     }
     threads.sort_by_cached_key(|thread| sort_key(thread, "eventUtc"));
@@ -667,14 +664,39 @@ fn ordinal_upper(character: char) -> char {
 #[cfg(test)]
 #[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
+    #![allow(
+        clippy::indexing_slicing,
+        reason = "The tests use fixed fixture shapes"
+    )]
+    use std::error::Error;
     use std::io;
     use std::path::Path;
 
+    use ohno::AppError;
     use serde_json::{Value, from_str, json};
     use ss_ai_runtime::{caused_by, classification};
+    use static_assertions::assert_not_impl_any;
 
-    use super::{document, finish_publication, identity_matches};
+    use super::{
+        CapturePreparation, document, finish_publication, identity_matches, reuse_decisions,
+        validate_provider_target,
+    };
+    use crate::capture::comment_input_hash;
+    use crate::error::{
+        InvalidProviderArray, InvalidProviderComment, InvalidProviderComments,
+        MissingProviderIdentity, MissingProviderPlatform, MissingProviderTargetField,
+        MissingProviderUrl, MissingPullRequest, ProviderTargetMismatch,
+        UnsupportedProviderPlatform,
+    };
     use crate::{canonical_capture_from_evidence, evidence_hash};
+
+    assert_not_impl_any!(CapturePreparation<'static>: std::panic::UnwindSafe, std::panic::RefUnwindSafe);
+
+    /// Confirms the provider invariant and the application recovery category.
+    fn assert_failure<T: Error + 'static>(error: &AppError) {
+        assert!(error.find_source::<T>().is_some(), "{error}");
+        assert_eq!(classification(error), "invalidInput");
+    }
 
     #[test]
     fn canonical_evidence_matches_saved_captures_independent_of_capture_time() {
@@ -753,6 +775,114 @@ mod tests {
             let error = canonical_capture_from_evidence(&invalid).unwrap_err();
             assert_eq!(classification(&error), "invalidInput");
         }
+    }
+
+    #[test]
+    fn provider_document_rejections_keep_specific_causes() {
+        let context: Value = serde_json::from_slice(include_bytes!(
+            "../../../tests/fixtures/ss-review-native-capture/github-context.json"
+        ))
+        .unwrap();
+        let mut bad = context.clone();
+        bad["threads"] = json!(null);
+        assert_failure::<InvalidProviderArray>(&document(&bad, "time").unwrap_err());
+        bad = context.clone();
+        bad["authenticatedIdentity"] = json!(null);
+        assert_failure::<MissingProviderIdentity>(&document(&bad, "time").unwrap_err());
+        bad = context.clone();
+        bad["target"]["webUrl"] = json!(null);
+        assert_failure::<MissingProviderUrl>(&document(&bad, "time").unwrap_err());
+        bad = context.clone();
+        bad["target"]["platform"] = json!(null);
+        assert_failure::<MissingProviderPlatform>(&document(&bad, "time").unwrap_err());
+        bad = context.clone();
+        bad["target"]["organization"] = json!(null);
+        assert_failure::<MissingProviderTargetField>(&document(&bad, "time").unwrap_err());
+        bad = context.clone();
+        bad["target"]["platform"] = json!("other");
+        assert_failure::<UnsupportedProviderPlatform>(&document(&bad, "time").unwrap_err());
+        bad = context.clone();
+        bad["pullRequest"] = json!(null);
+        assert_failure::<MissingPullRequest>(&document(&bad, "time").unwrap_err());
+        bad = context;
+        bad["threads"] = json!([{"comments": null}]);
+        assert_failure::<InvalidProviderComments>(&document(&bad, "time").unwrap_err());
+        bad["threads"] = json!([{"comments": [null]}]);
+        assert_failure::<InvalidProviderComment>(&document(&bad, "time").unwrap_err());
+    }
+
+    #[test]
+    fn provider_target_rejection_keeps_its_cause_for_requested_and_baseline_targets() {
+        let current = json!({"pullRequestUrl": "https://example.test/one"});
+        let previous = json!({"pullRequestUrl": "https://example.test/two"});
+        assert_failure::<ProviderTargetMismatch>(
+            &validate_provider_target(&current, None, "https://example.test/two").unwrap_err(),
+        );
+        assert_failure::<ProviderTargetMismatch>(
+            &validate_provider_target(&current, Some(&previous), "https://example.test/one")
+                .unwrap_err(),
+        );
+    }
+
+    #[test]
+    fn refresh_reuse_checks_last_duplicate_and_scalar_evidence_on_both_sides() {
+        let good = json!({
+            "id": "C", "content": "matching", "author": {"id": "author"},
+            "authorship": "indeterminate", "authorshipEvidence": [],
+            "isAuthoredBySelf": false
+        });
+        let mut bad = good.clone();
+        bad["content"] = json!("different");
+        let baseline = json!({
+            "platform": "gitHub", "repositoryUrl": "repo", "pullRequestUrl": "url",
+            "threads": [
+                {"id": "T", "comments": [bad]},
+                {"id": "T", "comments": [bad, good]},
+                {"id": "t", "comments": good}
+            ]
+        });
+        let current = json!({
+            "platform": "gitHub", "repositoryUrl": "repo", "pullRequestUrl": "url",
+            "threads": {"id": "T", "comments": good}
+        });
+        let hash = comment_input_hash(&baseline, "T", &good).unwrap();
+        let decisions = json!({"decisions": [
+            {"threadId": "T", "commentId": "C", "kind": "human", "inputHash": hash},
+            {"threadId": "t", "commentId": "C", "kind": "human", "inputHash": hash},
+            {"threadId": "T", "commentId": "c", "kind": "human", "inputHash": hash}
+        ]});
+        for (old, new) in [(&baseline, &current), (&current, &baseline)] {
+            let reused = reuse_decisions(old, new, &decisions).unwrap();
+            assert_eq!(reused.len(), 1);
+            assert_eq!(reused[0]["threadId"], "T");
+            assert_eq!(reused[0]["commentId"], "C");
+            assert_eq!(reused[0]["origin"], "reused");
+        }
+
+        let mut changed = baseline.clone();
+        changed["threads"][1]["comments"][1]["content"] = json!("changed");
+        assert!(
+            reuse_decisions(&changed, &current, &decisions)
+                .unwrap()
+                .is_empty()
+        );
+        assert!(
+            reuse_decisions(&current, &changed, &decisions)
+                .unwrap()
+                .is_empty()
+        );
+        let mut determined = current;
+        determined["threads"]["comments"]["authorship"] = json!("agent");
+        assert!(
+            reuse_decisions(&baseline, &determined, &decisions)
+                .unwrap()
+                .is_empty()
+        );
+        assert!(
+            reuse_decisions(&determined, &baseline, &decisions)
+                .unwrap()
+                .is_empty()
+        );
     }
 
     #[test]

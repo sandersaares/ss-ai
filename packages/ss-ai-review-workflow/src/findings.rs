@@ -1,6 +1,8 @@
 //! Validated finding records and atomic artifact mutations.
 
+use std::any::type_name;
 use std::collections::{HashMap, HashSet};
+use std::fmt;
 use std::fs;
 #[cfg(windows)]
 use std::os::windows::fs::MetadataExt;
@@ -13,7 +15,6 @@ use ss_ai_runtime::{Clock, FileTransaction, fail, read_bytes};
 use crate::workflow_plan::{PlanItem, PlanKind, parse_json};
 
 /// Describes the artifact created or resumed under its lock.
-#[derive(Debug)]
 #[non_exhaustive]
 pub struct InitializationResult {
     /// Validated artifact after initialization.
@@ -22,8 +23,15 @@ pub struct InitializationResult {
     pub resumed_existing: bool,
 }
 
+impl fmt::Debug for InitializationResult {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct(type_name::<Self>())
+            .field("resumed_existing", &self.resumed_existing)
+            .finish_non_exhaustive()
+    }
+}
+
 /// Describes an index using the reviewer artifacts read for its creation.
-#[derive(Debug)]
 #[non_exhaustive]
 pub struct IndexResult {
     /// Published index document.
@@ -36,8 +44,17 @@ pub struct IndexResult {
     pub output_path: PathBuf,
 }
 
+impl fmt::Debug for IndexResult {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct(type_name::<Self>())
+            .field("artifact_count", &self.artifact_count)
+            .field("finding_count", &self.finding_count)
+            .field("output_path", &self.output_path)
+            .finish_non_exhaustive()
+    }
+}
+
 /// Describes the published consolidation without rereading its inputs.
-#[derive(Debug)]
 #[non_exhaustive]
 pub struct ConsolidationResult {
     /// Published consolidated artifact.
@@ -50,6 +67,17 @@ pub struct ConsolidationResult {
     pub carried_over_count: usize,
     /// Destination supplied by the caller.
     pub output_path: PathBuf,
+}
+
+impl fmt::Debug for ConsolidationResult {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct(type_name::<Self>())
+            .field("finding_count", &self.finding_count)
+            .field("merged_count", &self.merged_count)
+            .field("carried_over_count", &self.carried_over_count)
+            .field("output_path", &self.output_path)
+            .finish_non_exhaustive()
+    }
 }
 
 /// Keeps authored content distinct from unchecked JSON and stored provenance.
@@ -90,14 +118,7 @@ pub fn validate_artifacts(
             let entry_path = entry.path();
             let name = entry.file_name();
             let name = name.to_string_lossy();
-            if hidden_entry(&entry)?
-                || (entry_path.is_file()
-                    && (name
-                        .get(name.len().saturating_sub(".json.lock".len())..)
-                        .is_some_and(|suffix| suffix.eq_ignore_ascii_case(".json.lock"))
-                        || powershell_staging_name(&name)
-                        || native_staging_name(&name)))
-            {
+            if hidden_entry(&entry)? || auxiliary_artifact_entry(&entry)? {
                 continue;
             }
             if !entry_path.is_file()
@@ -486,7 +507,7 @@ pub fn add_with_context(
         ));
     }
     let id = next_id(&artifact)?;
-    let record = make_record(&content, &id, origin, source_ids)?;
+    let record = make_record(content, &id, origin, source_ids)?;
     artifact
         .get_mut("findings")
         .and_then(Value::as_array_mut)
@@ -503,16 +524,22 @@ fn validate_follow_up(finding: &Value, context: &Value) -> Result<(), AppError> 
     };
     let thread_id = text(follow_up.get("threadId"), "threadId")?;
     let comment_id = text(follow_up.get("commentId"), "commentId")?;
-    let thread = array(context.get("threads"), "threads")?
+    // The capture reader accepts a single object as well as an array.
+    let threads = match context.get("threads") {
+        Some(Value::Array(threads)) => threads.as_slice(),
+        Some(thread @ Value::Object(_)) => std::slice::from_ref(thread),
+        _ => return Err(invalid("Invalid capture threads")),
+    };
+    let thread = threads
         .iter()
-        .find(|thread| thread.get("id").and_then(Value::as_str) == Some(thread_id))
+        .find(|thread| matches_capture_id(thread.get("id"), thread_id))
         .ok_or_else(|| {
             fail(
                 "invalidInput",
                 format!("Follow-up thread '{thread_id}' is absent from capture"),
             )
         })?;
-    if thread.get("openingCommentId").and_then(Value::as_str) != Some(comment_id)
+    if !matches_capture_id(thread.get("openingCommentId"), comment_id)
         || thread.get("kind").and_then(Value::as_str) != Some("text")
     {
         return Err(invalid(
@@ -525,6 +552,15 @@ fn validate_follow_up(finding: &Value, context: &Value) -> Result<(), AppError> 
         }
         Some("gitHub" | "azureDevOps") => Ok(()),
         _ => Err(invalid("Unsupported capture platform")),
+    }
+}
+
+/// Matches authored string identifiers against the capture's provider identifiers.
+fn matches_capture_id(value: Option<&Value>, expected: &str) -> bool {
+    match value {
+        Some(Value::String(value)) => value == expected,
+        Some(Value::Number(value)) => value.to_string() == expected,
+        _ => false,
     }
 }
 
@@ -612,8 +648,11 @@ pub fn validate_candidates(
         let PlanItem::Cluster(cluster) = item else {
             return Err(invalid("Invalid candidate plan"));
         };
-        if cluster.finding_ids.iter().any(|id| !ids.contains(id)) {
-            return Err(invalid("Candidate names unknown finding"));
+        if let Some(id) = cluster.finding_ids.iter().find(|id| !ids.contains(*id)) {
+            return Err(fail(
+                "invalidInput",
+                format!("Candidate names unknown finding {id:?}"),
+            ));
         }
     }
     Ok(plan.items().len())
@@ -670,6 +709,26 @@ fn validate_index(index: &Value) -> Result<HashSet<String>, AppError> {
         }
     }
     Ok(ids)
+}
+
+/// Ignores known writer files using the directory entry observed during enumeration.
+fn auxiliary_artifact_entry(entry: &fs::DirEntry) -> Result<bool, AppError> {
+    let name = entry.file_name();
+    let name = name.to_string_lossy();
+    if !name
+        .get(name.len().saturating_sub(".json.lock".len())..)
+        .is_some_and(|suffix| suffix.eq_ignore_ascii_case(".json.lock"))
+        && !powershell_staging_name(&name)
+        && !native_staging_name(&name)
+    {
+        return Ok(false);
+    }
+    let file_type = entry
+        .file_type()
+        .map_err(|error| ss_ai_runtime::caused_by("io", "Cannot inspect artifact entry", error))?;
+    // On Windows this uses the enumerated entry even if publication moved the file.
+    // Preserve the existing treatment of links to regular files.
+    Ok(file_type.is_file() || (file_type.is_symlink() && entry.path().is_file()))
 }
 
 /// Recognizes the sibling names used by the PowerShell atomic file writer.
@@ -759,7 +818,12 @@ fn reviewer_sources(
     let mut result = Vec::new();
     let mut ids = HashSet::new();
     for path in paths {
-        let artifact = read_artifact(&path, clock)?;
+        let artifact = read_artifact(&path, clock).map_err(|error| {
+            fail(
+                ss_ai_runtime::classification(&error),
+                format!("{}: {error}", path.display()),
+            )
+        })?;
         if artifact.get("kind") != Some(&json!("reviewer")) {
             return Err(invalid("Expected reviewer artifact"));
         }
@@ -824,9 +888,12 @@ pub fn consolidate_result(
             let mut first = usize::MAX;
             let mut replacements = Vec::new();
             for id in &group.source_finding_ids {
-                let position = *positions
-                    .get(id)
-                    .ok_or_else(|| invalid("Merge references unknown finding"))?;
+                let position = *positions.get(id).ok_or_else(|| {
+                    fail(
+                        "invalidInput",
+                        format!("Merge references unknown finding {id:?}"),
+                    )
+                })?;
                 if !claimed.insert(id.clone()) {
                     return Err(fail(
                         "invalidInput",
@@ -887,7 +954,7 @@ pub fn consolidate_result(
         if let Some((mut content, origin, ids)) = record {
             normalize_content(&mut content.0)?;
             let id = next_id(&artifact)?;
-            let record = make_record(&content, &id, &origin, &ids)?;
+            let record = make_record(content, &id, &origin, &ids)?;
             artifact
                 .get_mut("findings")
                 .ok_or_else(|| invalid("Missing findings"))?
@@ -1039,7 +1106,7 @@ pub fn update(
             .iter()
             .map(|value| text(Some(value), "sourceFindingIds").map(str::to_owned))
             .collect::<Result<Vec<_>, _>>()?;
-        let replacement = make_record(&content, id, origin, &sources)?;
+        let replacement = make_record(content, id, origin, &sources)?;
         *findings
             .get_mut(index)
             .ok_or_else(|| invalid("Finding to update does not exist"))? = replacement;
@@ -1128,7 +1195,7 @@ pub fn complete(path: &Path, queue_path: &Path, clock: &dyn Clock) -> Result<Val
 }
 
 /// Avoids recursively acquiring a sibling lock through equivalent paths.
-fn same_lock(path: &Path, queue_path: &Path) -> bool {
+pub(crate) fn same_lock(path: &Path, queue_path: &Path) -> bool {
     let lock_identity = |path: &Path| {
         Some((
             fs::canonicalize(path.parent()?).ok()?,
@@ -1248,48 +1315,58 @@ pub(crate) fn validate_queue(
             return Err(invalid("Invalid assessment disposition"));
         }
     }
-    let mut receipt_groups = HashSet::new();
     if let Some(receipts) = fields.get("batchReceipts") {
-        for receipt in array(Some(receipts), "batchReceipts")? {
-            let receipt = object(
-                receipt,
-                &["groupId", "sha256", "artifactPath", "findingIds"],
-            )?;
-            let group = text(receipt.get("groupId"), "groupId")?;
-            schema_id(group)?;
-            uppercase_hash(text(receipt.get("sha256"), "sha256")?)?;
-            if !completed.contains(group) || !receipt_groups.insert(group.to_owned()) {
-                return Err(invalid("Invalid batch receipt group"));
+        validate_receipts(array(Some(receipts), "batchReceipts")?, &completed, clock)?;
+    }
+    Ok(())
+}
+
+/// Checks receipt references against completed groups and persisted findings.
+fn validate_receipts(
+    receipts: &[Value],
+    completed: &HashSet<String>,
+    clock: &dyn Clock,
+) -> Result<(), AppError> {
+    let mut receipt_groups = HashSet::new();
+    for receipt in receipts {
+        let receipt = object(
+            receipt,
+            &["groupId", "sha256", "artifactPath", "findingIds"],
+        )?;
+        let group = text(receipt.get("groupId"), "groupId")?;
+        schema_id(group)?;
+        uppercase_hash(text(receipt.get("sha256"), "sha256")?)?;
+        if !completed.contains(group) || !receipt_groups.insert(group.to_owned()) {
+            return Err(invalid("Invalid batch receipt group"));
+        }
+        let artifact_path = text(receipt.get("artifactPath"), "artifactPath")?;
+        if !Path::new(artifact_path).is_absolute() {
+            return Err(invalid("Batch receipt artifact path must be absolute"));
+        }
+        let artifact = read_artifact(Path::new(artifact_path), clock)?;
+        if artifact.get("kind") != Some(&json!("reviewer")) {
+            return Err(invalid("Batch receipt requires a reviewer artifact"));
+        }
+        let mut persisted = HashSet::new();
+        for finding in array(artifact.get("findings"), "findings")? {
+            persisted.insert(text(finding.get("id"), "id")?.to_owned());
+        }
+        if let Some(removed) = artifact.get("removed") {
+            for entry in array(Some(removed), "removed")? {
+                persisted.insert(
+                    text(
+                        entry.get("finding").and_then(|finding| finding.get("id")),
+                        "id",
+                    )?
+                    .to_owned(),
+                );
             }
-            let artifact_path = text(receipt.get("artifactPath"), "artifactPath")?;
-            if !Path::new(artifact_path).is_absolute() {
-                return Err(invalid("Batch receipt artifact path must be absolute"));
-            }
-            let artifact = read_artifact(Path::new(artifact_path), clock)?;
-            if artifact.get("kind") != Some(&json!("reviewer")) {
-                return Err(invalid("Batch receipt requires a reviewer artifact"));
-            }
-            let mut persisted = HashSet::new();
-            for finding in array(artifact.get("findings"), "findings")? {
-                persisted.insert(text(finding.get("id"), "id")?.to_owned());
-            }
-            if let Some(removed) = artifact.get("removed") {
-                for entry in array(Some(removed), "removed")? {
-                    persisted.insert(
-                        text(
-                            entry.get("finding").and_then(|finding| finding.get("id")),
-                            "id",
-                        )?
-                        .to_owned(),
-                    );
-                }
-            }
-            let mut receipt_ids = HashSet::new();
-            for finding in array(receipt.get("findingIds"), "findingIds")? {
-                let id = text(Some(finding), "findingId")?;
-                if !receipt_ids.insert(id) || !persisted.contains(id) {
-                    return Err(invalid("Batch receipt names missing or duplicate finding"));
-                }
+        }
+        let mut receipt_ids = HashSet::new();
+        for finding in array(receipt.get("findingIds"), "findingIds")? {
+            let id = text(Some(finding), "findingId")?;
+            if !receipt_ids.insert(id) || !persisted.contains(id) {
+                return Err(invalid("Batch receipt names missing or duplicate finding"));
             }
         }
     }
@@ -1355,23 +1432,18 @@ fn validated_content(value: Value) -> Result<ValidatedContent, AppError> {
 
 /// Constructs the tool-owned portion without trusting author-supplied identity.
 fn make_record(
-    content: &ValidatedContent,
+    content: ValidatedContent,
     id: &str,
     origin: &str,
     source_ids: &[String],
 ) -> Result<Value, AppError> {
-    let mut record = Map::new();
+    let Value::Object(mut record) = content.0 else {
+        return Err(invalid("Invalid finding content"));
+    };
     record.insert("schemaVersion".into(), json!(1));
     record.insert("id".into(), json!(id));
     record.insert("sourceFindingIds".into(), json!(source_ids));
     record.insert("origin".into(), json!(origin));
-    record.extend(
-        content
-            .0
-            .as_object()
-            .ok_or_else(|| invalid("Invalid finding content"))?
-            .clone(),
-    );
     let record = Value::Object(record);
     validate_record(&record)?;
     Ok(record)
@@ -1651,7 +1723,50 @@ fn invalid(message: &str) -> AppError {
 #[cfg(test)]
 #[cfg_attr(coverage_nightly, coverage(off))]
 mod staging_tests {
-    use super::{native_staging_name, powershell_staging_name};
+    use std::fs;
+    use std::path::PathBuf;
+
+    use super::{auxiliary_artifact_entry, native_staging_name, powershell_staging_name};
+
+    /// Keeps the enumerated test entries isolated from concurrent test processes.
+    struct Directory(PathBuf);
+
+    impl Drop for Directory {
+        fn drop(&mut self) {
+            fs::remove_dir_all(&self.0).unwrap();
+        }
+    }
+
+    #[test]
+    fn moved_staging_files_remain_ignored_after_enumeration() {
+        let directory = Directory(
+            PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                .join(format!(".staging-entry-test-{}", std::process::id())),
+        );
+        #[expect(clippy::create_dir, reason = "The test directory must be exclusive")]
+        fs::create_dir(&directory.0).unwrap();
+        for name in [
+            ".reviewer.json.0123456789abcdef0123456789abcdef.tmp",
+            ".ss-ai-transaction-aB1234567890abcdefgh1234.tmp",
+        ] {
+            let path = directory.0.join(name);
+            fs::write(&path, "partial").unwrap();
+            let entry = fs::read_dir(&directory.0).unwrap().next().unwrap().unwrap();
+            fs::remove_file(path).unwrap();
+            assert!(auxiliary_artifact_entry(&entry).unwrap());
+        }
+
+        let path = directory
+            .0
+            .join(".ss-ai-transaction-aB1234567890abcdefgh1234.tmp");
+        #[expect(
+            clippy::create_dir,
+            reason = "A directory must not be treated as staging"
+        )]
+        fs::create_dir(&path).unwrap();
+        let entry = fs::read_dir(&directory.0).unwrap().next().unwrap().unwrap();
+        assert!(!auxiliary_artifact_entry(&entry).unwrap());
+    }
 
     #[test]
     fn only_powershell_json_staging_names_match() {

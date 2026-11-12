@@ -563,6 +563,7 @@ fn tracker_provenance_uses_exact_ids_and_preserves_capture_fallback() {
     }
 }
 
+/// Singleton captures must render like arrays across document destinations.
 #[test]
 fn captured_singleton_collections_render_like_arrays() {
     let plain = finding("F1", "reviewer");
@@ -637,6 +638,7 @@ fn captured_singleton_collections_render_like_arrays() {
     }
 }
 
+/// Singleton captures retain the same fallback and rejection rules as arrays.
 #[test]
 fn captured_singleton_collections_preserve_fallback_and_validation() {
     let mut follow = finding("F1", "reviewer");
@@ -698,6 +700,7 @@ fn captured_singleton_collections_preserve_fallback_and_validation() {
     assert!(!output.exists());
 }
 
+/// Check PowerShell request construction and Rust rendering without invoking the native CLI.
 #[test]
 #[cfg_attr(miri, ignore = "The PowerShell adapter runs in a separate process")]
 fn powershell_tracker_adapter_preserves_singleton_capture_for_native_documents() {
@@ -708,6 +711,7 @@ fn powershell_tracker_adapter_preserves_singleton_capture_for_native_documents()
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 $PSNativeCommandUseErrorActionPreference = $true
+if ($PSVersionTable.PSVersion -lt [version]'7.6') { throw 'PowerShell 7.6 or later is required.' }
 . ./skills/ss-review/scripts/lib/JsonValue.ps1
 . ./skills/ss-review/scripts/lib/TrackerItem.ps1
 function Invoke-NativeReviewMarkdown {

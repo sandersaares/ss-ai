@@ -13,6 +13,9 @@ Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 $PSNativeCommandUseErrorActionPreference = $true
 . "$PSScriptRoot\lib\NativeWorkflowBridge.ps1"
+$InputPath = $ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath($InputPath)
+$Path = $ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath($Path)
+if ($InventoryPath) { $InventoryPath = $ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath($InventoryPath) }
 $arguments = @('set-review-input', "--kind=$($Kind.ToLowerInvariant())", "--input-path=$InputPath", "--path=$Path")
 if ($InventoryPath) { $arguments += "--inventory-path=$InventoryPath" }
 if ($Replace) { $arguments += '--replace' }
