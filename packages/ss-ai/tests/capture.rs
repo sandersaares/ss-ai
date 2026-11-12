@@ -8,7 +8,7 @@ use std::cell::RefCell;
 use std::collections::{BTreeMap, VecDeque};
 use std::ffi::OsString;
 use std::fs::{read, remove_file};
-use std::io::Result as IoResult;
+use std::io::Result as StdIoResult;
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::path::PathBuf;
 use std::process::id as process_id;
@@ -93,7 +93,7 @@ impl Process for Provider {
         program: &str,
         arguments: &[String],
         input: &[u8],
-    ) -> IoResult<ProcessOutput> {
+    ) -> StdIoResult<ProcessOutput> {
         if program == "az" {
             assert_eq!(&arguments[..2], ["account", "get-access-token"]);
             return Ok(ProcessOutput::new(true, b"fixture-token".to_vec(), vec![]));
@@ -467,5 +467,279 @@ fn create_matches_powershell_captures_for_both_providers() {
         .map(OsString::from);
         run(&other_arguments, &provider, &provider, &FixedClock).unwrap_err();
         assert!(!other_output.path.exists());
+    }
+}
+
+/// Exercises refresh transactions with the same scripted provider as capture tests.
+mod refresh {
+    use std::cell::RefCell;
+    use std::collections::BTreeMap;
+    use std::ffi::OsString;
+    use std::fs::{create_dir, read, remove_dir_all};
+    use std::path::{Path, PathBuf};
+
+    use serde_json::{Value, from_slice, from_str, json};
+    use ss_ai::run;
+    use ss_ai_review_context::{document_hash, evidence_hash, read_capture, snapshot_id};
+    use uuid::Uuid;
+
+    use super::{FixedClock, Provider};
+
+    /// Builds fresh connection queues so each capture has independent inputs.
+    fn provider(name: &str, edited: bool) -> Provider {
+        let mut fixture = fixture(name);
+        let responses = &mut fixture["responses"];
+        if edited {
+            if name == "github" {
+                responses["reviewThreads"]["data"]["repository"]["pullRequest"]["reviewThreads"]
+                    ["nodes"][0]["comments"]["nodes"][0]["body"] = json!("Edited 🤖");
+            } else {
+                responses["threads"]["value"][0]["comments"][0]["content"] = json!("Edited 🤖");
+            }
+        }
+        provider_from_fixture(name, &fixture)
+    }
+
+    /// Populates each independent provider from the selected recorded responses.
+    fn provider_from_fixture(name: &str, fixture: &Value) -> Provider {
+        let responses = &fixture["responses"];
+        let provider = Provider {
+            github: RefCell::new(BTreeMap::new()),
+            azure: RefCell::new(BTreeMap::new()),
+        };
+        if name == "github" {
+            for (route, response) in [
+                (
+                    "repos/octo/widget/pulls/7",
+                    responses["pullRequest"].clone(),
+                ),
+                (
+                    "repos/octo/widget/pulls/7/reviews?per_page=100",
+                    json!([responses["reviews"]]),
+                ),
+                (
+                    "repos/octo/widget/issues/7/comments?per_page=100",
+                    json!([responses["issueComments"]]),
+                ),
+                (
+                    "repos/octo/widget/pulls/7/requested_reviewers?per_page=100",
+                    json!([responses["requestedReviewers"]]),
+                ),
+                ("reviewThreads", responses["reviewThreads"].clone()),
+                ("issueEdits", responses["issueEdits"].clone()),
+                ("reviewEdits", responses["reviewEdits"].clone()),
+                ("timeline", responses["timeline"].clone()),
+                ("user", responses["user"].clone()),
+                (
+                    "repos/octo/widget/compare/bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb...aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                    responses["compare"].clone(),
+                ),
+            ] {
+                provider.github_response(route, Value::Null, response);
+            }
+        } else {
+            for (route, response) in [
+                ("_apis/connectionData", responses["connectionData"].clone()),
+                ("pullRequests/4242?", responses["pullRequest"].clone()),
+                ("/iterations?", responses["iterations"].clone()),
+                ("/reviewers?", responses["reviewers"].clone()),
+                ("/threads?", responses["threads"].clone()),
+            ] {
+                provider.azure_response(route, None, response, None);
+            }
+        }
+        provider
+    }
+
+    /// Owns the capture outputs and their locks inside the active checkout.
+    struct Output(PathBuf);
+
+    impl Output {
+        fn new() -> Self {
+            let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                .join(format!(".capture-parity-{}", Uuid::new_v4()));
+            #[expect(
+                clippy::create_dir,
+                reason = "An existing directory must fail instead of being removed by test cleanup"
+            )]
+            create_dir(&path).unwrap();
+            Self(path)
+        }
+
+        fn capture(&self, prefix: &str) -> PathBuf {
+            self.0.join(format!("{prefix}pr-context.json"))
+        }
+    }
+
+    impl Drop for Output {
+        fn drop(&mut self) {
+            remove_dir_all(&self.0).unwrap();
+        }
+    }
+
+    /// Loads the immutable provider responses and PowerShell-generated expectations.
+    fn fixture(name: &str) -> Value {
+        let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../../tests/fixtures/ss-review-native-capture")
+            .join(format!("{name}.json"));
+        from_slice(&read(path).unwrap()).unwrap()
+    }
+
+    /// Runs the production command router with injected provider effects.
+    fn command(arguments: &[OsString], provider: &Provider) -> Value {
+        from_str(&run(arguments, provider, provider, &FixedClock).unwrap()).unwrap()
+    }
+
+    /// Captures one provider revision to an immutable destination.
+    fn create(
+        name: &str,
+        output: &Output,
+        prefix: &str,
+        compare: Option<&Path>,
+        edited: bool,
+    ) -> Value {
+        let provider = provider(name, edited);
+        let expected = fixture(&format!("{name}-expected"));
+        let mut args: Vec<OsString> = [
+            "ss-ai",
+            "context",
+            "create",
+            "--url",
+            expected["pullRequestUrl"].as_str().unwrap(),
+            "--output-directory",
+        ]
+        .into_iter()
+        .map(OsString::from)
+        .collect();
+        args.push(output.0.as_os_str().to_owned());
+        args.extend(["--output-prefix", prefix].map(OsString::from));
+        if let Some(compare) = compare {
+            args.push("--compare-path".into());
+            args.push(compare.as_os_str().to_owned());
+        }
+        let result = command(&args, &provider);
+        provider.assert_complete();
+        result
+    }
+
+    /// Reads the exact semantic sidecar without applying it to the capture.
+    fn sidecar(path: &Path) -> Value {
+        let mut name = path.as_os_str().to_os_string();
+        name.push(".authorship.json");
+        from_slice(&read(name).unwrap()).unwrap()
+    }
+
+    /// PowerShell records an absent GitHub PR body as an empty description.
+    #[test]
+    fn github_null_body_matches_powershell_capture() {
+        let mut recorded = fixture("github");
+        recorded["responses"]["pullRequest"]["body"] = Value::Null;
+        let provider = provider_from_fixture("github", &recorded);
+        let output = Output::new();
+        let args = [
+            "ss-ai".into(),
+            "context".into(),
+            "create".into(),
+            "--url".into(),
+            "https://github.com/octo/widget/pull/7".into(),
+            "--output-directory".into(),
+            output.0.as_os_str().to_owned(),
+            "--output-prefix".into(),
+            "null-body-".into(),
+        ];
+        command(&args, &provider);
+        provider.assert_complete();
+
+        let actual: Value = from_slice(&read(output.capture("null-body-")).unwrap()).unwrap();
+        let mut expected = fixture("github-expected");
+        expected["pullRequest"]["description"] = json!("");
+        assert_eq!(actual["pullRequest"]["description"], "");
+        assert_eq!(actual, expected);
+        assert_eq!(
+            evidence_hash(&actual).unwrap(),
+            evidence_hash(&expected).unwrap()
+        );
+    }
+
+    /// Exercises classification, unchanged reuse, and edited-input rejection for both services.
+    #[test]
+    fn provider_capture_refresh_matches_powershell_expectations() {
+        for name in ["github", "azure-devops"] {
+            let output = Output::new();
+            let golden = fixture(&format!("{name}-refresh-parity"));
+            let baseline = output.capture("baseline-");
+            create(name, &output, "baseline-", None, false);
+            let raw_bytes = read(&baseline).unwrap();
+            let raw: Value = from_slice(&raw_bytes).unwrap();
+            assert_eq!(raw, fixture(&format!("{name}-expected")), "{name}");
+            assert_eq!(document_hash(&raw).unwrap(), golden["baselineRawHash"]);
+            assert_eq!(evidence_hash(&raw).unwrap(), golden["baselineEvidenceHash"]);
+            assert_eq!(snapshot_id(&raw).unwrap(), golden["baselineSnapshot"]);
+
+            let classifications = if name == "github" {
+                json!([{"threadId":"PRRT_1","commentId":"PRRC_1","kind":"human"}])
+            } else {
+                json!([
+                    {"threadId":"101","commentId":"1","kind":"human"},
+                    {"threadId":"101","commentId":"2","kind":"agent"}
+                ])
+            };
+            let provider = provider(name, false);
+            let args = [
+                "ss-ai".into(),
+                "context".into(),
+                "set-authorship".into(),
+                "--path".into(),
+                baseline.as_os_str().to_owned(),
+                "--snapshot-id".into(),
+                snapshot_id(&raw).unwrap().into(),
+                "--classification".into(),
+                classifications.to_string().into(),
+            ];
+            command(&args, &provider);
+            assert_eq!(sidecar(&baseline), golden["baselineDecisions"]);
+            let classified = read_capture(&baseline, &FixedClock).unwrap();
+            assert_eq!(
+                snapshot_id(&classified).unwrap(),
+                golden["classifiedSnapshot"]
+            );
+            assert_eq!(read(&baseline).unwrap(), raw_bytes);
+
+            let unchanged = output.capture("unchanged-");
+            let unchanged_result = create(name, &output, "unchanged-", Some(&baseline), false);
+            assert_eq!(
+                unchanged_result["reusedClassificationCount"],
+                golden["baselineDecisions"]["decisions"]
+                    .as_array()
+                    .unwrap()
+                    .len()
+            );
+            assert_eq!(read_capture(&unchanged, &FixedClock).unwrap(), classified);
+            assert_eq!(unchanged_result["delta"]["hasChanges"], false);
+
+            let refreshed = output.capture("edited-");
+            let result = create(name, &output, "edited-", Some(&baseline), true);
+            let refresh_raw: Value = from_slice(&read(&refreshed).unwrap()).unwrap();
+            let effective = read_capture(&refreshed, &FixedClock).unwrap();
+            assert_eq!(refresh_raw, fixture(&format!("{name}-refresh-expected")));
+            assert_eq!(
+                document_hash(&refresh_raw).unwrap(),
+                golden["refreshRawHash"]
+            );
+            assert_eq!(
+                evidence_hash(&effective).unwrap(),
+                golden["refreshEvidenceHash"]
+            );
+            assert_eq!(snapshot_id(&effective).unwrap(), golden["refreshSnapshot"]);
+            assert_eq!(effective, golden["refreshEffective"]);
+            assert_eq!(sidecar(&refreshed), golden["refreshDecisions"]);
+            assert_eq!(
+                result["reusedClassificationCount"],
+                golden["reusedClassificationCount"]
+            );
+            assert_eq!(result["delta"], golden["delta"]);
+            assert_eq!(read(&baseline).unwrap(), raw_bytes);
+            assert_eq!(sidecar(&baseline), golden["baselineDecisions"]);
+        }
     }
 }

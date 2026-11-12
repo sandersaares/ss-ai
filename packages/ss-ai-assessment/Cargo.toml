@@ -19,6 +19,7 @@ ohno = { workspace = true, features = ["app-err"] }
 serde = { workspace = true, features = ["derive"] }
 serde_json = { workspace = true }
 sha2 = { workspace = true }
+ss-ai-git = { workspace = true }
 ss-ai-runtime = { workspace = true }
 
 [dev-dependencies]

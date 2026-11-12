@@ -268,8 +268,11 @@ Describe 'Persisted file assessments' {
         Write-PullRequestOutputFileAtomically -Path $assessment -Content (ConvertTo-JsonText -Value @{
             groupId = 'group-001'; path = $script:Files[0].path; disposition = 'reviewed'; scope = ''; reason = ''
         })
+        $paths = @($script:QueuePath, $script:Inventory, $script:Grouped, $assessment) | ForEach-Object {
+            if ($IsWindows) { $_.Replace('\', '/') } else { $_.Replace('/', '\') }
+        }
         $run = Invoke-DataCommand 'Set-ReviewFileAssessment.ps1' @(
-            '-QueuePath', $script:QueuePath, '-InventoryPath', $script:Inventory, '-FileGroupsPath', $script:Grouped, '-AssessmentPath', $assessment
+            '-QueuePath', $paths[0], '-InventoryPath', $paths[1], '-FileGroupsPath', $paths[2], '-AssessmentPath', $paths[3]
         )
         $run.exitCode | Should -Be 0 -Because $run.error
         (Read-ReviewQueueDocument -Path $script:QueuePath).assessments.Count | Should -Be 1
@@ -484,6 +487,29 @@ Describe 'Human audit records' {
         $feedback = Get-ReviewAuditFeedback -Path $script:FeedbackPath -FindingId $script:FindingId
         $feedback | Should -BeOfType [string]
         $feedback | Should -BeExactly $text
+    }
+
+    It 'stages audit inputs outside a read-only working directory' -Skip:$IsWindows {
+        $readOnly = Join-Path $script:Root 'read-only'
+        [IO.Directory]::CreateDirectory($readOnly) | Out-Null
+        $originalMode = [IO.File]::GetUnixFileMode($readOnly)
+        $readOnlyMode = [IO.UnixFileMode]::UserRead -bor [IO.UnixFileMode]::UserExecute
+        [IO.File]::SetUnixFileMode($readOnly, $readOnlyMode)
+        Push-Location -LiteralPath $readOnly
+        try {
+            { [IO.File]::WriteAllText((Join-Path $readOnly 'probe'), 'x') } | Should -Throw
+            Add-ReviewAuditFeedback -Path $script:FeedbackPath -FindingsPath $script:FindingsPath `
+                -ResponseId response-1 -FindingId $script:FindingId -Text 'Human response'
+            Set-ReviewMergeApproval -Path $script:ApprovalPath -Context $script:Context -ApproveMerge $true |
+                Should -Be 'Recorded'
+            Get-ReviewAuditFeedback -Path $script:FeedbackPath -FindingId $script:FindingId |
+                Should -BeExactly 'Human response'
+            Test-ReviewMergeApproval -Path $script:ApprovalPath -PullRequestUrl $script:Context.pullRequestUrl `
+                -SourceCommit ('a' * 40) | Should -BeTrue
+        } finally {
+            Pop-Location
+            [IO.File]::SetUnixFileMode($readOnly, $originalMode)
+        }
     }
 
     It 'loads accumulated feedback in the decision command rather than a shell-generated argument' {

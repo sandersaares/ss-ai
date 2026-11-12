@@ -108,6 +108,41 @@ Describe 'Prepared bounded worker inputs' {
         $dispatch | Should -Not -Match 'On errors stop and report'
     }
 
+    It 'accepts case-insensitive phase <Phase> and records <Canonical>' -ForEach @(
+        @{ Phase = 'References'; Canonical = 'references' }
+        @{ Phase = 'FILEGROUPS'; Canonical = 'fileGroups' }
+        @{ Phase = 'FocusAreas'; Canonical = 'focusAreas' }
+        @{ Phase = 'OVERVIEW'; Canonical = 'overview' }
+        @{ Phase = 'Review'; Canonical = 'review' }
+    ) {
+        $parameters = @{
+            Phase = $Phase; SessionState = $script:State; ScopePath = $script:Scope
+            OutputDirectory = Join-Path $script:State 'case-attempt'
+        }
+        if ($Canonical -eq 'review') {
+            $parameters.ManifestPath = $script:Work.manifestPath
+            $parameters.ReviewerId = 'focus-001'
+        }
+        $result = & (Join-Path $script:Scripts 'New-ReviewWorkerAssignment.ps1') @parameters |
+            ConvertFrom-Json -AsHashtable
+        $assignment = Read-WorkflowData -Kind workerAssignment -Path $result.assignmentPath
+        $assignment.phase | Should -BeExactly $Canonical
+    }
+
+    It 'resolves PowerShell paths for assignments, document reads and diagnostics' {
+        $state = if ($IsWindows) { $script:State.Replace('\', '/') } else { $script:State.Replace('/', '\') }
+        $scope = if ($IsWindows) { $script:Scope.Replace('\', '/') } else { $script:Scope.Replace('/', '\') }
+        $output = "$state\path-attempt"
+        $result = & (Join-Path $script:Scripts 'New-ReviewWorkerAssignment.ps1') -Phase references `
+            -SessionState $state -ScopePath $scope -OutputDirectory $output | ConvertFrom-Json -AsHashtable
+        $path = if ($IsWindows) { $result.assignmentPath.Replace('\', '/') } else { $result.assignmentPath.Replace('/', '\') }
+        $read = Invoke-WorkerRead -AssignmentPath $path -DocumentId scope -Offset 0
+        $read.exitCode | Should -Be 0 -Because $read.errors
+        (ConvertFrom-JsonVerbatim -Text $read.output).content | Should -BeExactly 'Review the current diff in the fixture repository.'
+        $diagnostics = & (Join-Path $script:Scripts 'Get-ReviewInputDiagnostics.ps1') -Path $state | ConvertFrom-Json -AsHashtable
+        $diagnostics.counts.documentReadCalls | Should -BeGreaterThan 0
+    }
+
     It 'provides bounded initial reads and exact complete guidance for original and resumed reviewers' {
         foreach ($resume in @($false, $true)) {
             $result = & (Join-Path $script:Scripts 'New-ReviewWorkerAssignment.ps1') -Phase review `

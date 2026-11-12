@@ -43,7 +43,7 @@ function ConvertTo-FindingDestinationText {
         [System.Collections.IDictionary] $Context
     )
 
-    if ($Destination -ceq 'pullRequest') {
+    if ($Destination -eq 'pullRequest') {
         return ConvertTo-FindingMarkdownText -Finding $Finding
     }
 
@@ -74,7 +74,7 @@ function ConvertTo-FindingDestinationDocument {
     )
 
     $request = @{ operation = 'document'; findings = @($Finding); destination = $Destination }
-    if ($Destination -ceq 'tracker' -and $null -ne $Context) { $request.context = $Context }
+    if ($Destination -eq 'tracker' -and $null -ne $Context) { $request.context = $Context }
     Invoke-NativeReviewMarkdown -Request $request
 }
 
@@ -104,7 +104,7 @@ function ConvertTo-FindingAuditDocument {
     )
 
     $request = @{ operation = 'auditDocument'; findings = @($Finding); destination = $Destination }
-    if ($Destination -ceq 'tracker' -and $null -ne $Context) { $request.context = $Context }
+    if ($Destination -eq 'tracker' -and $null -ne $Context) { $request.context = $Context }
     Invoke-NativeReviewMarkdown -Request $request
 }
 

@@ -1495,8 +1495,19 @@ dependencies = [
  "serde",
  "serde_json",
  "sha2",
+ "ss-ai-git",
  "ss-ai-runtime",
  "static_assertions",
+]
+
+[[package]]
+name = "ss-ai-assessment-fuzz"
+version = "0.1.0"
+dependencies = [
+ "libfuzzer-sys",
+ "serde_json",
+ "ss-ai-assessment",
+ "ss-ai-git",
 ]
 
 [[package]]
@@ -1564,6 +1575,7 @@ dependencies = [
  "serde_json",
  "sha2",
  "ss-ai-runtime",
+ "static_assertions",
 ]
 
 [[package]]

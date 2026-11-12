@@ -16,6 +16,9 @@ BeforeAll {
     . (Join-Path $script:LibraryRoot 'GitHubPullRequestApi.ps1')
     . (Join-Path $script:LibraryRoot 'PullRequestModel.ps1')
     . (Join-Path $script:LibraryRoot 'PullRequestContextQuery.ps1')
+    . (Join-Path $script:LibraryRoot 'NativeWorkflowBridge.ps1')
+    . (Join-Path $script:LibraryRoot 'ReviewPublication.ps1')
+    . (Join-Path $script:LibraryRoot 'PullRequestPublication.ps1')
 
     $script:FixturePath = Join-Path $PSScriptRoot 'fixtures\ss-review-native-capture\azure-devops.json'
     $script:Instant = [DateTimeOffset]::new(2026, 8, 4, 12, 0, 0, [TimeSpan]::Zero)
@@ -66,13 +69,14 @@ BeforeAll {
     # Exercise retained GitHub mapping with offline responses. PreDocument
     # returns the checked provider context; otherwise assemble a canonical capture.
     function New-OfflineGitHubCapture {
-        param([switch] $PreDocument, [string] $ReplacementContent)
+        param([switch] $PreDocument, [string] $ReplacementContent, [switch] $NullBody)
 
         $fixturePath = Join-Path $PSScriptRoot 'fixtures\ss-review-native-capture\github.json'
         $fixture = ConvertFrom-JsonVerbatim -Text ([IO.File]::ReadAllText($fixturePath, [Text.Encoding]::UTF8))
         if ($PSBoundParameters.ContainsKey('ReplacementContent')) {
             $fixture['responses']['reviewThreads']['data']['repository']['pullRequest']['reviewThreads']['nodes'][0]['comments']['nodes'][0]['body'] = $ReplacementContent
         }
+        if ($NullBody) { $fixture['responses']['pullRequest']['body'] = $null }
         $script:Responses = $fixture['responses']
         $script:Requests = [Collections.Generic.List[string]]::new()
         $invoke = {
@@ -105,7 +109,7 @@ BeforeAll {
             -GetUtcNow { $script:Instant }
         $context = Get-GitHubPullRequestContext -Transport $transport -Target $fixture['target']
         $name = if ($PSBoundParameters.ContainsKey('ReplacementContent')) { 'github-refresh' } else { 'github' }
-        Assert-ProviderExpectation -Context $context -Name $name
+        if (-not $NullBody) { Assert-ProviderExpectation -Context $context -Name $name }
         if ($PreDocument) { return $context }
         New-PullRequestContextDocument -Context $context -NowUtc $script:Instant
     }
@@ -172,6 +176,88 @@ AfterAll {
 }
 
 Describe 'Offline provider capture and native reading compatibility' {
+    It 'accepts matching native and retained evidence when GitHub returns a null pull request body' {
+        $live = New-OfflineGitHubCapture -PreDocument -NullBody
+        $retained = New-PullRequestContextDocument -Context $live -NowUtc $script:Instant
+        $retained['pullRequest']['description'] | Should -BeExactly ''
+        $fixturePath = Join-Path $PSScriptRoot 'fixtures/ss-review-native-capture/github.json'
+        $fixture = ConvertFrom-JsonVerbatim -Text ([IO.File]::ReadAllText($fixturePath, [Text.Encoding]::UTF8))
+        $fixture['responses']['pullRequest']['body'] = $null
+        $root = Join-Path $script:Scratch 'null-body'
+        $responses = Join-Path $root 'responses'
+        [void] [IO.Directory]::CreateDirectory($responses)
+        foreach ($key in $fixture['responses'].Keys) {
+            $value = $fixture['responses'][$key]
+            if ($key -in @('reviews', 'issueComments', 'requestedReviewers')) { $value = ,$value }
+            [IO.File]::WriteAllText((Join-Path $responses "$key.json"),
+                (ConvertTo-Json -InputObject $value -Depth 100 -Compress), [Text.UTF8Encoding]::new($false))
+        }
+
+        # A local executable serves the recorded responses; it rejects provider writes.
+        $standIn = @'
+#!/usr/bin/env pwsh
+#Requires -Version 7.6
+Set-StrictMode -Version Latest
+$ErrorActionPreference = 'Stop'
+$PSNativeCommandUseErrorActionPreference = $true
+$command = $args -join ' '
+if ($command -notmatch '^api graphql --method POST\b' -and $command -notmatch ' --method GET\b') {
+    throw "Unexpected provider write: $command"
+}
+$key = if ($command -match '^api user --method GET\b') { 'user' }
+elseif ($command -match 'pulls/7/reviews') { 'reviews' }
+elseif ($command -match 'issues/7/comments') { 'issueComments' }
+elseif ($command -match 'requested_reviewers') { 'requestedReviewers' }
+elseif ($command -match 'pulls/7 --method GET') { 'pullRequest' }
+elseif ($command -match 'compare/') { 'compare' }
+elseif ($command -match '^api graphql --method POST\b') {
+    $query = [Console]::In.ReadToEnd()
+    if ($query -match 'reviewThreads\(') { 'reviewThreads' }
+    elseif ($query -match 'reviews\(first:') { 'reviewEdits' }
+    elseif ($query -match 'timelineItems\(') { 'timeline' }
+    elseif ($query -match 'comments\(first:') { 'issueEdits' }
+    else { throw 'Unexpected GraphQL request.' }
+}
+else { throw "Unexpected provider request: $command" }
+[Console]::OutputEncoding = [Text.UTF8Encoding]::new($false)
+[Console]::Write([IO.File]::ReadAllText((Join-Path $env:FIXTURE_ROOT "responses/$key.json"), [Text.Encoding]::UTF8))
+'@
+        $fake = Join-Path $root $(if ($IsWindows) { 'gh.ps1' } else { 'gh' })
+        [IO.File]::WriteAllText($fake, $standIn, [Text.UTF8Encoding]::new($false))
+        if ($IsWindows) {
+            [IO.File]::WriteAllText((Join-Path $root 'gh.cmd'), '@pwsh -NoProfile -NonInteractive -File "%~dp0gh.ps1" %*')
+        } else {
+            [IO.File]::SetUnixFileMode($fake, [IO.UnixFileMode]::UserRead -bor [IO.UnixFileMode]::UserWrite -bor [IO.UnixFileMode]::UserExecute)
+        }
+        $oldPath = $env:PATH
+        $oldFixtureRoot = $env:FIXTURE_ROOT
+        try {
+            $env:PATH = $root + [IO.Path]::PathSeparator + $oldPath
+            $env:FIXTURE_ROOT = $root
+            $result = & $script:Native context create --url=https://github.com/octo/widget/pull/7 `
+                "--output-directory=$root" '--now-utc=2026-08-04T12:00:00Z'
+            $summary = $result | ConvertFrom-Json
+            $native = Read-PullRequestContextDocument -Path $summary.contextPath
+            $native['pullRequest']['description'] | Should -BeExactly ''
+            $expectedHash = Get-PullRequestEvidenceHash -Document $retained
+            Get-PullRequestEvidenceHash -Document $native | Should -BeExactly $expectedHash
+            $approved = [ordered]@{
+                schemaVersion = 2; target = $native['target']
+                reviewedSourceCommit = $native['pullRequest']['reviewedSourceCommit']
+                reviewedMergeBaseCommit = $native['pullRequest']['reviewedMergeBaseCommit']
+                reviewedContextHash = $expectedHash; findings = @()
+            }
+            # The preflight first asks native code to recompute the checked capture's evidence hash,
+            # then compares it with a fresh retained PowerShell provider observation.
+            { Assert-PullRequestPublicationEvidence -Approved $approved -Context $native -LiveContext $live } | Should -Not -Throw
+            $approved['reviewedContextHash'] = '0' * 64
+            { Assert-PullRequestPublicationEvidence -Approved $approved -Context $native -LiveContext $live } | Should -Throw
+        } finally {
+            $env:PATH = $oldPath
+            $env:FIXTURE_ROOT = $oldFixtureRoot
+        }
+    }
+
     It 'preserves GitHub provider Unicode in the complete native comments page and snapshot' {
         $document = New-OfflineGitHubCapture
         Assert-RetainedExpectation -Document $document -Name 'github'

@@ -6,12 +6,96 @@ use std::num::NonZeroU64;
 use ohno::AppError;
 use serde_json::{Map, Value, json};
 
+use crate::capture::classified_capture_error;
 use crate::clock::timestamp;
-use crate::error::fail;
 use crate::identity::Identity;
 use crate::json::{array, field, identifier, text};
 use crate::target::{Platform, Target, escape};
 use crate::transport::{Transport, ado_items};
+
+classified_capture_error!(
+    DuplicateIteration,
+    "service",
+    "Duplicate Azure DevOps iteration"
+);
+classified_capture_error!(MissingIteration, "service", "No Azure DevOps iteration");
+classified_capture_error!(
+    DuplicateReviewer,
+    "service",
+    "Duplicate Azure DevOps reviewer"
+);
+classified_capture_error!(DuplicateThread, "service", "Duplicate Azure DevOps thread");
+classified_capture_error!(
+    RepeatedContinuation,
+    "service",
+    "Azure DevOps continuation token repeated"
+);
+classified_capture_error!(DuplicateComment, "service", "Duplicate thread comment ID");
+classified_capture_error!(
+    MissingCommentOpener,
+    "service",
+    "Cannot establish thread opening comment"
+);
+classified_capture_error!(
+    AmbiguousCommentOrder,
+    "service",
+    "Ambiguous thread comment order"
+);
+classified_capture_error!(
+    InvalidAzureTarget,
+    "invalidInput",
+    "A resolved Azure DevOps PR is required"
+);
+classified_capture_error!(
+    ContradictoryCoordinates,
+    "service",
+    "Resolved Azure DevOps target contradicts supplied coordinates"
+);
+classified_capture_error!(
+    UnexpectedConnectionContinuation,
+    "service",
+    "Unexpected connection-data continuation"
+);
+classified_capture_error!(
+    MissingAzureIdentity,
+    "authentication",
+    "Azure DevOps did not identify the account"
+);
+classified_capture_error!(
+    WrongPullRequest,
+    "service",
+    "Azure DevOps returned a different pull request"
+);
+classified_capture_error!(
+    MissingReviewerIdentifier,
+    "service",
+    "Azure DevOps reviewer lacks an identifier"
+);
+classified_capture_error!(
+    InvalidIterationId,
+    "service",
+    "Invalid Azure DevOps iteration ID"
+);
+classified_capture_error!(
+    InvalidIterationOrdinal,
+    "service",
+    "Invalid Azure DevOps iteration ordinal"
+);
+classified_capture_error!(NonUtcTimestamp, "service", "Timestamp is not UTC");
+classified_capture_error!(
+    IncompletePropertyEnvelope,
+    "service",
+    "Incomplete property envelope"
+);
+classified_capture_error!(
+    InvalidPropertyBag,
+    "service",
+    "Invalid Azure DevOps property bag"
+);
+classified_capture_error!(InvalidThreadContext, "service", "Invalid thread context");
+classified_capture_error!(InvalidBoolean, "service", "Invalid Boolean {}", field);
+classified_capture_error!(EmptyRequiredText, "service", "Empty {}", field);
+classified_capture_error!(InvalidObject, "service", "Invalid object {}", field);
 
 /// Reads the provider's complete discussion and iteration evidence.
 pub(crate) fn collect(transport: &mut Transport<'_>, target: &Target) -> Result<Value, AppError> {
@@ -23,10 +107,7 @@ pub(crate) fn collect(transport: &mut Transport<'_>, target: &Target) -> Result<
             .as_deref()
             .is_none_or(|s| s.trim().is_empty())
     {
-        return Err(fail(
-            "invalidInput",
-            "A resolved Azure DevOps PR is required",
-        ));
+        return Err(InvalidAzureTarget::classified());
     }
 
     let mut target = target.clone();
@@ -51,10 +132,7 @@ pub(crate) fn collect(transport: &mut Transport<'_>, target: &Target) -> Result<
                 .filter(|s| !s.trim().is_empty())
                 .is_some_and(|existing| !existing.eq_ignore_ascii_case(project))
         {
-            return Err(fail(
-                "service",
-                "Resolved Azure DevOps target contradicts supplied coordinates",
-            ));
+            return Err(ContradictoryCoordinates::classified());
         }
         name.clone_into(&mut target.repository);
         target.project = Some(project.to_owned());
@@ -63,7 +141,7 @@ pub(crate) fn collect(transport: &mut Transport<'_>, target: &Target) -> Result<
 
     let connection = transport.ado("_apis/connectionData", "GET", None, &[], "7.1-preview")?;
     if connection.continuation.is_some() {
-        return Err(fail("service", "Unexpected connection-data continuation"));
+        return Err(UnexpectedConnectionContinuation::classified());
     }
     let account_properties =
         properties(field(&connection.payload, "authenticatedUser")?.get("properties"))?;
@@ -75,20 +153,14 @@ pub(crate) fn collect(transport: &mut Transport<'_>, target: &Target) -> Result<
     }
     let identity = Identity::from_connection(&connection.payload)?;
     if identity.id.is_none() {
-        return Err(fail(
-            "authentication",
-            "Azure DevOps did not identify the account",
-        ));
+        return Err(MissingAzureIdentity::classified());
     }
     identity.validate()?;
 
     let path = target.pr_api();
     let pr = transport.request(&path, "GET", None)?;
     if identifier(field(&pr, "pullRequestId")?)? != target.pull_request_id.to_string() {
-        return Err(fail(
-            "service",
-            "Azure DevOps returned a different pull request",
-        ));
+        return Err(WrongPullRequest::classified());
     }
     for name in [
         "title",
@@ -119,7 +191,7 @@ pub(crate) fn collect(transport: &mut Transport<'_>, target: &Target) -> Result<
     for iteration in &iterations {
         let id = iteration_id(field(iteration, "id")?)?;
         if !revision_ids.insert(id) {
-            return Err(fail("service", "Duplicate Azure DevOps iteration"));
+            return Err(DuplicateIteration::classified());
         }
         let revision = revision(iteration)?;
         if latest.as_ref().is_none_or(|(current, _)| id > *current) {
@@ -127,7 +199,7 @@ pub(crate) fn collect(transport: &mut Transport<'_>, target: &Target) -> Result<
         }
         revisions.push(revision);
     }
-    let (latest_id, latest) = latest.ok_or_else(|| fail("service", "No Azure DevOps iteration"))?;
+    let (latest_id, latest) = latest.ok_or_else(MissingIteration::classified)?;
     let source = required_text(&latest, "sourceCommit")?;
     let base = required_text(&latest, "mergeBaseCommit")?;
 
@@ -138,9 +210,9 @@ pub(crate) fn collect(transport: &mut Transport<'_>, target: &Target) -> Result<
         let reviewer_id = reviewer_identity
             .id
             .as_ref()
-            .ok_or_else(|| fail("service", "Azure DevOps reviewer lacks an identifier"))?;
+            .ok_or_else(MissingReviewerIdentifier::classified)?;
         if !reviewer_ids.insert(reviewer_id.to_lowercase()) {
-            return Err(fail("service", "Duplicate Azure DevOps reviewer"));
+            return Err(DuplicateReviewer::classified());
         }
         converted_reviewers.push(json!({
             "identity": reviewer_identity,
@@ -155,6 +227,9 @@ pub(crate) fn collect(transport: &mut Transport<'_>, target: &Target) -> Result<
             continue;
         }
         let properties = properties(thread.get("properties"))?;
+        // Vote notifications contain structured vote state and generated prose,
+        // not actionable discussion. Approval inspection captures that authority
+        // separately; review capture follows the PowerShell evidence policy.
         if properties
             .get("CodeReviewThreadType")
             .filter(|value| !value.is_null())
@@ -166,7 +241,7 @@ pub(crate) fn collect(transport: &mut Transport<'_>, target: &Target) -> Result<
         }
         let id = service_id(field(thread, "id")?)?;
         if !thread_ids.insert(id) {
-            return Err(fail("service", "Duplicate Azure DevOps thread"));
+            return Err(DuplicateThread::classified());
         }
         converted_threads.push(convert_thread(thread, &target, &properties, latest_id)?);
     }
@@ -213,7 +288,7 @@ fn list(transport: &mut Transport<'_>, path: &str) -> Result<Vec<Value>, AppErro
         match page.continuation {
             None => return Ok(result),
             Some(next) if seen.insert(next.clone()) => token = Some(next),
-            Some(_) => return Err(fail("service", "Azure DevOps continuation token repeated")),
+            Some(_) => return Err(RepeatedContinuation::classified()),
         }
     }
 }
@@ -223,7 +298,7 @@ fn optional_bool(node: &Value, name: &str) -> Result<bool, AppError> {
     match node.get(name) {
         None | Some(Value::Null) => Ok(false),
         Some(Value::Bool(value)) => Ok(*value),
-        _ => Err(fail("service", format!("Invalid Boolean {name}"))),
+        _ => Err(InvalidBoolean::classified(name)),
     }
 }
 
@@ -231,7 +306,7 @@ fn optional_bool(node: &Value, name: &str) -> Result<bool, AppError> {
 fn required_text<'a>(node: &'a Value, name: &str) -> Result<&'a str, AppError> {
     let value = text(field(node, name)?)?;
     if value.trim().is_empty() {
-        return Err(fail("service", format!("Empty {name}")));
+        return Err(EmptyRequiredText::classified(name));
     }
     Ok(value)
 }
@@ -249,14 +324,13 @@ fn optional_object<'a>(node: &'a Value, name: &str) -> Result<Option<&'a Value>,
     match node.get(name) {
         None | Some(Value::Null) => Ok(None),
         Some(value) if value.is_object() => Ok(Some(value)),
-        _ => Err(fail("service", format!("Invalid object {name}"))),
+        _ => Err(InvalidObject::classified(name)),
     }
 }
 
 /// Iteration ordinals are ordered numerically even if represented as strings.
 fn iteration_id(value: &Value) -> Result<NonZeroU64, AppError> {
-    NonZeroU64::new(ordinal(value)?)
-        .ok_or_else(|| fail("service", "Invalid Azure DevOps iteration ID"))
+    NonZeroU64::new(ordinal(value)?).ok_or_else(InvalidIterationId::classified)
 }
 
 /// Thread comparisons may refer to the common-commit baseline before iteration one.
@@ -264,7 +338,7 @@ fn ordinal(value: &Value) -> Result<u64, AppError> {
     value
         .as_u64()
         .or_else(|| value.as_str()?.parse().ok())
-        .ok_or_else(|| fail("service", "Invalid Azure DevOps iteration ordinal"))
+        .ok_or_else(InvalidIterationOrdinal::classified)
 }
 
 /// Detects numeric identity aliases without changing the provider's displayed ID.
@@ -298,7 +372,7 @@ fn canonical_time(value: Option<&Value>) -> Result<Option<String>, AppError> {
     let utc = timestamp(&value)?.to_string();
     let core = utc
         .strip_suffix('Z')
-        .ok_or_else(|| fail("service", "Timestamp is not UTC"))?;
+        .ok_or_else(NonUtcTimestamp::classified)?;
     let (whole, fraction) = core.split_once('.').unwrap_or((core, ""));
     let mut fraction = fraction.to_owned();
     fraction.truncate(7);
@@ -337,14 +411,14 @@ fn properties(node: Option<&Value>) -> Result<Map<String, Value>, AppError> {
                     value
                         .get("$value")
                         .cloned()
-                        .ok_or_else(|| fail("service", "Incomplete property envelope"))?
+                        .ok_or_else(IncompletePropertyEnvelope::classified)?
                 } else {
                     value.clone()
                 };
                 Ok((key.clone(), value))
             })
             .collect(),
-        _ => Err(fail("service", "Invalid Azure DevOps property bag")),
+        _ => Err(InvalidPropertyBag::classified()),
     }
 }
 
@@ -354,7 +428,7 @@ fn context(node: Option<&Value>) -> Result<Value, AppError> {
         return Ok(Value::Null);
     };
     if !node.is_object() {
-        return Err(fail("service", "Invalid thread context"));
+        return Err(InvalidThreadContext::classified());
     }
     let file = match node.get("filePath") {
         None | Some(Value::Null) => String::new(),
@@ -410,15 +484,15 @@ fn opening_index<'a>(
     for (index, comment) in comments.enumerate() {
         let id = service_id(field(comment, "id")?)?;
         if !ids.insert(id.clone()) {
-            return Err(fail("service", "Duplicate thread comment ID"));
+            return Err(DuplicateComment::classified());
         }
         let number = id.parse::<u64>().ok().filter(|number| *number > 0);
         if number.is_none() && count > 1 {
-            return Err(fail("service", "Cannot establish thread opening comment"));
+            return Err(MissingCommentOpener::classified());
         }
         if let Some(number) = number {
             if !ordinals.insert(number) {
-                return Err(fail("service", "Ambiguous thread comment order"));
+                return Err(AmbiguousCommentOrder::classified());
             }
             if lowest.is_none_or(|(current, _)| number < current) {
                 lowest = Some((number, index));
@@ -586,6 +660,7 @@ fn convert_comment(
 }
 
 #[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
     #![allow(
         clippy::indexing_slicing,
@@ -608,6 +683,27 @@ mod tests {
     use crate::target::{Platform, Target};
     use crate::transport::Transport;
     use crate::{Clock, Http, HttpResponse, Process, ProcessOutput, classification};
+
+    #[test]
+    fn comment_order_failures_keep_distinct_validation_causes() {
+        let duplicate = [json!({"id": 1}), json!({"id": 1})];
+        let unknown_order = [json!({"id": "opaque"}), json!({"id": 2})];
+        let duplicate = super::opening_index(duplicate.iter()).unwrap_err();
+        let unknown_order = super::opening_index(unknown_order.iter()).unwrap_err();
+        assert!(duplicate.find_source::<super::DuplicateComment>().is_some());
+        assert!(
+            duplicate
+                .find_source::<super::MissingCommentOpener>()
+                .is_none()
+        );
+        assert!(
+            unknown_order
+                .find_source::<super::MissingCommentOpener>()
+                .is_some()
+        );
+        assert_eq!(classification(&duplicate), "service");
+        assert_eq!(classification(&unknown_order), "service");
+    }
 
     /// Scripts independent endpoints while preserving their page order.
     struct Recording {

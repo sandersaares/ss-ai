@@ -1,8 +1,12 @@
 //! Exercises the actual PowerShell and native shared-file implementations together.
 
 use std::cell::{Cell, RefCell};
+#[cfg(windows)]
 use std::fs;
+use std::fs::{remove_file, write};
 use std::io::{BufRead, BufReader, Write};
+#[cfg(windows)]
+use std::os::windows::fs::OpenOptionsExt;
 use std::path::{Path, PathBuf};
 use std::process::{Child, ChildStdin, ChildStdout, Command, Stdio};
 use std::sync::Mutex;
@@ -12,6 +16,8 @@ use jiff::Timestamp;
 use ohno::AppError;
 use ss_ai_runtime::{Clock, FileTransaction, LockMode, ResourceLock};
 use tempfile::{NamedTempFile, TempPath};
+#[cfg(windows)]
+use windows_sys::Win32::Storage::FileSystem::{FILE_SHARE_READ, FILE_SHARE_WRITE};
 
 /// Prevents other test children from inheriting locks during process creation.
 static PROCESS_AND_LOCK: Mutex<()> = Mutex::new(());
@@ -35,7 +41,7 @@ impl Drop for TestFile {
     fn drop(&mut self) {
         let mut lock = self.path.as_os_str().to_owned();
         lock.push(".lock");
-        if let Err(error) = fs::remove_file(lock) {
+        if let Err(error) = remove_file(lock) {
             assert_eq!(error.kind(), std::io::ErrorKind::NotFound);
         }
     }
@@ -208,7 +214,7 @@ fn shared_owners_coexist_and_exclude_writers() {
 
     // Start the child before taking another lock so no lock descriptor is inherited.
     drop(reader);
-    let mut contender = PowerShell::start(&file.path, "shared-after-signal");
+    let mut contender = PowerShell::start(&file.path, "shared-contender");
     contender.expect("ready");
     let reader = ResourceLock::open(&file.path, LockMode::Shared, &NoWaitClock).unwrap();
     contender.send("acquire");
@@ -238,7 +244,7 @@ fn complete_publications_are_readable_in_both_directions() {
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
     let file = TestFile::new();
-    fs::write(&file.path, br#"{"version":"original"}"#).unwrap();
+    write(&file.path, br#"{"version":"original"}"#).unwrap();
     let mut reader = PowerShell::start(&file.path, "publication");
     reader.expect("reader-open");
     let transaction = FileTransaction::open(&file.path, &NoWaitClock).unwrap();
@@ -263,10 +269,6 @@ fn complete_publications_are_readable_in_both_directions() {
 #[test]
 #[cfg_attr(miri, ignore = "requires Windows file sharing and replacement")]
 fn native_staging_names_identify_a_blocked_transaction() {
-    use std::os::windows::fs::OpenOptionsExt;
-
-    use windows_sys::Win32::Storage::FileSystem::{FILE_SHARE_READ, FILE_SHARE_WRITE};
-
     struct Directory(PathBuf);
     impl Drop for Directory {
         fn drop(&mut self) {
@@ -315,7 +317,7 @@ fn native_staging_names_identify_a_blocked_transaction() {
     #[expect(clippy::create_dir, reason = "The test directory must be exclusive")]
     fs::create_dir(&directory.0).unwrap();
     let path = directory.0.join("reviewer.json");
-    fs::write(&path, b"old").unwrap();
+    write(&path, b"old").unwrap();
     let blocker = fs::OpenOptions::new()
         .read(true)
         .share_mode(FILE_SHARE_READ | FILE_SHARE_WRITE)
