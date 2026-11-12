@@ -610,6 +610,8 @@ fn bom_marked_audit_records_preserve_duplicate_key_validation() {
     }
 }
 
+/// Stored audit feedback rejects malformed string bytes before an append can
+/// rewrite the existing record.
 #[test]
 fn malformed_feedback_record_is_not_rewritten() {
     let workspace = Workspace::new("malformed-feedback-encoding");

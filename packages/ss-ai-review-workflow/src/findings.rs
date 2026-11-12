@@ -1875,10 +1875,7 @@ mod artifact_tests {
             "reasoning":"Why", "consequence":"Impact", "recommendedAction":"Fix",
             "anchor":{"kind":"line", "path":"src/./file.rs", "startLine":1}
         });
-        assert_eq!(
-            to_string(&records[0]).unwrap(),
-            to_string(&expected).unwrap()
-        );
+        assert_eq!(records[0], expected);
         artifact.remove(&id, "not applicable", "timestamp").unwrap();
         assert_eq!(
             artifact.append(&original, "reviewer", &[]).unwrap(),
@@ -1887,10 +1884,10 @@ mod artifact_tests {
         artifact.set_status("complete").unwrap();
         artifact.append(&original, "reviewer", &[]).unwrap_err();
         artifact.set_status("open").unwrap();
-        let value = artifact.into_value();
-        assert_eq!(value["removed"][0]["finding"]["id"], id);
-        assert_eq!(value["findings"][0]["anchor"]["path"], "src/./file.rs");
-        validate_artifact(&value).unwrap();
+        let artifact = artifact.into_value();
+        assert_eq!(artifact["removed"][0]["finding"]["id"], id);
+        assert_eq!(artifact["findings"][0]["anchor"]["path"], "src/./file.rs");
+        validate_artifact(&artifact).unwrap();
     }
 
     #[test]

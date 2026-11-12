@@ -1496,6 +1496,7 @@ mod tests {
         assert!(rendered.contains("Scope: scripts"));
         assert!(rendered.contains("Keep it."));
         assert_eq!(map.0.value(), &value);
+        assert!(docs["instruction-set-categories.md"].contains("Category: scripts"));
         assert_eq!(base64(b"abcde"), "YWJjZGU=");
         assert_eq!(quote("```"), "````\n```\n````");
     }
@@ -1540,17 +1541,6 @@ mod tests {
         second["id"] = json!("other");
         value["chapters"].as_array_mut().unwrap().push(second);
         assert!(ValidatedMap::from_value(value, &sources, false).is_err());
-    }
-
-    #[test]
-    fn complete_map_preserves_the_authored_document_for_rendering() {
-        let (sources, value) = fixture();
-        let bytes = to_vec(&value).unwrap();
-        let complete = CompleteMap::parse(&bytes, &sources).unwrap();
-        assert_eq!(complete.0.value(), &value);
-        let documents = complete.render(&sources).unwrap();
-        assert!(documents["instruction-set-categories.md"].contains("Category: scripts"));
-        assert!(documents["focus-areas/focus-scripts.md"].contains("Keep it."));
     }
 
     #[test]

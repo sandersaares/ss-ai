@@ -34,6 +34,9 @@ const ACTIVE: &str = "focus-area-generation.json";
 const SNAPSHOT: &str = "focus-area-source-identity.json";
 const GENERATIONS: &str = ".focus-area-generations";
 
+/// Existing sessions use this schema, so its version must remain stable.
+const ACTIVE_GENERATION_SCHEMA_VERSION: u32 = 1;
+
 /// The private session assigned to one preparation attempt.
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -58,11 +61,24 @@ struct ActiveGenerationRecord {
     hit_receipt: Option<String>,
 }
 
+/// Provides a borrowed persistence view without cloning active string fields.
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ActiveGenerationRecordRef<'a> {
+    schema_version: u32,
+    preparation_identity: Option<&'a str>,
+    generation_id: Option<&'a str>,
+    source_digest: Option<&'a str>,
+    cache_key: Option<&'a str>,
+    receipt: Option<&'a str>,
+    hit_receipt: Option<&'a str>,
+}
+
 impl ActiveGenerationRecord {
     /// Represents a session with no preparation authorized to publish.
     fn invalidated() -> Self {
         Self {
-            schema_version: 1,
+            schema_version: ACTIVE_GENERATION_SCHEMA_VERSION,
             preparation_identity: None,
             generation_id: None,
             source_digest: None,
@@ -70,6 +86,47 @@ impl ActiveGenerationRecord {
             receipt: None,
             hit_receipt: None,
         }
+    }
+
+    /// Rejects records that cannot describe one coherent generation.
+    fn validate(&self) -> Result<(), AppError> {
+        if self.schema_version != ACTIVE_GENERATION_SCHEMA_VERSION
+            || self.preparation_identity.is_some() != self.source_digest.is_some()
+            || self.preparation_identity.is_none()
+                && (self.generation_id.is_some()
+                    || self.cache_key.is_some()
+                    || self.receipt.is_some()
+                    || self.hit_receipt.is_some())
+            || self.generation_id.is_none() && self.receipt.is_some()
+            || self.generation_id.is_some() && self.hit_receipt.is_some()
+            || self
+                .preparation_identity
+                .as_ref()
+                .is_some_and(|id| !valid_epoch(id))
+            || self.generation_id.as_ref().is_some_and(|id| !valid_id(id))
+            || self
+                .source_digest
+                .as_ref()
+                .is_some_and(|digest| !valid_digest(digest))
+            || self
+                .cache_key
+                .as_ref()
+                .is_some_and(|digest| !valid_digest(digest))
+            || self
+                .receipt
+                .as_ref()
+                .is_some_and(|digest| !valid_digest(digest))
+            || self
+                .hit_receipt
+                .as_ref()
+                .is_some_and(|digest| !valid_digest(digest))
+        {
+            return Err(fail(
+                "invalidInput",
+                "Invalid preparation generation record",
+            ));
+        }
+        Ok(())
     }
 }
 
@@ -128,17 +185,27 @@ impl ActiveGeneration {
     }
 
     /// Produces the established flat JSON record for persistence.
-    fn to_record(&self) -> ActiveGenerationRecord {
-        let mut record = ActiveGenerationRecord::invalidated();
+    fn to_record(&self) -> ActiveGenerationRecordRef<'_> {
+        let mut record = ActiveGenerationRecordRef {
+            schema_version: ACTIVE_GENERATION_SCHEMA_VERSION,
+            preparation_identity: None,
+            generation_id: None,
+            source_digest: None,
+            cache_key: None,
+            receipt: None,
+            hit_receipt: None,
+        };
         if let Some(preparation) = &self.preparation {
-            record.preparation_identity = Some(preparation.identity.clone());
-            record.source_digest = Some(preparation.source_digest.clone());
-            record.cache_key.clone_from(&preparation.cache_key);
+            record.preparation_identity = Some(&preparation.identity);
+            record.source_digest = Some(&preparation.source_digest);
+            record.cache_key = preparation.cache_key.as_deref();
             match &preparation.work {
-                PreparationWork::Restore { receipt } => record.hit_receipt.clone_from(receipt),
+                PreparationWork::Restore { receipt } => {
+                    record.hit_receipt = receipt.as_deref();
+                }
                 PreparationWork::Generation { id, receipt } => {
-                    record.generation_id = Some(id.clone());
-                    record.receipt.clone_from(receipt);
+                    record.generation_id = Some(id);
+                    record.receipt = receipt.as_deref();
                 }
             }
         }
@@ -160,49 +227,6 @@ impl ActiveGeneration {
             ));
         };
         *current = receipt;
-        Ok(())
-    }
-}
-
-impl ActiveGenerationRecord {
-    /// Rejects records that cannot describe one coherent generation.
-    fn validate(&self) -> Result<(), AppError> {
-        if self.schema_version != 1
-            || self.preparation_identity.is_some() != self.source_digest.is_some()
-            || self.preparation_identity.is_none()
-                && (self.generation_id.is_some()
-                    || self.cache_key.is_some()
-                    || self.receipt.is_some()
-                    || self.hit_receipt.is_some())
-            || self.generation_id.is_none() && self.receipt.is_some()
-            || self.generation_id.is_some() && self.hit_receipt.is_some()
-            || self
-                .preparation_identity
-                .as_ref()
-                .is_some_and(|id| !valid_epoch(id))
-            || self.generation_id.as_ref().is_some_and(|id| !valid_id(id))
-            || self
-                .source_digest
-                .as_ref()
-                .is_some_and(|digest| !valid_digest(digest))
-            || self
-                .cache_key
-                .as_ref()
-                .is_some_and(|digest| !valid_digest(digest))
-            || self
-                .receipt
-                .as_ref()
-                .is_some_and(|digest| !valid_digest(digest))
-            || self
-                .hit_receipt
-                .as_ref()
-                .is_some_and(|digest| !valid_digest(digest))
-        {
-            return Err(fail(
-                "invalidInput",
-                "Invalid preparation generation record",
-            ));
-        }
         Ok(())
     }
 }

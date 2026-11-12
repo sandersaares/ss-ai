@@ -11,10 +11,6 @@ use serde_json::{Map, Number, Value};
 use ss_ai_review_context::decode_workflow_text;
 use ss_ai_runtime::{Clock, FileTransaction, caused_by, fail, read_bytes};
 
-/// Identifies an item that conflicts with an existing plan entry.
-#[ohno::error]
-struct ConflictingPlanItem;
-
 /// Selects the schema and list in a workflow plan.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 #[expect(
@@ -190,6 +186,10 @@ impl Plan {
         &self.items
     }
 }
+
+/// Identifies an item that conflicts with an existing plan entry.
+#[ohno::error]
+struct ConflictingPlanItem;
 
 /// Refuses explicit null for optional strings, which the schema does not allow.
 fn present_string<'de, D: serde::Deserializer<'de>>(
@@ -562,6 +562,8 @@ mod tests {
         }
     }
 
+    /// Structured workflow records reject malformed text bytes instead of
+    /// applying the replacement decoding used for imported prose.
     #[test]
     fn structured_json_rejects_malformed_unicode_without_replacement() {
         let encoded = encoded(r#"{"text":"Z"}"#);

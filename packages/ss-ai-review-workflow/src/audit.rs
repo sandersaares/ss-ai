@@ -497,7 +497,11 @@ fn validate_decisions(document: Value, clock: &dyn Clock) -> Result<DecisionJour
     for record in array(&document, "decisions")? {
         let (finding_id, decision) = validate_decision(record)?;
         validate_timestamp(clock.now(), required_text(record, "recordedUtc")?)?;
-        last.insert(finding_id.to_owned(), decision);
+        if let Some(previous) = last.get_mut(finding_id) {
+            *previous = decision;
+        } else {
+            last.insert(finding_id.to_owned(), decision);
+        }
     }
     Ok(DecisionJournal { document, last })
 }

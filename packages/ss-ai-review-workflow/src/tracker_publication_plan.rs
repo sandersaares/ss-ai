@@ -203,14 +203,15 @@ mod tests {
         let mut second = first.clone();
         second["id"] = json!("F2");
         second["description"] = json!("bad\rtext");
-        let approved = json!({"findings":[first, second]});
+        let approved = json!({"findings":[first.clone(), second]});
         let error = render_plan(&approved, None, &json!({}), "gitHub", 0)
             .unwrap_err()
             .to_string();
         assert!(error.contains("description contains a disallowed control character"));
 
         let context = json!({"threads":[{"id":"T","comments":[{"id":"C","url":42}]}]});
-        let error = render_plan(&approved, Some(&context), &json!({}), "gitHub", 0)
+        let valid_approved = json!({"findings":[first]});
+        let error = render_plan(&valid_approved, Some(&context), &json!({}), "gitHub", 0)
             .unwrap_err()
             .to_string();
         assert!(error.contains("url must be a string"));
