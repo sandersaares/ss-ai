@@ -50,6 +50,57 @@ impl Drop for TestDirectory {
     }
 }
 
+/// Keeps directory-wide validation errors actionable for each reviewer artifact.
+#[test]
+fn reviewer_validation_errors_identify_artifact_path() {
+    let directory = TestDirectory::new("validation-path");
+    let clock = SystemClock::default();
+    let reviewers = directory.path("reviewers");
+    #[expect(
+        clippy::create_dir,
+        reason = "A collision must fail rather than reuse test files"
+    )]
+    fs::create_dir(&reviewers).unwrap();
+    let artifact = reviewers.join("reviewer.json");
+    let finding = directory.path("finding.json");
+    fs::write(
+        &finding,
+        serde_json::to_vec(&json!({
+            "title":"Problem", "description":"What fails", "reasoning":"Why",
+            "consequence":"Impact", "recommendedAction":"Fix",
+            "anchor":{"kind":"file","path":"src/lib.rs"}
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+    findings::initialize(&artifact, "reviewer", "correctness", false, &clock).unwrap();
+    findings::add(&artifact, &finding, "reviewer", &[], &clock).unwrap();
+
+    let mut reviewer: Value = serde_json::from_slice(&fs::read(&artifact).unwrap()).unwrap();
+    reviewer["findings"][0]
+        .as_object_mut()
+        .unwrap()
+        .remove("title");
+    fs::write(&artifact, serde_json::to_vec(&reviewer).unwrap()).unwrap();
+
+    let index_error = findings::build_index(&reviewers, &directory.path("index.json"), &clock)
+        .unwrap_err()
+        .to_string();
+    assert!(index_error.contains(&artifact.display().to_string()));
+    assert!(index_error.contains("Expected non-empty string 'title'"));
+
+    let consolidation_error = findings::consolidate(
+        &reviewers,
+        None,
+        &directory.path("consolidated.json"),
+        &clock,
+    )
+    .unwrap_err()
+    .to_string();
+    assert!(consolidation_error.contains(&artifact.display().to_string()));
+    assert!(consolidation_error.contains("Expected non-empty string 'title'"));
+}
+
 /// Public workflow records must remain usable across panic-catching boundaries.
 #[test]
 fn public_records_are_unwind_safe() {
@@ -389,6 +440,12 @@ fn merge_preserves_locations_and_untouched_findings() {
     fs::write(&merged, serde_json::to_vec(&content("a.rs")).unwrap()).unwrap();
     let plan = directory.path("plan.json");
     fs::write(&plan, serde_json::to_vec(&json!({
+        "schemaVersion":1,"groups":[{"sourceFindingIds":["a-1","missing"],"findingPath":"merged.json"}]
+    })).unwrap()).unwrap();
+    let error = findings::consolidate(&reviewers, Some(&plan), &output, &clock).unwrap_err();
+    assert!(error.to_string().contains("missing"));
+    assert!(!output.exists());
+    fs::write(&plan, serde_json::to_vec(&json!({
         "schemaVersion":1,"groups":[{"sourceFindingIds":["a-1","b-1"],"findingPath":"merged.json"}]
     })).unwrap()).unwrap();
     assert!(findings::consolidate(&reviewers, Some(&plan), &output, &clock).is_err());
@@ -456,7 +513,8 @@ fn merge_preserves_locations_and_untouched_findings() {
         r#"{"schemaVersion":1,"clusters":[{"findingIds":["a-1","missing"]}]}"#,
     )
     .unwrap();
-    assert!(findings::validate_candidates(&candidates, &index, &clock).is_err());
+    let error = findings::validate_candidates(&candidates, &index, &clock).unwrap_err();
+    assert!(error.to_string().contains("missing"));
     fs::write(
         &candidates,
         r#"{"schemaVersion":1,"clusters":[],"clusters":[]}"#,

@@ -11,17 +11,7 @@ param(
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 $PSNativeCommandUseErrorActionPreference = $true
-
-# Native code receives a filesystem path rather than PowerShell provider syntax.
-function Resolve-ContextFileSystemPath {
-    param([AllowEmptyString()][string] $Path)
-    if ($Path -ceq '') { return '' }
-    $provider = $null
-    $drive = $null
-    $resolved = $ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath($Path, [ref] $provider, [ref] $drive)
-    if ($provider.Name -ne 'FileSystem') { throw "Expected a filesystem path: $Path" }
-    $resolved
-}
+. "$PSScriptRoot/lib/NativeContextPath.ps1"
 
 # Preserve JSON on PowerShell's success stream for callers that parse it.
 function Invoke-NativeContext {
@@ -50,7 +40,8 @@ function Invoke-NativeContext {
 
 $arguments = [Collections.Generic.List[string]]::new()
 $arguments.Add('diagnostics')
-$arguments.Add("--path=$(Resolve-ContextFileSystemPath -Path $Path)")
+$Path = Resolve-NativeContextFilePath -Path $Path
+$arguments.Add("--path=$Path")
 if ($PSBoundParameters.ContainsKey('Record')) { $arguments.Add("--record=$Record") }
 if ($PSBoundParameters.ContainsKey('Count')) { $arguments.Add("--count=$Count") }
 Invoke-NativeContext -Arguments $arguments.ToArray()

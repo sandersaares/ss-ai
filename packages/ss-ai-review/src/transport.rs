@@ -218,6 +218,11 @@ impl<'a> Transport<'a> {
         self.github(path, "POST", Some(body), false, RequestPolicy::WriteOnce)
     }
 
+    /// Dismissal is a separate, nonreplayable decision effect, not an approval rollback.
+    pub(crate) fn github_dismiss_once(&self, path: &str, body: &Value) -> Result<Value, AppError> {
+        self.github(path, "PUT", Some(body), false, RequestPolicy::WriteOnce)
+    }
+
     /// Approval success requires no response metadata and is never replayed.
     pub(crate) fn github_approve_once(&self, path: &str, body: &Value) -> Result<(), AppError> {
         self.github(path, "POST", Some(body), false, RequestPolicy::ApprovalOnce)?;

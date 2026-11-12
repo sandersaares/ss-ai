@@ -25,17 +25,7 @@ param(
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 $PSNativeCommandUseErrorActionPreference = $true
-
-# Translate PowerShell drive and location syntax before passing paths to native code.
-function Resolve-ContextFileSystemPath {
-    param([AllowEmptyString()][string] $Path)
-    if ($Path -ceq '') { return '' }
-    $provider = $null
-    $drive = $null
-    $resolved = $ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath($Path, [ref] $provider, [ref] $drive)
-    if ($provider.Name -ne 'FileSystem') { throw "Expected a filesystem path: $Path" }
-    $resolved
-}
+. "$PSScriptRoot/lib/NativeContextPath.ps1"
 
 # Match the query excerpt limit because parser errors can include captured evidence.
 function Get-NativeContextErrorExcerpt {
@@ -78,10 +68,11 @@ function Invoke-NativeContext {
 }
 
 $arguments = [Collections.Generic.List[string]]::new()
-foreach ($argument in @('prepare', "--path=$(Resolve-ContextFileSystemPath -Path $Path)",
-    "--request-path=$(Resolve-ContextFileSystemPath -Path $RequestPath)",
-    "--diagnostics-path=$(Resolve-ContextFileSystemPath -Path $DiagnosticsPath)",
-    "--query=$Query", "--scope=$Scope", "--page-size=$PageSize")) {
+$Path = Resolve-NativeContextFilePath -Path $Path
+$RequestPath = Resolve-NativeContextFilePath -Path $RequestPath
+$DiagnosticsPath = Resolve-NativeContextFilePath -Path $DiagnosticsPath
+foreach ($argument in @('prepare', "--path=$Path", "--request-path=$RequestPath",
+    "--diagnostics-path=$DiagnosticsPath", "--query=$Query", "--scope=$Scope", "--page-size=$PageSize")) {
     $arguments.Add($argument)
 }
 foreach ($entry in @(
@@ -97,10 +88,11 @@ foreach ($entry in @(@('TextPath', 'text-path'), @('ComparePath', 'compare-path'
     if ($PSBoundParameters.ContainsKey($entry[0])) {
         $value = $PSBoundParameters[$entry[0]]
         # Native preparation records the conflicting-selector failure in diagnostics.
-        if ($entry[0] -eq 'TextPath' -and $PSBoundParameters.ContainsKey('Text')) {
+        if ([string]::IsNullOrEmpty($value) -or
+            ($entry[0] -eq 'TextPath' -and $PSBoundParameters.ContainsKey('Text'))) {
             $resolved = $value
         } else {
-            $resolved = Resolve-ContextFileSystemPath -Path $value
+            $resolved = Resolve-NativeContextFilePath -Path $value
         }
         $arguments.Add("--$($entry[1])=$resolved")
     }

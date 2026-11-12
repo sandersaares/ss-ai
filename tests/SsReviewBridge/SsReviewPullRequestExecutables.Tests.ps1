@@ -133,7 +133,7 @@ Describe 'Capture bridge PowerShell paths' {
                 @{ Path = $script:Capture; Query = 'metadata' }
             }
             $arguments[$parameter] = 'Env:PATH'
-            { & (Join-Path $script:Scripts $name) @arguments } | Should -Throw '*filesystem path*'
+            { & (Join-Path $script:Scripts $name) @arguments } | Should -Throw '*FileSystem provider*'
         }
     }
 

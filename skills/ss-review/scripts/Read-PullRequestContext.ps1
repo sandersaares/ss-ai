@@ -29,17 +29,7 @@ param(
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 $PSNativeCommandUseErrorActionPreference = $true
-
-# Translate PowerShell drive and location syntax before passing paths to native code.
-function Resolve-ContextFileSystemPath {
-    param([AllowEmptyString()][string] $Path)
-    if ($Path -ceq '') { return '' }
-    $provider = $null
-    $drive = $null
-    $resolved = $ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath($Path, [ref] $provider, [ref] $drive)
-    if ($provider.Name -ne 'FileSystem') { throw "Expected a filesystem path: $Path" }
-    $resolved
-}
+. "$PSScriptRoot/lib/NativeContextPath.ps1"
 
 # Match the query excerpt limit because parser errors can include captured evidence.
 function Get-NativeContextErrorExcerpt {
@@ -85,12 +75,14 @@ function Invoke-NativeContext {
 $arguments = [Collections.Generic.List[string]]::new()
 if ($PSCmdlet.ParameterSetName -eq 'Saved') {
     $arguments.Add('read-saved')
-    $arguments.Add("--request-path=$(Resolve-ContextFileSystemPath -Path $RequestPath)")
+    $RequestPath = Resolve-NativeContextFilePath -Path $RequestPath
+    $arguments.Add("--request-path=$RequestPath")
     if ($Next) { $arguments.Add('--next') }
     if ($Restart) { $arguments.Add('--restart') }
 } else {
     $arguments.Add('read')
-    $arguments.Add("--path=$(Resolve-ContextFileSystemPath -Path $Path)")
+    $Path = Resolve-NativeContextFilePath -Path $Path
+    $arguments.Add("--path=$Path")
     $arguments.Add("--query=$Query")
     $arguments.Add("--scope=$Scope")
     $arguments.Add("--page-size=$PageSize")
@@ -108,11 +100,12 @@ if ($PSCmdlet.ParameterSetName -eq 'Saved') {
         if ($PSBoundParameters.ContainsKey($entry[0])) {
             $value = $PSBoundParameters[$entry[0]]
             # Native validation owns the explicit empty selector and conflicting-selector errors.
-            if ($entry[0] -eq 'FilesPath' -and
-                ([string]::IsNullOrWhiteSpace($value) -or $PSBoundParameters.ContainsKey('FilesJson'))) {
+            if ([string]::IsNullOrEmpty($value) -or
+                ($entry[0] -eq 'FilesPath' -and
+                    ([string]::IsNullOrWhiteSpace($value) -or $PSBoundParameters.ContainsKey('FilesJson')))) {
                 $resolved = $value
             } else {
-                $resolved = Resolve-ContextFileSystemPath -Path $value
+                $resolved = Resolve-NativeContextFilePath -Path $value
             }
             $arguments.Add("--$($entry[1])=$resolved")
         }

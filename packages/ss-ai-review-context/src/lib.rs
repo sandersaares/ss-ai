@@ -12,7 +12,9 @@ mod query;
 mod request;
 
 pub use authorship::write_comment_authorship;
-pub use capture::{decode_file_text, evidence_hash, read_capture, snapshot_id};
+pub use capture::{
+    decode_file_text, evidence_hash, read_capture, snapshot_id, validate_capture_version,
+};
 pub use diagnostics::{increment_diagnostic, read_diagnostics};
 pub use json::{bytes_hash, document_hash, powershell_json};
 pub use producer::{CapturePreparation, prepare_capture};

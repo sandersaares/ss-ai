@@ -22,7 +22,8 @@ assignment rather than starting an orchestrator run.
 
 This skill reassesses an existing approval; it does not perform an initial
 review or decide that a substantive change is correct. Explicit invocation
-authorizes qualifying renewals without per-PR confirmation. A dry run never
+authorizes qualifying renewals and clearing the account's existing approval
+after a completed significant or uncertain assessment, without per-PR confirmation. A dry run never
 writes remotely. Do not create schedules, merge, change policies, resolve
 discussion, or automatically invoke `ss-review`.
 
@@ -246,11 +247,22 @@ Significant work ends at `needsReview`; uncertain evaluation fails explicitly.
 For each newly completed significant or uncertain assessment in a live run,
 execute native `notify` with the required attribution. Uncertainty retains its
 explicit failure diagnostic even after the notice is posted.
-The utility posts a standalone comment explaining that automatic reapproval is
-unavailable and a separate new review is required,
-with a hidden account/repository/PR-bound marker. The native transaction verifies
-readback and prevents duplicate comments. An existing active marker needs no
-new comment. Dry runs report the decision without posting a marker.
+The utility posts a standalone Markdown comment with a heading and a concise
+list of reasons why the existing approval cannot be renewed, with a hidden
+account/repository/PR-bound marker. Include only decision-justifying reasons:
+no PR summary, unrelated discussion, coverage caveats such as "Partial assessment;
+unrelated changes may not have been examined", or workflow diagnostics.
+Keep partial coverage and diagnostics in the final report, not the comment.
+After verifying the comment, the native transaction dismisses the account's
+captured approvals on GitHub or resets its positive ADO vote to zero. An already
+dismissed approval or cleared vote needs no further write. Never submit a
+negative review or alter another account's approval. Preserve independent later
+approvals, withdrawals, and negative decisions; ADO cannot atomically fence a
+concurrent vote change. Permission errors or unknown reset outcomes leave an
+explicit incomplete notification, not success.
+The transaction prevents duplicate comments and never replays an uncertain reset.
+An existing active marker needs no new comment.
+Dry runs report the decision without posting a marker or changing approvals.
 Tooling failures before a completed assessment and missing approval authority
 are not semantic refusals and do not create needs-review markers.
 Never manually assemble or post a marker.
@@ -289,7 +301,8 @@ used to bypass an exhausted stale-recovery budget.
 
 An approval request can race with a push, a human decision, or existing
 auto-merge. The utility does not promise atomic source fencing on ADO or
-exactly-once publication. Never clear or dismiss a vote as rollback.
+exactly-once publication. Never clear or dismiss a vote as rollback of an
+approval request; clearing an existing approval belongs only to native `notify`.
 
 # Stage 5: report
 

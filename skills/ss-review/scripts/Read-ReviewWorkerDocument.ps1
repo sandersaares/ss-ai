@@ -12,6 +12,7 @@ $ErrorActionPreference = 'Stop'
 $PSNativeCommandUseErrorActionPreference = $true
 . "$PSScriptRoot\lib\NativeWorkflowBridge.ps1"
 
+$AssignmentPath = $ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath($AssignmentPath)
 Invoke-NativeReviewWorkflow -Arguments @(
     'worker-document', "--assignment-path=$AssignmentPath", "--document-id=$DocumentId", "--offset=$Offset"
 )
