@@ -7,7 +7,6 @@ use ohno::AppError;
 use serde_json::{Value, from_slice, json};
 use sha2::{Digest, Sha256};
 use url::Url;
-use uuid::Uuid;
 
 use crate::error::fail;
 use crate::json::{array, field, text};
@@ -77,7 +76,7 @@ fn upload_bytes(
         )
     })?;
     let id = field(&attachment, "id")
-        .and_then(attachment_id)
+        .and_then(|id| attachment_id(id, &name).map(|()| id.clone()))
         .map_err(|error| {
             crate::error::caused_by(
                 "ambiguousWrite",
@@ -100,8 +99,8 @@ pub(crate) fn verify_artifact(
     payload: &Value,
 ) -> Result<Value, AppError> {
     let path = route(transport, target)?;
-    attachment_id(field(payload, "id")?)?;
     let name = attachment_name(snapshot)?;
+    attachment_id(field(payload, "id")?, &name)?;
     if text(field(payload, "fileName")?)? != name {
         return Err(fail(
             "invalidInput",
@@ -135,7 +134,7 @@ pub(crate) fn comment(
     if body.is_empty() {
         return Err(fail("invalidInput", "Overview comment body is empty"));
     }
-    let response = transport.ado_write_once(
+    let response = transport.ado_write_with_rate_limit_retries(
         &format!("{path}/threads"),
         "POST",
         &json!({
@@ -271,16 +270,10 @@ fn check_hash(bytes: &[u8], snapshot: &Value) -> Result<(), AppError> {
     Ok(())
 }
 
-/// Accepts Azure attachment IDs without allowing unbounded or path-like values.
-fn attachment_id(value: &Value) -> Result<Value, AppError> {
-    if value
-        .as_u64()
-        .is_some_and(|id| id > 0 && u32::try_from(id).is_ok())
-        || value
-            .as_str()
-            .is_some_and(|id| id.len() == 36 && Uuid::parse_str(id).is_ok())
-    {
-        return Ok(value.clone());
+/// Accepts only the generated filename used to route this attachment.
+fn attachment_id(value: &Value, name: &str) -> Result<(), AppError> {
+    if value.as_str() == Some(name) {
+        return Ok(());
     }
     Err(fail("service", "Invalid Azure attachment identifier"))
 }
@@ -432,6 +425,7 @@ mod tests {
         struct Upload<'a> {
             bytes: &'a [u8],
             url: &'a str,
+            response: Vec<u8>,
             calls: Cell<usize>,
         }
 
@@ -460,7 +454,7 @@ mod tests {
                 Ok(HttpResponse::new(
                     200,
                     BTreeMap::new(),
-                    br#"{"id":3}"#.to_vec(),
+                    self.response.clone(),
                 ))
             }
         }
@@ -475,6 +469,7 @@ mod tests {
         let http = Upload {
             bytes,
             url: &url,
+            response: format!(r#"{{"id":"{name}"}}"#).into_bytes(),
             calls: Cell::new(0),
         };
         let mut transport = Transport::new(&target, None, &mock, &http, &NoWait);
@@ -482,7 +477,7 @@ mod tests {
         assert_eq!(http.calls.get(), 0);
         assert_eq!(
             upload_bytes(&mut transport, &target, &snapshot, bytes).unwrap(),
-            json!({"id": 3, "url": url, "fileName": name})
+            json!({"id": name, "url": url, "fileName": name})
         );
         assert_eq!(http.calls.get(), 1);
     }
@@ -499,7 +494,8 @@ mod tests {
             attachment_name(&snapshot).unwrap()
         );
         let url = attachment_url(&target, &path).unwrap();
-        let receipt = json!({"id": 3, "url": url, "fileName": attachment_name(&snapshot).unwrap()});
+        let name = attachment_name(&snapshot).unwrap();
+        let receipt = json!({"id": name, "url": url, "fileName": name});
         let mock = Mock::new(vec![("GET", &url, None, bytes.to_vec())]);
         let mut transport = Transport::new(&target, None, &mock, &mock, &NoWait);
         assert_eq!(
@@ -587,7 +583,11 @@ mod tests {
         for id in [json!(1), json!("1"), json!(u32::MAX)] {
             assert_ne!(thread_id(&id).unwrap().get(), 0);
         }
-        attachment_id(&json!("../attachment")).unwrap_err();
+        attachment_id(
+            &json!("../attachment"),
+            &attachment_name(&snapshot).unwrap(),
+        )
+        .unwrap_err();
         check_hash(b"archive", &snapshot).unwrap();
         check_hash(b"other", &snapshot).unwrap_err();
     }

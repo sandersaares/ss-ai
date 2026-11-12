@@ -245,6 +245,7 @@ Describe 'Native overview publisher caller' -Skip:$IsWindows {
         $result.exitCode | Should -Not -Be 0
         $result.output | Should -BeNullOrEmpty
         $result.record | Should -BeNullOrEmpty
+        $result.error | Should -Match 'ss-ai'
         @(Get-ChildItem -LiteralPath (Join-Path $script:Work $script:OutputDirectory) -Filter '.overview-prefix-*' -Force).Count | Should -Be 0
     }
 }

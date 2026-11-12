@@ -316,6 +316,20 @@ impl<'a> Transport<'a> {
         Ok(page.payload)
     }
 
+    /// Retries explicit rate-limit refusals for initial publication writes.
+    pub(crate) fn ado_write_with_rate_limit_retries(
+        &mut self,
+        path: &str,
+        method: &str,
+        body: &Value,
+    ) -> Result<Value, AppError> {
+        let page = self.ado_request(path, method, Some(body), &[], "7.1", true)?;
+        if page.continuation.is_some() {
+            return Err(fail("ambiguousWrite", "Unexpected ADO write continuation"));
+        }
+        Ok(page.payload)
+    }
+
     /// Reads GitHub slurped REST pages or a checked ADO list envelope.
     pub(crate) fn list(&mut self, path: &str) -> Result<Vec<Value>, AppError> {
         match self.platform {
@@ -675,8 +689,8 @@ impl<'a> Transport<'a> {
 
     /// Uploads or reads attachment bytes while retaining response evidence.
     ///
-    /// Paths are relative to the configured collection. The caller interprets
-    /// successful upload metadata and downloaded bytes as appropriate.
+    /// Explicit throttling refusals may be retried; uncertain upload failures
+    /// are not. Paths are relative to the configured collection.
     pub(crate) fn ado_binary(
         &mut self,
         path: &str,
@@ -690,7 +704,7 @@ impl<'a> Transport<'a> {
         {
             return Err(fail("invalidInput", "Invalid Azure attachment request"));
         }
-        // Publication records intent before upload and never replays a write.
+        // Only a proven HTTP 429 refusal may retry this intent-bearing upload.
         let response =
             self.ado_response(path, method, body, query, version, AdoRequestKind::Binary)?;
         // Attachment reads are verified by the caller's frozen content hash.
@@ -739,7 +753,7 @@ impl<'a> Transport<'a> {
         let binary = matches!(kind, AdoRequestKind::Binary);
         let retry_refusals = match kind {
             AdoRequestKind::Json { retry_refusals } => retry_refusals,
-            AdoRequestKind::Binary => read,
+            AdoRequestKind::Binary => true,
         };
         let mut transient_attempt = 0_u32;
         let mut rate_attempt = 0_u32;
@@ -848,7 +862,7 @@ enum GithubResponseMode {
 enum AdoRequestKind {
     /// JSON requests select whether a refusal may be replayed.
     Json { retry_refusals: bool },
-    /// Attachment reads may retry; uploads are single-attempt writes.
+    /// Attachments may retry explicit throttling refusals, not uncertain writes.
     Binary,
 }
 
@@ -1095,17 +1109,17 @@ mod tests {
     use ohno::AppError;
     use serde_json::json;
 
-    use super::{Http, HttpResponse, NativeHttp, Transport};
+    use super::Transport;
     use crate::error::fail;
     use crate::target::Target;
-    use crate::{Clock, Process, ProcessOutput, classification};
+    use crate::{Clock, Http, HttpResponse, NativeHttp, Process, ProcessOutput, classification};
 
     /// Supplies deterministic token acquisition and scripted HTTP responses.
     struct Fixture {
         replies: RefCell<VecDeque<Result<HttpResponse, AppError>>>,
         calls: RefCell<Vec<(String, String, Vec<u8>)>>,
         tokens: Cell<usize>,
-        waits: Cell<usize>,
+        waits: RefCell<Vec<Duration>>,
     }
 
     impl Fixture {
@@ -1114,7 +1128,7 @@ mod tests {
                 replies: RefCell::new(replies.into()),
                 calls: RefCell::new(Vec::new()),
                 tokens: Cell::new(0),
-                waits: Cell::new(0),
+                waits: RefCell::new(Vec::new()),
             }
         }
     }
@@ -1132,10 +1146,10 @@ mod tests {
             Timestamp::UNIX_EPOCH
         }
 
-        fn wait(&self, _: Duration) -> Result<(), AppError> {
+        fn wait(&self, duration: Duration) -> Result<(), AppError> {
             // An unexpected replay must fail immediately rather than loop forever.
-            assert!(self.waits.get() < 5);
-            self.waits.set(self.waits.get() + 1);
+            assert!(self.waits.borrow().len() < 5);
+            self.waits.borrow_mut().push(duration);
             Ok(())
         }
     }
@@ -1274,7 +1288,7 @@ mod tests {
             b"\xff"
         );
         assert_eq!(fixture.tokens.get(), 2);
-        assert_eq!(fixture.waits.get(), 2);
+        assert_eq!(fixture.waits.borrow().len(), 2);
         let error = transport
             .ado_binary("attachment", "POST", Some(b"data"), &[], "7.1")
             .unwrap_err();
@@ -1318,26 +1332,33 @@ mod tests {
     }
 
     #[test]
-    fn binary_upload_refusal_is_not_replayed_and_reads_do_not_sniff_html() {
-        let mut headers = BTreeMap::new();
-        headers.insert("content-type".to_owned(), "text/html".to_owned());
+    fn binary_upload_retries_explicit_throttling_and_reads_do_not_sniff_html() {
+        let mut throttle_headers = BTreeMap::new();
+        throttle_headers.insert("retry-after".to_owned(), "3".to_owned());
+        let mut html_headers = BTreeMap::new();
+        html_headers.insert("content-type".to_owned(), "text/html".to_owned());
         let fixture = Fixture::new(vec![
-            response(429, b"limited"),
+            Ok(HttpResponse::new(
+                429,
+                throttle_headers,
+                b"limited".to_vec(),
+            )),
+            response(201, b"uploaded"),
             Ok(HttpResponse::new(
                 200,
-                headers.clone(),
+                html_headers.clone(),
                 b"<content".to_vec(),
             )),
-            Ok(HttpResponse::new(200, headers, b"<sign-in".to_vec())),
+            Ok(HttpResponse::new(200, html_headers, b"<sign-in".to_vec())),
         ]);
         let target = target();
         let mut transport = Transport::new(&target, None, &fixture, &fixture, &fixture);
-        let error = transport
+        let uploaded = transport
             .ado_binary("attachment", "POST", Some(b"data"), &[], "7.1")
-            .unwrap_err();
-        assert_eq!(classification(&error), "rateLimited");
-        assert_eq!(fixture.calls.borrow().len(), 1);
-        assert_eq!(fixture.waits.get(), 0);
+            .unwrap();
+        assert_eq!(uploaded.status, 201);
+        assert_eq!(fixture.calls.borrow().len(), 2);
+        assert_eq!(fixture.waits.borrow().as_slice(), [Duration::from_secs(3)]);
         assert_eq!(
             transport
                 .ado_binary("attachment", "GET", None, &[], "7.1")
@@ -1349,6 +1370,35 @@ mod tests {
             .ado_binary("attachment", "POST", Some(b"data"), &[], "7.1")
             .unwrap_err();
         assert_eq!(classification(&error), "ambiguousWrite");
+    }
+
+    #[test]
+    fn overview_json_writes_retry_rate_limits_but_single_attempt_writes_do_not() {
+        let mut headers = BTreeMap::new();
+        headers.insert("retry-after".to_owned(), "7".to_owned());
+        let fixture = Fixture::new(vec![
+            Ok(HttpResponse::new(429, headers, b"limited".to_vec())),
+            response(201, b"{}"),
+        ]);
+        let target = target();
+        let mut transport = Transport::new(&target, None, &fixture, &fixture, &fixture);
+        assert_eq!(
+            transport
+                .ado_write_with_rate_limit_retries("threads", "POST", &json!({"body":"overview"}))
+                .unwrap(),
+            json!({})
+        );
+        assert_eq!(fixture.calls.borrow().len(), 2);
+        assert_eq!(fixture.waits.borrow().as_slice(), [Duration::from_secs(7)]);
+
+        let fixture = Fixture::new(vec![response(429, b"limited")]);
+        let mut transport = Transport::new(&target, None, &fixture, &fixture, &fixture);
+        let error = transport
+            .ado_write_once("threads", "POST", &json!({"body":"renewal"}))
+            .unwrap_err();
+        assert_eq!(classification(&error), "rateLimited");
+        assert_eq!(fixture.calls.borrow().len(), 1);
+        assert!(fixture.waits.borrow().is_empty());
     }
 
     #[test]

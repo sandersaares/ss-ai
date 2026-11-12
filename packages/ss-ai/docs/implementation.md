@@ -9,7 +9,8 @@ The nonpublished workspace packages implement the utility-wide [design](design.m
 - `ss-ai-git` compares immutable Git objects and interprets unified diffs.
 - `ss-ai-assessment` validates source inventory and judgment coverage for
   automatic reapproval without provider effects.
-- `ss-ai-runtime` supplies process, clock, diagnostics, and atomic file transactions.
+- `ss-ai-runtime` supplies process, clock, diagnostics, BOM-aware text decoding,
+  and atomic file transactions.
 - `ss-ai-review` owns provider-backed review and reapproval operations.
 - `ss-ai-review-context` owns local captured evidence, bounded queries, saved
   requests, and input diagnostics.

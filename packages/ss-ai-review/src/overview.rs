@@ -392,9 +392,9 @@ fn write_error(error: AppError, platform: Platform) -> EffectError {
     let kind = classification(&error);
     let refusal = (platform == Platform::AzureDevOps && kind == "rateLimited")
         || (platform == Platform::GitHub && kind == "explicitRateLimited");
-    let mut result = effect_error(error);
-    result.definite_refusal = refusal;
-    result
+    let mut error = effect_error(error);
+    error.definite_refusal = refusal;
+    error
 }
 
 /// Converts local failures into transaction diagnostics.

@@ -8,7 +8,7 @@
     reason = "The bounded test fixtures favor concise assertions and setup"
 )]
 
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::collections::BTreeMap;
 use std::env;
 use std::ffi::OsString;
@@ -329,7 +329,20 @@ struct Azure {
     requests: RefCell<Vec<String>>,
     archive: RefCell<Vec<u8>>,
     comment: RefCell<String>,
-    reject_upload: bool,
+    throttle_next_write: Cell<bool>,
+}
+
+/// Keeps rate-limit retries deterministic without waiting in real time.
+struct TestClock;
+
+impl Clock for TestClock {
+    fn now(&self) -> Timestamp {
+        Timestamp::UNIX_EPOCH
+    }
+
+    fn wait(&self, _: Duration) -> Result<(), AppError> {
+        Ok(())
+    }
 }
 
 impl Process for Azure {
@@ -352,6 +365,11 @@ impl Http for Azure {
         body: Option<&[u8]>,
     ) -> Result<HttpResponse, AppError> {
         self.requests.borrow_mut().push(format!("{method} {url}"));
+        if method == "POST" && self.throttle_next_write.replace(false) {
+            let mut headers = BTreeMap::new();
+            headers.insert("retry-after".to_owned(), "3".to_owned());
+            return Ok(HttpResponse::new(429, headers, Vec::new()));
+        }
         let response = if method == "POST" && url.contains("/threads?") {
             let body: Value = from_slice(body.unwrap()).unwrap();
             *self.comment.borrow_mut() =
@@ -377,12 +395,19 @@ impl Http for Azure {
         body: Option<&[u8]>,
     ) -> Result<HttpResponse, AppError> {
         self.requests.borrow_mut().push(format!("{method} {url}"));
-        if method == "POST" && self.reject_upload {
-            return Ok(HttpResponse::new(429, BTreeMap::new(), Vec::new()));
+        if method == "POST" && self.throttle_next_write.replace(false) {
+            let mut headers = BTreeMap::new();
+            headers.insert("retry-after".to_owned(), "3".to_owned());
+            return Ok(HttpResponse::new(429, headers, Vec::new()));
         }
         let bytes = if method == "POST" {
             *self.archive.borrow_mut() = body.unwrap().to_vec();
-            br#"{"id":3}"#.to_vec()
+            let id = url
+                .split("/attachments/")
+                .nth(1)
+                .and_then(|value| value.split('?').next())
+                .unwrap();
+            format!(r#"{{"id":"{id}"}}"#).into_bytes()
         } else {
             self.archive.borrow().clone()
         };
@@ -408,7 +433,7 @@ fn azure_publish(root: &Path, provider: &Azure, missing_tools: bool) -> Value {
     let overview_path = root.join("overview 雪.md");
     let output = root.join("output 雪");
     let skill = root.join("skill 雪");
-    let clock = SystemClock::default();
+    let clock = TestClock;
     let input = OverviewInput {
         capture: &capture,
         overview_path: &overview_path,
@@ -445,7 +470,12 @@ fn azure_publication_preserves_exact_archive_and_comment() {
     let provider = Azure::default();
     let result = azure_publish(fixture.path(), &provider, false);
     assert_eq!(result["status"], "succeeded", "{result}");
-    assert_eq!(result["artifact"]["id"], 3);
+    let expected_id = format!(
+        "ss-review-{}-{}.zip",
+        result["snapshot"]["runId"].as_str().unwrap(),
+        result["snapshot"]["archiveHash"].as_str().unwrap()
+    );
+    assert_eq!(result["artifact"]["id"], expected_id);
     assert_eq!(result["comment"]["id"], 5);
     assert_eq!(&*provider.archive.borrow(), b"archive");
     assert!(
@@ -479,15 +509,21 @@ fn missing_tools_report_snapshot_without_remote_writes() {
 fn azure_proven_rate_refusal_allows_retry() {
     let fixture = fixture();
     prepare(fixture.path());
-    let refused = Azure {
-        reject_upload: true,
+    let throttled = Azure {
+        throttle_next_write: Cell::new(true),
         ..Azure::default()
     };
-    let result = azure_publish(fixture.path(), &refused, false);
-    assert_eq!(result["operations"][0]["status"], "failed", "{result}");
-    let accepted = Azure::default();
-    let result = azure_publish(fixture.path(), &accepted, false);
+    let result = azure_publish(fixture.path(), &throttled, false);
     assert_eq!(result["status"], "succeeded", "{result}");
+    assert_eq!(
+        throttled
+            .requests
+            .borrow()
+            .iter()
+            .filter(|request| request.starts_with("POST ") && request.contains("/attachments/"))
+            .count(),
+        2
+    );
 }
 
 #[test]
@@ -716,15 +752,16 @@ fn cli_renders_parent_component_paths_child() {
             })
             .unwrap();
         *argument = OsString::from(format!("--output-directory={}", requested_output.display()));
-        let refused = Azure {
-            reject_upload: true,
+        let provider = Azure {
+            throttle_next_write: Cell::new(true),
             ..Azure::default()
         };
         let before = *renderer.render_calls.borrow();
         let first: Value =
-            from_str(&run(&args, &renderer, &refused, &SystemClock::default()).unwrap()).unwrap();
-        assert_eq!(first["operations"][0]["status"], "failed", "{first}");
-        assert_eq!(*renderer.render_calls.borrow(), before + 2);
+            from_str(&run(&args, &renderer, &provider, &TestClock).unwrap()).unwrap();
+        assert_eq!(first["status"], "succeeded", "{first}");
+        let after_first = *renderer.render_calls.borrow();
+        assert!(after_first > before);
         let generation = output_parent
             .join("output 雪/overview-publication")
             .join(first["snapshot"]["runId"].as_str().unwrap());
@@ -753,16 +790,15 @@ fn cli_renders_parent_component_paths_child() {
             manifest["archiveHash"],
             format!("{:x}", Sha256::digest(fs::read(archive_path).unwrap()))
         );
-        let accepted = Azure::default();
         let second: Value =
-            from_str(&run(&args, &renderer, &accepted, &SystemClock::default()).unwrap()).unwrap();
+            from_str(&run(&args, &renderer, &provider, &TestClock).unwrap()).unwrap();
         assert_eq!(second["status"], "succeeded", "{second}");
-        assert_eq!(*renderer.render_calls.borrow(), before + 2);
+        assert_eq!(*renderer.render_calls.borrow(), after_first);
         assert_eq!(
             fs::read(generation.join("html.json")).unwrap(),
             manifest_bytes
         );
-        assert_eq!(*accepted.archive.borrow(), fs::read(archive_path).unwrap());
+        assert_eq!(*provider.archive.borrow(), fs::read(archive_path).unwrap());
         if use_symlink {
             assert!(!case.join("output 雪").exists());
         }

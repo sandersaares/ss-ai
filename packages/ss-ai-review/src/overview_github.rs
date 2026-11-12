@@ -71,6 +71,8 @@ fn upload_bytes(
         )
     })?;
     let run = text(field(snapshot, "runId")?)?;
+    // This metadata budget permits compatible identifiers beyond generated UUIDs
+    // without treating the bound as a Gist provider restriction.
     if run.is_empty() || run.len() > 128 {
         return Err(fail("invalidState", "Invalid overview run identifier"));
     }

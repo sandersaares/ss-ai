@@ -1,14 +1,16 @@
 //! Freezes a preparation overview before any provider publication.
 
+use std::any::type_name;
 use std::env;
 use std::error::Error as StdError;
+use std::fmt;
 use std::fs;
 use std::path::{Path, PathBuf};
 
 use regex::Regex;
 use serde_json::{Value, from_str, from_value, json, to_vec_pretty};
 use sha2::{Digest, Sha256};
-use ss_ai_runtime::{Clock, FileTransaction, read_bytes};
+use ss_ai_runtime::{Clock, FileTransaction, decode_text_with_bom, read_bytes};
 use uuid::Uuid;
 
 use crate::target::Target;
@@ -56,13 +58,22 @@ snapshot_failure!(InvalidState, invalid_state, invalid_state_caused_by);
 snapshot_failure!(SnapshotIo, io, io_caused_by);
 
 /// Retains the validated target and original JSON for snapshot identity checks.
-#[derive(Debug)]
 pub(crate) struct ValidatedContext<'a> {
     pub(crate) url: &'a str,
     pub(crate) target: Target,
     target_json: &'a Value,
     source: &'a str,
     base: &'a str,
+}
+
+impl fmt::Debug for ValidatedContext<'_> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct(type_name::<Self>())
+            .field("url", &self.url)
+            .field("source", &self.source)
+            .field("base", &self.base)
+            .finish()
+    }
 }
 
 /// Publishes or reuses the immutable report under the caller's retained lock.
@@ -95,7 +106,7 @@ pub(crate) fn freeze_overview(
     let existing = snapshot_transaction
         .read_bytes()
         .map_err(|error| SnapshotError::io_caused_by(error.to_string(), error.into_std_error()))?;
-    let overview = read_text(&required_bytes(&source_path, clock)?);
+    let overview = decode_text_with_bom(&required_bytes(&source_path, clock)?);
     let source_hash = hash(overview.as_bytes());
     if let Some(bytes) = existing {
         let snapshot = parse_json(&bytes, true)?;
@@ -286,7 +297,7 @@ fn validate_overview(text: &str, output: &Path, skill: &Path) -> Result<(), Snap
     // PowerShell's `-match` is case-insensitive by default.
     let placeholder =
         Regex::new(r"\{\{[A-Za-z_][A-Za-z_0-9]*\}\}").expect("Fixed placeholder expression");
-    let mut sections: Vec<(String, String)> = Vec::new();
+    let mut sections: Vec<(&str, bool)> = Vec::new();
     let mut open: Option<String> = None;
     for line in text.split(['\r', '\n']) {
         if let Some((run, rest)) = fence_marker(line) {
@@ -303,12 +314,11 @@ fn validate_overview(text: &str, output: &Path, skill: &Path) -> Result<(), Snap
         } else if open.is_none()
             && let Some(found) = line.strip_prefix("## ").filter(|name| !name.is_empty())
         {
-            sections.push((found.trim_end().to_owned(), String::new()));
+            sections.push((found.trim_end(), false));
             continue;
         }
-        if let Some((_, body)) = sections.last_mut() {
-            body.push_str(line);
-            body.push('\n');
+        if let Some((_, has_content)) = sections.last_mut() {
+            *has_content |= !line.trim().is_empty();
         }
     }
     let mut previous = None;
@@ -318,12 +328,12 @@ fn validate_overview(text: &str, output: &Path, skill: &Path) -> Result<(), Snap
             .enumerate()
             .filter(|(_, section)| section.0 == name)
             .collect();
-        let [(position, (_, body))] = matches.as_slice() else {
+        let [(position, (_, has_content))] = matches.as_slice() else {
             return Err(SnapshotError::invalid_input(format!(
                 "Missing, empty, or unordered {name} section"
             )));
         };
-        if previous.is_some_and(|index| *position <= index) || body.trim().is_empty() {
+        if previous.is_some_and(|index| *position <= index) || !has_content {
             return Err(SnapshotError::invalid_input(format!(
                 "Missing, empty, or unordered {name} section"
             )));
@@ -389,57 +399,9 @@ fn required_bytes(path: &Path, clock: &dyn Clock) -> Result<Vec<u8>, SnapshotErr
         .ok_or_else(|| SnapshotError::io(format!("Missing file {}", path.display())))
 }
 
-/// Matches the BOM detection and replacement decoding used by `StreamReader`.
-fn read_text(bytes: &[u8]) -> String {
-    let decode_utf32 = |bytes: &[u8], little_endian: bool| {
-        let (chunks, remainder) = bytes.as_chunks::<4>();
-        let mut decoded = String::new();
-        for &unit in chunks {
-            let unit = if little_endian {
-                u32::from_le_bytes(unit)
-            } else {
-                u32::from_be_bytes(unit)
-            };
-            decoded.push(char::from_u32(unit).unwrap_or(char::REPLACEMENT_CHARACTER));
-        }
-        if !remainder.is_empty() {
-            decoded.push(char::REPLACEMENT_CHARACTER);
-        }
-        decoded
-    };
-    if let Some(bytes) = bytes.strip_prefix(&[0xff, 0xfe, 0, 0]) {
-        return decode_utf32(bytes, true);
-    }
-    if let Some(bytes) = bytes.strip_prefix(&[0, 0, 0xfe, 0xff]) {
-        return decode_utf32(bytes, false);
-    }
-    for (bom, little_endian) in [(&[0xff, 0xfe][..], true), (&[0xfe, 0xff][..], false)] {
-        if let Some(bytes) = bytes.strip_prefix(bom) {
-            let (chunks, remainder) = bytes.as_chunks::<2>();
-            let units: Vec<_> = chunks
-                .iter()
-                .map(|chunk| {
-                    if little_endian {
-                        u16::from_le_bytes(*chunk)
-                    } else {
-                        u16::from_be_bytes(*chunk)
-                    }
-                })
-                .collect();
-            let mut decoded = String::from_utf16_lossy(&units);
-            if !remainder.is_empty() {
-                decoded.push(char::REPLACEMENT_CHARACTER);
-            }
-            return decoded;
-        }
-    }
-    let bytes = bytes.strip_prefix(&[0xef, 0xbb, 0xbf]).unwrap_or(bytes);
-    String::from_utf8_lossy(bytes).into_owned()
-}
-
 /// Distinguishes malformed source input from a malformed retained snapshot.
 fn parse_json(bytes: &[u8], state: bool) -> Result<Value, SnapshotError> {
-    let text = read_text(bytes);
+    let text = decode_text_with_bom(bytes);
     from_str(&text).map_err(|error| {
         if state {
             SnapshotError::invalid_state_caused_by(error.to_string(), error)
@@ -502,7 +464,7 @@ mod tests {
 
     use super::{
         InvalidInput, InvalidState, SnapshotError, SnapshotIo, commit, hash, hash_shape,
-        make_report, parse_json, read_text, validate_context, validate_overview,
+        make_report, parse_json, validate_context, validate_overview,
     };
     use crate::{OverviewInput, OverviewRender};
 
@@ -613,7 +575,8 @@ mod tests {
     #[test]
     fn capture_binds_url_target_pr_and_inspected_commits() {
         let valid = capture();
-        validate_context(&valid).unwrap();
+        let context = validate_context(&valid).unwrap();
+        let _ = format!("{context:?}");
         for (pointer, value) in [
             ("/pullRequest/id", json!(43)),
             ("/target/pullRequestId", json!(43)),
@@ -716,9 +679,7 @@ mod tests {
     }
 
     #[test]
-    fn text_decoding_and_hash_match_powershell_conventions() {
-        assert_eq!(read_text(b"\xef\xbb\xbfhello"), "hello");
-        assert_eq!(read_text(&[0xff, 0xfe, b'h', 0, b'i', 0]), "hi");
+    fn snapshot_hash_and_commit_helpers_validate_expected_shapes() {
         assert_eq!(
             hash(b"abc"),
             "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"

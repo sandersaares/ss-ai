@@ -19,7 +19,10 @@ use regex::Regex;
 use regex::bytes::Regex as BytesRegex;
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
-use ss_ai_runtime::{Clock, FileTransaction, Process, ResourceLock, caused_by, fail, read_bytes};
+use ss_ai_runtime::{
+    Clock, FileTransaction, Process, ResourceLock, caused_by, decode_text_with_bom, fail,
+    read_bytes,
+};
 use tempfile::Builder;
 use url::Url;
 
@@ -74,7 +77,7 @@ pub fn write_report(
     reject_alias(&source_path, &html_path)?;
     let bytes =
         read_bytes(&source_path, clock)?.ok_or_else(|| invalid("Report Markdown is missing"))?;
-    let markdown = decode_markdown(&bytes);
+    let markdown = decode_text_with_bom(&bytes);
     if markdown.trim().is_empty() {
         return Err(invalid("Report Markdown is empty"));
     }
@@ -678,64 +681,6 @@ fn absolute(path: &Path) -> Result<PathBuf, AppError> {
         }
     }
     Ok(result)
-}
-
-/// Matches the text reader's BOM detection before computing the source hash.
-fn decode_markdown(bytes: &[u8]) -> String {
-    if let Some((bytes, little_endian)) = bytes
-        .strip_prefix(&[0xff, 0xfe, 0, 0])
-        .map(|bytes| (bytes, true))
-        .or_else(|| {
-            bytes
-                .strip_prefix(&[0, 0, 0xfe, 0xff])
-                .map(|bytes| (bytes, false))
-        })
-    {
-        let (chunks, remainder) = bytes.as_chunks::<4>();
-        let mut text = chunks
-            .iter()
-            .map(|&quad| {
-                let value = if little_endian {
-                    u32::from_le_bytes(quad)
-                } else {
-                    u32::from_be_bytes(quad)
-                };
-                char::from_u32(value).unwrap_or('\u{fffd}')
-            })
-            .collect::<String>();
-        if !remainder.is_empty() {
-            text.push('\u{fffd}');
-        }
-        return text;
-    }
-    let bytes = bytes.strip_prefix(&[0xef, 0xbb, 0xbf]).unwrap_or(bytes);
-    if let Some((bytes, little_endian)) = bytes
-        .strip_prefix(&[0xff, 0xfe])
-        .map(|bytes| (bytes, true))
-        .or_else(|| {
-            bytes
-                .strip_prefix(&[0xfe, 0xff])
-                .map(|bytes| (bytes, false))
-        })
-    {
-        let (chunks, remainder) = bytes.as_chunks::<2>();
-        let units = chunks.iter().map(|&pair| {
-            if little_endian {
-                u16::from_le_bytes(pair)
-            } else {
-                u16::from_be_bytes(pair)
-            }
-        });
-        let mut text = char::decode_utf16(units)
-            .map(|result| result.unwrap_or(char::REPLACEMENT_CHARACTER))
-            .collect::<String>();
-        if !remainder.is_empty() {
-            text.push('\u{fffd}');
-        }
-        text
-    } else {
-        String::from_utf8_lossy(bytes).into_owned()
-    }
 }
 
 /// Produces the same lowercase digest used by the report record.
