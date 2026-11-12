@@ -151,10 +151,16 @@ fn exact_unicode_pages_and_native_dispatch() {
         "if ($PSVersionTable.PSVersion -lt [version]'7.6') { throw 'PowerShell 7.6 or later is required.' }\n",
         "Set-StrictMode -Version Latest\n",
         "$ErrorActionPreference = 'Stop'\n",
-        "$PSNativeCommandUseErrorActionPreference = $true\n"
+        "$PSNativeCommandUseErrorActionPreference = $true\n",
+        "# Decode the native command's UTF-8 JSON output before PowerShell parses it.\n",
+        "[Console]::OutputEncoding = [Text.UTF8Encoding]::new($false)\n"
     )));
     assert!(
         dispatch.find("Apply this recovery policy").unwrap()
+            < dispatch.find("ss-ai workflow worker-document").unwrap()
+    );
+    assert!(
+        dispatch.find("[Console]::OutputEncoding").unwrap()
             < dispatch.find("ss-ai workflow worker-document").unwrap()
     );
     assert_eq!(collect(assignment_path, "scope"), expected);

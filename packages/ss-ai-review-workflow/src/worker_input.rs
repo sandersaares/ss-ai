@@ -312,6 +312,8 @@ pub fn create_assignment(
         "Set-StrictMode -Version Latest".to_owned(),
         "$ErrorActionPreference = 'Stop'".to_owned(),
         "$PSNativeCommandUseErrorActionPreference = $true".to_owned(),
+        "# Decode the native command's UTF-8 JSON output before PowerShell parses it.".to_owned(),
+        "[Console]::OutputEncoding = [Text.UTF8Encoding]::new($false)".to_owned(),
         format!("ss-ai workflow worker-document --assignment-path '{literal}' --document-id '{{{{DOCUMENT_ID}}}}' --offset 0"),
         "```".to_owned(),
         "| Placeholder | Replacement |".to_owned(),
