@@ -247,9 +247,8 @@ $PSNativeCommandUseErrorActionPreference = $true
 reading view, and `TITLE` is optional; omit `-Title` to use `Review report`.
 The adapters select `%LOCALAPPDATA%/ss-review/tools` when `LOCALAPPDATA` is set,
 or `~/.local/share/ss-review/tools` otherwise, and supply the active skill
-directory to the native executable. The render adapter writes the title to a
-UTF-8 file beside the resolved HTML output and removes it afterward. The output
-directory must be writable. The native process keeps the caller's working directory.
+directory to the native executable. The output directory must be writable. The
+native process keeps the caller's working directory.
 On Ubuntu, pass `-InstallBrowserDependencies` to the approved installer when
 browser system dependencies are needed. The check and installer exercise a real HTML/Mermaid
 probe. Check results include tool paths, `missing`, and `diagnostics`; rendering

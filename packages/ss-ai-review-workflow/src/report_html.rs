@@ -4,6 +4,7 @@
 //! `skills/ss-review/docs/{design,implementation}.md` explain the static,
 //! offline presentation and source-preserving transformations.
 
+use std::borrow::Cow;
 use std::fs;
 use std::path::{Component, Path, PathBuf};
 use std::sync::OnceLock;
@@ -372,8 +373,30 @@ fn transform(node: &mut Value, renderer: &mut DiagramRenderer<'_>) -> Result<(),
     Ok(())
 }
 
+/// Carries checked metadata to HTML presentation; a missing description differs from an empty one.
+struct SvgInspection {
+    description: Option<String>,
+    dimensions: String,
+}
+
 /// Checks the SVG before embedding it as an inert image and preserving its source.
 fn diagram_html(source: &str, svg: &str) -> Result<String, AppError> {
+    let inspection = inspect_svg(svg)?;
+    let alt = inspection
+        .description
+        .as_deref()
+        .unwrap_or("Mermaid diagram");
+    Ok(format!(
+        "<figure class=\"diagram\"><div class=\"diagram-scroll\"><img alt=\"{}\"{} src=\"data:image/svg+xml;base64,{}\"></div><details><summary>Diagram source</summary><pre><code>{}</code></pre></details></figure>",
+        html_escape(alt),
+        inspection.dimensions,
+        STANDARD.encode(svg.as_bytes()),
+        html_escape(source)
+    ))
+}
+
+/// Validates SVG content and extracts metadata used by its reading-view image.
+fn inspect_svg(svg: &str) -> Result<SvgInspection, AppError> {
     static EXTERNAL: OnceLock<Result<BytesRegex, regex::Error>> = OnceLock::new();
     // XML entities must be resolved before inspecting CSS, or encoded URLs can evade checks.
     let decoded =
@@ -458,29 +481,22 @@ fn diagram_html(source: &str, svg: &str) -> Result<String, AppError> {
             }
             Event::Text(text) => {
                 let text = text.xml10_content();
+                // Formatting whitespace outside the root is harmless; non-whitespace text is not.
                 if depth == 0 && !text.trim().is_empty() {
                     return Err(invalid("Text outside SVG root"));
                 }
-                if style_depth.is_some() && text.contains('\\') {
-                    return Err(invalid("SVG style contains unsupported escapes"));
-                }
-                if desc_depth.is_some() {
-                    description.push_str(&text);
-                }
+                inspect_svg_text(&text, desc_depth, style_depth, &mut description)?;
             }
             Event::CData(text) => {
                 let text = text.xml10_content();
+                // CDATA represents explicit content, so reject it outside the root even when empty.
                 if depth == 0 {
                     return Err(invalid("Text outside SVG root"));
                 }
-                if style_depth.is_some() && text.contains('\\') {
-                    return Err(invalid("SVG style contains unsupported escapes"));
-                }
-                if desc_depth.is_some() {
-                    description.push_str(&text);
-                }
+                inspect_svg_text(&text, desc_depth, style_depth, &mut description)?;
             }
             Event::GeneralRef(reference) => {
+                // References also represent explicit content and are never allowed outside the root.
                 if depth == 0 {
                     return Err(invalid("Text outside SVG root"));
                 }
@@ -490,12 +506,7 @@ fn diagram_html(source: &str, svg: &str) -> Result<String, AppError> {
                     let reference = unescape(&reference).map_err(|error| {
                         caused_by("invalidInput", "Invalid SVG reference", error)
                     })?;
-                    if style_depth.is_some() && reference.contains('\\') {
-                        return Err(invalid("SVG style contains unsupported escapes"));
-                    }
-                    if desc_depth.is_some() {
-                        description.push_str(&reference);
-                    }
+                    inspect_svg_text(&reference, desc_depth, style_depth, &mut description)?;
                 }
             }
             Event::DocType(_) | Event::PI(_) => {
@@ -511,18 +522,26 @@ fn diagram_html(source: &str, svg: &str) -> Result<String, AppError> {
     if !root_seen || depth != 0 {
         return Err(invalid("Malformed SVG document"));
     }
-    let alt = if desc_seen {
-        &description
-    } else {
-        "Mermaid diagram"
-    };
-    Ok(format!(
-        "<figure class=\"diagram\"><div class=\"diagram-scroll\"><img alt=\"{}\"{} src=\"data:image/svg+xml;base64,{}\"></div><details><summary>Diagram source</summary><pre><code>{}</code></pre></details></figure>",
-        html_escape(alt),
+    Ok(SvgInspection {
+        description: desc_seen.then_some(description),
         dimensions,
-        STANDARD.encode(svg.as_bytes()),
-        html_escape(source)
-    ))
+    })
+}
+
+/// Applies the style-escape and description rules shared by SVG text events.
+fn inspect_svg_text(
+    text: &str,
+    desc_depth: Option<usize>,
+    style_depth: Option<usize>,
+    description: &mut String,
+) -> Result<(), AppError> {
+    if style_depth.is_some() && text.contains('\\') {
+        return Err(invalid("SVG style contains unsupported escapes"));
+    }
+    if desc_depth.is_some() {
+        description.push_str(text);
+    }
+    Ok(())
 }
 
 /// Validates SVG attributes and captures the renderer's intrinsic dimensions.
@@ -688,7 +707,7 @@ fn absolute(path: &Path) -> Result<PathBuf, AppError> {
 }
 
 /// Matches the text reader's BOM detection before computing the source hash.
-fn decode_markdown(bytes: &[u8]) -> String {
+fn decode_markdown(bytes: &[u8]) -> Cow<'_, str> {
     if let Some((bytes, little_endian)) = bytes
         .strip_prefix(&[0xff, 0xfe, 0, 0])
         .map(|bytes| (bytes, true))
@@ -713,7 +732,7 @@ fn decode_markdown(bytes: &[u8]) -> String {
         if !remainder.is_empty() {
             text.push('\u{fffd}');
         }
-        return text;
+        return Cow::Owned(text);
     }
     let bytes = bytes.strip_prefix(&[0xef, 0xbb, 0xbf]).unwrap_or(bytes);
     if let Some((bytes, little_endian)) = bytes
@@ -739,9 +758,9 @@ fn decode_markdown(bytes: &[u8]) -> String {
         if !remainder.is_empty() {
             text.push('\u{fffd}');
         }
-        text
+        Cow::Owned(text)
     } else {
-        String::from_utf8_lossy(bytes).into_owned()
+        String::from_utf8_lossy(bytes)
     }
 }
 

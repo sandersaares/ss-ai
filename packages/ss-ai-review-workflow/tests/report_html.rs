@@ -160,17 +160,31 @@ fn skill_root() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join("../../skills/ss-review")
 }
 
-/// Reads visible inline text without prescribing Pandoc's container structure.
-fn inline_text(node: &Value) -> String {
+/// Reads visible text and code without prescribing Pandoc's container structure.
+fn visible_text(node: &Value) -> String {
     match node.get("t").and_then(Value::as_str) {
         Some("Str") => node["c"].as_str().unwrap().to_owned(),
-        Some("Code") => node["c"][1].as_str().unwrap().to_owned(),
+        Some("Code" | "CodeBlock") => node["c"][1].as_str().unwrap().to_owned(),
         Some("Space") => " ".to_owned(),
         _ => match node {
-            Value::Array(values) => values.iter().map(inline_text).collect(),
-            Value::Object(object) => object.get("c").map_or_else(String::new, inline_text),
+            Value::Array(values) => values.iter().map(visible_text).collect(),
+            Value::Object(object) => object.get("c").map_or_else(String::new, visible_text),
             _ => String::new(),
         },
+    }
+}
+
+/// Detects source markup nodes without rejecting the renderer's separate diagram node.
+fn contains_raw_markup(node: &Value) -> bool {
+    match node {
+        Value::Array(values) => values.iter().any(contains_raw_markup),
+        Value::Object(object) => {
+            matches!(
+                object.get("t").and_then(Value::as_str),
+                Some("RawBlock" | "RawInline")
+            ) || object.values().any(contains_raw_markup)
+        }
+        _ => false,
     }
 }
 
@@ -230,10 +244,14 @@ fn embeds_checked_diagrams_and_transforms_the_pandoc_ast() {
     let ast = process.observed_ast.borrow();
     let ast = ast.as_ref().unwrap();
     assert_eq!(ast["meta"], json!({}));
-    assert_eq!(ast["blocks"][1]["t"], "CodeBlock");
-    assert_eq!(ast["blocks"][2]["c"][0]["t"], "Str");
+    let raw_block = &ast["blocks"][1];
+    assert_eq!(visible_text(raw_block), "<script>alert(1)</script>");
+    assert!(!contains_raw_markup(raw_block));
+    let raw_inline = &ast["blocks"][2]["c"][0];
+    assert_eq!(visible_text(raw_inline), "<b>");
+    assert!(!contains_raw_markup(raw_inline));
     let reference = &ast["blocks"][2]["c"][1];
-    let text = inline_text(reference);
+    let text = visible_text(reference);
     assert!(text.contains("File"));
     assert!(text.contains("src/a.rs"));
     assert!(!contains_link(reference));
