@@ -8,7 +8,7 @@ use std::str::FromStr;
 
 use ohno::AppError;
 use serde_json::{Value, json};
-use ss_ai_review_context::{decode_file_text, read_capture};
+use ss_ai_review_context::{decode_file_text, read_capture, validate_capture_version};
 use ss_ai_runtime::{Clock, FileTransaction, caused_by, fail, read_bytes};
 
 use crate::findings::read_artifact;
@@ -326,6 +326,10 @@ fn set_merge_approval_from_context(
     carry_forward: bool,
     clock: &dyn Clock,
 ) -> Result<Value, AppError> {
+    validate_capture_version(context)?;
+    if let Some(previous) = previous {
+        validate_capture_version(previous)?;
+    }
     let url = required_text(context, "pullRequestUrl")?;
     let pr = context
         .get("pullRequest")

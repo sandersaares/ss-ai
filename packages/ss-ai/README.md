@@ -229,8 +229,8 @@ active skill directory supplied with `--skill-root`. Its result contains the
 assignment path and a dispatch prompt. The prompt includes recovery guidance
 and a ready-to-run `workflow worker-document` command for each registered
 shared Markdown document. The PowerShell command initializes its own version
-and error handling settings; copy the complete block for initial reads and
-reloads.
+and error handling settings and configures UTF-8 decoding for the native
+command's JSON output; copy the complete block for initial reads and reloads.
 
 The reader checks the registered bytes and emits an exact page, a UTF-16
 continuation offset, and an explicit completion flag. The complete encoded
