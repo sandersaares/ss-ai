@@ -90,7 +90,6 @@ impl Debug for TrackerPublicationInput<'_> {
 }
 
 /// Carries the local publication prerequisites across the provider boundary.
-#[derive(Debug)]
 struct ValidatedTrackerInput<'a> {
     target: TrackerTarget,
     metadata: &'a Value,
@@ -357,7 +356,7 @@ mod tests {
                 acceptance: None,
                 tenant: None,
             };
-            validate_input(&input).unwrap_err();
+            assert!(validate_input(&input).is_err());
         }
         let plan = json!({"items":[valid_item],"summaryBody":"summary"});
         let input = TrackerPublicationInput {

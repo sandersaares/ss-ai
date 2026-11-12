@@ -9,7 +9,7 @@ use url::Url;
 
 use crate::error::{caused_by, fail};
 use crate::json::required_optional;
-use crate::target::{Platform, escape};
+use crate::target::{Platform, decode, escape};
 
 /// Inputs for choosing a destination; explicit coordinates override URL values.
 #[derive(Clone, Copy, Default)]
@@ -462,29 +462,6 @@ fn parse_platform(value: &str) -> Result<Platform, AppError> {
     }
 }
 
-/// Decodes a single path segment without form-style plus conversion.
-fn decode(value: &str) -> Result<String, AppError> {
-    let mut bytes = Vec::new();
-    let mut source = value.bytes();
-    while let Some(byte) = source.next() {
-        if byte == b'%' {
-            let high = source.next().and_then(|byte| char::from(byte).to_digit(16));
-            let low = source.next().and_then(|byte| char::from(byte).to_digit(16));
-            let value = high
-                .zip(low)
-                .and_then(|(high, low)| high.checked_mul(16)?.checked_add(low))
-                .and_then(|value| u8::try_from(value).ok())
-                .ok_or_else(|| invalid("Invalid URL escape"))?;
-            bytes.push(value);
-        } else {
-            bytes.push(byte);
-        }
-    }
-    String::from_utf8(bytes).map_err(|error| {
-        caused_by("invalidInput", "Tracker URL is not UTF-8".to_owned(), error).into()
-    })
-}
-
 /// Rejects empty and path-shaped identities that cannot name a single segment.
 fn coordinate(value: &str) -> Result<(), AppError> {
     if value.trim().is_empty()
@@ -732,8 +709,8 @@ mod tests {
             })
         );
         validate_tracker_arguments(&target, &json!({})).unwrap();
-        let journal: TrackerTarget = serde_json::from_value(target).unwrap();
-        assert!(journal.matches(&github()).unwrap());
+        let target: TrackerTarget = serde_json::from_value(target).unwrap();
+        assert!(target.matches(&github()).unwrap());
     }
 
     #[test]

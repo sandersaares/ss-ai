@@ -57,6 +57,10 @@ pub(crate) fn compare_ado_body(
     stored: &str,
     accepted: Option<&AcceptedRewrite<'_>>,
 ) -> BodyVerdict {
+    if approved == stored && !approved.contains(['<', '>']) {
+        // Raw brackets must still pass through encoding and the HTML-loss check.
+        return BodyVerdict::Match;
+    }
     let sent = encode_ado_body(approved);
     if sent == stored || normalize_lines(&sent) == normalize_lines(stored) {
         return BodyVerdict::Match;
@@ -93,6 +97,7 @@ pub(crate) fn compare_ado_body(
 /// Exposes body verification to the offline fuzz harness.
 ///
 /// The returned boolean reports automatic equivalence without a human decision.
+#[cfg(any(test, feature = "private-fuzz"))]
 #[doc(hidden)]
 #[must_use]
 pub fn fuzz_tracker_body(approved: &str, stored: &str) -> (String, bool) {
@@ -316,6 +321,10 @@ mod tests {
 
     #[test]
     fn compares_representations_without_decoding_approved_entities() {
+        assert_eq!(
+            compare_ado_body("unchanged", "unchanged", None),
+            BodyVerdict::Match
+        );
         assert_eq!(
             compare_ado_body("x &lt;\ny", "x &lt;\r\ny", None),
             BodyVerdict::Match

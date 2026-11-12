@@ -46,6 +46,10 @@ lock in `ss-ai-review`; its PowerShell entry point preserves the named interface
 Tracker publication combines the native renderer with provider-specific
 preflight and per-item journaled creation and verification. Its PowerShell
 entry point retains the named skill interface.
+Accepted Azure body rewrites become durable before the transaction records a
+new creation intent. If saving that intent fails, the same accepted decision
+can continue; after the intent is durable, the possible provider write requires
+reconciliation instead of automatic replay.
 The Cargo inventory has no provider or
 network dependency. The focused packages support targeted test builds and
 incremental reuse; a cold build of the complete executable still builds its

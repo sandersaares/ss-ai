@@ -69,6 +69,55 @@ pub(crate) fn state(
     if !same_name(service_project, project) {
         return Err(fail("service", "Azure returned a different project"));
     }
+    let resolved_type = resolve_work_item_type(transport, &project_segment, requested_type)?;
+    let resolved_field =
+        resolve_description_field(transport, &project_segment, &resolved_type, description)?;
+
+    let mut area_route = format!("{project_segment}/_apis/wit/classificationnodes/areas");
+    for segment in segments.iter().skip(1) {
+        area_route.push('/');
+        area_route.push_str(&escape(segment));
+    }
+    let area = get(transport, &area_route, &[], "7.1")?;
+    let area_name = service_text(&area, "name")?;
+    if !same_name(area_name, segments.last().expect("area has a root")) {
+        return Err(fail("service", "Azure returned a different area"));
+    }
+    let mut resolved_area = segments.iter().map(|s| (*s).to_owned()).collect::<Vec<_>>();
+    if let Some(root) = resolved_area.first_mut() {
+        project.clone_into(root);
+    }
+    if resolved_area.len() > 1 {
+        area_name.clone_into(
+            resolved_area
+                .last_mut()
+                .expect("area has at least one segment"),
+        );
+    } else if !same_name(area_name, project) {
+        return Err(fail("service", "Azure returned a different area root"));
+    }
+
+    let parent = parent_id
+        .map(|id| resolve_parent(transport, collection, project, id))
+        .transpose()?;
+    Ok(json!({
+        "platform": "azureDevOps",
+        "trackerName": format!("{}/{project}", target.organization),
+        "collectionUrl": collection,
+        "project": project,
+        "workItemType": resolved_type,
+        "areaPath": resolved_area.join("\\"),
+        "descriptionField": resolved_field,
+        "parent": parent,
+    }))
+}
+
+/// Chooses the requested work-item type from the destination project's definitions.
+fn resolve_work_item_type(
+    transport: &mut Transport<'_>,
+    project_segment: &str,
+    requested_type: &str,
+) -> Result<String, AppError> {
     let types = transport.list(&format!("{project_segment}/_apis/wit/workitemtypes"))?;
     let mut resolved_type = None;
     for candidate in &types {
@@ -77,17 +126,26 @@ pub(crate) fn state(
             return Err(fail("service", "Azure returned duplicate work item types"));
         }
     }
-    let resolved_type = resolved_type.ok_or_else(|| {
+    resolved_type.ok_or_else(|| {
         fail(
             "invalidInput",
             "The project does not define the work item type",
         )
-    })?;
+    })
+}
+
+/// Resolves a selected type's description field and verifies its rich-text support.
+fn resolve_description_field(
+    transport: &mut Transport<'_>,
+    project_segment: &str,
+    work_item_type: &str,
+    description: Option<&str>,
+) -> Result<String, AppError> {
     let type_record = get(
         transport,
         &format!(
             "{project_segment}/_apis/wit/workitemtypes/{}",
-            escape(&resolved_type)
+            escape(work_item_type)
         ),
         &[],
         "7.1",
@@ -138,76 +196,47 @@ pub(crate) fn state(
             "Description field must be a rich-text HTML field",
         ));
     }
+    Ok(resolved_field)
+}
 
-    let mut area_route = format!("{project_segment}/_apis/wit/classificationnodes/areas");
-    for segment in segments.iter().skip(1) {
-        area_route.push('/');
-        area_route.push_str(&escape(segment));
+/// Confirms a parent belongs to the project and retains its service API URL.
+fn resolve_parent(
+    transport: &mut Transport<'_>,
+    collection: &str,
+    project: &str,
+    id: NonZeroU32,
+) -> Result<Value, AppError> {
+    let response = get(
+        transport,
+        &format!("_apis/wit/workitems/{id}"),
+        &[("fields", "System.TeamProject,System.Title".to_owned())],
+        "7.1",
+    )?;
+    if positive_id(field(&response, "id")?, "service")? != id {
+        return Err(fail(
+            "service",
+            "Azure returned a different parent work item",
+        ));
     }
-    let area = get(transport, &area_route, &[], "7.1")?;
-    let area_name = service_text(&area, "name")?;
-    if !same_name(area_name, segments.last().expect("area has a root")) {
-        return Err(fail("service", "Azure returned a different area"));
+    let fields = field(&response, "fields")?;
+    if !same_name(service_text(fields, "System.TeamProject")?, project) {
+        return Err(fail(
+            "invalidInput",
+            "Parent work item belongs to another project",
+        ));
     }
-    let mut resolved_area = segments.iter().map(|s| (*s).to_owned()).collect::<Vec<_>>();
-    if let Some(root) = resolved_area.first_mut() {
-        project.clone_into(root);
+    let url = service_text(&response, "url")?;
+    if !parent_url_matches(url, collection, project, id) {
+        return Err(fail(
+            "service",
+            "Azure returned an unexpected parent API URL",
+        ));
     }
-    if resolved_area.len() > 1 {
-        area_name.clone_into(
-            resolved_area
-                .last_mut()
-                .expect("area has at least one segment"),
-        );
-    } else if !same_name(area_name, project) {
-        return Err(fail("service", "Azure returned a different area root"));
-    }
-
-    let parent = if let Some(id) = parent_id {
-        let response = get(
-            transport,
-            &format!("_apis/wit/workitems/{id}"),
-            &[("fields", "System.TeamProject,System.Title".to_owned())],
-            "7.1",
-        )?;
-        if positive_id(field(&response, "id")?, "service")? != id {
-            return Err(fail(
-                "service",
-                "Azure returned a different parent work item",
-            ));
-        }
-        let fields = field(&response, "fields")?;
-        if !same_name(service_text(fields, "System.TeamProject")?, project) {
-            return Err(fail(
-                "invalidInput",
-                "Parent work item belongs to another project",
-            ));
-        }
-        let url = service_text(&response, "url")?;
-        if !parent_url_matches(url, collection, project, id) {
-            return Err(fail(
-                "service",
-                "Azure returned an unexpected parent API URL",
-            ));
-        }
-        Some(json!({
-            "itemId": id.to_string(),
-            "title": service_text(fields, "System.Title")?,
-            "url": url,
-            "webUrl": item_url(collection, project, id),
-        }))
-    } else {
-        None
-    };
     Ok(json!({
-        "platform": "azureDevOps",
-        "trackerName": format!("{}/{project}", target.organization),
-        "collectionUrl": collection,
-        "project": project,
-        "workItemType": resolved_type,
-        "areaPath": resolved_area.join("\\"),
-        "descriptionField": resolved_field,
-        "parent": parent,
+        "itemId": id.to_string(),
+        "title": service_text(fields, "System.Title")?,
+        "url": url,
+        "webUrl": item_url(collection, project, id),
     }))
 }
 
@@ -613,13 +642,21 @@ mod tests {
         }
     }
 
+    // This successful preflight uses Unicode project casing, a nested area,
+    // both body fields with an explicit choice, and a parent work item.
     fn preflight() -> Vec<Value> {
         vec![
+            // Project lookup establishes the casing used by later routes.
             json!({"name":"Prøject"}),
+            // Type listing identifies the project's available work-item forms.
             json!({"count":1,"value":[{"name":"Bug"}]}),
+            // The type offers both body fields, so tests must explicitly choose one.
             json!({"fields":[{"referenceName":"System.Description"},{"referenceName":REPRO}]}),
+            // The selected repro field is confirmed as rich text.
             json!({"referenceName":REPRO,"type":"html"}),
+            // Area lookup returns the canonical name for the requested child path.
             json!({"name":"Sub Area"}),
+            // Parent lookup supplies project ownership, title, and the relation URL.
             json!({"id":9,"url":"https://dev.azure.com/org/_apis/wit/workItems/9",
                 "fields":{"System.TeamProject":"Prøject","System.Title":"Parent"}}),
         ]

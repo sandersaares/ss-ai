@@ -28,8 +28,7 @@ use crate::error::fail;
 use crate::tracker_body::{AcceptedRewrite, BodyVerdict, compare_ado_body};
 use crate::tracker_target::TrackerTarget;
 
-mod fuzz;
-
+#[cfg(any(test, feature = "private-fuzz"))]
 pub use fuzz::fuzz_tracker_transaction;
 
 /// Provider calls supplied by the composition root, which also performs preflight.
@@ -759,10 +758,14 @@ fn verify(
 /// The radius matches TrackerPublication.ps1, balancing readable context
 /// against journal size.
 fn excerpt(text: &str, at: usize) -> String {
-    let units: Vec<u16> = text.encode_utf16().collect();
-    let start = at.saturating_sub(48).min(units.len());
-    let end = at.saturating_add(48).min(units.len());
-    String::from_utf16_lossy(&units[start..end])
+    let start = at.saturating_sub(48);
+    let end = at.saturating_add(48);
+    let units = text
+        .encode_utf16()
+        .skip(start)
+        .take(end.saturating_sub(start))
+        .collect::<Vec<_>>();
+    String::from_utf16_lossy(&units)
 }
 
 /// Records readback failure separately from the durable creation receipt.
@@ -828,6 +831,10 @@ fn run(
             op["acceptedRewrite"] = json!({"expectedBodyHash":acceptance.expected_body_hash, "storedBodyHash":acceptance.stored_body_hash});
             old["status"] = json!("resumeReady");
             old["adjudication"] = Value::Null;
+            // Keep the accepted decision durable before the next creation
+            // intent; a failed intent save can resume it, while a saved
+            // ambiguous intent must be reconciled. Ref:
+            // skills/ss-review/docs/implementation.md#tracker-publication.
             save(journal, &old)?;
         }
         old
@@ -930,6 +937,9 @@ fn run(
     }
     Ok(outcome(&record, path, summary))
 }
+
+#[cfg(any(test, feature = "private-fuzz"))]
+mod fuzz;
 
 #[cfg(test)]
 #[cfg_attr(coverage_nightly, coverage(off))]
@@ -1199,6 +1209,13 @@ mod tests {
         ] {
             super::fuzz_tracker_transaction(&data);
         }
+    }
+
+    #[test]
+    fn excerpt_preserves_lossy_utf16_window_boundaries() {
+        // The ASCII prefix leaves one UTF-16 slot for the emoji's surrogate pair.
+        let text = format!("{}😀Z", "a".repeat(47));
+        assert_eq!(super::excerpt(&text, 0), format!("{}�", "a".repeat(47)));
     }
 
     #[test]

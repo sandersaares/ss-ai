@@ -55,6 +55,7 @@ pub use overview_snapshot::overview_text_is_publishable;
 pub use ss_ai_runtime::{
     Clock, NativeProcess, Process, ProcessOutput, SystemClock, classification,
 };
+#[cfg(any(test, feature = "private-fuzz"))]
 #[doc(hidden)]
 pub use tracker_body::fuzz_tracker_body;
 pub use tracker_publication::{
@@ -62,6 +63,7 @@ pub use tracker_publication::{
     tracker_publication_check_prior,
 };
 pub use tracker_target::{resolve_tracker_target, validate_tracker_arguments};
+#[cfg(any(test, feature = "private-fuzz"))]
 #[doc(hidden)]
 pub use tracker_transaction::fuzz_tracker_transaction;
 pub use transport::{Http, HttpResponse, NativeHttp};

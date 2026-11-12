@@ -175,17 +175,6 @@ impl NativeHttp {
     }
 }
 
-/// Selects the request media type without changing authentication handling.
-#[derive(Clone, Copy)]
-enum HttpBodyKind {
-    /// Ordinary provider JSON.
-    Json,
-    /// JSON Patch operations.
-    JsonPatch,
-    /// Attachment bytes.
-    Binary,
-}
-
 impl Http for NativeHttp {
     /// Sends JSON bytes directly so the Azure CLI cannot alter service Unicode.
     fn send(
@@ -217,6 +206,17 @@ impl Http for NativeHttp {
     ) -> Result<HttpResponse, AppError> {
         self.execute(self.request(method, url, token, body, HttpBodyKind::Binary)?)
     }
+}
+
+/// Selects the request media type without changing authentication handling.
+#[derive(Clone, Copy)]
+enum HttpBodyKind {
+    /// Ordinary provider JSON.
+    Json,
+    /// JSON Patch operations.
+    JsonPatch,
+    /// Attachment bytes.
+    Binary,
 }
 
 /// Shares authentication, retry, and paging behavior across native operations.

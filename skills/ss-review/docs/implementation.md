@@ -1202,6 +1202,9 @@ A paused body-adjudication state is the only resumable path. Continuation is
 bound to the exact item, approved body, stored body, destination metadata, and
 remaining publication plan. This allows the existing run to continue without
 turning general failure recovery into a duplicate-producing retry mechanism.
+The accepted decision is persisted before a later creation intent. If persisting
+that intent fails, the same decision can continue; once the intent is durable,
+the possible provider write requires reconciliation.
 
 The review summary is returned to the orchestrator rather than filed as work,
 because it describes the delivery and does not represent an independently
