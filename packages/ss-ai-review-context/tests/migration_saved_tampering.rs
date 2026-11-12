@@ -15,10 +15,10 @@ use jiff::Timestamp;
 use ohno::AppError;
 use serde_json::{Value, json};
 use ss_ai_review_context::{
-    CaptureChanged, ModifiedSelectors, SavedRequestAction, document_hash, prepare, query,
-    read_diagnostics, read_saved, snapshot_id, write_comment_authorship,
+    SavedRequestAction, document_hash, prepare, query, read_diagnostics, read_saved, snapshot_id,
+    write_comment_authorship,
 };
-use ss_ai_runtime::Clock;
+use ss_ai_runtime::{Clock, classification};
 
 /// Makes unexpected transaction contention fail without waiting on real time.
 struct NoWait;
@@ -283,7 +283,7 @@ fn edited_selectors_reject_both_continuation_and_restart() {
     let before = fs::read(&files.request).unwrap();
     for action in [SavedRequestAction::Next, SavedRequestAction::Restart] {
         let error = read_saved(&files.request, action, &NoWait).unwrap_err();
-        assert!(error.find_source::<ModifiedSelectors>().is_some());
+        assert_eq!(classification(&error), "invalidInput");
         assert_eq!(fs::read(&files.request).unwrap(), before);
     }
 }
@@ -335,7 +335,7 @@ fn changed_baseline_rejects_replay_and_restart_rebinds_changes() {
     fs::write(&baseline, serde_json::to_vec(&changed).unwrap()).unwrap();
     let before = fs::read(&files.request).unwrap();
     let error = read_saved(&files.request, SavedRequestAction::Replay, &clock).unwrap_err();
-    assert!(error.find_source::<CaptureChanged>().is_some());
+    assert_eq!(classification(&error), "invalidInput");
     assert_eq!(fs::read(&files.request).unwrap(), before);
     let restarted: Value = serde_json::from_str(
         &read_saved(&files.request, SavedRequestAction::Restart, &clock).unwrap(),

@@ -29,13 +29,13 @@ pub enum SavedRequestAction {
     Restart,
 }
 
-/// Identifies a saved request whose selectors or identity were modified.
+/// Keeps modified saved-request selectors distinguishable inside this crate.
 #[ohno::error]
-pub struct ModifiedSelectors;
+pub(crate) struct ModifiedSelectors;
 
-/// Identifies a saved request bound to different capture evidence.
+/// Keeps changed capture bindings distinguishable inside this crate.
 #[ohno::error]
-pub struct CaptureChanged;
+pub(crate) struct CaptureChanged;
 
 /// Creates a saved query after validating selectors and their capture.
 pub fn prepare(
@@ -153,16 +153,7 @@ pub fn read_saved(
         ));
     }
     let options = normalize_options(&request["options"])?;
-    if document_hash(&options)? != document_hash(&request["options"])?
-        || request_id(&request)? != required_string(&request, "requestId")?
-    {
-        return Err(caused_by(
-            "invalidInput",
-            "Saved query selectors or identity were modified",
-            ModifiedSelectors::new(),
-        )
-        .into());
-    }
+    validate_saved_identity(&request, &options)?;
     if action == SavedRequestAction::Restart {
         increment_diagnostic(&diagnostics_path, "cursorRestarts", NonZeroU32::MIN, clock)?;
         request = new_request(
@@ -180,16 +171,7 @@ pub fn read_saved(
         .transpose()?;
     let snapshot = snapshot_id(&document)?;
     let baseline = previous.as_ref().map(snapshot_id).transpose()?;
-    if request["snapshotId"].as_str() != Some(snapshot.as_str())
-        || optional_string(&request, "baselineId")? != baseline.as_deref()
-    {
-        return Err(caused_by(
-            "invalidInput",
-            "Saved query capture changed; restart or create a new request",
-            CaptureChanged::new(),
-        )
-        .into());
-    }
+    validate_capture_identity(&request, &snapshot, baseline.as_deref())?;
     let last_page = &request["lastPage"];
     let cursor = if last_page.is_null() {
         if action == SavedRequestAction::Next {
@@ -290,6 +272,40 @@ fn request_id(request: &Value) -> Result<String, AppError> {
         "baselineId": request["baselineId"],
         "options": request["options"]
     }))
+}
+
+/// Confirms a saved request still binds its original selectors and identity.
+fn validate_saved_identity(request: &Value, options: &Value) -> Result<(), AppError> {
+    if document_hash(options)? != document_hash(&request["options"])?
+        || request_id(request)? != required_string(request, "requestId")?
+    {
+        return Err(caused_by(
+            "invalidInput",
+            "Saved query selectors or identity were modified",
+            ModifiedSelectors::new(),
+        )
+        .into());
+    }
+    Ok(())
+}
+
+/// Confirms a saved request still binds the current capture evidence.
+fn validate_capture_identity(
+    request: &Value,
+    snapshot: &str,
+    baseline: Option<&str>,
+) -> Result<(), AppError> {
+    if request["snapshotId"].as_str() != Some(snapshot)
+        || optional_string(request, "baselineId")? != baseline
+    {
+        return Err(caused_by(
+            "invalidInput",
+            "Saved query capture changed; restart or create a new request",
+            CaptureChanged::new(),
+        )
+        .into());
+    }
+    Ok(())
 }
 
 /// Validates the saved query envelope and page against the workflow schema.
@@ -502,4 +518,41 @@ pub(crate) fn path_string(path: &Path) -> Result<&str, AppError> {
 /// Accounts for the platform newline in the bounded output.
 fn line_ending_length() -> usize {
     if cfg!(windows) { 2 } else { 1 }
+}
+
+#[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
+mod tests {
+    use serde_json::{Value, json};
+
+    use super::{
+        CaptureChanged, ModifiedSelectors, normalize_options, request_id,
+        validate_capture_identity, validate_saved_identity,
+    };
+
+    #[test]
+    fn edited_selectors_keep_the_typed_validation_cause() {
+        let options = normalize_options(&json!({"query":"comments","threadId":"T"})).unwrap();
+        let mut request = json!({
+            "path":"/capture.json",
+            "comparePath":null,
+            "snapshotId":"A".repeat(64),
+            "baselineId":null,
+            "options":options,
+            "requestId":"",
+        });
+        request["requestId"] = json!(request_id(&request).unwrap());
+        let mut changed_options: Value = request["options"].clone();
+        changed_options["threadId"] = json!("other");
+
+        let error = validate_saved_identity(&request, &changed_options).unwrap_err();
+        assert!(error.find_source::<ModifiedSelectors>().is_some());
+    }
+
+    #[test]
+    fn changed_capture_keeps_the_typed_validation_cause() {
+        let request = json!({"snapshotId":"A".repeat(64),"baselineId":null});
+        let error = validate_capture_identity(&request, &"B".repeat(64), None).unwrap_err();
+        assert!(error.find_source::<CaptureChanged>().is_some());
+    }
 }

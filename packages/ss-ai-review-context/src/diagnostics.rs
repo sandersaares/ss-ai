@@ -24,10 +24,10 @@ const COUNTERS: [&str; 6] = [
     "cursorRestarts",
 ];
 
-/// Identifies a malformed diagnostics record while retaining the original error.
+/// Keeps malformed diagnostics distinguishable inside this crate.
 #[ohno::error]
 #[display("{message}")]
-pub struct MalformedDiagnostics {
+pub(crate) struct MalformedDiagnostics {
     message: String,
 }
 
@@ -257,4 +257,16 @@ fn add_counts(total: &mut Value, record: &Value) -> Result<(), AppError> {
         counts.insert(name.to_owned(), json!(sum));
     }
     Ok(())
+}
+
+#[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
+mod tests {
+    use super::{MalformedDiagnostics, parse};
+
+    #[test]
+    fn malformed_records_keep_the_typed_diagnostic_cause() {
+        let error = parse(br#"{"schemaVersion":1,"counts":{}}"#).unwrap_err();
+        assert!(error.find_source::<MalformedDiagnostics>().is_some());
+    }
 }

@@ -18,8 +18,8 @@ use jiff::Timestamp;
 use ohno::AppError;
 use serde_json::{Value, json};
 use ss_ai_review_context::{
-    CaptureChanged, MalformedDiagnostics, ModifiedSelectors, SavedRequestAction,
-    increment_diagnostic, prepare, prepare_failure, read_diagnostics, read_saved,
+    SavedRequestAction, increment_diagnostic, prepare, prepare_failure, read_diagnostics,
+    read_saved,
 };
 use ss_ai_runtime::{Clock, FileTransaction, SystemClock, classification, fail};
 
@@ -152,7 +152,6 @@ fn edited_cached_page_and_selectors_are_not_replayed() {
     altered["options"]["pageSize"] = json!(2);
     files.write_request(&altered);
     let error = read_saved(&files.request, SavedRequestAction::Replay, &clock).unwrap_err();
-    assert!(error.find_source::<ModifiedSelectors>().is_some());
     assert_eq!(classification(&error), "invalidInput");
 }
 
@@ -212,7 +211,6 @@ fn stale_capture_requires_explicit_restart_and_counts_attempts() {
     capture["pullRequest"]["title"] = json!("Changed");
     fs::write(&files.capture, serde_json::to_vec(&capture).unwrap()).unwrap();
     let error = read_saved(&files.request, SavedRequestAction::Replay, &clock).unwrap_err();
-    assert!(error.find_source::<CaptureChanged>().is_some());
     assert_eq!(classification(&error), "invalidInput");
     read_saved(&files.request, SavedRequestAction::Restart, &clock).unwrap();
     let diagnostics = read_diagnostics(&files.diagnostics, &clock).unwrap();
@@ -290,12 +288,10 @@ fn duplicate_properties_are_rejected_without_changing_records() {
         assert_ne!(diagnostics, original_diagnostics);
         fs::write(&files.diagnostics, &diagnostics).unwrap();
         let error = read_diagnostics(&files.diagnostics, &clock).unwrap_err();
-        assert!(error.find_source::<MalformedDiagnostics>().is_some());
         assert_eq!(classification(&error), "invalidInput");
         assert!(error.to_string().to_lowercase().contains("duplicate"));
         let error = increment_diagnostic(&files.diagnostics, "setupCalls", NonZeroU32::MIN, &clock)
             .unwrap_err();
-        assert!(error.find_source::<MalformedDiagnostics>().is_some());
         assert_eq!(classification(&error), "invalidInput");
         assert_eq!(fs::read_to_string(&files.diagnostics).unwrap(), diagnostics);
     }
@@ -338,10 +334,8 @@ fn diagnostics_reject_malformed_records_and_account_for_failed_setup() {
     let before = fs::read(&files.diagnostics).unwrap();
     let error = increment_diagnostic(&files.diagnostics, "setupCalls", NonZeroU32::MIN, &clock)
         .unwrap_err();
-    assert!(error.find_source::<MalformedDiagnostics>().is_some());
     assert_eq!(classification(&error), "invalidInput");
     let error = read_diagnostics(&files.diagnostics, &clock).unwrap_err();
-    assert!(error.find_source::<MalformedDiagnostics>().is_some());
     assert_eq!(classification(&error), "invalidInput");
     assert_eq!(fs::read(&files.diagnostics).unwrap(), before);
 }
