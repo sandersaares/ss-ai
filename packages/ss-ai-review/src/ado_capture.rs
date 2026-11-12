@@ -408,7 +408,6 @@ fn context(node: Option<&Value>) -> Result<Value, AppError> {
     let file = match node.get("filePath") {
         None | Some(Value::Null) => String::new(),
         Some(value) => text(value)?
-            .trim()
             .replace('\\', "/")
             .trim_start_matches('/')
             .to_owned(),
@@ -1146,7 +1145,7 @@ mod tests {
             let mut page = recording.page("threads", 0);
             let thread = &mut page.1["value"][1];
             thread["threadContext"] = json!({
-                "filePath": "/renamed.rs",
+                "filePath": "/renamed.rs ",
                 "leftFileStart": {"line": 7, "offset": 1},
                 "leftFileEnd": {"line": 9, "offset": 2}
             });
@@ -1157,7 +1156,7 @@ mod tests {
         let mut transport = Transport::new(&target, None, &recording, &recording, &TestClock);
         let result = collect_complete(&mut transport, &target, &recording);
         let thread = &result["threads"][0];
-        assert_eq!(thread["context"]["filePath"], "renamed.rs");
+        assert_eq!(thread["context"]["filePath"], "renamed.rs ");
         assert_eq!(thread["context"]["side"], "left");
         assert_eq!(thread["context"]["originalStartLine"], 7);
         assert_eq!(thread["context"]["originalEndLine"], 9);

@@ -131,7 +131,6 @@ pub(crate) fn state(transport: &mut Transport<'_>, target: &Target) -> Result<Va
 /// Normalizes ADO paths to repository-relative form.
 fn canonical_path(path: &str) -> String {
     path.replace('\\', "/")
-        .trim()
         .trim_start_matches('/')
         .to_owned()
 }
@@ -171,8 +170,7 @@ pub(crate) fn file_identity(
             positive(id)?;
             let canonical = canonical_path(item_path);
             if !canonical.is_empty() {
-                // PowerShell's ordered dictionary compares keys case-insensitively.
-                found.insert(canonical.to_lowercase(), id.clone());
+                found.insert(canonical, id.clone());
             }
         }
         let Some(next) = page.payload.get("nextSkip").filter(|v| !v.is_null()) else {
@@ -195,7 +193,7 @@ pub(crate) fn file_identity(
     let mut missing = Vec::new();
     for path in paths {
         let canonical = canonical_path(path);
-        if let Some(id) = found.get(&canonical.to_lowercase()) {
+        if let Some(id) = found.get(&canonical) {
             result.insert(path.clone(), id.clone());
         } else {
             missing.push(canonical);
@@ -932,6 +930,35 @@ mod tests {
         assert_eq!(ids, json!({"src/a.rs":42,"src/b.rs":43}));
         let handle = start(&mut transport, &target, &state).unwrap();
         assert_eq!(handle["reviewId"], "iteration/3");
+        fixture.done();
+    }
+
+    #[test]
+    fn file_identity_preserves_whitespace_and_case_distinct_paths() {
+        let changes = "proj/_apis/git/repositories/repo/pullRequests/7/iterations/3/changes";
+        let fixture = Fixture::new(vec![(
+            "GET",
+            url(changes, "%24top=1000&"),
+            None,
+            json!({"changeEntries":[
+                {"item":{"path":"/src/File "},"changeTrackingId":42},
+                {"item":{"path":"/src/Foo.rs"},"changeTrackingId":43},
+                {"item":{"path":"/src/foo.rs"},"changeTrackingId":44}
+            ]}),
+        )]);
+        let target = target();
+        let mut transport = Transport::new(&target, None, &fixture, &fixture, &fixture);
+        let ids = file_identity(
+            &mut transport,
+            &target,
+            &json!({"iterationId":3}),
+            &["src/File ".into(), "src/Foo.rs".into(), "src/foo.rs".into()],
+        )
+        .unwrap();
+        assert_eq!(
+            ids,
+            json!({"src/File ":42,"src/Foo.rs":43,"src/foo.rs":44})
+        );
         fixture.done();
     }
 
