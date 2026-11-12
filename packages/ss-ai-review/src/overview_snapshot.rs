@@ -85,6 +85,9 @@ pub(crate) struct FrozenSnapshot {
     run_id: String,
     markdown_path: String,
     markdown_hash: String,
+    source_commit: String,
+    merge_base_commit: String,
+    source_hash: String,
 }
 
 impl FrozenSnapshot {
@@ -108,7 +111,22 @@ impl FrozenSnapshot {
         &self.markdown_hash
     }
 
-    /// Builds typed fields from a record already validated by its caller.
+    /// Returns the inspected source commit bound to this snapshot.
+    pub(crate) fn source_commit(&self) -> &str {
+        &self.source_commit
+    }
+
+    /// Returns the inspected merge-base commit bound to this snapshot.
+    pub(crate) fn merge_base_commit(&self) -> &str {
+        &self.merge_base_commit
+    }
+
+    /// Returns the hash of the source overview text.
+    pub(crate) fn source_hash(&self) -> &str {
+        &self.source_hash
+    }
+
+    /// Builds typed fields only from a structurally valid snapshot record.
     fn from_record(record: Value) -> Result<Self, SnapshotError> {
         let invalid = || SnapshotError::invalid_state("Invalid or modified overview snapshot");
         let Value::Object(record) = record else {
@@ -132,11 +150,32 @@ impl FrozenSnapshot {
             .filter(|value| hash_shape(value))
             .ok_or_else(invalid)?
             .to_owned();
+        let source_commit = record
+            .get("sourceCommit")
+            .and_then(Value::as_str)
+            .filter(|value| commit(value))
+            .ok_or_else(invalid)?
+            .to_owned();
+        let merge_base_commit = record
+            .get("mergeBaseCommit")
+            .and_then(Value::as_str)
+            .filter(|value| commit(value))
+            .ok_or_else(invalid)?
+            .to_owned();
+        let source_hash = record
+            .get("sourceHash")
+            .and_then(Value::as_str)
+            .filter(|value| hash_shape(value))
+            .ok_or_else(invalid)?
+            .to_owned();
         Ok(Self {
             record,
             run_id,
             markdown_path,
             markdown_hash,
+            source_commit,
+            merge_base_commit,
+            source_hash,
         })
     }
 }
@@ -232,6 +271,9 @@ pub(crate) fn frozen_snapshot_for_test(
         "runId": run_id,
         "markdownPath": markdown_path,
         "markdownHash": markdown_hash,
+        "sourceCommit": "a".repeat(40),
+        "mergeBaseCommit": "b".repeat(40),
+        "sourceHash": "c".repeat(64),
     }))
     .expect("test frozen snapshot has valid identity fields")
 }
@@ -291,7 +333,9 @@ pub(crate) fn freeze_overview(
         let snapshot = parse_json(&bytes, true)?;
         let snapshot = validate_snapshot(snapshot, context.url, context.target_json, clock)?;
         if !refresh_unpublished
-            || snapshot.record().get("sourceHash").and_then(Value::as_str) == Some(&source_hash)
+            || (snapshot.source_hash() == source_hash
+                && snapshot.source_commit() == context.source
+                && snapshot.merge_base_commit() == context.base)
         {
             return Ok(snapshot);
         }
@@ -786,6 +830,11 @@ mod tests {
             json!({"markdownPath":"report.md","markdownHash":"0".repeat(64)}),
             json!({"runId":"0123456789abcdef0123456789abcdef","markdownHash":"0".repeat(64)}),
             json!({"runId":"0123456789abcdef0123456789abcdef","markdownPath":"report.md"}),
+            json!({
+                "runId":"0123456789abcdef0123456789abcdef","markdownPath":"report.md",
+                "markdownHash":"0".repeat(64),"sourceCommit":"a".repeat(40),
+                "mergeBaseCommit":"b".repeat(40)
+            }),
         ] {
             assert!(FrozenSnapshot::from_record(record).is_err());
         }
@@ -798,6 +847,9 @@ mod tests {
         assert_eq!(snapshot.run_id(), "0123456789abcdef0123456789abcdef");
         assert_eq!(snapshot.markdown_path(), "report.md");
         assert_eq!(snapshot.markdown_hash(), "0".repeat(64));
+        assert_eq!(snapshot.source_commit(), "a".repeat(40));
+        assert_eq!(snapshot.merge_base_commit(), "b".repeat(40));
+        assert_eq!(snapshot.source_hash(), "c".repeat(64));
     }
 
     #[test]
@@ -838,6 +890,9 @@ mod tests {
                 "runId": "0123456789abcdef0123456789abcdef",
                 "markdownPath": "report.md",
                 "markdownHash": "0".repeat(64),
+                "sourceCommit": "a".repeat(40),
+                "mergeBaseCommit": "b".repeat(40),
+                "sourceHash": "c".repeat(64),
             }))
             .unwrap();
             assert!(

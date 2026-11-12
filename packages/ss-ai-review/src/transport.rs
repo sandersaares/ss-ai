@@ -301,26 +301,6 @@ impl<'a> Transport<'a> {
         Ok(())
     }
 
-    /// Distinguishes an explicit HTTP 429 from other single-attempt failures.
-    ///
-    /// Only a failed command with an included HTTP status line establishes the
-    /// `explicitRateLimited` classification; diagnostic prose is not proof.
-    pub(crate) fn github_write_once_with_refusal_evidence(
-        &self,
-        path: &str,
-        body: &Value,
-    ) -> Result<Value, AppError> {
-        self.github_optional(
-            path,
-            "POST",
-            Some(body),
-            false,
-            RequestPolicy::WriteOnce,
-            GithubResponseMode::ExplicitRefusal,
-        )?
-        .ok_or_else(|| fail("service", "Unexpected absent GitHub response"))
-    }
-
     /// A renewal must recheck freshness rather than replay a refused ADO write.
     pub(crate) fn ado_write_once(
         &mut self,
@@ -517,15 +497,6 @@ impl<'a> Transport<'a> {
                 && response_status(headers) == Some(404)
             {
                 return Ok(None);
-            }
-            if matches!(response_mode, GithubResponseMode::ExplicitRefusal)
-                && !output.success
-                && response_status(headers) == Some(429)
-            {
-                return Err(fail(
-                    "explicitRateLimited",
-                    "GitHub refused the write for rate limiting; no write was retried",
-                ));
             }
             let stderr = String::from_utf8_lossy(&output.stderr);
             let error_text = format!("{stderr}\n{payload}");
@@ -920,8 +891,6 @@ enum GithubResponseMode {
     Standard,
     /// Recognize an explicit not-found response for optional reads.
     OptionalNotFound,
-    /// Recognize an explicit rate refusal for a single-attempt write.
-    ExplicitRefusal,
 }
 
 /// Selects decoding and refusal replay without changing the existing JSON policy.
@@ -1488,7 +1457,7 @@ mod tests {
     }
 
     #[test]
-    fn github_explicit_refusal_requires_failed_command_and_http_status_line() {
+    fn github_standard_writes_retry_rate_refusals_but_one_shot_writes_do_not() {
         struct GithubProcess {
             replies: RefCell<VecDeque<ProcessOutput>>,
             calls: Cell<usize>,
@@ -1515,36 +1484,42 @@ mod tests {
         let process = GithubProcess {
             replies: RefCell::new(VecDeque::from([
                 ProcessOutput::new(false, b"HTTP/2 429\n\n{}".to_vec(), vec![]),
-                ProcessOutput::new(false, b"{}".to_vec(), b"HTTP 429".to_vec()),
+                ProcessOutput::new(true, br#"{"id":"abc"}"#.to_vec(), vec![]),
                 ProcessOutput::new(
                     false,
-                    br#"{"errors":[{"message":"rate limit"}]}"#.to_vec(),
+                    br#"HTTP/2 403
+
+{"message":"API rate limit exceeded"}"#
+                        .to_vec(),
                     vec![],
                 ),
-                ProcessOutput::new(true, b"HTTP/2 429\n\n{}".to_vec(), vec![]),
+                ProcessOutput::new(true, br#"{"id":"def"}"#.to_vec(), vec![]),
                 ProcessOutput::new(false, b"HTTP/2 429\n\n{}".to_vec(), vec![]),
             ])),
             calls: Cell::new(0),
         };
         let fixture = Fixture::new(vec![]);
         let target = Target::repository("https://github.com/org/repo").unwrap();
-        let transport = Transport::new(&target, None, &process, &fixture, &fixture);
-        for expected in [
-            "explicitRateLimited",
-            "rateLimited",
-            "rateLimited",
-            "rateLimited",
-        ] {
-            let error = transport
-                .github_write_once_with_refusal_evidence("gists", &json!({}))
-                .unwrap_err();
-            assert_eq!(classification(&error), expected);
-        }
+        let mut transport = Transport::new(&target, None, &process, &fixture, &fixture);
+        assert_eq!(
+            transport
+                .request("gists", "POST", Some(&json!({})))
+                .unwrap(),
+            json!({"id":"abc"})
+        );
+        assert_eq!(
+            transport
+                .request("gists", "POST", Some(&json!({})))
+                .unwrap(),
+            json!({"id":"def"})
+        );
+        assert_eq!(fixture.waits.borrow().len(), 2);
         let error = transport
             .github_write_once("gists", &json!({}))
             .unwrap_err();
         assert_eq!(classification(&error), "rateLimited");
         assert_eq!(process.calls.get(), 5);
+        assert_eq!(fixture.waits.borrow().len(), 2);
     }
 
     #[test]

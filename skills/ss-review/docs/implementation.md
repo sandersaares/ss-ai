@@ -1247,6 +1247,8 @@ newer content.
 write and retains returned IDs before verification. Upload is verified before the
 linking comment is created. Known successful attempts are reused; an attempt
 that wrote or may have written remote state is not automatically replayed.
+Transports retry service-confirmed rate-limit refusals until accepted, without
+replaying ambiguous writes.
 The initial comment is not edited and later overview generation does not publish.
 `Publish-ContentOverview.ps1` writes its optional `-CommentPrefix` to a private
 UTF-8 file and passes its path to the native operation. The native transaction

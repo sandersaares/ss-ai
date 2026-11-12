@@ -41,8 +41,8 @@ pub(crate) fn is_open(transport: &mut Transport<'_>, target: &Target) -> Result<
     }
 }
 
-/// Creates the unlisted Gist once using the frozen Markdown bytes.
-#[expect(
+/// Creates the unlisted Gist using the frozen Markdown bytes.
+#[allow(
     clippy::needless_pass_by_ref_mut,
     reason = "The provider interface consistently accepts exclusive transport access"
 )]
@@ -56,9 +56,9 @@ pub(crate) fn upload(
     upload_bytes(transport, snapshot, &bytes)
 }
 
-/// Keeps the file boundary separate from the single non-idempotent request.
+/// Keeps the file boundary separate from the status-aware provider request.
 fn upload_bytes(
-    transport: &Transport<'_>,
+    transport: &mut Transport<'_>,
     snapshot: &FrozenSnapshot,
     bytes: &[u8],
 ) -> Result<Value, AppError> {
@@ -78,7 +78,7 @@ fn upload_bytes(
     }
     let body = json!({"public":false, "description":format!("ss-review initial overview {run}"),
         "files":{"overview.md":{"content":content}}});
-    let response = transport.github_write_once_with_refusal_evidence("gists", &body)?;
+    let response = transport.request("gists", "POST", Some(&body))?;
     let id = response
         .get("id")
         .and_then(Value::as_str)
@@ -148,8 +148,8 @@ fn verify_artifact_with(
     Ok(json!({"id":id, "revision":revision, "url":format!("{url}/{revision}")}))
 }
 
-/// Creates the PR conversation comment without replaying a refused or uncertain write.
-#[expect(
+/// Creates the PR comment, retrying only service-confirmed rate-limit refusals.
+#[allow(
     clippy::needless_pass_by_ref_mut,
     reason = "The provider interface consistently accepts exclusive transport access"
 )]
@@ -160,13 +160,14 @@ pub(crate) fn comment(
 ) -> Result<Value, AppError> {
     check_target(transport, target)?;
     let body = text(field(payload, "body")?)?;
-    let response = transport.github_write_once_with_refusal_evidence(
+    let response = transport.request(
         &format!(
             "{}/issues/{}/comments",
             target.repository_api(),
             target.pull_request_id
         ),
-        &json!({"body":body}),
+        "POST",
+        Some(&json!({"body":body})),
     )?;
     let id = comment_id(response.get("id")).ok_or_else(|| {
         fail(
@@ -356,7 +357,7 @@ fn git_revision(
     reason = "Tests inspect bounded requests and JSON fixtures"
 )]
 mod tests {
-    use std::cell::RefCell;
+    use std::cell::{Cell, RefCell};
     use std::collections::VecDeque;
     use std::io;
     use std::path::Path;
@@ -462,6 +463,18 @@ mod tests {
         }
     }
 
+    struct RateLimitWait(Cell<usize>);
+    impl Clock for RateLimitWait {
+        fn now(&self) -> Timestamp {
+            "2026-01-01T00:00:00Z".parse().unwrap()
+        }
+
+        fn wait(&self, _: Duration) -> Result<(), AppError> {
+            self.0.set(self.0.get() + 1);
+            Ok(())
+        }
+    }
+
     fn script(requests: Vec<Request>) -> Script {
         Script {
             requests: RefCell::new(requests.into()),
@@ -545,7 +558,7 @@ mod tests {
         ]);
         let mut transport = Transport::new(&target, None, &fixture, &fixture, &NoWait);
         assert!(is_open(&mut transport, &target).unwrap());
-        let receipt = upload_bytes(&transport, &snapshot(bytes), bytes).unwrap();
+        let receipt = upload_bytes(&mut transport, &snapshot(bytes), bytes).unwrap();
         let verified =
             verify_artifact_with(&mut transport, &snapshot(bytes), &receipt, |_, _, _| {
                 panic!("not truncated")
@@ -696,8 +709,8 @@ mod tests {
             json!({"message":"server error"}),
             false,
         )]);
-        let transport = Transport::new(&target, None, &fixture, &fixture, &NoWait);
-        let error = upload_bytes(&transport, &snapshot(bytes), bytes).unwrap_err();
+        let mut transport = Transport::new(&target, None, &fixture, &fixture, &NoWait);
+        let error = upload_bytes(&mut transport, &snapshot(bytes), bytes).unwrap_err();
         assert_eq!(classification(&error), "ambiguousWrite");
         assert!(fixture.requests.borrow().is_empty());
         let fixture = script(vec![(
@@ -707,9 +720,9 @@ mod tests {
             json!({"id":"abc123","html_url":null}),
             true,
         )]);
-        let transport = Transport::new(&target, None, &fixture, &fixture, &NoWait);
+        let mut transport = Transport::new(&target, None, &fixture, &fixture, &NoWait);
         assert_eq!(
-            upload_bytes(&transport, &snapshot(bytes), bytes).unwrap(),
+            upload_bytes(&mut transport, &snapshot(bytes), bytes).unwrap(),
             json!({"id":"abc123","url":null})
         );
     }
@@ -777,7 +790,7 @@ mod tests {
     }
 
     #[test]
-    fn both_writes_preserve_explicit_rate_refusal_without_replay() {
+    fn both_writes_retry_explicit_rate_refusals() {
         let target = Target::pull_request("https://github.com/acme/repo/pull/42", None).unwrap();
         let bytes = b"content";
         let fixture = script(vec![
@@ -792,23 +805,42 @@ mod tests {
                 false,
             ),
             (
+                "gists",
+                "POST",
+                Some(
+                    json!({"public":false,"description":"ss-review initial overview 0123456789abcdef0123456789abcdef",
+                    "files":{"overview.md":{"content":"content"}}}),
+                ),
+                json!({"id":"abc123","html_url":"https://gist.github.com/acme/abc123"}),
+                true,
+            ),
+            (
                 "repos/acme/repo/issues/42/comments",
                 "POST",
                 Some(json!({"body":"text"})),
                 json!({"__status":429}),
                 false,
             ),
+            (
+                "repos/acme/repo/issues/42/comments",
+                "POST",
+                Some(json!({"body":"text"})),
+                json!({"id":42,"html_url":"https://github.com/acme/repo/issues/42#issuecomment-42"}),
+                true,
+            ),
         ]);
-        let mut transport = Transport::new(&target, None, &fixture, &fixture, &NoWait);
+        let clock = RateLimitWait(Cell::new(0));
+        let mut transport = Transport::new(&target, None, &fixture, &fixture, &clock);
         assert_eq!(
-            classification(&upload_bytes(&transport, &snapshot(bytes), bytes).unwrap_err()),
-            "explicitRateLimited"
+            upload_bytes(&mut transport, &snapshot(bytes), bytes).unwrap(),
+            json!({"id":"abc123","url":"https://gist.github.com/acme/abc123"})
         );
         assert_eq!(
-            classification(&comment(&mut transport, &target, &json!({"body":"text"})).unwrap_err()),
-            "explicitRateLimited"
+            comment(&mut transport, &target, &json!({"body":"text"})).unwrap(),
+            json!({"id":42,"url":"https://github.com/acme/repo/issues/42#issuecomment-42"})
         );
         assert!(fixture.requests.borrow().is_empty());
+        assert_eq!(clock.0.get(), 2);
     }
 
     #[test]
@@ -816,7 +848,7 @@ mod tests {
         let target = Target::pull_request("https://github.com/acme/repo/pull/42", None).unwrap();
         let fixture = script(vec![]);
         let mut transport = Transport::new(&target, None, &fixture, &fixture, &NoWait);
-        upload_bytes(&transport, &snapshot(b"expected"), b"changed").unwrap_err();
+        upload_bytes(&mut transport, &snapshot(b"expected"), b"changed").unwrap_err();
         for id in ["../other", "", "a".repeat(65).as_str(), "ABC"] {
             verify_artifact_with(
                 &mut transport,

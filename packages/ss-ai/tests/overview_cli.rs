@@ -40,7 +40,8 @@ struct Provider {
     comment: RefCell<String>,
     reject_comment_readback: bool,
     fail_upload: bool,
-    refuse_upload: bool,
+    refuse_upload: Cell<bool>,
+    refuse_comment: Cell<bool>,
 }
 
 impl Process for Provider {
@@ -54,7 +55,17 @@ impl Process for Provider {
         let route = &arguments[1];
         let method = &arguments[arguments.iter().position(|v| v == "--method").unwrap() + 1];
         self.requests.borrow_mut().push(format!("{method} {route}"));
-        if self.refuse_upload && method == "POST" && route == "gists" {
+        if method == "POST" && route == "gists" && self.refuse_upload.replace(false) {
+            return Ok(ProcessOutput::new(
+                false,
+                b"HTTP/1.1 429 Too Many Requests\r\n\r\n".to_vec(),
+                Vec::new(),
+            ));
+        }
+        if method == "POST"
+            && route == "repos/owner/repo/issues/42/comments"
+            && self.refuse_comment.replace(false)
+        {
             return Ok(ProcessOutput::new(
                 false,
                 b"HTTP/1.1 429 Too Many Requests\r\n\r\n".to_vec(),
@@ -246,21 +257,46 @@ fn github_unproven_rate_limit_does_not_authorize_replay() {
 }
 
 #[test]
-fn github_explicit_rate_refusal_allows_retry() {
-    let fixture = fixture();
-    prepare(fixture.path());
-    let refused = Provider {
-        refuse_upload: true,
+fn github_explicit_rate_refusals_retry_without_reconciliation() {
+    let upload_fixture = fixture();
+    prepare(upload_fixture.path());
+    let upload_refused = Provider {
+        refuse_upload: Cell::new(true),
         ..Provider::default()
     };
-    let args = arguments(fixture.path());
+    let args = arguments(upload_fixture.path());
     let result: Value =
-        from_str(&run(&args, &refused, &refused, &SystemClock::default()).unwrap()).unwrap();
-    assert_eq!(result["operations"][0]["status"], "failed", "{result}");
-    let accepted = Provider::default();
-    let result: Value =
-        from_str(&run(&args, &accepted, &accepted, &SystemClock::default()).unwrap()).unwrap();
+        from_str(&run(&args, &upload_refused, &upload_refused, &TestClock).unwrap()).unwrap();
     assert_eq!(result["status"], "succeeded", "{result}");
+    assert_eq!(
+        upload_refused
+            .requests
+            .borrow()
+            .iter()
+            .filter(|request| request.as_str() == "POST gists")
+            .count(),
+        2
+    );
+
+    let comment_fixture = fixture();
+    prepare(comment_fixture.path());
+    let comment_refused = Provider {
+        refuse_comment: Cell::new(true),
+        ..Provider::default()
+    };
+    let args = arguments(comment_fixture.path());
+    let result: Value =
+        from_str(&run(&args, &comment_refused, &comment_refused, &TestClock).unwrap()).unwrap();
+    assert_eq!(result["status"], "succeeded", "{result}");
+    assert_eq!(
+        comment_refused
+            .requests
+            .borrow()
+            .iter()
+            .filter(|request| request.as_str() == "POST repos/owner/repo/issues/42/comments")
+            .count(),
+        2
+    );
 }
 
 #[test]
@@ -430,12 +466,22 @@ fn azure_capture() -> Value {
 /// Runs the provider transaction with a narrow local artifact renderer.
 fn azure_publish(root: &Path, provider: &Azure, missing_tools: bool) -> Value {
     let capture = azure_capture();
+    azure_publish_with_capture(root, provider, missing_tools, &capture)
+}
+
+/// Runs publication with a supplied capture to exercise inspected-commit freshness.
+fn azure_publish_with_capture(
+    root: &Path,
+    provider: &Azure,
+    missing_tools: bool,
+    capture: &Value,
+) -> Value {
     let overview_path = root.join("overview 雪.md");
     let output = root.join("output 雪");
     let skill = root.join("skill 雪");
     let clock = TestClock;
     let input = OverviewInput {
-        capture: &capture,
+        capture,
         overview_path: &overview_path,
         output_directory: &output,
         skill_root: &skill,
@@ -554,6 +600,33 @@ fn changed_unpublished_overview_preserves_previous_generation() {
         fs::read(generation.join("report.html")).unwrap(),
         b"orphaned report"
     );
+}
+
+#[test]
+fn unpublished_snapshot_refreshes_when_inspected_commits_change() {
+    let fixture = fixture();
+    prepare(fixture.path());
+    let provider = Azure::default();
+    let first = azure_publish(fixture.path(), &provider, true);
+    let first_id = first["snapshot"]["runId"].as_str().unwrap();
+    let first_report = PathBuf::from(first["snapshot"]["markdownPath"].as_str().unwrap());
+    let first_report_bytes = fs::read(&first_report).unwrap();
+
+    let mut refreshed_capture = azure_capture();
+    let refreshed_source = "c".repeat(40);
+    refreshed_capture["pullRequest"]["reviewedSourceCommit"] = json!(refreshed_source);
+    let refreshed =
+        azure_publish_with_capture(fixture.path(), &provider, false, &refreshed_capture);
+
+    assert_eq!(refreshed["status"], "succeeded", "{refreshed}");
+    assert_ne!(refreshed["snapshot"]["runId"], first_id);
+    assert_eq!(refreshed["snapshot"]["sourceCommit"], refreshed_source);
+    assert_eq!(refreshed["snapshot"]["mergeBaseCommit"], "b".repeat(40));
+    assert_ne!(
+        refreshed["snapshot"]["markdownPath"],
+        first_report.to_str().unwrap()
+    );
+    assert_eq!(fs::read(first_report).unwrap(), first_report_bytes);
 }
 
 #[test]
