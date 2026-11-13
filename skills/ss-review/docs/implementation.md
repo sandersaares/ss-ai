@@ -1207,6 +1207,8 @@ A paused body-adjudication state is the only resumable path. Continuation is
 bound to the exact item, approved body, stored body, destination metadata, and
 remaining publication plan. This allows the existing run to continue without
 turning general failure recovery into a duplicate-producing retry mechanism.
+Azure DevOps destination and item URL comparisons use case-insensitive
+identities; verification preserves the original item URL recorded by the journal.
 The accepted decision is persisted before a later creation intent. If persisting
 that intent fails, the same decision can continue; once the intent is durable,
 the possible provider write requires reconciliation.
@@ -1238,7 +1240,8 @@ prose. This matches the encoding applied to Markdown work-item fields by
 
 An uncertain transformation is a user decision, not a similarity heuristic
 disguised as approval. The journal records enough exact and summarized evidence
-for that decision, and content hashes ensure the accepted bodies have not
+for that decision. Excerpt offsets use the same normalized, HTML-decoded text
+used by comparison, and content hashes ensure the accepted bodies have not
 changed before continuation.
 
 ## Tracker adapters

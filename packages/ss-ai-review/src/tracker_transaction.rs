@@ -22,10 +22,12 @@ use serde::{Deserialize, Deserializer};
 use serde_json::{Map, Value, json};
 use sha2::{Digest, Sha256};
 use ss_ai_runtime::FileTransaction;
+use url::Url;
 
 use crate::classification;
 use crate::error::fail;
-use crate::tracker_body::{AcceptedRewrite, BodyVerdict, compare_ado_body};
+use crate::target::decode;
+use crate::tracker_body::{AcceptedRewrite, BodyVerdict, adjudication_excerpts, compare_ado_body};
 use crate::tracker_target::TrackerTarget;
 
 /// Separates native tracker journal records from legacy skill-produced records.
@@ -698,7 +700,7 @@ fn verify(
     let actual = effects.read(op)?;
     if actual["itemId"] != op["itemId"]
         || actual["itemNodeId"] != op["itemNodeId"]
-        || actual["url"] != op["url"]
+        || !same_item_url(&record["platform"], &actual["url"], &op["url"])
         || actual["title"] != item["title"]
         || !actual["body"].is_string()
     {
@@ -746,34 +748,56 @@ fn verify(
                 ));
             }
             BodyVerdict::Adjudicate(deviation) => {
+                let (sent_excerpt, stored_excerpt) =
+                    adjudication_excerpts(approved, stored, deviation.first_difference);
                 record["adjudication"] = json!({"findingId":item["findingId"], "itemId":actual["itemId"],
                     "title":item["title"], "expectedBodyHash":hash(approved), "storedBodyHash":hash(stored),
                     "similarity":deviation.similarity, "firstDifference":deviation.first_difference,
-                    "sentExcerpt":excerpt(approved, deviation.first_difference), "storedExcerpt":excerpt(stored, deviation.first_difference)});
+                    "sentExcerpt":sent_excerpt, "storedExcerpt":stored_excerpt});
                 record["status"] = json!("needsAdjudication");
                 return Ok(None);
             }
         }
     }
     Ok(Some(
-        json!({"findingId":item["findingId"], "itemId":actual["itemId"], "url":actual["url"],
+        json!({"findingId":item["findingId"], "itemId":actual["itemId"], "url":op["url"],
         "title":actual["title"], "descriptionFormat":actual["descriptionFormat"]}),
     ))
 }
 
-/// Provides bounded context using the same UTF-16 offset as body comparison.
-///
-/// The radius matches TrackerPublication.ps1, balancing readable context
-/// against journal size.
-fn excerpt(text: &str, at: usize) -> String {
-    let start = at.saturating_sub(48);
-    let end = at.saturating_add(48);
-    let units = text
-        .encode_utf16()
-        .skip(start)
-        .take(end.saturating_sub(start))
-        .collect::<Vec<_>>();
-    String::from_utf16_lossy(&units)
+/// Compares Azure item URLs using the case-insensitive tracker identity.
+fn same_item_url(platform: &Value, actual: &Value, expected: &Value) -> bool {
+    if platform == "azureDevOps" {
+        actual
+            .as_str()
+            .and_then(azure_url_identity)
+            .zip(expected.as_str().and_then(azure_url_identity))
+            .is_some_and(|(actual, expected)| actual == expected)
+    } else {
+        actual == expected
+    }
+}
+
+/// Resolves an Azure URL to the case-insensitive path identity used by the API.
+fn azure_url_identity(value: &str) -> Option<(String, Vec<String>)> {
+    let url = Url::parse(value).ok()?;
+    if url.scheme() != "https"
+        || !url.username().is_empty()
+        || url.password().is_some()
+        || url.query().is_some()
+        || url.fragment().is_some()
+    {
+        return None;
+    }
+    let path = url
+        .path_segments()?
+        .map(decode)
+        .collect::<Result<Vec<_>, _>>()
+        .ok()?
+        .into_iter()
+        .map(|segment| segment.to_lowercase())
+        .collect();
+    Some((url.origin().ascii_serialization(), path))
 }
 
 /// Records readback failure separately from the durable creation receipt.
@@ -1220,13 +1244,6 @@ mod tests {
     }
 
     #[test]
-    fn excerpt_preserves_lossy_utf16_window_boundaries() {
-        // The ASCII prefix leaves one UTF-16 slot for the emoji's surrogate pair.
-        let text = format!("{}😀Z", "a".repeat(47));
-        assert_eq!(super::excerpt(&text, 0), format!("{}�", "a".repeat(47)));
-    }
-
-    #[test]
     fn ambiguous_failure_blocks_retry_but_proven_refusal_allows_it() {
         for (kind, retry) in [("ambiguousWrite", false), ("permissionDenied", true)] {
             let (mut journal, mut provider) = setup();
@@ -1372,6 +1389,12 @@ mod tests {
         same_tracker["project"] = json!("pROJECT");
         same_tracker["collectionUrl"] = json!("https://dev.azure.com/ORG");
         same_tracker["webUrl"] = json!("https://dev.azure.com/ORG/pROJECT/_workitems");
+        let expected_url = "https://dev.azure.com/org/Project/_workitems/edit/1";
+        let actual_url = "https://dev.azure.com/ORG/Project/_workitems/edit/1";
+        let mut saved: Value = serde_json::from_slice(journal.bytes.as_ref().unwrap()).unwrap();
+        saved["operations"][0]["url"] = json!(expected_url);
+        journal.bytes = Some(serde_json::to_vec(&saved).unwrap());
+        provider.records[0]["url"] = json!(actual_url);
 
         let mut different_collection = same_tracker.clone();
         different_collection["collectionUrl"] = json!("https://dev.azure.com/ORG/other");
@@ -1393,10 +1416,27 @@ mod tests {
         )
         .unwrap();
         assert_eq!(result["status"], "succeeded");
+        assert_eq!(result["items"][0]["url"], expected_url);
         assert_eq!(
             &provider.calls[..4],
             ["create first", "read 1", "read 1", "create second"]
         );
+    }
+
+    #[test]
+    fn azure_item_url_identity_decodes_case_insensitive_path_segments() {
+        let platform = json!("azureDevOps");
+        let actual = json!("https://dev.azure.com/ORG/Pr%C3%98JECT/_WORKITEMS/EDIT/1");
+        let expected = json!("https://dev.azure.com/org/Pr%C3%B8ject/_workitems/edit/1");
+        assert!(super::same_item_url(&platform, &actual, &expected));
+
+        let different_project =
+            json!("https://dev.azure.com/org/Another%20Project/_workitems/edit/1");
+        assert!(!super::same_item_url(
+            &platform,
+            &actual,
+            &different_project
+        ));
     }
 
     #[test]

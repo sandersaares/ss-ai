@@ -94,6 +94,13 @@ pub(crate) fn compare_ado_body(
     }
 }
 
+/// Builds excerpts from the same normalized text used for deviation offsets.
+pub(crate) fn adjudication_excerpts(approved: &str, stored: &str, at: usize) -> (String, String) {
+    let approved = normalize_lines(approved);
+    let stored = normalize_lines(&decode_html(stored));
+    (excerpt(&approved, at), excerpt(&stored, at))
+}
+
 /// Exposes body verification to the offline fuzz harness.
 ///
 /// The returned boolean reports automatic equivalence without a human decision.
@@ -121,6 +128,21 @@ fn normalize_lines(text: &str) -> String {
         }
     }
     normalized
+}
+
+/// Extracts the context window used to explain a body difference.
+///
+/// The radius matches TrackerPublication.ps1, balancing readable context
+/// against journal size.
+fn excerpt(text: &str, at: usize) -> String {
+    let start = at.saturating_sub(48);
+    let end = at.saturating_add(48);
+    let units = text
+        .encode_utf16()
+        .skip(start)
+        .take(end.saturating_sub(start))
+        .collect::<Vec<_>>();
+    String::from_utf16_lossy(&units)
 }
 
 /// Decodes one layer of the HTML entities recognized by .NET `WebUtility`.
@@ -345,6 +367,27 @@ mod tests {
     }
 
     #[test]
+    fn adjudication_excerpts_use_decoded_offsets() {
+        // Entity expansion must not shift the rewrite outside the stored excerpt.
+        let approved = format!(
+            "{}This body explains the important behavior in enough detail.",
+            "<Vec<T>> ".repeat(12)
+        );
+        let stored = format!(
+            "{}This body explains the importAnt behavior in enough detail.",
+            "&lt;Vec&lt;T&gt;&gt; ".repeat(12)
+        );
+        let BodyVerdict::Adjudicate(deviation) = compare_ado_body(&approved, &stored, None) else {
+            panic!("the changed body requires a decision");
+        };
+
+        let (sent_excerpt, stored_excerpt) =
+            adjudication_excerpts(&approved, &stored, deviation.first_difference);
+        assert!(sent_excerpt.contains("important"));
+        assert!(stored_excerpt.contains("importAnt"));
+    }
+
+    #[test]
     fn decodes_one_layer_and_preserves_unknown_or_malformed_entities() {
         assert_eq!(
             decode_html("&amp;lt; &copy; &apos; &#65; &#x1F600;"),
@@ -412,6 +455,15 @@ mod tests {
         );
         assert_eq!(measure_deviation("😀a", "😀b").first_difference, 2);
         assert_eq!(measure_deviation("", "").similarity, Some(1.0));
+    }
+
+    #[test]
+    fn adjudication_excerpts_preserve_lossy_utf16_window_boundaries() {
+        // The ASCII prefix leaves one UTF-16 slot for the emoji's surrogate pair.
+        let text = format!("{}😀Z", "a".repeat(47));
+        let (sent, stored) = adjudication_excerpts(&text, &text, 0);
+        assert_eq!(sent, format!("{}�", "a".repeat(47)));
+        assert_eq!(stored, sent);
     }
 
     #[test]
