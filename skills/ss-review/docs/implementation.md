@@ -1070,11 +1070,12 @@ from the captured commit pair and fails if either commit is unavailable.
 
 Service-specific change identities remain adapter data where a platform needs
 them to place comments. The installed `ss-ai git diff` operation owns
-exact Git comparison and path/hunk parsing. Final review publication uses the
-native comparison directly to resolve finding anchors and hunk membership.
-Retained PowerShell consumers map the result into their reviewed-commit model.
-Parser fixtures invoke the same native parser; isolated Rust integration tests
-exercise the real Git process boundary.
+exact Git comparison and path/hunk parsing. The PowerShell adapter maps the
+result into the reviewed-commit model. The native workflow resolver selects
+the finding's changed file and checks its side-specific hunk membership. Final
+review publication also uses the native comparison to resolve finding anchors
+and hunk membership. Parser fixtures invoke the same native parser; isolated
+Rust integration tests exercise the real Git process boundary.
 
 ## Finding rendering
 
@@ -1145,6 +1146,10 @@ GitHub implements completion by submitting one pending review. Azure DevOps has
 no draft review, so findings become visible individually and the summary is the
 completion marker. These strategies differ at the adapter boundary while
 sharing the same plan, preflight, journal, and verification model.
+
+GitHub readback uses the thread and comment IDs returned by each successful
+finding write. It queries only those threads and confirms that each review
+comment appears in its receipted thread, avoiding reads of unrelated discussion.
 
 On Azure DevOps, the journal records finding writes and their receipts
 sequentially. Readback verifies each actual comment and the relative order of
@@ -1261,13 +1266,19 @@ session state and uses platform adapters separate from review submission.
 `Publish-ContentOverview.ps1` supplies its inputs to that operation.
 `overview-snapshot.json`
 binds its immutable Markdown to the PR, inspected commits, run identifier, and
-content hash. A separately frozen HTML artifact and its ZIP container serve ADO. The mutable local
-overview and audit documents may subsequently describe newer content.
+content hash. The native boundary carries that validated identity in a frozen
+snapshot type instead of passing arbitrary JSON to provider adapters. ADO
+publication requires a separately prepared state with the rendered HTML and ZIP
+paths and hashes; both states serialize through the existing journal record
+shape. The mutable local overview and audit documents may subsequently describe
+newer content.
 
 `overview-publication-result.json` records intent before each non-idempotent
 write and retains returned IDs before verification. Upload is verified before the
 linking comment is created. Known successful attempts are reused; an attempt
 that wrote or may have written remote state is not automatically replayed.
+Transports retry service-confirmed rate-limit refusals until accepted, without
+replaying ambiguous writes.
 The initial comment is not edited and later overview generation does not publish.
 `Publish-ContentOverview.ps1` writes its optional `-CommentPrefix` to a private
 UTF-8 file and passes its path to the native operation. The native transaction

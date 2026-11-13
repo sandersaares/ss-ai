@@ -151,6 +151,13 @@ BeforeAll {
 }
 
 Describe 'Finding rendering' {
+    It 'accepts case-insensitive destinations in the rendering library' {
+        $finding = New-TestRecord
+        $canonical = @(Get-FindingMarkdownBlock -Finding $finding -Destination 'tracker')
+        $mixedCase = @(Get-FindingMarkdownBlock -Finding $finding -Destination 'TRACKER')
+        ($mixedCase -join "`n") | Should -BeExactly ($canonical -join "`n")
+    }
+
     # Pins the whole body rather than a fragment of it. Every other assertion here names one section
     # at a time, so a change to the blocks between them, to their order or to the blank lines that
     # separate them would pass unnoticed while altering the text a reviewer approved and the text a
@@ -646,6 +653,12 @@ Describe 'Combined document' {
 }
 
 Describe 'Review summary' {
+    It 'accepts case-insensitive platform values' {
+        $canonical = New-ReviewSummaryMarkdown -Diagnostics @{ cache = 'Hit' } -Platform 'azureDevOps'
+        New-ReviewSummaryMarkdown -Diagnostics @{ cache = 'Hit' } -Platform 'AZUREDEVOPS' |
+            Should -BeExactly $canonical
+    }
+
     It 'states how much was published and how much followed up' {
         $summary = New-ReviewSummaryMarkdown `
             -Finding @((New-TestRecord), (New-TestRecord), (New-TestRecord)) `
@@ -884,6 +897,18 @@ Describe 'Rendering executable' {
             Test-Path -LiteralPath $path -PathType Leaf | Should -BeTrue -Because $findingId
             [System.IO.File]::ReadAllText($path) | Should -BeLike '`[Copilot speaking`]*'
         }
+    }
+
+    It 'accepts case-insensitive destination values' {
+        $result = Invoke-SkillExecutable -Name 'ConvertTo-FindingMarkdown.ps1' -ArgumentList @(
+            '-Path', $script:ArtifactPath
+            '-OutputDirectory', $script:MarkdownRoot
+            '-Destination', 'TRACKER'
+        )
+
+        $result.exitCode | Should -Be 0 -Because $result.standardError
+        [IO.File]::ReadAllText((Join-Path $script:MarkdownRoot 'F1.md')) |
+            Should -BeLike 'Title: Reviewer finding*'
     }
 
     It 'writes the combined document when asked for one' {

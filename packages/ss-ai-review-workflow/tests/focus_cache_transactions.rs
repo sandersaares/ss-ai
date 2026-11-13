@@ -38,7 +38,7 @@ use ss_ai_review_workflow::focus_cache::{
 use ss_ai_review_workflow::instruction_sources::{
     InstructionSourceOptions, RepositoryInstructionSources, snapshot_instruction_sources,
 };
-use ss_ai_runtime::{Clock, LockMode, ResourceLock};
+use ss_ai_runtime::{Clock, LockMode, ResourceLock, classification};
 
 /// Prevents a fork from inheriting another test's lock before close-on-exec.
 static FIXTURE_LOCK: RwLock<()> = RwLock::new(());
@@ -184,6 +184,41 @@ fn restore(
 ) -> Result<CacheResult, AppError> {
     let identity = snapshot(options.session, clock);
     restore_with_snapshot(options, refresh, &identity, clock)
+}
+
+#[test]
+fn restore_preserves_all_session_records_when_one_schema_is_incompatible() {
+    for (name, incompatible) in [
+        ("generation-version", "focus-area-generation.json"),
+        ("source-version", "focus-area-source-identity.json"),
+        ("cache-version", "focus-area-cache-identity.json"),
+    ] {
+        let fixture = Fixture::new(name);
+        let clock = TestClock(1_800_000_000);
+        let identity = snapshot(&fixture.session, &clock);
+        restore_with_snapshot(&fixture.options(), false, &identity, &clock).unwrap();
+        let records = [
+            "focus-area-generation.json",
+            "focus-area-source-identity.json",
+            "focus-area-cache-identity.json",
+        ];
+        let path = fixture.session.join(incompatible);
+        let mut record: serde_json::Value =
+            serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+        record["schemaVersion"] = serde_json::json!(record["schemaVersion"].as_u64().unwrap() + 1);
+        fs::write(path, serde_json::to_vec(&record).unwrap()).unwrap();
+        let before: Vec<_> = records
+            .iter()
+            .map(|name| fs::read(fixture.session.join(name)).unwrap())
+            .collect();
+
+        let error =
+            restore_with_snapshot(&fixture.options(), false, &identity, &clock).unwrap_err();
+        assert_eq!(classification(&error), "invalidInput");
+        for (name, expected) in records.iter().zip(before) {
+            assert_eq!(fs::read(fixture.session.join(name)).unwrap(), expected);
+        }
+    }
 }
 
 /// Preserves the caller's restore identity when requesting cache storage.

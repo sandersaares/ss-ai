@@ -21,6 +21,7 @@ struct Installer {
     fail_browser: Cell<bool>,
     fail_npm: Cell<bool>,
     npm_calls: Cell<usize>,
+    npm_program: RefCell<Option<String>>,
     system_calls: RefCell<Vec<Vec<String>>>,
 }
 
@@ -55,12 +56,13 @@ impl Process for Installer {
 
     fn execute_in(
         &self,
-        _program: &str,
+        program: &str,
         arguments: &[String],
         _input: &[u8],
         directory: &Path,
         path: Option<&OsStr>,
     ) -> io::Result<ProcessOutput> {
+        *self.npm_program.borrow_mut() = Some(program.to_owned());
         assert_eq!(
             arguments,
             [
@@ -119,6 +121,13 @@ fn file(path: &Path, content: &str) {
     ignore = "process isolation requires launching a child executable"
 )]
 fn offline_setup_and_retained_locks() {
+    for relative_path in [false, true] {
+        run_offline_setup(relative_path);
+    }
+}
+
+/// Exercises both absolute and invocation-relative executable discovery.
+fn run_offline_setup(relative_path: bool) {
     let workspace = Builder::new()
         .prefix(".report-tools-test-")
         .tempdir_in(env::current_dir().unwrap())
@@ -139,10 +148,18 @@ fn offline_setup_and_retained_locks() {
             fs::set_permissions(path, fs::Permissions::from_mode(0o755)).unwrap();
         }
     }
+    let npm = if cfg!(windows) { "npm.cmd" } else { "npm" };
+    file(&bin.join(npm), "");
+    let path = if relative_path {
+        PathBuf::from("bin")
+    } else {
+        bin
+    };
     let output = Command::new(env::current_exe().unwrap())
         .args(["--exact", "offline_child", "--ignored", "--nocapture"])
         .env("REPORT_TOOLS_TEST_ROOT", workspace.path())
-        .env("PATH", &bin)
+        .current_dir(workspace.path())
+        .env("PATH", &path)
         .env_remove("NVM_BIN")
         .env_remove("NVM_SYMLINK")
         .env_remove("NVM_DIR")
@@ -180,11 +197,13 @@ fn offline_child() {
         fail_browser: Cell::new(false),
         fail_npm: Cell::new(false),
         npm_calls: Cell::new(0),
+        npm_program: RefCell::new(None),
         system_calls: RefCell::new(Vec::new()),
     };
     let clock = SystemClock::default();
     let guard = tools_lock(&tools_dir, LockMode::Shared, &clock).unwrap();
     let initial = discover(&skill, &tools_dir, &process, &guard).unwrap();
+    assert!(initial.node.as_ref().unwrap().is_absolute());
     assert!(initial.missing.contains(&"mermaid-cli".to_owned()));
     assert!(
         ResourceLock::try_open(&tools_dir.join("installation"), LockMode::Exclusive)
@@ -210,6 +229,11 @@ fn offline_child() {
     )
     .unwrap();
     assert_eq!(process.npm_calls.get(), 1);
+    let npm = if cfg!(windows) { "npm.cmd" } else { "npm" };
+    assert_eq!(
+        Path::new(process.npm_program.borrow().as_ref().unwrap()),
+        root.join("bin").join(npm)
+    );
     let puppet = installed
         .mermaid
         .ancestors()

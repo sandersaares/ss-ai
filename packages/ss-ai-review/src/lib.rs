@@ -10,10 +10,12 @@ mod approval;
 mod assessment {
     pub(crate) use ss_ai_assessment::{Assessment, Disposition, Judgment};
 }
+mod assessment_budget;
 mod capture;
 mod clock;
 mod command;
 mod discovery;
+mod discussion;
 mod final_review;
 mod final_review_ado;
 mod final_review_github;
@@ -69,4 +71,5 @@ pub use tracker_transaction::fuzz_tracker_transaction;
 pub use transport::{Http, HttpResponse, NativeHttp};
 
 #[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
 mod tests;

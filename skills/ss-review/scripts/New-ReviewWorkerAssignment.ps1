@@ -19,6 +19,15 @@ $ErrorActionPreference = 'Stop'
 $PSNativeCommandUseErrorActionPreference = $true
 . "$PSScriptRoot\lib\NativeWorkflowBridge.ps1"
 
+# Preserve the case-insensitive PowerShell entry point while passing the native
+# operation its canonical phase spelling.
+$Phase = @('references', 'fileGroups', 'focusAreas', 'overview', 'review') |
+    Where-Object { $_ -ieq $Phase } | Select-Object -First 1
+$SessionState = $ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath($SessionState)
+$ScopePath = $ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath($ScopePath)
+$OutputDirectory = $ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath($OutputDirectory)
+if ($ManifestPath) { $ManifestPath = $ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath($ManifestPath) }
+if ($ContextPath) { $ContextPath = $ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath($ContextPath) }
 $arguments = @(
     'worker-assignment', "--phase=$Phase", "--session-state=$SessionState",
     "--scope-path=$ScopePath", "--output-directory=$OutputDirectory",

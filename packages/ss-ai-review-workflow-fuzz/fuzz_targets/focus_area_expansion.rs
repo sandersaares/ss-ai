@@ -14,7 +14,7 @@ use std::time::Duration;
 use jiff::Timestamp;
 use libfuzzer_sys::fuzz_target;
 use ohno::AppError;
-use serde_json::{Value, json};
+use serde_json::{Value, from_slice, from_value, json};
 use ss_ai_review_workflow::focus_area_expansion::{
     Operation, ReferenceInput, ReferenceResult, update,
 };
@@ -110,7 +110,7 @@ fn referrer(parent: Option<&str>, scope: &str) -> Value {
 
 /// Uses the public wire schema to build typed registration operations.
 fn register(id: &str, uri: &str, parent: Option<&str>, scope: &str) -> Operation {
-    let input: ReferenceInput = serde_json::from_value(json!({
+    let input: ReferenceInput = from_value(json!({
         "id": id, "uri": uri, "referrers": [referrer(parent, scope)]
     }))
     .unwrap();
@@ -221,7 +221,7 @@ fn check(fixtures: &[Fixture; 2], model: &Model) {
         .collect::<Vec<_>>();
     for fixture in fixtures {
         let before = fs::read(&fixture.manifest).unwrap();
-        let actual: Value = serde_json::from_slice(&before).unwrap();
+        let actual: Value = from_slice(&before).unwrap();
         assert_eq!(actual, expected);
         let summary = update(
             &fixture.root,

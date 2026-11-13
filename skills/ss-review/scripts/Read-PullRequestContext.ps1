@@ -29,6 +29,7 @@ param(
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 $PSNativeCommandUseErrorActionPreference = $true
+. "$PSScriptRoot/lib/NativeContextPath.ps1"
 
 # Match the query excerpt limit because parser errors can include captured evidence.
 function Get-NativeContextErrorExcerpt {
@@ -74,23 +75,39 @@ function Invoke-NativeContext {
 $arguments = [Collections.Generic.List[string]]::new()
 if ($PSCmdlet.ParameterSetName -eq 'Saved') {
     $arguments.Add('read-saved')
+    $RequestPath = Resolve-NativeContextFilePath -Path $RequestPath
     $arguments.Add("--request-path=$RequestPath")
     if ($Next) { $arguments.Add('--next') }
     if ($Restart) { $arguments.Add('--restart') }
 } else {
     $arguments.Add('read')
+    $Path = Resolve-NativeContextFilePath -Path $Path
     $arguments.Add("--path=$Path")
     $arguments.Add("--query=$Query")
     $arguments.Add("--scope=$Scope")
     $arguments.Add("--page-size=$PageSize")
     foreach ($entry in @(
-        @('Field', 'field'), @('FilesJson', 'files-json'), @('FilesPath', 'files-path'),
+        @('Field', 'field'), @('FilesJson', 'files-json'),
         @('Kind', 'kind'), @('Resolution', 'resolution'), @('ThreadId', 'thread-id'),
         @('CommentId', 'comment-id'), @('Authorship', 'authorship'), @('Text', 'text'),
-        @('ComparePath', 'compare-path'), @('Cursor', 'cursor')
+        @('Cursor', 'cursor')
     )) {
         if ($PSBoundParameters.ContainsKey($entry[0])) {
             $arguments.Add("--$($entry[1])=$($PSBoundParameters[$entry[0]])")
+        }
+    }
+    foreach ($entry in @(@('FilesPath', 'files-path'), @('ComparePath', 'compare-path'))) {
+        if ($PSBoundParameters.ContainsKey($entry[0])) {
+            $value = $PSBoundParameters[$entry[0]]
+            # Native validation owns the explicit empty selector and conflicting-selector errors.
+            if ([string]::IsNullOrEmpty($value) -or
+                ($entry[0] -eq 'FilesPath' -and
+                    ([string]::IsNullOrWhiteSpace($value) -or $PSBoundParameters.ContainsKey('FilesJson')))) {
+                $resolved = $value
+            } else {
+                $resolved = Resolve-NativeContextFilePath -Path $value
+            }
+            $arguments.Add("--$($entry[1])=$resolved")
         }
     }
     if ($IndexOnly) { $arguments.Add('--index-only') }

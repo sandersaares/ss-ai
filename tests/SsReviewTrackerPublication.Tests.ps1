@@ -568,11 +568,16 @@ BeforeAll {
             }) | Out-Null
     }
 
-    # A native journal with an acknowledged creation must include its durable receipt and plan hash.
+    # A native journal uses the current schema and includes its durable receipt and plan hash.
     function Write-NativeFiledJournal {
         param([Parameter(Mandatory)][string] $OutputDirectory)
 
-        Write-TrackerJournal -OutputDirectory $OutputDirectory -Status 'failed' -CreationOutcome @('succeeded') -PlanHash ('a' * 64)
+        Write-TrackerJournal `
+            -OutputDirectory $OutputDirectory `
+            -Status 'failed' `
+            -CreationOutcome @('succeeded') `
+            -SchemaVersion 2 `
+            -PlanHash ('a' * 64)
         $path = Get-TrackerPublicationResultPath -OutputDirectory $OutputDirectory
         $journal = Read-JsonFixture -Path $path
         $journal['operations'][0]['itemNodeId'] = 'I_101'
@@ -1257,6 +1262,38 @@ Describe 'Audit document' {
         $audit.Contains('**Finding `F-2`**', [StringComparison]::Ordinal) | Should -BeTrue
         $withoutFollowUp = ConvertTo-FindingAuditDocument -Finding @($plain) -Destination 'tracker' -Context $context
         $withoutFollowUp.Contains('**Follows up on**', [StringComparison]::Ordinal) | Should -BeFalse
+    }
+
+    It 'preserves tracker links and pull request formatting with case-insensitive destinations' {
+        $context = New-TestContext -Thread @(
+            (New-TestThread -Id 'T1' -Comment @((New-TestComment -Id 'C1')))
+        )
+        $finding = New-TestFinding -Id 'F-1' -FollowUpThreadId 'T1' -FollowUpCommentId 'C1'
+        $expectedLink = '**Follows up on**: https://example.invalid/comment/C1'
+        (ConvertTo-FindingDestinationDocument -Finding @($finding) -Destination 'TRACKER' -Context $context).Contains($expectedLink) |
+            Should -BeTrue
+        (ConvertTo-FindingAuditDocument -Finding @($finding) -Destination 'TRACKER' -Context $context).Contains($expectedLink) |
+            Should -BeTrue
+        (ConvertTo-FindingDestinationText -Finding $finding -Destination 'PULLREQUEST') |
+            Should -BeExactly (ConvertTo-FindingMarkdownText -Finding $finding)
+    }
+
+    It 'renders a captured follow-up through the file command with a case-insensitive destination' {
+        $context = New-TestContext -Thread @(
+            (New-TestThread -Id 'T1' -Comment @((New-TestComment -Id 'C1')))
+        )
+        $finding = New-TestFinding -Id 'F-1' -FollowUpThreadId 'T1' -FollowUpCommentId 'C1'
+        $root = New-ScratchDirectory
+        $artifactPath = Write-JsonFixture -Path (Join-Path $root 'approved.json') -Value (New-TestApproved -Finding @($finding) -Context $context)
+        $contextPath = Write-JsonFixture -Path (Join-Path $root 'capture.json') -Value $context
+        $output = Join-Path $root 'markdown'
+        $executable = Join-Path $script:ExecutableRoot 'ConvertTo-FindingMarkdown.ps1'
+
+        & $script:PowerShellPath -NoProfile -NonInteractive -File $executable `
+            -Path $artifactPath -OutputDirectory $output -Destination 'TRACKER' -ContextPath $contextPath | Out-Null
+        $LASTEXITCODE | Should -Be 0
+        [IO.File]::ReadAllText((Join-Path $output 'F-1.md')) |
+            Should -BeLike '*https://example.invalid/comment/C1*'
     }
 
     It 'renders an empty set as an empty document' {

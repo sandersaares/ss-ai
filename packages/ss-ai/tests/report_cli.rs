@@ -4,6 +4,8 @@ use std::cell::RefCell;
 use std::env;
 use std::fs;
 use std::io;
+#[cfg(unix)]
+use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
@@ -109,7 +111,6 @@ fn report_dispatch_with_offline_dependencies() {
         fixture_file(&path, b"");
         #[cfg(unix)]
         {
-            use std::os::unix::fs::PermissionsExt;
             fs::set_permissions(path, fs::Permissions::from_mode(0o755)).unwrap();
         }
     }
@@ -135,6 +136,7 @@ fn report_dispatch_with_offline_dependencies() {
         String::from_utf8_lossy(&output.stdout),
         String::from_utf8_lossy(&output.stderr)
     );
+    assert!(String::from_utf8_lossy(&output.stdout).contains("1 passed"));
 }
 
 /// Checks output contracts and the production readiness probe using fake processes.

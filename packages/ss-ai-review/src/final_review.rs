@@ -1,7 +1,7 @@
 //! Composes the final review transaction with the provider-specific operations.
 
 use std::any::type_name;
-use std::fmt::{Debug, Formatter, Result as FmtResult};
+use std::fmt::{Debug, Formatter, Result as StdFmtResult};
 use std::path::Path;
 
 use ohno::AppError;
@@ -48,11 +48,12 @@ pub struct FinalReviewInput<'a> {
 }
 
 impl Debug for FinalReviewInput<'_> {
-    fn fmt(&self, f: &mut Formatter<'_>) -> FmtResult {
+    fn fmt(&self, f: &mut Formatter<'_>) -> StdFmtResult {
         f.debug_struct(type_name::<Self>())
             .field("finding_count", &self.plan.len())
             .field("approve_merge", &self.approve_merge)
             .field("publish_closed", &self.publish_closed)
+            .field("has_tenant", &self.tenant.is_some())
             .finish_non_exhaustive()
     }
 }
@@ -249,15 +250,6 @@ struct ProviderEffects<'a> {
     approval: Option<Value>,
 }
 
-impl ProviderEffects<'_> {
-    /// Requires a review receipt before subsequent provider operations.
-    fn review(&self) -> Result<&Value, AppError> {
-        self.review
-            .as_ref()
-            .ok_or_else(|| fail("invalidState", "Review has not started"))
-    }
-}
-
 impl Effects for ProviderEffects<'_> {
     fn start(&mut self) -> Result<Value, AppError> {
         let review = match self.target.platform {
@@ -289,13 +281,16 @@ impl Effects for ProviderEffects<'_> {
     }
 
     fn verify_findings(&mut self) -> Result<Value, AppError> {
-        let review = self.review()?.clone();
+        let review = self
+            .review
+            .as_ref()
+            .ok_or_else(|| fail("invalidState", "Review has not started"))?;
         match self.target.platform {
             Platform::GitHub => {
-                final_review_github::verify_findings(&self.transport, &self.target, &review)
+                final_review_github::verify_findings(&self.transport, &self.target, review)
             }
             Platform::AzureDevOps => {
-                final_review_ado::verify_findings(&mut self.transport, &self.target, &review)
+                final_review_ado::verify_findings(&mut self.transport, &self.target, review)
             }
         }
     }
@@ -338,12 +333,15 @@ impl Effects for ProviderEffects<'_> {
     }
 
     fn verify(&mut self) -> Result<Value, AppError> {
-        let review = self.review()?.clone();
+        let review = self
+            .review
+            .as_ref()
+            .ok_or_else(|| fail("invalidState", "Review has not started"))?;
         match self.target.platform {
-            Platform::GitHub => final_review_github::verify(&self.transport, &self.target, &review),
+            Platform::GitHub => final_review_github::verify(&self.transport, &self.target, review),
             Platform::AzureDevOps => {
                 let mut verification =
-                    final_review_ado::verify(&mut self.transport, &self.target, &review)?;
+                    final_review_ado::verify(&mut self.transport, &self.target, review)?;
                 if let Some(receipt) = &self.approval {
                     let approval = final_review_ado::verify_approval(
                         &mut self.transport,
@@ -372,13 +370,14 @@ impl Effects for ProviderEffects<'_> {
     }
 
     fn discard(&mut self) -> Result<(), AppError> {
-        let review = self.review()?.clone();
+        let review = self
+            .review
+            .as_ref()
+            .ok_or_else(|| fail("invalidState", "Review has not started"))?;
         match self.target.platform {
-            Platform::GitHub => {
-                final_review_github::discard(&self.transport, &self.target, &review)
-            }
+            Platform::GitHub => final_review_github::discard(&self.transport, &self.target, review),
             Platform::AzureDevOps => {
-                final_review_ado::discard(&mut self.transport, &self.target, &review)
+                final_review_ado::discard(&mut self.transport, &self.target, review)
             }
         }
     }
@@ -387,9 +386,8 @@ impl Effects for ProviderEffects<'_> {
 #[cfg(test)]
 #[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
+    use crate::FinalReviewInput;
     use serde_json::json;
-
-    use super::FinalReviewInput;
 
     #[test]
     fn final_review_input_debug_formats() {

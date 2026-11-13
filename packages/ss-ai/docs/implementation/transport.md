@@ -39,14 +39,16 @@ permitted.
 
 HTTP replies retain status, normalized headers, and raw bytes until transport
 classifies them. GitHub failures use captured CLI diagnostics and explicit
-rate-limit evidence. Neither path treats an uncertain write as permission to
-try again; journal reconciliation belongs to the calling workflow.
+rate-limit evidence. GraphQL mutation errors retain bounded, credential-scrubbed
+provider details for recovery. Neither path treats an uncertain write as
+permission to try again. Notice and review-selection recovery follow their own
+workflows; journal reconciliation belongs to the calling workflow.
 
 Approval publication uses explicit single-attempt methods for both providers,
-including ADO's reviewer PUT and audit-thread POST. These methods do not wait
-and replay a rate-limit refusal: publication must refresh authority before any
-new effect. ADO sign-in documents or malformed successful write replies are
-ambiguous effects, not proof that the service made no change.
+including ADO's reviewer PUT. The approval request is the final remote action:
+a successful response finishes the operation, and request errors are reported
+without automatic resend in that attempt. These methods do not wait and replay
+a rate-limit refusal. ADO's vote request has no source-commit precondition.
 
 Final review publication also performs live capture and evidence checks before
 remote writes. An explicitly authorized pre-existing GitHub draft discard is

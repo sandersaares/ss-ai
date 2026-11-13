@@ -73,6 +73,19 @@ BeforeAll {
 
     function Invoke-FocusPreparationCommand {
         param([string] $Name, [string[]] $Arguments)
+        if ($script:AlternatePaths) {
+            # Exercise PowerShell path syntax across the real process boundary.
+            for ($index = 0; $index -lt $Arguments.Count - 1; $index++) {
+                if ($Arguments[$index] -match '^-(?:.*Path|.*Directory)$') {
+                    $Arguments[$index + 1] = if ($IsWindows) {
+                        $Arguments[$index + 1].Replace('\', '/')
+                    } else {
+                        $Arguments[$index + 1].Replace('/', '\')
+                    }
+                    $index++
+                }
+            }
+        }
         Receive-FocusPreparationCommand (Start-FocusPreparationCommand $Name $Arguments)
     }
 
@@ -125,6 +138,7 @@ BeforeAll {
 
 Describe 'ss-review focus-area preparation' {
     BeforeEach {
+        $script:AlternatePaths = $false
         $script:Session = Join-Path $TestDrive ([guid]::NewGuid().ToString('N'))
         $script:MapPath = Join-Path $script:Session 'focus-area-map.json'
         $script:ScopedText = @(
@@ -479,6 +493,44 @@ try {
         $combined = Get-Content -LiteralPath $merged -Raw | ConvertFrom-Json
         $combined.chapters.Count | Should -Be 4
         $combined.chapters[0].applicability[0].effectiveScope | Should -BeExactly 'Corrected scope judgment.'
+    }
+
+    It 'resolves PowerShell paths before passing focus-area inputs to the native workflow' {
+        $script:AlternatePaths = $true
+        $arguments = @('-SessionStateDirectory', $script:Session, '-MapPath', $script:MapPath)
+        $result = Invoke-FocusPreparationCommand 'Test-FocusAreaMap.ps1' $arguments
+        $result.ExitCode | Should -Be 0 -Because $result.Error
+        $result = Invoke-FocusPreparationCommand 'New-FocusAreaArtifacts.ps1' $arguments
+        $result.ExitCode | Should -Be 0 -Because $result.Error
+
+        $merged = Join-Path $script:Session 'merged map.json'
+        $result = Invoke-FocusPreparationCommand 'Update-FocusAreaMap.ps1' @(
+            '-SessionStateDirectory', $script:Session, '-Path', $merged,
+            '-Operation', 'Append', '-InputPath', $script:MapPath
+        )
+        $result.ExitCode | Should -Be 0 -Because $result.Error
+        Test-Path -LiteralPath $merged | Should -BeTrue
+
+        Remove-Item -LiteralPath (Join-Path $script:Session 'focus-area-expansion-status.json')
+        $result = Invoke-FocusPreparationCommand 'Update-FocusAreaExpansion.ps1' @(
+            '-SessionStateDirectory', $script:Session, '-Operation', 'Initialize'
+        )
+        $result.ExitCode | Should -Be 0 -Because $result.Error
+        $registration = Join-Path $script:Session 'expansion input.json'
+        [IO.File]::WriteAllText($registration, (ConvertTo-JsonText -Value @{
+            id = 'path-test'
+            uri = 'https://example.invalid/path-test'
+            referrers = @(@{
+                parentId = $null
+                source = New-TestSpan 'scoped.md' 4 4 'instruction-set-source'
+                scope = 'Scripts'
+                declarations = @((New-TestSpan 'scoped.md' 1 4 'instruction-set-source'))
+            })
+        }))
+        $result = Invoke-FocusPreparationCommand 'Update-FocusAreaExpansion.ps1' @(
+            '-SessionStateDirectory', $script:Session, '-Operation', 'Register', '-InputPath', $registration
+        )
+        $result.ExitCode | Should -Be 0 -Because $result.Error
     }
 
     It 'validates inherited reference chains and rejects invalidated sources without changing published artifacts' {

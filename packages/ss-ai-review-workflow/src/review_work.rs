@@ -18,7 +18,7 @@ use serde_json::{Map, Value, json};
 use ss_ai_review_context::{bytes_hash, powershell_json};
 use ss_ai_runtime::{Clock, FileTransaction, LockMode, ResourceLock, caused_by, fail, read_bytes};
 
-use crate::findings;
+use crate::findings::{self, same_lock};
 use crate::focus_area_generation;
 use crate::workflow_plan::parse_json;
 
@@ -30,6 +30,45 @@ impl ValidatedManifest {
     pub(crate) fn as_value(&self) -> &Value {
         &self.0
     }
+}
+
+/// Resolves directory aliases without requiring the publication target to exist.
+fn focus_path_for_lock(path: &Path) -> Result<PathBuf, AppError> {
+    let mut path = path.to_path_buf();
+    let mut links = HashSet::new();
+    // Match the instruction-source resolver's bound on link expansion.
+    for _ in 0..256 {
+        let Some(name) = path.file_name() else {
+            return fs::canonicalize(&path)
+                .map_err(|error| caused_by("io", "Cannot resolve focus areas", error).into());
+        };
+        let parent = path
+            .parent()
+            .ok_or_else(|| invalid("Focus areas require a parent directory"))?;
+        let parent = fs::canonicalize(parent)
+            .map_err(|error| caused_by("io", "Cannot resolve focus-area parent", error))?;
+        let resolved = parent.join(name);
+        match fs::symlink_metadata(&resolved) {
+            Ok(metadata) if metadata.file_type().is_symlink() => {
+                if !links.insert(resolved.clone()) {
+                    return Err(invalid("Focus-area directory link cycle"));
+                }
+                let target = fs::read_link(&resolved)
+                    .map_err(|error| caused_by("io", "Cannot read focus-area link", error))?;
+                path = if target.is_absolute() {
+                    target
+                } else {
+                    parent.join(target)
+                };
+            }
+            Ok(_) => return Ok(resolved),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(resolved),
+            Err(error) => {
+                return Err(caused_by("io", "Cannot inspect focus areas", error).into());
+            }
+        }
+    }
+    Err(invalid("Excessive focus-area directory links"))
 }
 
 /// Publishes a validated inventory without replacing existing input by default.
@@ -160,21 +199,13 @@ fn create_internal(
         ));
     }
     let focus_path = full_path(focus_areas)?;
-    let legacy_focus = if preparation.is_none() {
-        Some(
-            fs::canonicalize(&focus_path)
-                .map_err(|error| caused_by("io", "Cannot resolve focus areas", error))?,
-        )
-    } else {
-        None
-    };
+    let focus_lock_path = focus_path_for_lock(&focus_path)?;
     let session = if let Some(preparation) = preparation {
         fs::canonicalize(preparation.session)
             .map_err(|error| caused_by("io", "Cannot resolve review session", error))?
     } else {
-        legacy_focus
-            .as_ref()
-            .and_then(|path| path.parent())
+        focus_lock_path
+            .parent()
             .ok_or_else(|| invalid("Focus areas require a parent directory"))?
             .to_path_buf()
     };
@@ -183,9 +214,15 @@ fn create_internal(
         LockMode::Shared,
         clock,
     )?;
+    if preparation.is_some() && focus_lock_path.parent() != Some(session.as_path()) {
+        return Err(invalid("Focus areas do not belong to the review session"));
+    }
+    let _focus_lock = FileTransaction::open(&focus_lock_path, clock)?;
     let canonical_focus = fs::canonicalize(&focus_path)
         .map_err(|error| caused_by("io", "Cannot resolve focus areas", error))?;
-    if legacy_focus.is_some_and(|path| path != canonical_focus) {
+    let locked_focus = fs::canonicalize(&focus_lock_path)
+        .map_err(|error| caused_by("io", "Cannot resolve locked focus areas", error))?;
+    if locked_focus != canonical_focus || fs::symlink_metadata(&focus_lock_path)?.is_symlink() {
         return Err(invalid("Focus-area directory changed"));
     }
     let is_session_focus = if preparation.is_some() {
@@ -204,7 +241,6 @@ fn create_internal(
             }
         }
     };
-    let _focus_lock = FileTransaction::open(&canonical_focus, clock)?;
     if preparation.is_none()
         && is_session_focus
         && focus_area_generation::is_managed_locked(&session, clock)?
@@ -852,6 +888,7 @@ fn scope_exclusions(
 /// Matches the intentionally small path-scope glob language.
 fn scope_matches(scope: &Value, path: &str) -> Result<bool, AppError> {
     let base = nonblank(scope.get("base"), "base")?;
+    let path: Vec<_> = path.split('/').collect();
     for pattern in array(scope.get("include"), "include")? {
         let pattern = nonblank(Some(pattern), "pattern")?;
         let full = if base == "." {
@@ -868,7 +905,6 @@ fn scope_matches(scope: &Value, path: &str) -> Result<bool, AppError> {
         }) {
             return Err(invalid("Unsupported path-scope pattern"));
         }
-        let path: Vec<_> = path.split('/').collect();
         if match_segments(&segments, &path) {
             return Ok(true);
         }
@@ -877,6 +913,10 @@ fn scope_matches(scope: &Value, path: &str) -> Result<bool, AppError> {
 }
 
 /// Matches segments with a dynamic table so globstars always make progress.
+///
+/// Each row records which input prefixes match the processed pattern prefix.
+/// A wildcard uses the preceding row to consume nothing and its current row
+/// to consume another element; ordinary elements advance from the preceding row.
 fn match_segments(pattern: &[&str], path: &[&str]) -> bool {
     let mut previous = vec![false; path.len() + 1];
     let mut next = vec![false; path.len() + 1];
@@ -899,6 +939,8 @@ fn match_segments(pattern: &[&str], path: &[&str]) -> bool {
 }
 
 /// Matches a single case-insensitive segment without crossing path separators.
+///
+/// The prefix rows follow the same recurrence as `match_segments`, over characters.
 fn match_segment(pattern: &str, path: &str) -> bool {
     let chars: Vec<_> = path.chars().flat_map(char::to_lowercase).collect();
     let mut previous = vec![false; chars.len() + 1];
@@ -1753,20 +1795,6 @@ fn path_text(path: &Path) -> Result<&str, AppError> {
     path.to_str().ok_or_else(|| invalid("Path is not Unicode"))
 }
 
-/// Avoids recursively taking the same retained sibling lock through an alias.
-fn same_lock(first: &Path, second: &Path) -> bool {
-    let identity = |path: &Path| {
-        Some((
-            fs::canonicalize(path.parent()?).ok()?,
-            path.file_name()?.to_owned(),
-        ))
-    };
-    first == second
-        || identity(first)
-            .zip(identity(second))
-            .is_some_and(|(first, second)| first == second)
-}
-
 /// Reads the complete manifest before another operation relies on its assignments.
 pub(crate) fn read_manifest(path: &Path, clock: &dyn Clock) -> Result<ValidatedManifest, AppError> {
     let manifest = read_bytes(path, clock)?
@@ -1942,19 +1970,19 @@ fn decode_text(bytes: &[u8]) -> Result<String, AppError> {
 
 /// Rejects invalid UTF-16 rather than substituting replacement characters.
 fn decode_utf16(bytes: &[u8], little_endian: bool) -> Result<String, AppError> {
-    let mut words = Vec::new();
     let (chunks, remainder) = bytes.as_chunks::<2>();
-    for &word in chunks {
-        words.push(if little_endian {
-            u16::from_le_bytes(word)
-        } else {
-            u16::from_be_bytes(word)
-        });
-    }
     if !remainder.is_empty() {
         return Err(invalid("Invalid UTF-16 workflow data"));
     }
-    String::from_utf16(&words)
+    let words = chunks.iter().map(|&word| {
+        if little_endian {
+            u16::from_le_bytes(word)
+        } else {
+            u16::from_be_bytes(word)
+        }
+    });
+    char::decode_utf16(words)
+        .collect::<Result<String, _>>()
         .map_err(|error| caused_by("invalidInput", "Invalid UTF-16 workflow data", error).into())
 }
 
@@ -2044,6 +2072,14 @@ mod tests {
         assert_eq!(
             decode_text(&[0, 0, 0xfe, 0xff, 0, 0, 0, b'a']).unwrap(),
             "a"
+        );
+        assert_eq!(
+            decode_text(&[0xff, 0xfe, b'a', 0, 0x3d, 0xd8, 0x42, 0xde]).unwrap(),
+            "a🙂"
+        );
+        assert_eq!(
+            decode_text(&[0xfe, 0xff, 0, b'a', 0xd8, 0x3d, 0xde, 0x42]).unwrap(),
+            "a🙂"
         );
     }
 

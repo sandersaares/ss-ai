@@ -12,7 +12,7 @@ use crate::error::fail;
 use crate::identity::Identity;
 use crate::json::{array, field, identifier, text};
 use crate::target::{Platform, Target, escape};
-use crate::transport::{Transport, ado_items};
+use crate::transport::Transport;
 
 /// Resolves incomplete coordinates before constructing repository-scoped routes.
 fn resolve(transport: &mut Transport<'_>, target: &Target) -> Result<Target, AppError> {
@@ -58,26 +58,6 @@ fn resolve(transport: &mut Transport<'_>, target: &Target) -> Result<Target, App
     Ok(resolved)
 }
 
-/// Follows all list pages and rejects continuation cycles.
-fn list(transport: &mut Transport<'_>, path: &str) -> Result<Vec<Value>, AppError> {
-    let mut result = Vec::new();
-    let mut token: Option<String> = None;
-    let mut seen = HashSet::new();
-    loop {
-        let query = token
-            .as_ref()
-            .map(|s| vec![("continuationToken", s.clone())])
-            .unwrap_or_default();
-        let page = transport.ado(path, "GET", None, &query, "7.1")?;
-        result.extend(ado_items(&page.payload)?);
-        match page.continuation {
-            None => return Ok(result),
-            Some(next) if seen.insert(next.clone()) => token = Some(next),
-            Some(_) => return Err(fail("service", "Azure DevOps continuation token repeated")),
-        }
-    }
-}
-
 /// Obtains the authenticated account from the preview connection endpoint.
 fn account(transport: &mut Transport<'_>) -> Result<Identity, AppError> {
     let page = transport.ado("_apis/connectionData", "GET", None, &[], "7.1-preview")?;
@@ -117,7 +97,7 @@ pub(crate) fn state(transport: &mut Transport<'_>, target: &Target) -> Result<Va
     }
     let mut latest: Option<(u64, Value)> = None;
     let mut ids = HashSet::new();
-    for iteration in list(transport, &format!("{path}/iterations"))? {
+    for iteration in transport.ado_list(&format!("{path}/iterations"))? {
         let id = positive(field(&iteration, "id")?)?;
         if !ids.insert(id) {
             return Err(fail("service", "Duplicate Azure DevOps iteration"));
@@ -150,10 +130,7 @@ pub(crate) fn state(transport: &mut Transport<'_>, target: &Target) -> Result<Va
 
 /// Normalizes ADO paths to repository-relative form.
 fn canonical_path(path: &str) -> String {
-    path.replace('\\', "/")
-        .trim()
-        .trim_start_matches('/')
-        .to_owned()
+    path.replace('\\', "/").trim_start_matches('/').to_owned()
 }
 
 /// Reads the cumulative changed-file identities for the selected iteration.
@@ -191,8 +168,7 @@ pub(crate) fn file_identity(
             positive(id)?;
             let canonical = canonical_path(item_path);
             if !canonical.is_empty() {
-                // PowerShell's ordered dictionary compares keys case-insensitively.
-                found.insert(canonical.to_lowercase(), id.clone());
+                found.insert(canonical, id.clone());
             }
         }
         let Some(next) = page.payload.get("nextSkip").filter(|v| !v.is_null()) else {
@@ -215,7 +191,7 @@ pub(crate) fn file_identity(
     let mut missing = Vec::new();
     for path in paths {
         let canonical = canonical_path(path);
-        if let Some(id) = found.get(&canonical.to_lowercase()) {
+        if let Some(id) = found.get(&canonical) {
             result.insert(path.clone(), id.clone());
         } else {
             missing.push(canonical);
@@ -424,6 +400,18 @@ pub(crate) fn add(
     Ok(written)
 }
 
+/// Normalizes an omitted optional-reviewer flag for durable approval evidence.
+fn normalize_required_status(reviewer: &mut Value) -> Option<bool> {
+    let reviewer = reviewer.as_object_mut()?;
+    let required = match reviewer.get("isRequired") {
+        None => false,
+        Some(Value::Bool(required)) => *required,
+        Some(_) => return None,
+    };
+    reviewer.insert("isRequired".into(), Value::Bool(required));
+    Some(required)
+}
+
 /// Records approval while retaining an existing reviewer's required status.
 pub(crate) fn approve(transport: &mut Transport<'_>, target: &Target) -> Result<Value, AppError> {
     let target = resolve(transport, target)?;
@@ -434,7 +422,7 @@ pub(crate) fn approve(transport: &mut Transport<'_>, target: &Target) -> Result<
         .ok_or_else(|| fail("authentication", "Approval requires an account ID"))?;
     let path = format!("{}/reviewers", target.pr_api());
     let mut required = false;
-    for reviewer in list(transport, &path)? {
+    for reviewer in transport.ado_list(&path)? {
         if Identity::from_account(Platform::AzureDevOps, &reviewer)?.may_match(&identity) {
             required = match reviewer.get("isRequired") {
                 None | Some(Value::Null) => false,
@@ -445,13 +433,13 @@ pub(crate) fn approve(transport: &mut Transport<'_>, target: &Target) -> Result<
         }
     }
     let body = json!({"id": id, "vote": 10, "isRequired": required});
-    let response = transport.request(&format!("{path}/{}", escape(id)), "PUT", Some(&body))?;
+    let mut response = transport.request(&format!("{path}/{}", escape(id)), "PUT", Some(&body))?;
     if response
         .get("id")
         .and_then(|v| identifier(v).ok())
         .is_none_or(|s| !s.eq_ignore_ascii_case(id))
         || response.get("vote").and_then(Value::as_i64) != Some(10)
-        || response.get("isRequired").and_then(Value::as_bool) != Some(required)
+        || normalize_required_status(&mut response) != Some(required)
     {
         return Err(fail(
             "ambiguousWrite",
@@ -496,13 +484,13 @@ pub(crate) fn verify_approval(
         ));
     }
     let path = format!("{}/reviewers/{}", target.pr_api(), escape(&id));
-    let reviewer = transport.request(&path, "GET", None)?;
+    let mut reviewer = transport.request(&path, "GET", None)?;
     if reviewer
         .get("id")
         .and_then(|value| identifier(value).ok())
         .is_none_or(|current| !current.eq_ignore_ascii_case(&id))
         || reviewer.get("vote").and_then(Value::as_i64) != Some(10)
-        || reviewer.get("isRequired").and_then(Value::as_bool) != Some(required)
+        || normalize_required_status(&mut reviewer) != Some(required)
     {
         return Err(fail(
             "service",
@@ -598,7 +586,7 @@ fn verify_core(
 ) -> Result<Value, AppError> {
     let target = resolve(transport, target)?;
     let mut threads = HashMap::new();
-    for thread in list(transport, &format!("{}/threads", target.pr_api()))? {
+    for thread in transport.ado_list(&format!("{}/threads", target.pr_api()))? {
         let id = identifier(field(&thread, "id")?)?;
         if threads.insert(id, thread).is_some() {
             return Err(fail("service", "Duplicate thread identifier"));
@@ -944,6 +932,32 @@ mod tests {
     }
 
     #[test]
+    fn file_identity_preserves_whitespace_and_case_distinct_paths() {
+        let changes = "proj/_apis/git/repositories/repo/pullRequests/7/iterations/3/changes";
+        let fixture = Fixture::new(vec![(
+            "GET",
+            url(changes, "%24top=1000&"),
+            None,
+            json!({"changeEntries":[
+                {"item":{"path":"/src/File "},"changeTrackingId":42},
+                {"item":{"path":"/src/Foo.rs"},"changeTrackingId":43},
+                {"item":{"path":"/src/foo.rs"},"changeTrackingId":44}
+            ]}),
+        )]);
+        let target = target();
+        let mut transport = Transport::new(&target, None, &fixture, &fixture, &fixture);
+        let ids = file_identity(
+            &mut transport,
+            &target,
+            &json!({"iterationId":3}),
+            &["src/File ".into(), "src/Foo.rs".into(), "src/foo.rs".into()],
+        )
+        .unwrap();
+        assert_eq!(ids, json!({"src/File ":42,"src/Foo.rs":43,"src/foo.rs":44}));
+        fixture.done();
+    }
+
+    #[test]
     fn publication_and_readback_keep_separate_receipts() {
         let pr = "proj/_apis/git/repositories/repo/pullRequests/7";
         let threads = format!("{pr}/threads");
@@ -1045,6 +1059,72 @@ mod tests {
             true
         );
         fixture.done();
+    }
+
+    #[test]
+    fn approval_normalizes_omitted_optional_status_in_receipt_and_readback() {
+        let reviewers = "proj/_apis/git/repositories/repo/pullRequests/7/reviewers";
+        let fixture = Fixture::new(vec![
+            ("GET", connection_url(), None, connection()),
+            ("GET", url(reviewers, ""), None, list(json!([]))),
+            (
+                "PUT",
+                url(&format!("{reviewers}/account"), ""),
+                Some(json!({"id":"account","vote":10,"isRequired":false})),
+                json!({"id":"account","vote":10}),
+            ),
+            ("GET", connection_url(), None, connection()),
+            (
+                "GET",
+                url(&format!("{reviewers}/account"), ""),
+                None,
+                json!({"id":"account","vote":10}),
+            ),
+        ]);
+        let target = target();
+        let mut transport = Transport::new(&target, None, &fixture, &fixture, &fixture);
+        let receipt = approve(&mut transport, &target).unwrap();
+        assert_eq!(receipt["isRequired"], false);
+        let readback = verify_approval(&mut transport, &target, &receipt).unwrap();
+        assert_eq!(readback["isRequired"], false);
+        fixture.done();
+    }
+
+    #[test]
+    fn approval_rejects_malformed_or_mismatched_required_status() {
+        let reviewers = "proj/_apis/git/repositories/repo/pullRequests/7/reviewers";
+        for (required, response) in [
+            (false, json!({"id":"account","vote":10,"isRequired":null})),
+            (
+                false,
+                json!({"id":"account","vote":10,"isRequired":"false"}),
+            ),
+            (false, json!({"id":"account","vote":10,"isRequired":true})),
+            (true, json!({"id":"account","vote":10})),
+        ] {
+            let fixture = Fixture::new(vec![
+                ("GET", connection_url(), None, connection()),
+                (
+                    "GET",
+                    url(reviewers, ""),
+                    None,
+                    list(json!([{"id":"account","isRequired":required}])),
+                ),
+                (
+                    "PUT",
+                    url(&format!("{reviewers}/account"), ""),
+                    Some(json!({"id":"account","vote":10,"isRequired":required})),
+                    response,
+                ),
+            ]);
+            let target = target();
+            let mut transport = Transport::new(&target, None, &fixture, &fixture, &fixture);
+            assert_eq!(
+                classification(&approve(&mut transport, &target).unwrap_err()),
+                "ambiguousWrite"
+            );
+            fixture.done();
+        }
     }
 
     #[test]
@@ -1250,6 +1330,8 @@ mod tests {
             json!({"id":"account","vote":0,"isRequired":true}),
             json!({"id":"account","vote":10,"isRequired":false}),
             json!({"id":"account","vote":10}),
+            json!({"id":"account","vote":10,"isRequired":null}),
+            json!({"id":"account","vote":10,"isRequired":"true"}),
         ] {
             let fixture = Fixture::new(vec![
                 ("GET", connection_url(), None, connection()),
@@ -1262,6 +1344,31 @@ mod tests {
             ]);
             let mut transport = Transport::new(&target, None, &fixture, &fixture, &fixture);
             assert!(verify_approval(&mut transport, &target, &receipt).is_err());
+            fixture.done();
+        }
+
+        let optional_receipt = json!({"id":"account","vote":10,"isRequired":false});
+        for readback in [
+            json!({"id":"account","vote":10,"isRequired":null}),
+            json!({"id":"account","vote":10,"isRequired":"false"}),
+            json!({"id":"account","vote":10,"isRequired":true}),
+        ] {
+            let fixture = Fixture::new(vec![
+                ("GET", connection_url(), None, connection()),
+                (
+                    "GET",
+                    url(&format!("{reviewers}/account"), ""),
+                    None,
+                    readback,
+                ),
+            ]);
+            let mut transport = Transport::new(&target, None, &fixture, &fixture, &fixture);
+            assert_eq!(
+                classification(
+                    &verify_approval(&mut transport, &target, &optional_receipt).unwrap_err()
+                ),
+                "service"
+            );
             fixture.done();
         }
 

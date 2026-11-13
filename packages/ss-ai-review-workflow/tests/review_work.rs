@@ -9,6 +9,8 @@ use std::cell::Cell;
 use std::env;
 use std::fs;
 use std::io::{self, BufRead, BufReader, Read, Write};
+#[cfg(unix)]
+use std::os::unix::fs::symlink;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::Mutex;
@@ -758,6 +760,162 @@ impl Clock for EventGateClock {
     }
 }
 
+/// Pauses publication with its artifact directory absent, then resumes the reader.
+fn work_waits_for_focus_publication(bound: bool, alias: bool) {
+    let _process_exclusion = PROCESS_CREATION_AND_CONTROLLED_LOCK
+        .lock()
+        .expect("Another test panicked while excluding process creation");
+    let workspace = Workspace::new(match (bound, alias) {
+        (false, false) => "legacy-publication-gap",
+        (true, false) => "bound-publication-gap",
+        (false, true) => "legacy-publication-alias",
+        (true, true) => "bound-publication-alias",
+    });
+    let clock = SystemClock::default();
+    let (inventory, groups, _) = inputs(&workspace);
+    let focus = workspace.path("focus-areas");
+    let identity = if bound {
+        Some(published_preparation(&workspace, &clock))
+    } else {
+        fs::create_dir_all(&focus).unwrap();
+        fs::write(focus.join("focus-rules.md"), "Focus guidance").unwrap();
+        None
+    };
+    let original = fs::read_to_string(focus.join("focus-rules.md")).unwrap();
+    let input = if alias {
+        #[cfg(unix)]
+        {
+            let link = workspace.path("focus-alias");
+            symlink("focus-areas", &link).unwrap();
+            link
+        }
+        #[cfg(not(unix))]
+        {
+            panic!("The alias fixture is only used where symlinks are available");
+        }
+    } else {
+        focus.clone()
+    };
+    let operation = ResourceLock::open(
+        &workspace.path("focus-area-cache-operation"),
+        LockMode::Shared,
+        &clock,
+    )
+    .unwrap();
+    let artifacts = FileTransaction::open(&focus, &clock).unwrap();
+    let backup = workspace.path("focus-backup");
+    fs::rename(&focus, &backup).unwrap();
+    let (events_tx, events_rx) = mpsc::channel();
+    let (retry_tx, retry_rx) = mpsc::channel();
+    let session = workspace.0.clone();
+    let output = workspace.path("work");
+    std::thread::scope(|scope| {
+        let worker = scope.spawn(move || {
+            let clock = EventGateClock {
+                events: events_tx.clone(),
+                release: retry_rx,
+                waits: Cell::new(0),
+            };
+            let result = if let Some(identity) = identity.as_deref() {
+                review_work::create_with_preparation(
+                    &inventory,
+                    &groups,
+                    &input,
+                    &output,
+                    None,
+                    None,
+                    &review_work::PreparationBinding {
+                        session: &session,
+                        identity,
+                    },
+                    &clock,
+                )
+            } else {
+                review_work::create(&inventory, &groups, &input, &output, None, None, &clock)
+            };
+            events_tx.send("finished").unwrap();
+            result
+        });
+        // The reader must reach the artifact lock rather than inspect the
+        // temporarily absent directory during the publication transaction.
+        assert_eq!(events_rx.recv().unwrap(), "contended");
+        fs::rename(&backup, &focus).unwrap();
+        drop(artifacts);
+        drop(operation);
+        retry_tx.send(()).unwrap();
+        let result = worker.join().unwrap().unwrap();
+        let manifest: Value =
+            serde_json::from_slice(&fs::read(result["manifestPath"].as_str().unwrap()).unwrap())
+                .unwrap();
+        let snapshot = Path::new(manifest["reviewers"][0]["focusArea"].as_str().unwrap());
+        assert_eq!(fs::read_to_string(snapshot).unwrap(), original);
+    });
+}
+
+#[test]
+fn work_waits_for_focus_publication_before_resolving_directory() {
+    work_waits_for_focus_publication(false, false);
+    work_waits_for_focus_publication(true, false);
+}
+
+#[cfg(unix)]
+#[test]
+fn work_waits_for_focus_publication_through_directory_alias() {
+    work_waits_for_focus_publication(false, true);
+    work_waits_for_focus_publication(true, true);
+}
+
+#[cfg(unix)]
+#[test]
+fn work_rejects_retargeted_and_cyclic_focus_aliases() {
+    let _process_exclusion = PROCESS_CREATION_AND_CONTROLLED_LOCK
+        .lock()
+        .expect("Another test panicked while excluding process creation");
+    let workspace = Workspace::new("focus-alias-changes");
+    let clock = SystemClock::default();
+    let (inventory, groups, _) = inputs(&workspace);
+    let focus = workspace.path("focus-areas");
+    let other = workspace.path("other");
+    fs::create_dir_all(&focus).unwrap();
+    fs::create_dir_all(&other).unwrap();
+    fs::write(focus.join("area.md"), "Original").unwrap();
+    fs::write(other.join("area.md"), "Replacement").unwrap();
+    let alias = workspace.path("focus-alias");
+    symlink("focus-areas", &alias).unwrap();
+    let held = FileTransaction::open(&focus, &clock).unwrap();
+    let (events_tx, events_rx) = mpsc::channel();
+    let (retry_tx, retry_rx) = mpsc::channel();
+    let output = workspace.path("work");
+    std::thread::scope(|scope| {
+        let worker = scope.spawn({
+            let alias = &alias;
+            let output = &output;
+            let inventory = &inventory;
+            let groups = &groups;
+            move || {
+                let clock = EventGateClock {
+                    events: events_tx,
+                    release: retry_rx,
+                    waits: Cell::new(0),
+                };
+                review_work::create(inventory, groups, alias, output, None, None, &clock)
+            }
+        });
+        assert_eq!(events_rx.recv().unwrap(), "contended");
+        fs::remove_file(&alias).unwrap();
+        symlink("other", &alias).unwrap();
+        drop(held);
+        retry_tx.send(()).unwrap();
+        assert!(worker.join().unwrap().is_err());
+    });
+    assert!(!output.exists());
+
+    fs::remove_file(&alias).unwrap();
+    symlink("focus-alias", &alias).unwrap();
+    assert!(review_work::create(&inventory, &groups, &alias, &output, None, None, &clock).is_err());
+    assert!(!output.exists());
+}
+
 #[test]
 fn bound_work_holds_operation_lock_and_snapshots_before_replacement() {
     let _process_exclusion = PROCESS_CREATION_AND_CONTROLLED_LOCK
@@ -776,6 +934,8 @@ fn bound_work_holds_operation_lock_and_snapshots_before_replacement() {
             .unwrap();
     let focus = workspace.path("focus-areas");
     let original = fs::read_to_string(focus.join("focus-rules.md")).unwrap();
+    // The artifact lock pauses initialization after it owns the operation lock;
+    // the finding lock pauses it again after it has snapshotted focus documents.
     let held_artifacts = FileTransaction::open(&focus, &clock).unwrap();
     let findings = workspace.path("artifacts");
     fs::create_dir_all(&findings).unwrap();
@@ -844,6 +1004,7 @@ fn bound_work_holds_operation_lock_and_snapshots_before_replacement() {
         drop(held_artifacts);
         worker_retry_tx.send(()).unwrap();
         assert_eq!(worker_events_rx.recv().unwrap(), "contended");
+        // The writer must still be excluded after the snapshot, through publication.
         writer_retry_tx.send(()).unwrap();
         assert_eq!(writer_events_rx.recv().unwrap(), "contended");
         drop(held_finding);
