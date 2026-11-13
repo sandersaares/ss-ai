@@ -1147,6 +1147,10 @@ no draft review, so findings become visible individually and the summary is the
 completion marker. These strategies differ at the adapter boundary while
 sharing the same plan, preflight, journal, and verification model.
 
+GitHub readback uses the thread and comment IDs returned by each successful
+finding write. It queries only those threads and confirms that each review
+comment appears in its receipted thread, avoiding reads of unrelated discussion.
+
 On Azure DevOps, the journal records finding writes and their receipts
 sequentially. Readback verifies each actual comment and the relative order of
 comments within the same thread. Independent threads do not provide a

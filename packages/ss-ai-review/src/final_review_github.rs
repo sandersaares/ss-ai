@@ -50,13 +50,8 @@ const VERIFY: &str = "query($reviewId:ID!,$cur:String,$size:Int!){
  node(id:$reviewId){... on PullRequestReview{
  id state url body comments(first:$size,after:$cur){pageInfo{hasNextPage endCursor}
  nodes{id databaseId state path line startLine subjectType body}}}}}";
-const THREADS: &str = "query($owner:String!,$repo:String!,$num:Int!,$cur:String,$size:Int!){
- repository(owner:$owner,name:$repo){pullRequest(number:$num){
- reviewThreads(first:$size,after:$cur){pageInfo{hasNextPage endCursor}
- nodes{id diffSide subjectType comments(first:$size){pageInfo{hasNextPage endCursor}
- nodes{id}}}}}}}";
 const THREAD_COMMENTS: &str = "query($threadId:ID!,$cur:String,$size:Int!){
- node(id:$threadId){... on PullRequestReviewThread{
+ node(id:$threadId){... on PullRequestReviewThread{id diffSide subjectType
  comments(first:$size,after:$cur){pageInfo{hasNextPage endCursor} nodes{id}}}}}";
 
 /// Associates a review comment with the provider's thread anchor.
@@ -216,18 +211,21 @@ pub(crate) fn start(
         "id",
     )?;
     let status = required(review, "state", "ambiguousWrite")?;
-    Ok(json!({"reviewId":review["id"],"state":status}))
+    Ok(json!({"reviewId":review["id"],"state":status,"published":[]}))
 }
 
 /// Adds a line, file, or reply finding to the same draft.
 pub(crate) fn add(
     transport: &Transport<'_>,
     target: &Target,
-    review: &Value,
+    review: &mut Value,
     operation: &Value,
 ) -> Result<Value, AppError> {
     check(transport, target)?;
     let review_id = required(review, "reviewId", "invalidInput")?;
+    if !review.get("published").is_some_and(Value::is_array) {
+        return Err(fail("invalidState", "Review has no publication receipts"));
+    }
     let body = operation
         .get("body")
         .and_then(Value::as_str)
@@ -289,20 +287,27 @@ pub(crate) fn add(
         }
     };
     let response = transport.graphql_mutation(query, &variables)?;
-    if let Some(thread) = reply {
+    let written = if let Some(thread) = reply {
         let comment = receipt(
             &response,
             "/data/addPullRequestReviewThreadReply/comment",
             "id",
         )?;
-        return Ok(json!({"threadId":thread,"commentId":comment["id"]}));
-    }
-    let thread = receipt(&response, "/data/addPullRequestReviewThread/thread", "id")?;
-    let comment = thread
-        .pointer("/comments/nodes/0")
-        .ok_or_else(|| fail("ambiguousWrite", "GitHub returned no comment receipt"))?;
-    let comment_id = required(comment, "id", "ambiguousWrite")?;
-    Ok(json!({"threadId":thread["id"],"commentId":comment_id}))
+        json!({"threadId":thread,"commentId":comment["id"]})
+    } else {
+        let thread = receipt(&response, "/data/addPullRequestReviewThread/thread", "id")?;
+        let comment = thread
+            .pointer("/comments/nodes/0")
+            .ok_or_else(|| fail("ambiguousWrite", "GitHub returned no comment receipt"))?;
+        let comment_id = required(comment, "id", "ambiguousWrite")?;
+        json!({"threadId":thread["id"],"commentId":comment_id})
+    };
+    review
+        .get_mut("published")
+        .and_then(Value::as_array_mut)
+        .ok_or_else(|| fail("invalidState", "Review has no publication receipts"))?
+        .push(written.clone());
+    Ok(written)
 }
 
 /// Submits the draft as a comment or an explicitly authorized approval.
@@ -388,7 +393,7 @@ pub(crate) fn verify(
         if !boolean(field(page, "hasNextPage")?)? {
             let first = first.ok_or_else(|| fail("service", "Missing review"))?;
             let status = text(field(&first, "state")?)?;
-            let threads = review_threads(transport, target, &comment_ids)?;
+            let threads = review_threads(transport, &comment_ids, field(review, "published")?)?;
             for comment in &mut comments {
                 let id = required(comment, "id", "service")?;
                 let thread = threads.get(id).ok_or_else(|| {
@@ -417,60 +422,81 @@ pub(crate) fn verify(
     Err(fail("service", "GitHub review exceeded the page limit"))
 }
 
-/// Walks PR threads and their comment connections to prove review membership.
+/// Reads only written threads and proves each review comment belongs to its receipt.
 fn review_threads(
     transport: &Transport<'_>,
-    target: &Target,
     wanted: &HashSet<String>,
+    receipts: &Value,
 ) -> Result<HashMap<String, ThreadEvidence>, AppError> {
-    if wanted.is_empty() {
-        return Ok(HashMap::new());
-    }
-    let variables = json!({"owner":target.organization,"repo":target.repository,
-        "num":target.pull_request_id,"size":THREAD_PAGE_SIZE});
-    let threads = connection(
-        transport,
-        THREADS,
-        variables,
-        "/data/repository/pullRequest/reviewThreads",
-        None,
-    )?;
-    let mut result = HashMap::new();
-    let mut thread_ids = HashSet::new();
-    for thread in threads {
-        let id = required(&thread, "id", "service")?;
-        if !thread_ids.insert(id.to_owned()) {
-            return Err(fail("service", "GitHub repeated a review thread"));
+    let mut by_thread: HashMap<String, HashSet<String>> = HashMap::new();
+    let mut thread_order = Vec::new();
+    let mut receipt_comments = HashSet::new();
+    for receipt in array(receipts)? {
+        let thread_id = required(receipt, "threadId", "service")?.to_owned();
+        let comment_id = required(receipt, "commentId", "service")?.to_owned();
+        if !receipt_comments.insert(comment_id.clone()) {
+            return Err(fail("service", "GitHub repeated a written comment receipt"));
         }
+        let comments = by_thread.entry(thread_id.clone()).or_insert_with(|| {
+            thread_order.push(thread_id);
+            HashSet::new()
+        });
+        if !comments.insert(comment_id) {
+            return Err(fail("service", "GitHub repeated a thread comment receipt"));
+        }
+    }
+    if &receipt_comments != wanted {
+        return Err(fail(
+            "service",
+            "GitHub review comments do not match written comment receipts",
+        ));
+    }
+    let mut result = HashMap::new();
+    for thread_id in thread_order {
+        let response = transport.graphql(
+            THREAD_COMMENTS,
+            &json!({"threadId":thread_id,"cur":null,"size":THREAD_PAGE_SIZE}),
+        )?;
+        let thread = node(&response, "/data/node")?;
+        if required(thread, "id", "service")? != thread_id {
+            return Err(fail("service", "GitHub returned a different review thread"));
+        }
+        let subject_type = required(thread, "subjectType", "service")?;
+        let side = match subject_type {
+            "LINE" => {
+                let side = required(thread, "diffSide", "service")?;
+                if !["LEFT", "RIGHT"].contains(&side) {
+                    return Err(fail("service", "Unknown GitHub thread diff side"));
+                }
+                side
+            }
+            "FILE" => "",
+            _ => return Err(fail("service", "Unknown GitHub thread subject")),
+        };
         let comments = connection(
             transport,
             THREAD_COMMENTS,
-            json!({"threadId":id,"size":THREAD_PAGE_SIZE}),
+            json!({"threadId":thread_id,"size":THREAD_PAGE_SIZE}),
             "/data/node/comments",
-            Some(field(&thread, "comments")?.clone()),
+            Some(field(thread, "comments")?.clone()),
         )?;
-        for comment in &comments {
-            let comment_id = required(comment, "id", "service")?;
-            if !wanted.contains(comment_id) {
+        let wanted_in_thread = by_thread
+            .get(&thread_id)
+            .ok_or_else(|| fail("service", "Missing GitHub thread receipt"))?;
+        let mut found = HashSet::new();
+        for comment in comments {
+            let comment_id = required(&comment, "id", "service")?;
+            if !wanted_in_thread.contains(comment_id) {
                 continue;
             }
-            let subject_type = required(&thread, "subjectType", "service")?;
-            let side = match subject_type {
-                "LINE" => {
-                    let side = required(&thread, "diffSide", "service")?;
-                    if !["LEFT", "RIGHT"].contains(&side) {
-                        return Err(fail("service", "Unknown GitHub thread diff side"));
-                    }
-                    side
-                }
-                "FILE" => "",
-                _ => return Err(fail("service", "Unknown GitHub thread subject")),
-            };
+            if !found.insert(comment_id.to_owned()) {
+                return Err(fail("service", "GitHub repeated a thread comment"));
+            }
             if result
                 .insert(
                     comment_id.to_owned(),
                     ThreadEvidence {
-                        id: id.to_owned(),
+                        id: thread_id.clone(),
                         side: side.to_owned(),
                         subject_type: subject_type.to_owned(),
                     },
@@ -482,6 +508,12 @@ fn review_threads(
                     "GitHub comment belongs to multiple thread entries",
                 ));
             }
+        }
+        if found != *wanted_in_thread {
+            return Err(fail(
+                "service",
+                "GitHub thread does not contain its written comment receipts",
+            ));
         }
     }
     Ok(result)
@@ -685,9 +717,9 @@ mod tests {
         Target::pull_request("https://github.com/acme/repo/pull/42", None).unwrap()
     }
 
-    fn thread_response() -> Value {
-        json!({"data":{"addPullRequestReviewThread":{"thread":{"id":"thread",
-            "comments":{"nodes":[{"id":"comment"}]}}}}})
+    fn thread_response(thread_id: &str, comment_id: &str) -> Value {
+        json!({"data":{"addPullRequestReviewThread":{"thread":{"id":thread_id,
+            "comments":{"nodes":[{"id":comment_id}]}}}}})
     }
 
     #[test]
@@ -748,13 +780,13 @@ mod tests {
                 "graphql",
                 json!({"reviewId":"r","path":"src/a","line":9,"startLine":4,"side":"LEFT","body":"line"}),
                 true,
-                thread_response(),
+                thread_response("thread", "comment"),
             ),
             (
                 "graphql",
                 json!({"reviewId":"r","path":"src/a","body":"file"}),
                 true,
-                thread_response(),
+                thread_response("file-thread", "file-comment"),
             ),
             (
                 "graphql",
@@ -783,7 +815,7 @@ mod tests {
         ]);
         let target = target();
         let transport = Transport::new(&target, None, &script, &NoHttp, &NoWait);
-        let review = start(
+        let mut review = start(
             &transport,
             &target,
             &json!({"pullRequestNodeId":"pr","sourceCommit":"head"}),
@@ -793,7 +825,7 @@ mod tests {
             add(
                 &transport,
                 &target,
-                &review,
+                &mut review,
                 &json!({"operation":"newLineThread","body":"line",
             "anchor":{"path":"src/a","startLine":4,"endLine":9,"side":"left"}})
             )
@@ -803,7 +835,7 @@ mod tests {
         add(
             &transport,
             &target,
-            &review,
+            &mut review,
             &json!({"operation":"newFileThread","body":"file","anchor":{"path":"src/a"}}),
         )
         .unwrap();
@@ -811,11 +843,19 @@ mod tests {
             add(
                 &transport,
                 &target,
-                &review,
+                &mut review,
                 &json!({"operation":"reply","body":"reply","threadId":"old"})
             )
             .unwrap(),
             json!({"threadId":"old","commentId":"reply"})
+        );
+        assert_eq!(
+            review["published"],
+            json!([
+                {"threadId":"thread","commentId":"comment"},
+                {"threadId":"file-thread","commentId":"file-comment"},
+                {"threadId":"old","commentId":"reply"}
+            ])
         );
         assert_eq!(
             complete(&transport, &target, &review, "summary", true).unwrap()["state"],
@@ -883,6 +923,10 @@ mod tests {
             "nodes":[{"id":id,"state":"PENDING","path":"x","line":9,"startLine":null,
                 "subjectType":"LINE","body":"finding"}]}}}})
         };
+        let review = json!({"reviewId":"r","published":[
+            {"threadId":"thread","commentId":"c1"},
+            {"threadId":"thread","commentId":"c2"}
+        ]});
         let script = Script::new(vec![
             (
                 "graphql",
@@ -898,25 +942,24 @@ mod tests {
             ),
             (
                 "graphql",
-                json!({"owner":"acme","repo":"repo","num":42,"cur":null,"size":50}),
+                json!({"threadId":"thread","cur":null,"size":50}),
                 true,
-                json!({"data":{"repository":{"pullRequest":{"reviewThreads":{
-                    "pageInfo":{"hasNextPage":false,"endCursor":null},
-                    "nodes":[{"id":"thread","subjectType":"LINE","diffSide":"LEFT",
-                        "comments":{"pageInfo":{"hasNextPage":true,"endCursor":"more"},
-                        "nodes":[{"id":"c1"}]}}]}}}}}),
+                json!({"data":{"node":{"id":"thread","subjectType":"LINE","diffSide":"LEFT",
+                    "comments":{"pageInfo":{"hasNextPage":true,"endCursor":"more"},
+                    "nodes":[{"id":"c1"}]}}}}),
             ),
             (
                 "graphql",
                 json!({"threadId":"thread","cur":"more","size":50}),
                 true,
-                json!({"data":{"node":{"comments":{"pageInfo":{"hasNextPage":false,"endCursor":null},
+                json!({"data":{"node":{"id":"thread","subjectType":"LINE","diffSide":"LEFT",
+                    "comments":{"pageInfo":{"hasNextPage":false,"endCursor":null},
                     "nodes":[{"id":"c2"}]}}}}),
             ),
         ]);
         let target = target();
         let transport = Transport::new(&target, None, &script, &NoHttp, &NoWait);
-        let result = verify_findings(&transport, &target, &json!({"reviewId":"r"})).unwrap();
+        let result = verify_findings(&transport, &target, &review).unwrap();
         assert_eq!(result["isPublished"], false);
         assert_eq!(result["comments"].as_array().unwrap().len(), 2);
         assert_eq!(result["comments"][1]["isPublished"], false);
@@ -1026,18 +1069,16 @@ mod tests {
                 "url":"url","body":"summary","comments":{"pageInfo":{"hasNextPage":false,"endCursor":null},
                 "nodes":comments}}}});
             let thread = |id: &str, subject: &str, side: Value, comment: &str| {
-                json!({"id":id,"subjectType":subject,"diffSide":side,
+                json!({"data":{"node":{"id":id,"subjectType":subject,"diffSide":side,
                     "comments":{"pageInfo":{"hasNextPage":false,"endCursor":null},
-                    "nodes":[{"id":comment}]}})
+                    "nodes":[{"id":comment}]}}}})
             };
-            let first = json!({"data":{"repository":{"pullRequest":{"reviewThreads":{
-                "pageInfo":{"hasNextPage":true,"endCursor":"next"},
-                "nodes":[thread("actual-reply","LINE",json!("RIGHT"),"reply"),
-                    thread("left-thread","LINE",json!("LEFT"),"left")]}}}}});
-            let second = json!({"data":{"repository":{"pullRequest":{"reviewThreads":{
-                "pageInfo":{"hasNextPage":false,"endCursor":null},
-                "nodes":[thread("right-thread","LINE",json!("RIGHT"),"right"),
-                    thread("file-thread","FILE",Value::Null,"file")]}}}}});
+            let receipts = json!({"reviewId":"r","published":[
+                {"threadId":"actual-reply","commentId":"reply"},
+                {"threadId":"left-thread","commentId":"left"},
+                {"threadId":"right-thread","commentId":"right"},
+                {"threadId":"file-thread","commentId":"file"}
+            ]});
             let script = Script::new(vec![
                 (
                     "graphql",
@@ -1047,26 +1088,36 @@ mod tests {
                 ),
                 (
                     "graphql",
-                    json!({"owner":"acme","repo":"repo","num":42,"cur":null,"size":50}),
+                    json!({"threadId":"actual-reply","cur":null,"size":50}),
                     true,
-                    first,
+                    thread("actual-reply", "LINE", json!("RIGHT"), "reply"),
                 ),
                 (
                     "graphql",
-                    json!({"owner":"acme","repo":"repo","num":42,"cur":"next","size":50}),
+                    json!({"threadId":"left-thread","cur":null,"size":50}),
                     true,
-                    second,
+                    thread("left-thread", "LINE", json!("LEFT"), "left"),
+                ),
+                (
+                    "graphql",
+                    json!({"threadId":"right-thread","cur":null,"size":50}),
+                    true,
+                    thread("right-thread", "LINE", json!("RIGHT"), "right"),
+                ),
+                (
+                    "graphql",
+                    json!({"threadId":"file-thread","cur":null,"size":50}),
+                    true,
+                    thread("file-thread", "FILE", Value::Null, "file"),
                 ),
             ]);
             let target = target();
             let transport = Transport::new(&target, None, &script, &NoHttp, &NoWait);
-            let result = verify(&transport, &target, &json!({"reviewId":"r"})).unwrap();
+            let result = verify(&transport, &target, &receipts).unwrap();
             assert_eq!(result["comments"][0]["threadId"], "actual-reply");
-            assert_ne!(result["comments"][0]["threadId"], "expected-reply");
+            assert_eq!(result["comments"][0]["side"], "RIGHT");
             assert_eq!(result["comments"][1]["side"], "LEFT");
-            assert_ne!(result["comments"][1]["side"], "RIGHT");
             assert_eq!(result["comments"][2]["side"], "RIGHT");
-            assert_ne!(result["comments"][2]["side"], "LEFT");
             assert_eq!(result["comments"][3]["threadId"], "file-thread");
             assert_eq!(result["comments"][3]["side"], "");
             script.done();
@@ -1075,10 +1126,14 @@ mod tests {
 
     #[test]
     fn verification_fails_when_thread_or_line_side_is_missing() {
-        for thread_nodes in [
-            json!([]),
-            json!([{"id":"thread","subjectType":"LINE","diffSide":null,
-                "comments":{"pageInfo":{"hasNextPage":false,"endCursor":null},"nodes":[{"id":"c"}]}}]),
+        for thread_response in [
+            json!({"data":{"node":null}}),
+            json!({"data":{"node":{"id":"thread","subjectType":"LINE","diffSide":null,
+                "comments":{"pageInfo":{"hasNextPage":false,"endCursor":null},"nodes":[{"id":"c"}]}}}}),
+            json!({"data":{"node":{"id":"different-thread","subjectType":"LINE","diffSide":"RIGHT",
+                "comments":{"pageInfo":{"hasNextPage":false,"endCursor":null},"nodes":[{"id":"c"}]}}}}),
+            json!({"data":{"node":{"id":"thread","subjectType":"LINE","diffSide":"RIGHT",
+                "comments":{"pageInfo":{"hasNextPage":false,"endCursor":null},"nodes":[]}}}}),
         ] {
             let script = Script::new(vec![
                 (
@@ -1091,15 +1146,19 @@ mod tests {
                 ),
                 (
                     "graphql",
-                    json!({"owner":"acme","repo":"repo","num":42,"cur":null,"size":50}),
+                    json!({"threadId":"thread","cur":null,"size":50}),
                     true,
-                    json!({"data":{"repository":{"pullRequest":{"reviewThreads":{
-                        "pageInfo":{"hasNextPage":false,"endCursor":null},"nodes":thread_nodes}}}}}),
+                    thread_response,
                 ),
             ]);
             let target = target();
             let transport = Transport::new(&target, None, &script, &NoHttp, &NoWait);
-            let error = verify(&transport, &target, &json!({"reviewId":"r"})).unwrap_err();
+            let error = verify(
+                &transport,
+                &target,
+                &json!({"reviewId":"r","published":[{"threadId":"thread","commentId":"c"}]}),
+            )
+            .unwrap_err();
             assert_eq!(classification(&error), "service");
             script.done();
         }

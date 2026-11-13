@@ -505,6 +505,11 @@ impl PublicationProvider {
                             "path":"src/lib.rs","line":2,"startLine":1,"subjectType":"LINE",
                             "body":self.finding.borrow().as_ref().unwrap()}]}}}});
             }
+            if query.contains("node(id:$threadId)") && self.finding.borrow().is_some() {
+                return json!({"data":{"node":{"id":"thread","diffSide":"RIGHT","subjectType":"LINE",
+                    "comments":{"pageInfo":{"hasNextPage":false,"endCursor":null},
+                            "nodes":[{"id":"comment"}]}}}});
+            }
             if query.contains("reviewThreads(") && self.finding.borrow().is_some() {
                 return json!({"data":{"repository":{"pullRequest":{"reviewThreads":{
                     "pageInfo":{"hasNextPage":false,"endCursor":null},

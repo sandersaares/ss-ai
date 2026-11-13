@@ -130,9 +130,7 @@ pub(crate) fn state(transport: &mut Transport<'_>, target: &Target) -> Result<Va
 
 /// Normalizes ADO paths to repository-relative form.
 fn canonical_path(path: &str) -> String {
-    path.replace('\\', "/")
-        .trim_start_matches('/')
-        .to_owned()
+    path.replace('\\', "/").trim_start_matches('/').to_owned()
 }
 
 /// Reads the cumulative changed-file identities for the selected iteration.
@@ -955,10 +953,7 @@ mod tests {
             &["src/File ".into(), "src/Foo.rs".into(), "src/foo.rs".into()],
         )
         .unwrap();
-        assert_eq!(
-            ids,
-            json!({"src/File ":42,"src/Foo.rs":43,"src/foo.rs":44})
-        );
+        assert_eq!(ids, json!({"src/File ":42,"src/Foo.rs":43,"src/foo.rs":44}));
         fixture.done();
     }
 
