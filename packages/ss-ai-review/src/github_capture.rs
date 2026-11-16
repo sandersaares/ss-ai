@@ -318,7 +318,7 @@ pub(crate) fn collect(transport: &mut Transport<'_>, target: &Target) -> Result<
 }
 
 /// Projects the same source branch name as the retained PowerShell adapter.
-fn source_ref<'a>(head: &'a Value, fork: bool) -> Result<&'a str, AppError> {
+fn source_ref(head: &Value, fork: bool) -> Result<&str, AppError> {
     // The retained adapter qualifies known forks; matching it keeps evidence hashes stable,
     // including when GitHub no longer returns the deleted head repository.
     nonempty(field(head, if fork { "label" } else { "ref" })?)
