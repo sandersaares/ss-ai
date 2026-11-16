@@ -256,6 +256,7 @@ pub(crate) fn validate_session_records_locked(
     read_active(&transaction)?;
     drop(transaction);
     read_snapshot_identity(session, clock)?;
+    read_generation_key_locked(session, clock)?;
     Ok(())
 }
 

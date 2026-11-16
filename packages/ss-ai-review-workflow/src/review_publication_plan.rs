@@ -107,6 +107,7 @@ pub fn preflight(
                     "Finding '{id}' cannot be published as a follow-up: {error}"
                 ))
             })?;
+            check_reply_capability(context, finding)?;
             follow_up_count = follow_up_count.saturating_add(1);
         }
     }
@@ -116,6 +117,27 @@ pub fn preflight(
     }))
     .map_err(invalid)?;
     Ok(())
+}
+
+/// Applies the pull-request reply restrictions after checking capture provenance.
+fn check_reply_capability(context: &Value, finding: &Value) -> Result<(), AppError> {
+    let follow_up = &finding["followUp"];
+    let thread_id = text(follow_up, "threadId")?;
+    let comment_id = text(follow_up, "commentId")?;
+    let thread = captured_thread(context, thread_id)
+        .ok_or_else(|| invalid(format!("Missing follow-up thread '{thread_id}'")))?;
+    if !identifier_matches(thread.get("openingCommentId"), comment_id)
+        || thread.get("kind").and_then(Value::as_str) != Some("text")
+    {
+        return Err(invalid(
+            "Follow-up does not name a reply-capable opening comment",
+        ));
+    }
+    match context.get("platform").and_then(Value::as_str) {
+        Some("gitHub") if !thread.get("context").is_none_or(Value::is_null) => Ok(()),
+        Some("azureDevOps") => Ok(()),
+        _ => Err(invalid("Follow-up thread cannot accept replies")),
+    }
 }
 
 /// Prepares ordered publication operations and the review summary.
@@ -306,10 +328,20 @@ mod tests {
             "threads": [
                 {"id":"T","openingCommentId":"C","kind":"text","resolution":"resolved",
                  "isOutdated":false,"isAuthoredBySelf":false,"context":{"filePath":"src/lib.rs"},
-                 "decision":null,"url":null,"eventUtc":null,"lastUpdatedUtc":null,"comments":[]},
+                 "decision":null,"url":null,"eventUtc":null,"lastUpdatedUtc":null,
+                 "comments":[
+                    {"id":"C","content":"Original","author":null,"parentId":null,"url":null,
+                     "publishedUtc":null,"lastEditedUtc":null,"authorship":"human",
+                     "authorshipEvidence":[],"isAuthoredBySelf":false},
+                    {"id":"later","content":"Reply","author":null,"parentId":"C","url":null,
+                     "publishedUtc":null,"lastEditedUtc":null,"authorship":"human",
+                     "authorshipEvidence":[],"isAuthoredBySelf":false}]},
                 {"id":12,"openingCommentId":13,"kind":"text","resolution":"active",
                  "isOutdated":false,"isAuthoredBySelf":false,"context":{"filePath":"src/lib.rs"},
-                 "decision":null,"url":null,"eventUtc":null,"lastUpdatedUtc":null,"comments":[]}
+                 "decision":null,"url":null,"eventUtc":null,"lastUpdatedUtc":null,
+                 "comments":[{"id":13,"content":"Original","author":null,"parentId":null,
+                    "url":null,"publishedUtc":null,"lastEditedUtc":null,"authorship":"human",
+                    "authorshipEvidence":[],"isAuthoredBySelf":false}]}
             ]
         })
     }
@@ -525,6 +557,10 @@ mod tests {
         let result = prepare(&document, &context, &diff, &json!({}), false).unwrap();
         assert_eq!(result["plan"][0]["requiresReopen"], true);
         assert_eq!(result["plan"][0]["commentId"], "C");
+        reply["followUp"]["commentId"] = json!("later");
+        let document = approved(&context, json!([reply.clone()]));
+        assert!(prepare(&document, &context, &diff, &json!({}), false).is_err());
+        reply["followUp"]["commentId"] = json!("C");
         context["threads"]["kind"] = json!("system");
         let document = approved(&context, json!([reply]));
         assert!(prepare(&document, &context, &diff, &json!({}), false).is_err());

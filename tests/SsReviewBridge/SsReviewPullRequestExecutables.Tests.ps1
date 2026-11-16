@@ -10,15 +10,16 @@ BeforeAll {
     New-Item -ItemType Directory -Path $script:Root -Force | Out-Null
     New-PSDrive -Name CaptureTest -PSProvider FileSystem -Root $script:Root | Out-Null
 
-    # Native output uses Console directly, rather than PowerShell's success stream.
+    # Keep direct Console writes visible to tests while returning PowerShell success-stream output.
     function Invoke-Bridge {
         param([string] $Name, [hashtable] $Parameters)
         $previous = [Console]::Out
         $output = [IO.StringWriter]::new()
         try {
             [Console]::SetOut($output)
-            & (Join-Path $script:Scripts $Name) @Parameters
-            $output.ToString()
+            $success = @(& (Join-Path $script:Scripts $Name) @Parameters)
+            if ($success.Count -gt 0) { return $success }
+            return $output.ToString()
         } finally {
             [Console]::SetOut($previous)
             $output.Dispose()
@@ -55,6 +56,22 @@ Describe 'Capture bridge PowerShell paths' {
             [IO.File]::Copy((Join-Path $script:RepoRoot 'tests/fixtures/ss-review-query-capture.json'), $script:Capture)
             [IO.File]::WriteAllText((Join-Path $script:Directory 'files.json'), '["src/widget.rs"]')
             [IO.File]::WriteAllText((Join-Path $script:Directory 'search.txt'), 'widget')
+        }
+
+        It 'emits read JSON on the PowerShell success stream' {
+            $json = & (Join-Path $script:Scripts 'Read-PullRequestContext.ps1') `
+                -Path $script:Capture -Query metadata -Field title
+            $json | Should -BeOfType ([string])
+            ($json | ConvertFrom-Json).items[0].content | Should -BeExactly 'Widget'
+        }
+
+        It 'emits native capture JSON on the PowerShell success stream' {
+            $json = & {
+                . (Join-Path $script:Scripts 'lib/NativeCaptureBridge.ps1')
+                Invoke-NativeCaptureContext -Arguments @('read', "--path=$script:Capture", '--query=metadata', '--field=title')
+            }
+            $json | Should -BeOfType ([string])
+            ($json | ConvertFrom-Json).items[0].content | Should -BeExactly 'Widget'
         }
 
         It 'resolves <spelling> paths for direct, saved, preparation and diagnostics commands' -ForEach @(
@@ -181,6 +198,25 @@ Describe 'Capture bridge PowerShell paths' {
         } finally {
             Pop-Location
         }
+    }
+
+    It 'emits authored JSON on the PowerShell success stream' {
+        $json = & (Join-Path $script:Scripts 'Set-CommentAuthorship.ps1') `
+            -Path $script:Capture -SnapshotId $script:Snapshot -ClassificationPath $script:Classification
+        $json | Should -BeOfType ([string])
+        ($json | ConvertFrom-Json).contextPath | Should -BeExactly ([IO.Path]::GetFullPath($script:Capture))
+
+        $powerShell = Get-Command pwsh -CommandType Application -ErrorAction Stop | Select-Object -First 1
+        $cliCapture = Join-Path $script:Directory 'cli-capture.json'
+        $cliClassification = Join-Path $script:Directory 'cli-classification.json'
+        [IO.File]::Copy($script:Capture, $cliCapture)
+        [IO.File]::Copy($script:Classification, $cliClassification)
+        $cliJson = & $powerShell.Source -NoProfile -NonInteractive -File (Join-Path $script:Scripts 'Set-CommentAuthorship.ps1') `
+            -Path $cliCapture -SnapshotId $script:Snapshot -ClassificationPath $cliClassification
+        $exitCode = $LASTEXITCODE
+        $exitCode | Should -Be 0
+        $cliJson | Should -BeOfType ([string])
+        ($cliJson | ConvertFrom-Json).contextPath | Should -BeExactly ([IO.Path]::GetFullPath($cliCapture))
     }
 
     It 'rejects non-filesystem provider paths for <parameter>' -ForEach @(

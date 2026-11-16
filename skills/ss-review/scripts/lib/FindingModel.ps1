@@ -1597,36 +1597,6 @@ function Get-ApprovedFindingApprovalSplit {
     }
 }
 
-# Refuses a freshness check that could only half run (SKILL.md, "Phase 8: freshness check").
-#
-# The two inputs answer one question between them and neither answers it alone. The refreshed
-# capture states which commits the review is bound to; the local clone is where the diff between
-# those commits is read from. Given only the capture, a finding anchored to a file the pull request
-# no longer changes is carried into publication and fails it there, after the user has approved
-# every finding. Given only the clone, there are no commits to compare.
-#
-# The pair is therefore required rather than encouraged: the phase that supplies one always has the
-# other, and a gate that may be omitted is a gate that will be.
-function Assert-FindingFreshnessInput {
-    param(
-        [AllowNull()]
-        [AllowEmptyString()]
-        [string] $ContextPath,
-
-        [AllowNull()]
-        [AllowEmptyString()]
-        [string] $RepositoryPath
-    )
-
-    if (-not [string]::IsNullOrWhiteSpace($ContextPath) -and [string]::IsNullOrWhiteSpace($RepositoryPath)) {
-        throw 'Rebuilding the approved set against a refreshed capture also requires -RepositoryPath, naming a local clone that holds the reviewed commits, so that every approved anchor is checked against the reviewed diff.'
-    }
-
-    if (-not [string]::IsNullOrWhiteSpace($RepositoryPath) -and [string]::IsNullOrWhiteSpace($ContextPath)) {
-        throw 'Checking approved anchors against the reviewed diff also requires -ContextPath, naming the refreshed capture, which is where the reviewed commits are taken from.'
-    }
-}
-
 # Builds the record an artifact stores.
 #
 # The stored key order is fixed rather than inherited from the author's document, so that two

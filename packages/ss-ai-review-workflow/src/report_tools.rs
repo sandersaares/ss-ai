@@ -446,9 +446,19 @@ fn install_mermaid(
         .parent()
         .ok_or_else(|| fail("invalidInput", "Node path has no parent"))?;
     let path = env::var_os("PATH").unwrap_or_default();
-    let path =
-        env::join_paths(std::iter::once(parent.to_path_buf()).chain(env::split_paths(&path)))
-            .map_err(|error| caused_by("invalidInput", "Cannot construct npm PATH", error))?;
+    let working_directory = env::current_dir()
+        .map_err(|error| caused_by("io", "Cannot resolve report setup working directory", error))?;
+    // The child runs in staging, so resolve relative entries before changing its working directory.
+    let path = env::join_paths(std::iter::once(parent.to_path_buf()).chain(
+        env::split_paths(&path).map(|entry| {
+            if entry.is_absolute() {
+                entry
+            } else {
+                working_directory.join(entry)
+            }
+        }),
+    ))
+    .map_err(|error| caused_by("invalidInput", "Cannot construct npm PATH", error))?;
     if staging.is_some() {
         for name in ["package.json", "package-lock.json"] {
             fs::copy(skill_root.join("tools").join(name), directory.join(name)).map_err(
@@ -512,7 +522,8 @@ fn install_mermaid(
         return Err(fail(
             "io",
             format!(
-                "Installing Mermaid's browser failed: {}. Follow report-tool-setup.md; browser cache deletion requires separate approval.",
+                "Installing Mermaid's browser failed. stdout:\n{}\nstderr:\n{}. Follow report-tool-setup.md; browser cache deletion requires separate approval.",
+                String::from_utf8_lossy(&output.stdout),
                 String::from_utf8_lossy(&output.stderr)
             ),
         ));
