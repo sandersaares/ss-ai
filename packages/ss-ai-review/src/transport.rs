@@ -556,15 +556,8 @@ impl<'a> Transport<'a> {
             let error_text = format!("{stderr}\n{payload}");
             let status_text = format!("{headers}\n{stderr}");
             let json = serde_json::from_str::<Value>(payload);
-            // A mutation can only be replayed when the HTTP response itself
-            // establishes refusal; GraphQL error prose may accompany a write.
-            let rate_limited = if matches!(response_mode, GithubResponseMode::Mutation) {
-                !output.success
-                    && (response_status(headers) == Some(429)
-                        || (response_status(headers) == Some(403) && rate_message(&error_text)))
-            } else {
-                github_rate_limit(&status_text, &error_text, json.as_ref().ok())
-            };
+            let rate_limited = !output.success
+                && github_rate_limit(response_status(headers), &error_text, json.as_ref().ok());
             if rate_limited {
                 if policy != RequestPolicy::Standard {
                     return Err(fail(
@@ -1102,11 +1095,20 @@ fn rate_message(value: &str) -> bool {
     .any(|pattern| value.contains(pattern))
 }
 
-/// Requires refusal evidence before allowing a request to use rate-limit recovery.
+/// Requires an explicit failed HTTP refusal before allowing rate-limit recovery.
 ///
 /// Partial GraphQL data is not a pure refusal; mixed errors must not authorize
 /// replay through the rate-limit path.
-fn github_rate_limit(status: &str, message: &str, response: Option<&Value>) -> bool {
+fn github_rate_limit(status: Option<u16>, message: &str, response: Option<&Value>) -> bool {
+    let Some(status) = status else {
+        return false;
+    };
+    if status == 429 {
+        return true;
+    }
+    if status != 403 {
+        return false;
+    }
     if response
         .and_then(|value| value.get("data"))
         .is_some_and(|data| !data.is_null())
@@ -1126,7 +1128,7 @@ fn github_rate_limit(status: &str, message: &str, response: Option<&Value>) -> b
                     .is_some_and(rate_message)
         });
     }
-    http_status(status, 429) || (http_status(status, 403) && rate_message(message))
+    rate_message(message)
 }
 
 /// Status evidence must not match an unrelated quota, request identifier, or body number.
@@ -1565,6 +1567,27 @@ mod tests {
                 ),
                 ProcessOutput::new(true, br#"{"id":"def"}"#.to_vec(), vec![]),
                 ProcessOutput::new(false, b"HTTP/2 429\n\n{}".to_vec(), vec![]),
+                ProcessOutput::new(
+                    false,
+                    br#"HTTP/2 500
+
+{"errors":[{"message":"API rate limit exceeded"}]}"#
+                        .to_vec(),
+                    vec![],
+                ),
+                ProcessOutput::new(
+                    false,
+                    br#"{"errors":[{"type":"RATE_LIMITED"}]}"#.to_vec(),
+                    vec![],
+                ),
+                ProcessOutput::new(
+                    false,
+                    br#"HTTP/2 403
+
+{"message":"Resource not accessible by integration"}"#
+                        .to_vec(),
+                    vec![],
+                ),
             ])),
             calls: Cell::new(0),
         };
@@ -1589,6 +1612,22 @@ mod tests {
             .unwrap_err();
         assert_eq!(classification(&error), "rateLimited");
         assert_eq!(process.calls.get(), 5);
+        assert_eq!(fixture.waits.borrow().len(), 2);
+        for (expected_status, expected_classification) in [
+            ("HTTP/2 500", "ambiguousWrite"),
+            ("missing status", "ambiguousWrite"),
+            ("HTTP/2 403", "permissionDenied"),
+        ] {
+            let error = transport
+                .request("gists", "POST", Some(&json!({})))
+                .unwrap_err();
+            assert_eq!(
+                classification(&error),
+                expected_classification,
+                "{expected_status}"
+            );
+        }
+        assert_eq!(process.calls.get(), 8);
         assert_eq!(fixture.waits.borrow().len(), 2);
     }
 

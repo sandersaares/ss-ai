@@ -42,7 +42,7 @@ function Get-NativeContextErrorExcerpt {
     $message.Substring(0, $length)
 }
 
-# Forward bytes without PowerShell's native command output conversion.
+# Forward native JSON through PowerShell's success stream.
 function Invoke-NativeContext {
     param([string[]] $Arguments)
     $program = Get-Command ss-ai -CommandType Application -ErrorAction Stop | Select-Object -First 1
@@ -67,7 +67,7 @@ function Invoke-NativeContext {
             [Console]::Error.WriteLine("Context query failed: $excerpt")
             exit $process.ExitCode
         }
-        [Console]::Write($text)
+        Write-Output $text.TrimEnd([char[]]@("`r", "`n"))
         [Console]::Error.Write($errorText)
     } finally { $process.Dispose() }
 }

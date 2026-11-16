@@ -22,6 +22,7 @@ struct Installer {
     fail_npm: Cell<bool>,
     npm_calls: Cell<usize>,
     npm_program: RefCell<Option<String>>,
+    npm_path: RefCell<Option<Vec<PathBuf>>>,
     system_calls: RefCell<Vec<Vec<String>>>,
 }
 
@@ -46,7 +47,8 @@ impl Process for Installer {
         if self.fail_browser.get() {
             return Ok(ProcessOutput::new(
                 false,
-                Vec::new(),
+                b"IncompleteInstallationError: chrome revision path: /cache/123/chrome-linux64/chrome"
+                    .to_vec(),
                 b"browser failure".to_vec(),
             ));
         }
@@ -63,6 +65,7 @@ impl Process for Installer {
         path: Option<&OsStr>,
     ) -> io::Result<ProcessOutput> {
         *self.npm_program.borrow_mut() = Some(program.to_owned());
+        *self.npm_path.borrow_mut() = path.map(|path| env::split_paths(path).collect());
         assert_eq!(
             arguments,
             [
@@ -121,13 +124,13 @@ fn file(path: &Path, content: &str) {
     ignore = "process isolation requires launching a child executable"
 )]
 fn offline_setup_and_retained_locks() {
-    for relative_path in [false, true] {
-        run_offline_setup(relative_path);
+    for (relative_path, node_from_nvm) in [(false, false), (true, false), (true, true)] {
+        run_offline_setup(relative_path, node_from_nvm);
     }
 }
 
 /// Exercises both absolute and invocation-relative executable discovery.
-fn run_offline_setup(relative_path: bool) {
+fn run_offline_setup(relative_path: bool, node_from_nvm: bool) {
     let workspace = Builder::new()
         .prefix(".report-tools-test-")
         .tempdir_in(env::current_dir().unwrap())
@@ -140,7 +143,12 @@ fn run_offline_setup(relative_path: bool) {
             name.to_owned()
         }
     };
-    for name in ["node", "pandoc", "sudo", "apt-get"] {
+    let names = if node_from_nvm {
+        &["pandoc", "sudo", "apt-get"][..]
+    } else {
+        &["node", "pandoc", "sudo", "apt-get"][..]
+    };
+    for name in names {
         let path = bin.join(executable(name));
         file(&path, "");
         #[cfg(unix)]
@@ -155,16 +163,32 @@ fn run_offline_setup(relative_path: bool) {
     } else {
         bin
     };
-    let output = Command::new(env::current_exe().unwrap())
+    let mut command = Command::new(env::current_exe().unwrap());
+    command
         .args(["--exact", "offline_child", "--ignored", "--nocapture"])
         .env("REPORT_TOOLS_TEST_ROOT", workspace.path())
         .current_dir(workspace.path())
         .env("PATH", &path)
         .env_remove("NVM_BIN")
         .env_remove("NVM_SYMLINK")
-        .env_remove("NVM_DIR")
-        .output()
+        .env_remove("NVM_DIR");
+    if node_from_nvm {
+        let runtime = workspace.path().join("node-runtime");
+        file(&runtime.join(executable("node")), "");
+        #[cfg(unix)]
+        fs::set_permissions(
+            runtime.join(executable("node")),
+            fs::Permissions::from_mode(0o755),
+        )
         .unwrap();
+        let variable = if cfg!(windows) {
+            "NVM_SYMLINK"
+        } else {
+            "NVM_BIN"
+        };
+        command.env(variable, runtime);
+    }
+    let output = command.output().unwrap();
     assert!(
         output.status.success(),
         "{}\n{}",
@@ -198,6 +222,7 @@ fn offline_child() {
         fail_npm: Cell::new(false),
         npm_calls: Cell::new(0),
         npm_program: RefCell::new(None),
+        npm_path: RefCell::new(None),
         system_calls: RefCell::new(Vec::new()),
     };
     let clock = SystemClock::default();
@@ -230,10 +255,20 @@ fn offline_child() {
     .unwrap();
     assert_eq!(process.npm_calls.get(), 1);
     let npm = if cfg!(windows) { "npm.cmd" } else { "npm" };
-    assert_eq!(
-        Path::new(process.npm_program.borrow().as_ref().unwrap()),
-        root.join("bin").join(npm)
-    );
+    let node_from_nvm = env::var_os("NVM_BIN").is_some() || env::var_os("NVM_SYMLINK").is_some();
+    if node_from_nvm {
+        assert_eq!(process.npm_program.borrow().as_deref(), Some(npm));
+    } else {
+        assert_eq!(
+            Path::new(process.npm_program.borrow().as_ref().unwrap()),
+            root.join("bin").join(npm)
+        );
+    }
+    let npm_path = process.npm_path.borrow();
+    let npm_entries = npm_path.as_ref().unwrap();
+    assert!(npm_entries.iter().all(|entry| entry.is_absolute()));
+    assert!(npm_entries.contains(&root.join("bin")));
+    drop(npm_path);
     let puppet = installed
         .mermaid
         .ancestors()
@@ -290,10 +325,14 @@ fn offline_child() {
     file(&old_marker, "preserve");
     fs::remove_file(&installed.mermaid).unwrap();
     process.fail_browser.set(true);
-    install(&skill, &tools_dir, &process, &clock, false, |_, _| {
+    let error = install(&skill, &tools_dir, &process, &clock, false, |_, _| {
         panic!("failed setup must not probe")
     })
-    .unwrap_err();
+    .unwrap_err()
+    .to_string();
+    assert!(error.contains("stdout:\n"));
+    assert!(error.contains("chrome revision path: /cache/123/chrome-linux64/chrome"));
+    assert!(error.contains("stderr:\nbrowser failure"));
     assert_eq!(fs::read_to_string(&old_marker).unwrap(), "preserve");
     assert_eq!(process.npm_calls.get(), 2);
     process.fail_browser.set(false);
