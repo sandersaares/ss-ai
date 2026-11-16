@@ -205,6 +205,18 @@ Describe 'Capture bridge PowerShell paths' {
             -Path $script:Capture -SnapshotId $script:Snapshot -ClassificationPath $script:Classification
         $json | Should -BeOfType ([string])
         ($json | ConvertFrom-Json).contextPath | Should -BeExactly ([IO.Path]::GetFullPath($script:Capture))
+
+        $powerShell = Get-Command pwsh -CommandType Application -ErrorAction Stop | Select-Object -First 1
+        $cliCapture = Join-Path $script:Directory 'cli-capture.json'
+        $cliClassification = Join-Path $script:Directory 'cli-classification.json'
+        [IO.File]::Copy($script:Capture, $cliCapture)
+        [IO.File]::Copy($script:Classification, $cliClassification)
+        $cliJson = & $powerShell.Source -NoProfile -NonInteractive -File (Join-Path $script:Scripts 'Set-CommentAuthorship.ps1') `
+            -Path $cliCapture -SnapshotId $script:Snapshot -ClassificationPath $cliClassification
+        $exitCode = $LASTEXITCODE
+        $exitCode | Should -Be 0
+        $cliJson | Should -BeOfType ([string])
+        ($cliJson | ConvertFrom-Json).contextPath | Should -BeExactly ([IO.Path]::GetFullPath($cliCapture))
     }
 
     It 'rejects non-filesystem provider paths for <parameter>' -ForEach @(
