@@ -88,21 +88,23 @@ impl Provider<'_> {
             "comments":{"pageInfo":{"hasNextPage":false,"endCursor":null},"nodes":comments}}}})
     }
 
-    /// Reports thread membership for the review-scoped comments.
-    fn threads(&self) -> Value {
-        let nodes: Vec<_> = self
+    /// Returns the generated thread identified by a direct readback query.
+    fn thread(&self, thread_id: &str) -> Value {
+        let thread = self
             .findings
             .borrow()
             .iter()
             .enumerate()
-            .map(|(index, _)| {
-                json!({"id":format!("T{index}"),"diffSide":null,"subjectType":"FILE",
-                "comments":{"pageInfo":{"hasNextPage":false,"endCursor":null},
-                    "nodes":[{"id":format!("C{index}")}]}})
+            .find_map(|(index, _)| {
+                let id = format!("T{index}");
+                (id == thread_id).then(|| {
+                    json!({"id":id,"diffSide":null,"subjectType":"FILE",
+                    "comments":{"pageInfo":{"hasNextPage":false,"endCursor":null},
+                        "nodes":[{"id":format!("C{index}")}]}})
+                })
             })
-            .collect();
-        json!({"data":{"repository":{"pullRequest":{"reviewThreads":{
-            "pageInfo":{"hasNextPage":false,"endCursor":null},"nodes":nodes}}}}})
+            .unwrap_or(Value::Null);
+        json!({"data":{"node":thread}})
     }
 
     /// Implements only the routes used by this publication; all others fail.
@@ -157,8 +159,8 @@ impl Provider<'_> {
                 }
                 return Ok(self.review());
             }
-            if query.contains("reviewThreads(") && self.starts.get() > 0 {
-                return Ok(self.threads());
+            if query.contains("node(id:$threadId)") {
+                return Ok(self.thread(variables["threadId"].as_str().unwrap()));
             }
             return Ok(if query.contains("reviewThreads(") {
                 responses["reviewThreads"].clone()
