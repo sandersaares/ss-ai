@@ -1295,9 +1295,7 @@ Describe 'Approval executable' {
         Test-Path -LiteralPath $script:ApprovedPath | Should -BeFalse
     }
 
-    # The freshness check reads the reviewed diff and the capture states which commits to read it
-    # between, so neither input answers the question alone.
-    It 'refuses a refreshed capture supplied without a checkout' {
+    It 'binds a tracker projection to a capture without filtering anchors' {
         Write-TestJsonFile -Path $script:ContextPath -Value (New-CaptureDocument -Thread @()) | Out-Null
 
         $result = Invoke-SkillExecutable -Name 'New-ApprovedFindings.ps1' -ArgumentList @(
@@ -1307,10 +1305,17 @@ Describe 'Approval executable' {
             '-ContextPath', $script:ContextPath
         )
 
-        $result['exitCode'] | Should -Not -Be 0
-        $result['standardOutput'] | Should -BeNullOrEmpty
-        (Get-SingleLineErrorText -Text $result['standardError']) | Should -BeLike '*-RepositoryPath*'
-        Test-Path -LiteralPath $script:ApprovedPath | Should -BeFalse
+        $result['exitCode'] | Should -Be 0
+        $result['standardError'] | Should -BeNullOrEmpty
+
+        $emitted = ConvertFrom-JsonVerbatim -Text $result['standardOutput']
+        $emitted['approved'] | Should -Be 1
+        $emitted['unanchored'] | Should -Be 0
+        @($emitted['findingId']) | Should -Be @('F1')
+
+        $document = Read-TestJsonFile -Path $script:ApprovedPath
+        $document['reviewedSourceCommit'] | Should -BeExactly '1111111111111111111111111111111111111111'
+        [string]::IsNullOrWhiteSpace([string] $document['reviewedContextHash']) | Should -BeFalse
     }
 
     It 'refuses a checkout supplied without a refreshed capture' {
