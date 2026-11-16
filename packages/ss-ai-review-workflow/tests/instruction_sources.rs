@@ -151,27 +151,39 @@ fn incompatible_session_records_prevent_snapshot_invalidation() {
     for (name, incompatible) in [
         ("generation-version", "focus-area-generation.json"),
         ("source-version", "focus-area-source-identity.json"),
+        ("cache-version", "focus-area-cache-identity.json"),
     ] {
         let workspace = Workspace::new(name);
         let snapshot = workspace.snapshot(None).unwrap();
         let session = workspace.0.join("session");
         begin_preparation(&session);
-        let generation = session.join("focus-area-generation.json");
-        let source = session.join("focus-area-source-identity.json");
+        let records = [
+            "focus-area-generation.json",
+            "focus-area-source-identity.json",
+            "focus-area-cache-identity.json",
+        ];
+        let cache_identity = session.join("focus-area-cache-identity.json");
+        if !cache_identity.exists() {
+            // Seed a current record so setup succeeds before the test advances its schema.
+            fs::write(&cache_identity, br#"{"schemaVersion":3,"key":null}"#).unwrap();
+        }
         let path = session.join(incompatible);
         let mut record: serde_json::Value =
             serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
         record["schemaVersion"] = serde_json::json!(record["schemaVersion"].as_u64().unwrap() + 1);
         fs::write(&path, serde_json::to_vec(&record).unwrap()).unwrap();
-        let before_generation = fs::read(&generation).unwrap();
-        let before_source = fs::read(&source).unwrap();
+        let before_records: Vec<_> = records
+            .iter()
+            .map(|record| fs::read(session.join(record)).unwrap())
+            .collect();
         let guidance = Path::new(&snapshot.source_directory).join("skill/focus-areas.md");
         let before_guidance = fs::read(&guidance).unwrap();
 
         let error = workspace.snapshot(None).unwrap_err();
         assert_eq!(classification(&error), "invalidInput");
-        assert_eq!(fs::read(generation).unwrap(), before_generation);
-        assert_eq!(fs::read(source).unwrap(), before_source);
+        for (record, before) in records.iter().zip(before_records) {
+            assert_eq!(fs::read(session.join(record)).unwrap(), before);
+        }
         assert_eq!(fs::read(guidance).unwrap(), before_guidance);
     }
 }

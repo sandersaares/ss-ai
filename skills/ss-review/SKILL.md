@@ -408,7 +408,7 @@ If the command refuses because the pull request is no longer open, do not decide
 
 Rebuild the approved set first, without the diff. Execute the command in `pwsh-calls/rebuild-approved-findings-for-tracker.md`, replacing its placeholders.
 
-A tracker item carries no anchor into a diff, so the anchor check phase 8 applies does not apply here and a set rebuilt with `-ContextPath` and `-RepositoryPath` would file fewer findings than the review produced. Provenance and follow-up links come from the capture handed to the command below, so nothing is lost.
+A tracker item carries no anchor into a diff, so the anchor check phase 8 applies does not apply here. Supplying `-RepositoryPath` would filter out findings whose anchors do not resolve in the pull-request diff; omit it to file every approved finding. Provenance and follow-up links come from the capture handed to the command below, so nothing is lost.
 
 If the findings were rendered for a pull request, re-render them for this destination before filing anything, using the command in `pwsh-calls/rerender-findings-for-tracker.md`. A destination-only wrapper that adds tracker location or provenance around unchanged approved finding prose retains the existing approval. When re-rendering changes substantive finding prose, record `needs-audit` using `pwsh-calls/record-auto-approval-decision.md`, return directly to phase 7 for the user's decision, and rebuild the approved set before filing.
 
