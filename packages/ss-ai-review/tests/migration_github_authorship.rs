@@ -462,7 +462,7 @@ fn service_edit_evidence_controls_review_and_comment_timestamps() {
             .unwrap() = json!([{"id":"R1","lastEditedAt":timestamp,"comments":{"totalCount":0}}]);
         *responses
             .pointer_mut("/issueEdits/data/repository/pullRequest/comments/nodes")
-            .unwrap() = json!([{"id":"I1","lastEditedAt":timestamp}]);
+            .unwrap() = json!([{"id":"I1","lastEditedAt":timestamp,"isMinimized":false}]);
         let result = capture(responses);
         let threads = result.get("threads").unwrap().as_array().unwrap();
         for id in ["R1", "I1"] {

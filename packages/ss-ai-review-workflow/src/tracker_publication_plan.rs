@@ -203,7 +203,7 @@ mod tests {
         let mut second = first.clone();
         second["id"] = json!("F2");
         second["description"] = json!("bad\rtext");
-        let approved = json!({"findings":[first.clone(), second]});
+        let approved = json!({"findings":[first, second]});
         let error = render_plan(&approved, None, &json!({}), "gitHub", 0)
             .unwrap_err()
             .to_string();

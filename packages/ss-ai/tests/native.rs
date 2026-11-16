@@ -126,7 +126,7 @@ impl Fixture {
         )
         .expect("Malformed Rust prerequisites");
         // Match the preparation record contract in DEVELOPMENT.md.
-        assert_eq!(record["schemaVersion"], 3, "Unsupported prerequisites");
+        assert_eq!(record["schemaVersion"], 4, "Unsupported prerequisites");
         assert_eq!(record["status"], "complete", "Incomplete prerequisites");
 
         let provider = &record["provider"];
@@ -238,7 +238,7 @@ fn provider_prerequisites_reject_missing_incomplete_stale_and_modified_artifacts
     fs::write(&source, source_bytes).unwrap();
     fs::write(&executable, executable_bytes).unwrap();
     let valid = json!({
-        "schemaVersion": 3,
+        "schemaVersion": 4,
         "status": "complete",
         "provider": {
             "source": {"path": source, "sha256": format!("{:X}", Sha256::digest(source_bytes))},
@@ -252,8 +252,9 @@ fn provider_prerequisites_reject_missing_incomplete_stale_and_modified_artifacts
         // Reject older, future, and string-encoded versions rather than accepting a range.
         ("/schemaVersion", json!(1)),
         ("/schemaVersion", json!(2)),
-        ("/schemaVersion", json!(4)),
-        ("/schemaVersion", json!("3")),
+        ("/schemaVersion", json!(3)),
+        ("/schemaVersion", json!(5)),
+        ("/schemaVersion", json!("4")),
         ("/status", json!("preparing")),
         ("/status", json!("providerFailed")),
         ("/provider/source/path", json!("relative.rs")),

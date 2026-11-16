@@ -75,19 +75,6 @@ struct ActiveGenerationRecordRef<'a> {
 }
 
 impl ActiveGenerationRecord {
-    /// Represents a session with no preparation authorized to publish.
-    fn invalidated() -> Self {
-        Self {
-            schema_version: ACTIVE_GENERATION_SCHEMA_VERSION,
-            preparation_identity: None,
-            generation_id: None,
-            source_digest: None,
-            cache_key: None,
-            receipt: None,
-            hit_receipt: None,
-        }
-    }
-
     /// Rejects records that cannot describe one coherent generation.
     fn validate(&self) -> Result<(), AppError> {
         if self.schema_version != ACTIVE_GENERATION_SCHEMA_VERSION

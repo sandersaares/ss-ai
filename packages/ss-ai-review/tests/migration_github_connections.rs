@@ -195,7 +195,7 @@ fn independently_paged_discussion_retains_all_evidence() {
                     Value::Null,
                     connection(
                         "comments",
-                        json!([{"id":"I1","lastEditedAt":"2026-08-03T09:15:00Z"}]),
+                        json!([{"id":"I1","lastEditedAt":"2026-08-03T09:15:00Z","isMinimized":false}]),
                         Some("issue-1"),
                     ),
                 ),
@@ -203,7 +203,7 @@ fn independently_paged_discussion_retains_all_evidence() {
                     json!("issue-1"),
                     connection(
                         "comments",
-                        json!([{"id":"I2","lastEditedAt":"2026-08-04T09:15:00Z"}]),
+                        json!([{"id":"I2","lastEditedAt":"2026-08-04T09:15:00Z","isMinimized":true}]),
                         None,
                     ),
                 ),
@@ -479,7 +479,7 @@ fn rest_pagination_flattens_every_page_into_the_capture() {
         ]),
     );
     let metadata = (1..=5)
-        .map(|id| json!({"id":format!("I{id}"),"lastEditedAt":null}))
+        .map(|id| json!({"id":format!("I{id}"),"lastEditedAt":null,"isMinimized":false}))
         .collect::<Vec<_>>();
     let initial_threads = responses.get("reviewThreads").unwrap().clone();
     let pages = BTreeMap::from([

@@ -175,7 +175,11 @@ impl Process for Provider {
                 .get("cur")
                 .expect("missing GraphQL cursor");
             assert!(cursor.is_null() || cursor.is_string());
-            (graphql_route(&request), cursor.clone())
+            let route = graphql_route(&request);
+            if route == "issueEdits" {
+                assert!(request["query"].as_str().unwrap().contains("isMinimized"));
+            }
+            (route, cursor.clone())
         } else {
             assert_eq!(method, "GET");
             assert!(input.is_empty());
@@ -317,7 +321,7 @@ fn provider_routes_independent_reads_and_checks_continuations() {
         from_slice::<Value>(&result.stdout).unwrap()
     };
     assert_eq!(
-        connection("query { comments(first:1) { nodes { id } } }"),
+        connection("query { comments(first:1) { nodes { id isMinimized } } }"),
         "edits"
     );
     assert_eq!(
@@ -370,6 +374,73 @@ fn command(arguments: &[OsString], provider: &Provider) -> Value {
     from_str(&run(arguments, provider, provider, &FixedClock).unwrap()).unwrap()
 }
 
+#[test]
+fn github_context_joins_minimization_evidence_before_publication() {
+    for (metadata, expected) in [
+        (
+            json!({"id":"I1","lastEditedAt":null,"isMinimized":false}),
+            Some(false),
+        ),
+        (
+            json!({"id":"I1","lastEditedAt":null,"isMinimized":true}),
+            Some(true),
+        ),
+        (
+            json!({"id":"I1","lastEditedAt":null,"isMinimized":null}),
+            None,
+        ),
+        (json!({"id":"I1","lastEditedAt":null}), None),
+        (
+            json!({"id":"other","lastEditedAt":null,"isMinimized":false}),
+            None,
+        ),
+    ] {
+        let output = Output::new();
+        let provider = Provider::new("github", false);
+        {
+            let mut replies = provider.github.borrow_mut();
+            replies
+                .get_mut("repos/octo/widget/issues/7/comments?per_page=100")
+                .unwrap()[0]
+                .1 = json!([[{"id":10,"node_id":"I1","body":"discussion","user":null,
+                    "created_at":"2026-08-03T12:00:00Z","html_url":null,
+                    "author_association":"MEMBER","minimized":null}]]);
+            replies.get_mut("issueEdits").unwrap()[0].1 = json!({"data":{"repository":{"pullRequest":{"comments":{
+                "pageInfo":{"hasNextPage":false,"endCursor":null},
+                "nodes":[metadata]
+            }}}}});
+        }
+        let mut args: Vec<OsString> = [
+            "ss-ai",
+            "context",
+            "create",
+            "--url",
+            "https://github.com/octo/widget/pull/7",
+            "--output-directory",
+        ]
+        .into_iter()
+        .map(OsString::from)
+        .collect();
+        args.push(output.0.as_os_str().to_owned());
+        let result = run(&args, &provider, &provider, &FixedClock);
+        if let Some(expected) = expected {
+            result.unwrap();
+            provider.assert_complete();
+            let capture = read_capture(&output.capture(""), &FixedClock).unwrap();
+            let discussion = capture["threads"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|thread| thread["id"] == "I1")
+                .unwrap();
+            assert_eq!(discussion["properties"]["isMinimized"], expected);
+        } else {
+            result.unwrap_err();
+            assert!(!output.capture("").exists());
+        }
+    }
+}
+
 /// Captures one provider revision to an immutable destination.
 fn create(
     name: &str,
@@ -414,7 +485,7 @@ fn prepared_provider() -> PathBuf {
     let path = var_os("SS_AI_RUST_TEST_PREREQUISITES")
         .expect("Prepare the selected Rust tests with scripts/Invoke-Tests.ps1 first");
     let record: Value = from_slice(&read(path).unwrap()).unwrap();
-    assert_eq!(record["schemaVersion"], 3);
+    assert_eq!(record["schemaVersion"], 4);
     assert_eq!(record["status"], "complete");
     let source = PathBuf::from(record["provider"]["source"]["path"].as_str().unwrap());
     let executable = PathBuf::from(record["provider"]["executable"]["path"].as_str().unwrap());

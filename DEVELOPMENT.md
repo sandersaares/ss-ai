@@ -93,6 +93,13 @@ exercise PATH discovery and executable identity. These tests use the existing
 PowerShell executable; they never compile or install a utility. Cargo owns
 compilation, replacement and source-rebuild behavior.
 
+CI rejects Rust compiler and rustdoc warnings in every test job, including
+direct compilation of the native provider fixture and the default-feature
+release installation. Local builds retain normal warning behavior; set
+`CARGO_ENCODED_RUSTFLAGS=-Dwarnings`,
+`RUSTDOCFLAGS=-Dwarnings`, and `SS_AI_DENY_RUST_WARNINGS=1` to apply the
+same checks locally.
+
 Run every test in the repo:
 
 ```powershell
@@ -119,7 +126,7 @@ modified, stale-source, mismatched-selection, and incompatible-toolchain or
 flag records instead of building a missing helper. Cargo still checks freshness;
 ordinary execution uses its prepared target directory and preserves
 `CARGO_BIN_EXE` and doctest behavior.
-Prerequisite schema version 3 binds source content and last-write timestamps,
+Prerequisite schema version 4 binds source content and last-write timestamps,
 including manifests, Cargo configuration, embedded provider and query fixtures,
 and review schemas used by the build. A touch or byte-identical save requires
 preparation again, because Cargo can rebuild from timestamps alone. Execution

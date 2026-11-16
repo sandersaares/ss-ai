@@ -37,7 +37,7 @@ const THREAD_COMMENTS: &str = "query($threadId:ID!,$cur:String,$size:Int!){
  authorAssociation minimizedReason}}}}}";
 const ISSUE_METADATA: &str = "query($owner:String!,$repo:String!,$num:Int!,$cur:String,$size:Int!){
  repository(owner:$owner,name:$repo){pullRequest(number:$num){
- comments(first:$size,after:$cur){pageInfo{hasNextPage endCursor} nodes{id lastEditedAt}}}}}";
+ comments(first:$size,after:$cur){pageInfo{hasNextPage endCursor} nodes{id lastEditedAt isMinimized}}}}}";
 const REVIEW_METADATA: &str = "query($owner:String!,$repo:String!,$num:Int!,$cur:String,$size:Int!){
  repository(owner:$owner,name:$repo){pullRequest(number:$num){
  reviews(first:$size,after:$cur){pageInfo{hasNextPage endCursor} nodes{id lastEditedAt comments{totalCount}}}}}}";
@@ -585,9 +585,10 @@ fn text_thread(node: &Value, meta: &Value, review: bool) -> Result<Value, AppErr
             "authorAssociation":nullable_field(node,"author_association")?,
             "commitId":nullable_field(node,"commit_id")?})
     } else {
+        // GraphQL supplies minimization state; REST's minimized field can be null.
         json!({"commentId":field(node,"id")?,
             "authorAssociation":nullable_field(node,"author_association")?,
-            "isMinimized":node.get("minimized").map(boolean).transpose()?.unwrap_or(false)})
+            "isMinimized":boolean(field(meta,"isMinimized")?)?})
     };
     Ok(
         json!({"id":id,"url":url,"publishedUtc":published,"lastUpdatedUtc":updated,
@@ -856,7 +857,7 @@ mod tests {
             "author_association":"MEMBER","commit_id":b});
         let issue = json!({"id":10,"node_id":"I1","body":"[Copilot speaking] hi","user":account,
             "created_at":"2026-01-03T03:04:06Z","html_url":"https://github.com/issue",
-            "author_association":"MEMBER"});
+            "author_association":"MEMBER","minimized":null});
         let issue_two = json!({"id":11,"node_id":"I2","body":"later\r\n🐙","user":account,
             "created_at":"2026-01-04T03:04:06Z","html_url":"https://github.com/issue2",
             "author_association":"MEMBER"});
@@ -902,7 +903,7 @@ mod tests {
                     wrap(
                         "comments",
                         page(
-                            json!([{"id":"I1","lastEditedAt":null}]),
+                            json!([{"id":"I1","lastEditedAt":null,"isMinimized":true}]),
                             true,
                             json!("issues-next"),
                         ),
@@ -911,7 +912,7 @@ mod tests {
                 (
                     super::ISSUE_METADATA,
                     json!({"__expectedCursor":"issues-next","data":{"repository":{"pullRequest":{
-                        "comments":page(json!([{"id":"I2","lastEditedAt":"2026-01-05T00:00:00Z"}]),false,Value::Null)}}}}),
+                        "comments":page(json!([{"id":"I2","lastEditedAt":"2026-01-05T00:00:00Z","isMinimized":false}]),false,Value::Null)}}}}),
                 ),
                 (
                     super::REVIEW_METADATA,
@@ -947,6 +948,8 @@ mod tests {
         assert_eq!(captured["threads"][0]["openingCommentId"], "C1");
         assert_eq!(captured["threads"][1]["comments"][0]["authorship"], "human");
         assert_eq!(captured["threads"][2]["comments"][0]["authorship"], "agent");
+        assert_eq!(captured["threads"][2]["properties"]["isMinimized"], true);
+        assert_eq!(captured["threads"][3]["properties"]["isMinimized"], false);
         assert_eq!(
             captured["threads"][3]["comments"][0]["content"],
             "later\r\n🐙"

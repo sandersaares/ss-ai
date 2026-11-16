@@ -17,6 +17,7 @@ BeforeAll {
         }
 
         $script:ProviderBuilds++
+        $script:ProviderArguments = @($args)
         if ($script:FailProvider) {
             # Distinct native exit statuses keep provider and Cargo failures distinguishable.
             $global:LASTEXITCODE = 13
@@ -85,6 +86,7 @@ Describe 'Rust preparation boundary' {
             cargo @ArgumentList
         }
         $script:ProviderBuilds = 0
+        $script:ProviderArguments = @()
         $script:CargoCalls = [Collections.Generic.List[object]]::new()
         $script:FailProvider = $false
         $script:FailCargo = $false
@@ -541,6 +543,7 @@ Describe 'Rust preparation boundary' {
         foreach ($change in @(
             { param($record) $record.schemaVersion = '1' }
             { param($record) $record.schemaVersion = 1 }
+            { param($record) $record.schemaVersion = 3 }
             { param($record) $record.identity.Remove('sourceFreshnessSha256') }
             { param($record) $record.identity.sourceFreshnessSha256 = @($record.identity.sourceFreshnessSha256) }
             { param($record) $record.testTargets = 'native' }
@@ -598,6 +601,27 @@ Describe 'Rust preparation boundary' {
         $null = New-RustTestPreparation -RepositoryRoot $fixture.root -PrerequisitePath $fixture.record -TestTarget native
         Test-Path -LiteralPath $lockPath | Should -BeTrue
         $null = Read-RustTestPreparation -RepositoryRoot $fixture.root -PrerequisitePath $fixture.record -TestTarget native
+    }
+
+    It 'applies the CI warning policy to direct provider compilation only when enabled' {
+        $original = $env:SS_AI_DENY_RUST_WARNINGS
+        try {
+            $env:SS_AI_DENY_RUST_WARNINGS = '1'
+            $null = New-RustTestPreparation -RepositoryRoot $fixture.root -PrerequisitePath $fixture.record -TestTarget native
+            $script:ProviderArguments | Should -Contain '-D'
+            $script:ProviderArguments | Should -Contain 'warnings'
+
+            # A prepared fixture must not be reused across compiler policies.
+            $env:SS_AI_DENY_RUST_WARNINGS = $null
+            { Read-RustTestPreparation -RepositoryRoot $fixture.root -PrerequisitePath $fixture.record -TestTarget native } |
+                Should -Throw '*environment*'
+            $another = New-PreparationFixture
+            $null = New-RustTestPreparation -RepositoryRoot $another.root -PrerequisitePath $another.record -TestTarget native
+            $script:ProviderArguments | Should -Not -Contain '-D'
+            $script:ProviderArguments | Should -Not -Contain 'warnings'
+        } finally {
+            $env:SS_AI_DENY_RUST_WARNINGS = $original
+        }
     }
 
     It 'prepares concurrently with shared record = <SharedRecord> without replacing active outputs' -ForEach @(

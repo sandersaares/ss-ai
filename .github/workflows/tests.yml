@@ -12,6 +12,13 @@ concurrency:
   group: tests-${{ github.ref }}
   cancel-in-progress: true
 
+# Cargo and rustdoc compile in both jobs, including prerequisites built by Pester.
+# The direct rustc provider build uses the same policy through the test runner.
+env:
+  CARGO_ENCODED_RUSTFLAGS: -Dwarnings
+  RUSTDOCFLAGS: -Dwarnings
+  SS_AI_DENY_RUST_WARNINGS: "1"
+
 jobs:
   pester:
     name: Pester (${{ matrix.os }})
@@ -69,3 +76,15 @@ jobs:
       - name: Native validation and isolated installation
         shell: pwsh
         run: ./scripts/Invoke-Tests.ps1 -Suite Rust
+      # Use the installer path so release/default-feature warnings cannot hide behind test builds.
+      - name: Validate release installation
+        shell: pwsh
+        env:
+          CARGO_INSTALL_ROOT: ${{ runner.temp }}/ss-ai-warning-check
+        run: |
+          #Requires -Version 7.6
+          Set-StrictMode -Version Latest
+          $ErrorActionPreference = 'Stop'
+          $PSNativeCommandUseErrorActionPreference = $true
+          . ./scripts/lib/NativeUtility.ps1
+          Invoke-SkillsUtilityCargo -UtilityPath (Join-Path $PWD 'packages/ss-ai') | Out-Null

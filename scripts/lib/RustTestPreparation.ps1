@@ -179,7 +179,7 @@ function Get-RustTestIdentity {
     $environment = @{}
     # Preserve null versus empty because both toolchain wrappers and flags affect compatibility.
     foreach ($name in @(
-        'RUSTFLAGS', 'CARGO_ENCODED_RUSTFLAGS', 'RUSTDOCFLAGS', 'CARGO_BUILD_TARGET',
+        'RUSTFLAGS', 'CARGO_ENCODED_RUSTFLAGS', 'RUSTDOCFLAGS', 'SS_AI_DENY_RUST_WARNINGS', 'CARGO_BUILD_TARGET',
         'CARGO_PROFILE_DEV_DEBUG', 'CARGO_PROFILE_TEST_DEBUG', 'CARGO_INCREMENTAL',
         'RUSTC', 'RUSTUP_TOOLCHAIN', 'RUSTC_WRAPPER', 'RUSTC_WORKSPACE_WRAPPER'
     )) {
@@ -268,7 +268,9 @@ function New-RustTestPreparation {
         if ($requiresProvider) {
             try {
                 Invoke-TestPhase -Name 'prepare provider (compilerInvocations=1)' -Action {
-                    & rustc --edition 2024 $providerSource -o $provider
+                    # rustc does not read Cargo's warning flags; keep local builds unchanged.
+                    $warningFlags = if ($env:SS_AI_DENY_RUST_WARNINGS -eq '1') { @('-D', 'warnings') } else { @() }
+                    & rustc --edition 2024 @warningFlags $providerSource -o $provider
                     if ($LASTEXITCODE -ne 0) {
                         throw 'Preparing the native provider failed.'
                     }
@@ -318,7 +320,7 @@ function New-RustTestPreparation {
 
         $record = @{
             # The consumer requires source and effective external configuration identity (DEVELOPMENT.md).
-            schemaVersion = 3
+            schemaVersion = 4
             status = $(if ($providerFailure) { 'providerFailed' } else { 'complete' })
             providerFailure = $providerFailure
             identity = $identity
@@ -389,7 +391,7 @@ function Read-RustTestPreparation {
         'ownedDirectory', 'targetDirectory', 'provider', 'executables'
     )
     if ($record -isnot [System.Collections.IDictionary] -or
-        $record.schemaVersion -isnot [long] -or $record.schemaVersion -ne 3 -or
+        $record.schemaVersion -isnot [long] -or $record.schemaVersion -ne 4 -or
         $record.status -isnot [string] -or
         ($record.status -cne 'complete' -and -not ($AllowProviderFailure -and $record.status -ceq 'providerFailed'))) {
         throw 'Incomplete or unsupported Rust prerequisites.'
