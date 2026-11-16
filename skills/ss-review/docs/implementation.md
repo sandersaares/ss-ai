@@ -542,6 +542,11 @@ in the consolidated artifact, re-renders the finding, and rebuilds the approved
 artifact under the existing decision. It neither asks for renewed approval nor
 appends a policy approval that would replace the original approval source.
 
+Tracker projections use the checked capture without a repository path. This
+preserves the evidence binding and validates follow-up comment provenance
+without filtering findings against the pull-request diff. Pull-request
+publication supplies the repository path to retain anchor filtering.
+
 Merge approval is kept in a separate source-commit-bound record. After recording
 revalidation decisions, the orchestrator queries `auditFindingIds`. An empty
 list keeps the prior merge decision in effect without returning to the audit
@@ -1196,6 +1201,8 @@ remaining publication plan. This allows the existing run to continue without
 turning general failure recovery into a duplicate-producing retry mechanism.
 Azure DevOps destination and item URL comparisons use case-insensitive
 identities; verification preserves the original item URL recorded by the journal.
+Continuation also treats Azure area paths as case-insensitive identities and
+preserves their recorded spelling.
 The accepted decision is persisted before a later creation intent. If persisting
 that intent fails, the same decision can continue; once the intent is durable,
 the possible provider write requires reconciliation.

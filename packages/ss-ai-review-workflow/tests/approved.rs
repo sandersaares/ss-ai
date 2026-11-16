@@ -101,16 +101,18 @@ fn projection_uses_last_decisions_and_refuses_incomplete_work() {
     );
     let log = workspace.put("decisions.json", &decisions(&[("F1", "approved")]));
     let output = workspace.0.join("approved.json");
-    let missing = workspace.0.join("missing.json");
-    let error = approved::build_approved(&artifact, &missing, &output, None, None, &clock, &Git)
-        .unwrap_err()
-        .to_string();
+    let error = approved::build_approved(
+        &artifact,
+        &workspace.0.join("missing.json"),
+        &output,
+        None,
+        None,
+        &clock,
+        &Git,
+    )
+    .unwrap_err()
+    .to_string();
     assert!(error.contains("'F1' or 'F2'"));
-    let error =
-        approved::build_approved(&artifact, &log, &output, Some(&missing), None, &clock, &Git)
-            .unwrap_err()
-            .to_string();
-    assert!(error.contains("-RepositoryPath"));
     let error = approved::build_approved(
         &artifact,
         &log,
@@ -315,7 +317,7 @@ fn freshness_rejects_changed_commits_and_discussion() {
 }
 
 #[test]
-fn follow_up_must_name_reply_capable_opening_comment() {
+fn follow_up_must_name_a_comment_in_the_captured_thread() {
     let workspace = Workspace::new("followup");
     let clock = SystemClock::default();
     let mut record = finding("F", json!({"kind":"file","path":"not-in-diff"}));
@@ -326,81 +328,70 @@ fn follow_up_must_name_reply_capable_opening_comment() {
     );
     let log = workspace.put("decisions.json", &decisions(&[("F", "approved")]));
     let mut current = capture();
+    let comment = |id: &str| {
+        json!({"id":id,"parentId":null,"url":null,"publishedUtc":null,"lastEditedUtc":null,
+            "author":null,"content":null,"authorship":"human","authorshipEvidence":[],
+            "isAuthoredBySelf":false})
+    };
     current["threads"] = json!([{"id":"T","openingCommentId":"C","kind":"text","resolution":"active",
-        "isOutdated":false,"isAuthoredBySelf":false,"context":{"filePath":"src/lib.rs"},"decision":null,
-        "url":null,"eventUtc":null,"lastUpdatedUtc":null,"comments":[]}]);
+        "isOutdated":false,"isAuthoredBySelf":false,"context":null,"decision":null,
+        "url":null,"eventUtc":null,"lastUpdatedUtc":null,"comments":[comment("C"),comment("reply")]}]);
+    record["followUp"]["commentId"] = json!("reply");
+    workspace.put(
+        "findings.json",
+        &json!({"schemaVersion":1,"kind":"consolidated","findings":[record]}),
+    );
     let context = workspace.put("context.json", &current);
     let output = workspace.0.join("approved.json");
-    let result = approved::build_approved(
-        &artifact,
-        &log,
-        &output,
-        Some(&context),
-        Some(&workspace.0),
-        &clock,
-        &Git,
-    )
-    .unwrap();
+    let result =
+        approved::build_approved(&artifact, &log, &output, Some(&context), None, &clock, &Git)
+            .unwrap();
     assert_eq!(result["approved"], 1);
+    assert_eq!(result["unanchored"], 0);
+
     current["threads"] = current["threads"][0].clone();
+    current["threads"]["comments"] = comment("reply");
     workspace.put("context.json", &current);
     assert!(
-        approved::build_approved(
-            &artifact,
-            &log,
-            &output,
-            Some(&context),
-            Some(&workspace.0),
-            &clock,
-            &Git
-        )
-        .is_ok()
+        approved::build_approved(&artifact, &log, &output, Some(&context), None, &clock, &Git)
+            .is_ok()
     );
-    current["threads"] = json!([current["threads"]]);
     let before = fs::read(&output).unwrap();
-    current["threads"][0]["context"] = Value::Null;
+    current["threads"]["comments"] = json!([comment("C")]);
     workspace.put("context.json", &current);
     assert!(
-        approved::build_approved(
-            &artifact,
-            &log,
-            &output,
-            Some(&context),
-            Some(&workspace.0),
-            &clock,
-            &Git
-        )
-        .is_err()
+        approved::build_approved(&artifact, &log, &output, Some(&context), None, &clock, &Git)
+            .is_err()
     );
     assert_eq!(before, fs::read(&output).unwrap());
-    current["platform"] = json!("azureDevOps");
-    workspace.put("context.json", &current);
-    assert!(
-        approved::build_approved(
-            &artifact,
-            &log,
-            &output,
-            Some(&context),
-            Some(&workspace.0),
-            &clock,
-            &Git
-        )
-        .is_ok()
+}
+
+#[test]
+fn tracker_projection_binds_capture_without_filtering_anchors() {
+    let workspace = Workspace::new("tracker-capture-only");
+    let clock = SystemClock::default();
+    let artifact = workspace.put(
+        "findings.json",
+        &json!({"schemaVersion":1,"kind":"consolidated","findings":[
+            finding("F", json!({"kind":"file","path":"not-in-diff"}))
+        ]}),
     );
-    current["threads"][0]["openingCommentId"] = json!("different");
-    workspace.put("context.json", &current);
-    assert!(
-        approved::build_approved(
-            &artifact,
-            &log,
-            &output,
-            Some(&context),
-            Some(&workspace.0),
-            &clock,
-            &Git
-        )
-        .is_err()
+    let log = workspace.put("decisions.json", &decisions(&[("F", "approved")]));
+    let context = workspace.put("context.json", &capture());
+    let output = workspace.0.join("approved.json");
+
+    let result =
+        approved::build_approved(&artifact, &log, &output, Some(&context), None, &clock, &Git)
+            .unwrap();
+
+    assert_eq!(result["findingId"], json!(["F"]));
+    assert_eq!(result["unanchored"], 0);
+    let document: Value = serde_json::from_slice(&fs::read(&output).unwrap()).unwrap();
+    assert_eq!(
+        document["reviewedContextHash"],
+        ss_ai_review_context::evidence_hash(&capture()).unwrap()
     );
+    approved::check_approved(&output, Some(&context), &clock).unwrap();
 }
 
 #[test]
@@ -449,19 +440,26 @@ fn freshness_does_not_replace_destination_follow_up_rules() {
     );
     let decisions = workspace.put("decisions.json", &decisions(&[("F", "approved")]));
     let output = workspace.0.join("publication-approved.json");
+    approved::build_approved(
+        &artifact,
+        &decisions,
+        &output,
+        Some(&context_path),
+        Some(&workspace.0),
+        &clock,
+        &Git,
+    )
+    .unwrap();
+    let projected: Value = serde_json::from_slice(&fs::read(&output).unwrap()).unwrap();
     assert!(
-        approved::build_approved(
-            &artifact,
-            &decisions,
-            &output,
-            Some(&context_path),
-            Some(&workspace.0),
-            &clock,
-            &Git
+        ss_ai_review_workflow::review_publication_plan::preflight(
+            &projected,
+            &context,
+            &json!({}),
+            false,
         )
         .is_err()
     );
-    assert!(!output.exists());
 }
 
 #[test]

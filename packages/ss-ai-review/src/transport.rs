@@ -641,7 +641,7 @@ impl<'a> Transport<'a> {
                 || (matches!(response_mode, GithubResponseMode::Mutation)
                     && json
                         .as_ref()
-                        .is_ok_and(|value| github_rate_limit("", "", Some(value))));
+                        .is_ok_and(|value| github_rate_limit(Some(403), "", Some(value))));
             let write_conflicting = matches!(
                 response_mode,
                 GithubResponseMode::Mutation | GithubResponseMode::RefusalRetryWrite
@@ -670,7 +670,7 @@ impl<'a> Transport<'a> {
                                     .get("message")
                                     .and_then(Value::as_str)
                                     .is_some_and(rate_message)
-                                && !github_rate_limit("", "", Some(value)))
+                                && !github_rate_limit(Some(403), "", Some(value)))
                     }
                     Err(_) => {
                         // An empty 429 establishes refusal; an empty generic
@@ -692,7 +692,14 @@ impl<'a> Transport<'a> {
                         && (response_status(headers) == Some(429)
                             || (response_status(headers) == Some(403) && rate_evidence))
                 }
-                _ => github_rate_limit(&status_text, &error_text, json.as_ref().ok()),
+                _ => {
+                    !output.success
+                        && github_rate_limit(
+                            response_status(headers),
+                            &error_text,
+                            json.as_ref().ok(),
+                        )
+                }
             };
             if rate_limited {
                 if policy != RequestPolicy::Standard {
@@ -1356,7 +1363,16 @@ fn github_partial_write(response: &Value) -> bool {
 ///
 /// Partial GraphQL data is not a pure refusal; mixed errors must not authorize
 /// replay through the rate-limit path.
-fn github_rate_limit(status: &str, message: &str, response: Option<&Value>) -> bool {
+fn github_rate_limit(status: Option<u16>, message: &str, response: Option<&Value>) -> bool {
+    let Some(status) = status else {
+        return false;
+    };
+    if status == 429 {
+        return true;
+    }
+    if status != 403 {
+        return false;
+    }
     if response
         .and_then(|value| value.get("data"))
         .is_some_and(|data| !data.is_null())
@@ -1376,7 +1392,7 @@ fn github_rate_limit(status: &str, message: &str, response: Option<&Value>) -> b
                     .is_some_and(rate_message)
         });
     }
-    http_status(status, 429) || (http_status(status, 403) && rate_message(message))
+    rate_message(message)
 }
 
 /// Status evidence must not match an unrelated quota, request identifier, or body number.
@@ -2073,6 +2089,109 @@ mod tests {
         JsonOnly
             .send_json_patch("PATCH", "https://example.test/", "token", Some(b"[]"))
             .unwrap_err();
+    }
+
+    #[test]
+    fn github_standard_writes_retry_rate_refusals_but_one_shot_writes_do_not() {
+        struct GithubProcess {
+            replies: RefCell<VecDeque<ProcessOutput>>,
+            calls: Cell<usize>,
+        }
+
+        impl Process for GithubProcess {
+            fn execute(
+                &self,
+                program: &str,
+                arguments: &[String],
+                _: &[u8],
+            ) -> io::Result<ProcessOutput> {
+                assert_eq!(program, "gh");
+                assert!(arguments.iter().any(|argument| argument == "--include"));
+                self.calls.set(self.calls.get() + 1);
+                Ok(self
+                    .replies
+                    .borrow_mut()
+                    .pop_front()
+                    .expect("unexpected request"))
+            }
+        }
+
+        let process = GithubProcess {
+            replies: RefCell::new(VecDeque::from([
+                ProcessOutput::new(false, b"HTTP/2 429\n\n{}".to_vec(), vec![]),
+                ProcessOutput::new(true, br#"{"id":"abc"}"#.to_vec(), vec![]),
+                ProcessOutput::new(
+                    false,
+                    br#"HTTP/2 403
+
+{"message":"API rate limit exceeded"}"#
+                        .to_vec(),
+                    vec![],
+                ),
+                ProcessOutput::new(true, br#"{"id":"def"}"#.to_vec(), vec![]),
+                ProcessOutput::new(false, b"HTTP/2 429\n\n{}".to_vec(), vec![]),
+                ProcessOutput::new(
+                    false,
+                    br#"HTTP/2 500
+
+{"errors":[{"message":"API rate limit exceeded"}]}"#
+                        .to_vec(),
+                    vec![],
+                ),
+                ProcessOutput::new(
+                    false,
+                    br#"{"errors":[{"type":"RATE_LIMITED"}]}"#.to_vec(),
+                    vec![],
+                ),
+                ProcessOutput::new(
+                    false,
+                    br#"HTTP/2 403
+
+{"message":"Resource not accessible by integration"}"#
+                        .to_vec(),
+                    vec![],
+                ),
+            ])),
+            calls: Cell::new(0),
+        };
+        let fixture = Fixture::new(vec![]);
+        let target = Target::repository("https://github.com/org/repo").unwrap();
+        let mut transport = Transport::new(&target, None, &process, &fixture, &fixture);
+        assert_eq!(
+            transport
+                .request("gists", "POST", Some(&json!({})))
+                .unwrap(),
+            json!({"id":"abc"})
+        );
+        assert_eq!(
+            transport
+                .request("gists", "POST", Some(&json!({})))
+                .unwrap(),
+            json!({"id":"def"})
+        );
+        assert_eq!(fixture.waits.borrow().len(), 2);
+        let error = transport
+            .github_write_once("gists", &json!({}))
+            .unwrap_err();
+        assert_eq!(classification(&error), "rateLimited");
+        assert_eq!(process.calls.get(), 5);
+        assert_eq!(fixture.waits.borrow().len(), 2);
+        for (expected_status, expected_classification) in [
+            ("HTTP/2 500", "ambiguousWrite"),
+            ("missing status", "ambiguousWrite"),
+            ("HTTP/2 403", "permissionDenied"),
+        ] {
+            let error = transport
+                .request("gists", "POST", Some(&json!({})))
+                .unwrap_err();
+            assert_eq!(
+                classification(&error),
+                expected_classification,
+                "{expected_status}"
+            );
+        }
+        assert_eq!(process.calls.get(), 8);
+        assert_eq!(fixture.waits.borrow().len(), 2);
     }
 
     #[test]

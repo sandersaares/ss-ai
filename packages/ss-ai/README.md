@@ -324,6 +324,7 @@ using `--accept-stored-rewrite`, `--accept-work-item-id`,
 `--accept-expected-body-hash`, and `--accept-stored-body-hash` can continue that
 same publication. The command returns its partial outcome and exits nonzero
 when publication does not complete.
+Continuation accepts case-only differences in Azure area paths.
 
 ## Review report tools
 

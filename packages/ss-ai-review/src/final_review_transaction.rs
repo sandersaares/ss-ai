@@ -21,6 +21,9 @@ use ss_ai_runtime::FileTransaction;
 use crate::error::fail;
 use crate::{Clock, classification};
 
+/// Separates native publication journals from the prior PowerShell record format.
+const JOURNAL_SCHEMA_VERSION: u64 = 2;
+
 /// Provider effects retain their review handle in the composition layer.
 pub(crate) trait Effects {
     fn start(&mut self) -> Result<Value, AppError>;
@@ -214,8 +217,22 @@ fn check_prior_inner(journal: &mut dyn Journal, target: &Value) -> Result<(), Ap
     let operations = old["operations"]
         .as_array()
         .ok_or_else(|| fail("invalidState", "Publication record has no operations"))?;
-    if old["schemaVersion"] != 1
+    let in_flight = old.get("inFlight");
+    if old["schemaVersion"] != JOURNAL_SCHEMA_VERSION
         || !valid_target(&old["target"])
+        || old["platform"] != old["target"]["platform"]
+        || !old["startedUtc"].is_string()
+        || !old["pullRequestUrl"].is_string()
+        || !old["sourceCommit"].is_string()
+        || !old["mergeBaseCommit"].is_string()
+        || !has_nullable_string(&old, "reviewId")
+        || !has_nullable_string(&old, "reviewUrl")
+        || !old["draftDiscarded"].is_boolean()
+        || !has_nullable_string(&old, "draftDiscardMessage")
+        || !has_nullable_string(&old, "message")
+        || !has_nullable_object(&old, "preCompletionVerification")
+        || !has_nullable_object(&old, "verification")
+        || !in_flight.is_some_and(valid_in_flight)
         || !matches!(
             old["status"].as_str(),
             Some("inProgress" | "failed" | "succeeded" | "publishedWithFollowUpFailure")
@@ -251,7 +268,7 @@ fn check_prior_inner(journal: &mut dyn Journal, target: &Value) -> Result<(), Ap
     // An initial record or a pending intent is not evidence that no request ran.
     // Only a terminal, definitive start refusal proves that no effect occurred.
     let clean_refusal = old["status"] == "failed"
-        && old["inFlight"].is_null()
+        && in_flight == Some(&Value::Null)
         && operations
             .first()
             .is_some_and(|op| op["operation"] == "startReview" && op["outcome"] == "failed")
@@ -266,6 +283,40 @@ fn check_prior_inner(journal: &mut dyn Journal, target: &Value) -> Result<(), Ap
         ));
     }
     Ok(())
+}
+
+/// Requires a field that the journal may leave unset until its effect succeeds.
+fn has_nullable_string(record: &Value, name: &str) -> bool {
+    matches!(record.get(name), Some(Value::Null | Value::String(_)))
+}
+
+/// Requires a verification field that may remain unset before it is read.
+fn has_nullable_object(record: &Value, name: &str) -> bool {
+    matches!(record.get(name), Some(Value::Null | Value::Object(_)))
+}
+
+/// Validates the durable intent written before each provider effect.
+fn valid_in_flight(value: &Value) -> bool {
+    let Some(intent) = value.as_object() else {
+        return value.is_null();
+    };
+    matches!(
+        intent.get("operation").and_then(Value::as_str),
+        Some(
+            "startReview"
+                | "newLineThread"
+                | "newFileThread"
+                | "reply"
+                | "verifyFindings"
+                | "approveReview"
+                | "completeReview"
+                | "verify"
+                | "reopenThread"
+                | "discard"
+        )
+    ) && intent
+        .get("index")
+        .is_some_and(|index| index.is_null() || index.as_u64().is_some())
 }
 
 /// Tracks which journal operations may follow the validated prefix.
@@ -474,8 +525,6 @@ fn effect(
     let read_only = kind.is_read_only();
     let intent = json!({"operation": name, "index": index});
     result["inFlight"] = intent.clone();
-    // Schema-1 readers that do not know `inFlight` still refuse replay while
-    // the provider call may have reached the service.
     if !read_only && let Some(index) = index {
         result["operations"][index]["outcome"] = json!("ambiguous");
     }
@@ -790,7 +839,7 @@ fn execute_inner(
             .and_then(|op| op["operation"].as_str()),
         Some("completeReview")
     );
-    let mut result = json!({"schemaVersion": 1, "startedUtc": now, "platform": target["platform"],
+    let mut result = json!({"schemaVersion": JOURNAL_SCHEMA_VERSION, "startedUtc": now, "platform": target["platform"],
         "target": target, "pullRequestUrl": target["webUrl"], "sourceCommit": state["sourceCommit"],
         "mergeBaseCommit": state["mergeBaseCommit"], "status": "inProgress", "reviewId": null,
         "reviewUrl": null, "draftDiscarded": false, "draftDiscardMessage": null, "message": null,
@@ -992,7 +1041,7 @@ mod tests {
     use std::rc::Rc;
     use std::time::Duration;
 
-    use super::{Effects, Journal, check_prior_inner, execute_inner};
+    use super::{Effects, JOURNAL_SCHEMA_VERSION, Journal, check_prior_inner, execute_inner};
     use crate::classification;
     use crate::error::fail;
     use crate::target::Target;
@@ -1205,6 +1254,10 @@ mod tests {
             let mut provider = Provider::default();
             let result = run(&mut journal, &mut provider, platform, true).unwrap();
             assert_eq!(result["status"], "succeeded");
+            assert_eq!(
+                journal.record.as_ref().unwrap()["schemaVersion"],
+                JOURNAL_SCHEMA_VERSION
+            );
             assert_eq!(result["publishedFindingCount"], 1);
             assert_eq!(result["resultPath"], "publication-result.json");
             let expected = if platform == "gitHub" {
@@ -1371,29 +1424,57 @@ mod tests {
     }
 
     #[test]
-    fn legacy_pending_and_corrupt_records_never_authorize_replay() {
-        let prior = json!({"schemaVersion": 1, "target": target("gitHub"), "status": "inProgress",
+    fn incompatible_and_incomplete_records_never_authorize_replay() {
+        let prior = json!({"schemaVersion": JOURNAL_SCHEMA_VERSION, "startedUtc":"2026-01-01T00:00:00Z",
+        "platform":"gitHub","target": target("gitHub"),"pullRequestUrl":"https://github.com/acme/repo/pull/42",
+        "sourceCommit":"head","mergeBaseCommit":"base","reviewId":null,"reviewUrl":null,
+        "draftDiscarded":false,"draftDiscardMessage":null,"message":null,
+        "preCompletionVerification":null,"verification":null,"inFlight":null,"status": "inProgress",
         "operations": [
             super::operation("startReview", None, &Value::Null, false),
             super::operation("verifyFindings", None, &Value::Null, false),
             super::operation("completeReview", None, &Value::Null, false)
         ]});
+        let mut legacy = prior.clone();
+        legacy["schemaVersion"] = json!(1);
+        legacy.as_object_mut().unwrap().remove("inFlight");
+        legacy["status"] = json!("failed");
+        legacy["operations"][0]["outcome"] = json!("failed");
+        let mut missing_in_flight = prior.clone();
+        missing_in_flight
+            .as_object_mut()
+            .unwrap()
+            .remove("inFlight");
+        let mut missing_verification = prior.clone();
+        missing_verification
+            .as_object_mut()
+            .unwrap()
+            .remove("verification");
+        let mut clean_refusal = prior;
+        clean_refusal["status"] = json!("failed");
+        clean_refusal["operations"][0]["outcome"] = json!("failed");
+        let mut malformed_intent = clean_refusal.clone();
+        malformed_intent["inFlight"] = json!({"operation":"unknown","index":null});
+
         for record in [
-            prior.clone(),
+            legacy,
+            missing_in_flight,
+            missing_verification,
+            malformed_intent,
             json!({"schemaVersion": 1, "target": target("gitHub"), "status":"failed", "operations": []}),
-            json!({"schemaVersion": 2, "target": target("gitHub"), "status":"failed", "operations": []}),
+            json!({"schemaVersion": 3, "target": target("gitHub"), "status":"failed", "operations": []}),
         ] {
+            let raw = to_vec(&record).unwrap();
             let mut journal = Memory {
-                record: Some(record),
+                raw: Some(raw.clone()),
                 ..Memory::default()
             };
             _ = check_prior_inner(&mut journal, &target("gitHub")).unwrap_err();
+            assert_eq!(journal.raw.as_deref(), Some(raw.as_slice()));
+            assert_eq!(journal.writes, 0);
         }
-        let mut prior = prior;
-        prior["status"] = json!("failed");
-        prior["operations"][0]["outcome"] = json!("failed");
         let mut journal = Memory {
-            record: Some(prior),
+            record: Some(clean_refusal),
             ..Memory::default()
         };
         check_prior_inner(&mut journal, &target("gitHub")).unwrap();

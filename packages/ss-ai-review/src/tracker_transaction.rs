@@ -847,8 +847,20 @@ fn run(
             "parentItemId",
         ]
         .iter()
-        .any(|k| old[*k] != metadata(state, k))
-        {
+        .any(|key| {
+            let current = metadata(state, key);
+            if target["platform"] == "azureDevOps" && *key == "areaPath" {
+                // Azure area names identify the same destination regardless of
+                // casing, including the project spelling supplied at preflight.
+                // Ref: packages/ss-ai/docs/design.md, "Tracker publication".
+                old[*key]
+                    .as_str()
+                    .zip(current.as_str())
+                    .is_none_or(|(prior, current)| prior.to_lowercase() != current.to_lowercase())
+            } else {
+                old[*key] != current
+            }
+        }) {
             return Err(fail(
                 "invalidState",
                 "Continuation tracker metadata changed",
@@ -1424,6 +1436,76 @@ mod tests {
             &provider.calls[..4],
             ["create first", "read 1", "read 1", "create second"]
         );
+    }
+
+    #[test]
+    fn continuation_accepts_only_case_changes_to_azure_area_paths() {
+        for area in ["Project", "Project\\Prøduct\\Area"] {
+            let (mut journal, mut provider) = setup();
+            provider.rewrite = true;
+            let mut initial_state = state("azureDevOps");
+            initial_state["areaPath"] = json!(area);
+            let paused = run(
+                &mut journal,
+                Path::new("result.json"),
+                &mut provider,
+                &target("azureDevOps"),
+                &initial_state,
+                &plan(),
+                "summary",
+                "now",
+                None,
+            )
+            .unwrap();
+            let adjudication = &paused["adjudication"];
+            let acceptance = Acceptance {
+                item_id: "1",
+                expected_body_hash: adjudication["expectedBodyHash"].as_str().unwrap(),
+                stored_body_hash: adjudication["storedBodyHash"].as_str().unwrap(),
+            };
+            let bytes = journal.bytes.clone();
+            let writes = journal.writes;
+            let calls = provider.calls.clone();
+            let mut resumed_state = initial_state;
+            resumed_state["areaPath"] = json!(format!("{area}\\Other"));
+            let error = run(
+                &mut journal,
+                Path::new("result.json"),
+                &mut provider,
+                &target("azureDevOps"),
+                &resumed_state,
+                &plan(),
+                "summary",
+                "now",
+                Some(&acceptance),
+            )
+            .unwrap_err();
+            assert_eq!(crate::classification(&error), "invalidState");
+            assert_eq!(journal.bytes, bytes);
+            assert_eq!(journal.writes, writes);
+            assert_eq!(provider.calls, calls);
+
+            resumed_state["areaPath"] = json!(area.to_uppercase());
+            let resumed = run(
+                &mut journal,
+                Path::new("result.json"),
+                &mut provider,
+                &target("azureDevOps"),
+                &resumed_state,
+                &plan(),
+                "summary",
+                "now",
+                Some(&acceptance),
+            )
+            .unwrap();
+            assert_eq!(resumed["status"], "succeeded");
+            let saved: Value = serde_json::from_slice(journal.bytes.as_ref().unwrap()).unwrap();
+            assert_eq!(saved["areaPath"], area);
+            assert_eq!(
+                &provider.calls[..4],
+                ["create first", "read 1", "read 1", "create second"]
+            );
+        }
     }
 
     #[test]

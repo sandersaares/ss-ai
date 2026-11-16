@@ -227,7 +227,6 @@ pub fn restore(
         clock,
     )?;
     focus_area_generation::validate_session_records_locked(&session, clock)?;
-    read_snapshot(&session, clock)?;
     let snapshot_valid =
         focus_area_generation::verify_snapshot_locked(&session, expected_snapshot_identity, clock);
     focus_area_generation::invalidate_locked(&session, clock)?;

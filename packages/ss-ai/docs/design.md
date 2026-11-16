@@ -253,6 +253,15 @@ prose to audit and publication without granting approval or contacting a provide
 Individual decision input accepts mixed case and surrounding whitespace while
 stored decisions use the canonical vocabulary.
 
+## Tracker publication
+
+Tracker publication files approved findings in an independent GitHub or Azure
+DevOps destination and verifies each item before creating the next. An Azure
+body rewrite can pause publication for explicit acceptance bound to that item
+and its exact approved and stored bodies. Continuation retains the destination,
+metadata, and remaining plan. Azure area paths identify the same destination
+regardless of casing; continuation preserves their recorded spelling.
+
 ## Review reports
 
 Report commands check and install prerequisites and render a Markdown document
