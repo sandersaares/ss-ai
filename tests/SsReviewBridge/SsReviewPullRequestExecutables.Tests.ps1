@@ -10,15 +10,16 @@ BeforeAll {
     New-Item -ItemType Directory -Path $script:Root -Force | Out-Null
     New-PSDrive -Name CaptureTest -PSProvider FileSystem -Root $script:Root | Out-Null
 
-    # Native output uses Console directly, rather than PowerShell's success stream.
+    # Capture both PowerShell success-stream output and adapters that write directly to Console.
     function Invoke-Bridge {
         param([string] $Name, [hashtable] $Parameters)
         $previous = [Console]::Out
         $output = [IO.StringWriter]::new()
         try {
             [Console]::SetOut($output)
-            & (Join-Path $script:Scripts $Name) @Parameters
-            $output.ToString()
+            $success = @(& (Join-Path $script:Scripts $Name) @Parameters)
+            if ($success.Count -gt 0) { return $success }
+            return $output.ToString()
         } finally {
             [Console]::SetOut($previous)
             $output.Dispose()
@@ -55,6 +56,13 @@ Describe 'Capture bridge PowerShell paths' {
             [IO.File]::Copy((Join-Path $script:RepoRoot 'tests/fixtures/ss-review-query-capture.json'), $script:Capture)
             [IO.File]::WriteAllText((Join-Path $script:Directory 'files.json'), '["src/widget.rs"]')
             [IO.File]::WriteAllText((Join-Path $script:Directory 'search.txt'), 'widget')
+        }
+
+        It 'emits read JSON on the PowerShell success stream' {
+            $json = & (Join-Path $script:Scripts 'Read-PullRequestContext.ps1') `
+                -Path $script:Capture -Query metadata -Field title
+            $json | Should -BeOfType ([string])
+            ($json | ConvertFrom-Json).items[0].content | Should -BeExactly 'Widget'
         }
 
         It 'resolves <spelling> paths for direct, saved, preparation and diagnostics commands' -ForEach @(
