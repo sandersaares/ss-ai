@@ -1,6 +1,6 @@
 #Requires -Version 7.6
 
-# Projects audited findings through the native freshness and anchor checks.
+# Projects audited findings through native capture and optional anchor checks.
 [CmdletBinding(PositionalBinding = $false)]
 param(
     [Parameter(Mandatory)]
