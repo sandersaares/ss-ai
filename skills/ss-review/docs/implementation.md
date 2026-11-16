@@ -1209,6 +1209,8 @@ remaining publication plan. This allows the existing run to continue without
 turning general failure recovery into a duplicate-producing retry mechanism.
 Azure DevOps destination and item URL comparisons use case-insensitive
 identities; verification preserves the original item URL recorded by the journal.
+Continuation also treats Azure area paths as case-insensitive identities and
+preserves their recorded spelling.
 The accepted decision is persisted before a later creation intent. If persisting
 that intent fails, the same decision can continue; once the intent is durable,
 the possible provider write requires reconciliation.

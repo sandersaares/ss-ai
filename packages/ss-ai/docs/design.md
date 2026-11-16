@@ -249,6 +249,15 @@ Approved projections require settled decisions and retain the evidence binding
 needed for freshness checks. Shared Markdown rendering supplies the same finding
 prose to audit and publication without granting approval or contacting a provider.
 
+## Tracker publication
+
+Tracker publication files approved findings in an independent GitHub or Azure
+DevOps destination and verifies each item before creating the next. An Azure
+body rewrite can pause publication for explicit acceptance bound to that item
+and its exact approved and stored bodies. Continuation retains the destination,
+metadata, and remaining plan. Azure area paths identify the same destination
+regardless of casing; continuation preserves their recorded spelling.
+
 ## Review reports
 
 Report commands check and install prerequisites and render a Markdown document
