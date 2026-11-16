@@ -10,7 +10,7 @@ BeforeAll {
     New-Item -ItemType Directory -Path $script:Root -Force | Out-Null
     New-PSDrive -Name CaptureTest -PSProvider FileSystem -Root $script:Root | Out-Null
 
-    # Capture both PowerShell success-stream output and adapters that write directly to Console.
+    # Keep direct Console writes visible to tests while returning PowerShell success-stream output.
     function Invoke-Bridge {
         param([string] $Name, [hashtable] $Parameters)
         $previous = [Console]::Out
@@ -61,6 +61,15 @@ Describe 'Capture bridge PowerShell paths' {
         It 'emits read JSON on the PowerShell success stream' {
             $json = & (Join-Path $script:Scripts 'Read-PullRequestContext.ps1') `
                 -Path $script:Capture -Query metadata -Field title
+            $json | Should -BeOfType ([string])
+            ($json | ConvertFrom-Json).items[0].content | Should -BeExactly 'Widget'
+        }
+
+        It 'emits native capture JSON on the PowerShell success stream' {
+            $json = & {
+                . (Join-Path $script:Scripts 'lib/NativeCaptureBridge.ps1')
+                Invoke-NativeCaptureContext -Arguments @('read', "--path=$script:Capture", '--query=metadata', '--field=title')
+            }
             $json | Should -BeOfType ([string])
             ($json | ConvertFrom-Json).items[0].content | Should -BeExactly 'Widget'
         }
@@ -189,6 +198,13 @@ Describe 'Capture bridge PowerShell paths' {
         } finally {
             Pop-Location
         }
+    }
+
+    It 'emits authored JSON on the PowerShell success stream' {
+        $json = & (Join-Path $script:Scripts 'Set-CommentAuthorship.ps1') `
+            -Path $script:Capture -SnapshotId $script:Snapshot -ClassificationPath $script:Classification
+        $json | Should -BeOfType ([string])
+        ($json | ConvertFrom-Json).contextPath | Should -BeExactly ([IO.Path]::GetFullPath($script:Capture))
     }
 
     It 'rejects non-filesystem provider paths for <parameter>' -ForEach @(

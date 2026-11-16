@@ -1,6 +1,6 @@
 #Requires -Version 7.6
 
-# Sends complete UTF-8 results from native capture operations to the caller.
+# Returns complete UTF-8 results through PowerShell's success stream so callers can capture the JSON.
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 $PSNativeCommandUseErrorActionPreference = $true
@@ -26,7 +26,7 @@ function Invoke-NativeCaptureContext {
         $errorText = $errors.GetAwaiter().GetResult()
         if ($process.ExitCode -ne 0) { throw "ss-ai context operation failed: $errorText" }
         [Console]::OutputEncoding = [Text.UTF8Encoding]::new($false)
-        [Console]::Write($text)
+        Write-Output $text.TrimEnd([char[]]@("`r", "`n"))
         [Console]::Error.Write($errorText)
     } finally { $process.Dispose() }
 }
