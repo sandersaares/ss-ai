@@ -4452,14 +4452,15 @@ fn incomplete_evidence_does_not_authorize_approval_or_needs_review_publication()
     let sources = Sources::new();
     for ado in [false, true] {
         let scope = TempDir::new().unwrap();
+        let root = scope.path().join("run");
         let provider = sources.provider(ado);
-        let (snapshot, prepared) = prepare(scope.path(), &provider, false);
+        let (snapshot, prepared) = prepare(&root, &provider, false);
         let id = prepared["changes"][0]["id"].as_str().unwrap();
-        read_evidence(scope.path(), &provider, &snapshot, "policy", None, None);
+        read_evidence(&root, &provider, &snapshot, "policy", None, None);
         for disposition in ["uncertain", "significant", "insignificant"] {
-            let before = fs::read(scope.path().join("run.json")).unwrap();
+            let before = fs::read(root.join("run.json")).unwrap();
             work(
-                scope.path(),
+                &root,
                 &provider,
                 "judge",
                 &snapshot,
@@ -4475,12 +4476,12 @@ fn incomplete_evidence_does_not_authorize_approval_or_needs_review_publication()
                 ],
             )
             .unwrap_err();
-            work(scope.path(), &provider, "complete", &snapshot, &[]).unwrap_err();
+            work(&root, &provider, "complete", &snapshot, &[]).unwrap_err();
             // The rejected judgment and completion each consume one work command.
-            assert_only_work_commands_changed(&scope.path().join("run.json"), &before, 2);
-            notify(scope.path(), &provider, &snapshot).unwrap_err();
-            publish(scope.path(), &provider, &snapshot).unwrap_err();
-            let result = invoke(scope.path(), &provider, "results", &[]).unwrap();
+            assert_only_work_commands_changed(&root.join("run.json"), &before, 2);
+            notify(&root, &provider, &snapshot).unwrap_err();
+            publish(&root, &provider, &snapshot).unwrap_err();
+            let result = invoke(&root, &provider, "results", &[]).unwrap();
             assert_eq!(result["items"][0]["status"], "assessmentRequired");
             assert!(result["items"][0]["assessmentDigest"].is_null());
             assert_eq!(
@@ -4490,12 +4491,19 @@ fn incomplete_evidence_does_not_authorize_approval_or_needs_review_publication()
             assert_eq!(provider.writes.get(), 0);
         }
         // Actual uncertainty after examination still has its ordinary fail-closed notice path.
-        assess_as(scope.path(), &provider, &snapshot, &prepared, "uncertain");
-        let result = notify(scope.path(), &provider, &snapshot).unwrap();
+        assess_as(&root, &provider, &snapshot, &prepared, "uncertain");
+        let result = notify(&root, &provider, &snapshot).unwrap();
         assert_eq!(result["items"][0]["status"], "failed");
         assert!(result["items"][0]["reviewNotice"]["commentId"].is_string());
+        let host_store = root.parent().unwrap().join("host-store");
+        assert!(
+            host_store
+                .canonicalize()
+                .unwrap()
+                .starts_with(scope.path().canonicalize().unwrap())
+        );
         assert_eq!(provider.writes.get(), 1);
-        publish(scope.path(), &provider, &snapshot).unwrap_err();
+        publish(&root, &provider, &snapshot).unwrap_err();
         assert_eq!(provider.writes.get(), 1);
     }
 }

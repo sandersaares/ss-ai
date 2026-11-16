@@ -22,6 +22,7 @@ serde_json = { workspace = true }
 ss-ai-cargo = { workspace = true }
 ss-ai-git = { workspace = true }
 ss-ai-review = { workspace = true }
+ss-ai-review-context = { workspace = true }
 ss-ai-runtime = { workspace = true }
 
 [dev-dependencies]

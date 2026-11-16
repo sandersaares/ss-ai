@@ -166,7 +166,7 @@ pub(crate) fn capture(api: &mut Api<'_>, target: &Target) -> Result<Evidence, Ap
 fn observe(api: &mut Api<'_>, target: &Target) -> Result<Evidence, AppError> {
     let pr = project_pull_request(&api.transport.request(&target.pr_api(), "GET", None)?)?;
     if excluded(&pr)?.is_some() {
-        return Ok(Evidence::State { pull_request: pr });
+        return compact(&Evidence::State { pull_request: pr });
     }
     let policy = policy(api, target, &pr)?;
     let reviews = list(api, &format!("{}/reviews", target.pr_api()), "node_id")?;
@@ -283,6 +283,29 @@ fn compact(evidence: &Evidence) -> Result<Evidence, AppError> {
         }
         *comments = project_comments(comments);
         *review_comments = project_comments(review_comments);
+    }
+    // Retained provider objects use sorted keys even when context enables
+    // insertion-ordered JSON. Keep the evidence enum's typed field order intact.
+    match &mut evidence {
+        Evidence::State { pull_request } => pull_request.sort_all_objects(),
+        Evidence::History {
+            pull_request,
+            reviews,
+            timeline,
+            comments,
+            review_comments,
+            ..
+        } => {
+            pull_request.sort_all_objects();
+            for value in reviews
+                .iter_mut()
+                .chain(timeline)
+                .chain(comments)
+                .chain(review_comments)
+            {
+                value.sort_all_objects();
+            }
+        }
     }
     Ok(evidence)
 }
@@ -783,6 +806,30 @@ mod tests {
 
     fn fixture() -> Value {
         serde_json::from_str(include_str!("../tests/fixtures/github-approval.json")).unwrap()
+    }
+
+    #[test]
+    fn retained_dynamic_objects_have_feature_independent_bytes() {
+        let history: Evidence = serde_json::from_value(fixture()["evidence"].clone()).unwrap();
+        let state = match &history {
+            Evidence::History { pull_request, .. } => Evidence::State {
+                pull_request: pull_request.clone(),
+            },
+            Evidence::State { .. } => unreachable!(),
+        };
+        for evidence in [state, history] {
+            let compact = super::compact(&evidence).unwrap();
+            let bytes = serde_json::to_string(&compact).unwrap();
+            // Typed enum fields retain their declaration order; only dynamic
+            // provider values use sorted object members.
+            assert!(bytes.starts_with("{\"scope\":"));
+            let value = serde_json::to_value(compact).unwrap();
+            for value in value.as_object().unwrap().values() {
+                let mut expected = value.clone();
+                expected.sort_all_objects();
+                assert_eq!(value.to_string(), expected.to_string());
+            }
+        }
     }
 
     fn decide(value: Value) -> Result<Decision, AppError> {

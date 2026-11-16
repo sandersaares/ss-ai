@@ -1779,6 +1779,7 @@ pub(crate) fn check_response(value: &Value) -> Result<(), AssessmentError> {
     Ok(())
 }
 
+/// Typed fields keep declaration order; dynamic provenance is sorted at its boundary.
 pub(crate) fn hash(value: &impl Serialize) -> Result<String, AssessmentError> {
     Ok(format!("{:x}", Sha256::digest(serde_json::to_vec(value)?)))
 }

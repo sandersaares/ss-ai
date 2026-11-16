@@ -30,8 +30,9 @@ Before replay or continuation, the reader regenerates that page from the bound
 capture and selectors and requires exact agreement, including item structure,
 content, and continuation. The default read replays the validated page;
 `-Next` advances, and `-Restart` explicitly rebinds snapshots.
-Use `pwsh-calls/query-pr-context.md`; do not edit these records or substitute
-their paths for canonical capture paths at validation/publication boundaries.
+Use `pwsh-calls/query-pr-context.md`, whose PowerShell entry points call the
+native context commands. Do not edit these records or substitute their paths
+for canonical capture paths at validation/publication boundaries.
 
 `inputDiagnostics` contains required nonnegative counters, including explicit
 zeros. The prepared writers serialize observations under a lock, including

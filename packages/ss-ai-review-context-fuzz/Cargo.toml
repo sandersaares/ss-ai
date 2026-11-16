@@ -1,0 +1,40 @@
+[package]
+name = "ss-ai-review-context-fuzz"
+description = "Bounded query fuzz targets for ss-ai-review-context"
+version = "0.1.0"
+publish = false
+authors.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+include.workspace = true
+
+[package.metadata]
+cargo-fuzz = true
+
+[package.metadata.docs.rs]
+all-features = true
+
+[dependencies]
+libfuzzer-sys = { workspace = true, features = ["link_libfuzzer"] }
+serde_json = { workspace = true }
+ss-ai-review-context = { workspace = true }
+ss-ai-runtime = { workspace = true }
+
+[[bin]]
+name = "pagination"
+path = "fuzz_targets/pagination.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "saved_requests"
+path = "fuzz_targets/saved_requests.rs"
+test = false
+doc = false
+bench = false
+
+[lints]
+workspace = true

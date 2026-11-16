@@ -11,12 +11,16 @@ The nonpublished workspace packages implement the utility-wide [design](design.m
   automatic reapproval without provider effects.
 - `ss-ai-runtime` supplies process, clock, diagnostics, and atomic file transactions.
 - `ss-ai-review` owns provider-backed review and reapproval operations.
+- `ss-ai-review-context` owns local captured evidence, bounded queries, saved
+  requests, and input diagnostics.
 
 Dependencies flow from command composition toward focused operations and shared
 runtime boundaries, never back to the executable. Review selection, provider
 evidence, approval authority, and publication stay together because they share
 decisions and transaction boundaries. Assessment owns the independent source
 and judgment model, while review retains provider-backed authority decisions.
+Local context operations do not require provider transport and do not make
+review or authorship judgments.
 The Cargo inventory has no provider or
 network dependency. The focused packages support targeted test builds and
 incremental reuse; a cold build of the complete executable still builds its

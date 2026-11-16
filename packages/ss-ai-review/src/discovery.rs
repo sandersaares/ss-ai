@@ -1249,11 +1249,14 @@ fn snapshot_digest(
     captured_at: &str,
     attempt_id: Option<&str>,
 ) -> Result<String, AppError> {
-    let document = if let Some(attempt_id) = attempt_id {
+    let mut document = if let Some(attempt_id) = attempt_id {
         json!({ "capturedAt": captured_at, "evidence": evidence, "attemptId": attempt_id })
     } else {
         json!({ "capturedAt": captured_at, "evidence": evidence })
     };
+    // Snapshot envelopes are dynamic JSON; their bytes use sorted object keys
+    // independently of the insertion-order support needed by context captures.
+    document.sort_all_objects();
     Ok(digest(&serde_json::to_vec(&document)?))
 }
 
@@ -2210,4 +2213,43 @@ fn digest(bytes: &[u8]) -> String {
 
 fn utc(value: Timestamp) -> String {
     format!("{value:.9}")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{digest, snapshot_digest};
+    use crate::approval::Evidence;
+    use crate::github_approval;
+
+    #[test]
+    fn snapshot_bytes_sort_nested_evidence_and_recovery_envelopes() {
+        let evidence = Evidence::GitHub(github_approval::Evidence::State {
+            pull_request: serde_json::from_str(r#"{"z":0,"a":{"z":2,"a":1}}"#).unwrap(),
+        });
+        let before = serde_json::to_string(&evidence).unwrap();
+        for (attempt, expected) in [
+            (
+                None,
+                concat!(
+                    "{\"capturedAt\":\"captured\",\"evidence\":{\"observation\":{",
+                    "\"pullRequest\":{\"a\":{\"a\":1,\"z\":2},\"z\":0},\"scope\":\"state\"},",
+                    "\"platform\":\"gitHub\"}}"
+                ),
+            ),
+            (
+                Some("attempt"),
+                concat!(
+                    "{\"attemptId\":\"attempt\",\"capturedAt\":\"captured\",",
+                    "\"evidence\":{\"observation\":{\"pullRequest\":{\"a\":{\"a\":1,\"z\":2},",
+                    "\"z\":0},\"scope\":\"state\"},\"platform\":\"gitHub\"}}"
+                ),
+            ),
+        ] {
+            assert_eq!(
+                snapshot_digest(&evidence, "captured", attempt).unwrap(),
+                digest(expected.as_bytes())
+            );
+            assert_eq!(serde_json::to_string(&evidence).unwrap(), before);
+        }
+    }
 }
