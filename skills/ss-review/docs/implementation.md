@@ -532,6 +532,11 @@ in the consolidated artifact, re-renders the finding, and rebuilds the approved
 artifact under the existing decision. It neither asks for renewed approval nor
 appends a policy approval that would replace the original approval source.
 
+Tracker projections use the checked capture without a repository path. This
+preserves the evidence binding and validates follow-up comment provenance
+without filtering findings against the pull-request diff. Pull-request
+publication supplies the repository path to retain anchor filtering.
+
 Merge approval is kept in a separate source-commit-bound record. After recording
 revalidation decisions, the orchestrator queries `auditFindingIds`. An empty
 list keeps the prior merge decision in effect without returning to the audit
