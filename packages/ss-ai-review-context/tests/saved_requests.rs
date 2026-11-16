@@ -1,4 +1,6 @@
 //! Exercises saved request and diagnostics file transactions.
+#![cfg_attr(coverage_nightly, feature(coverage_attribute))]
+#![cfg_attr(coverage_nightly, coverage(off))]
 #![allow(
     clippy::assertions_on_result_states,
     clippy::indexing_slicing,
@@ -295,8 +297,9 @@ fn duplicate_properties_are_rejected_without_changing_records() {
     }
 }
 
-/// Distinguishes initial malformed setup from rejection of an existing request,
-/// while requiring diagnostics records to remain complete.
+/// Distinguishes malformed setup from rejection of an existing request.
+///
+/// Diagnostics records must also remain complete.
 #[test]
 fn diagnostics_reject_malformed_records_and_account_for_failed_setup() {
     let files = Files::new();
@@ -333,6 +336,22 @@ fn diagnostics_reject_malformed_records_and_account_for_failed_setup() {
         increment_diagnostic(&files.diagnostics, "setupCalls", NonZeroU32::MIN, &clock).is_err()
     );
     assert!(read_diagnostics(&files.diagnostics, &clock).is_err());
+}
+
+/// Counter names accepted by callers retain the canonical persisted keys.
+#[test]
+fn diagnostics_canonicalize_counter_case_and_reject_unknown_names() {
+    let files = Files::new();
+    let clock = SystemClock::default();
+    increment_diagnostic(&files.diagnostics, "SetupCalls", NonZeroU32::MIN, &clock).unwrap();
+    increment_diagnostic(&files.diagnostics, "SETUPCALLS", NonZeroU32::MIN, &clock).unwrap();
+    let before = fs::read(&files.diagnostics).unwrap();
+    assert!(increment_diagnostic(&files.diagnostics, "unknown", NonZeroU32::MIN, &clock).is_err());
+    assert_eq!(fs::read(&files.diagnostics).unwrap(), before);
+    let diagnostics = read_diagnostics(&files.diagnostics, &clock).unwrap();
+    assert_eq!(diagnostics["counts"]["setupCalls"], 2);
+    assert!(diagnostics["counts"].get("SetupCalls").is_none());
+    assert!(diagnostics["counts"].get("SETUPCALLS").is_none());
 }
 
 #[test]

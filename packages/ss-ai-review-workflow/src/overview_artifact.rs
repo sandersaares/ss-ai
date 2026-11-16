@@ -15,7 +15,7 @@ use tempfile::{Builder, TempDir};
 use zip::{CompressionMethod, DateTime, ZipWriter, write::SimpleFileOptions};
 
 use crate::report_html::ReportResult;
-use crate::report_tools::{self, ReportTools};
+use crate::report_tools::{ReportTools, assert_ready, discover, tools_lock};
 
 /// The immutable paths and hashes needed to publish a frozen overview.
 #[derive(Debug)]
@@ -137,14 +137,14 @@ pub fn freeze(
         let html_path = manifest.html_path.clone();
         (manifest, html_path, archive_path)
     } else {
-        let html_exists = read_bytes(&default_html_path, clock)?.is_some();
-        let archive_exists = read_bytes(&default_archive_path, clock)?.is_some();
-        let guard = report_tools::tools_lock(tools_directory, LockMode::Shared, clock)?;
-        let tools = report_tools::discover(skill_root, tools_directory, process, &guard)?;
+        let html_exists = default_html_path.try_exists()?;
+        let archive_exists = default_archive_path.try_exists()?;
+        let guard = tools_lock(tools_directory, LockMode::Shared, clock)?;
+        let tools = discover(skill_root, tools_directory, process, &guard)?;
         if !tools.missing.is_empty() {
             return Ok(Preparation::MissingTools(tools));
         }
-        report_tools::assert_ready(&tools, false)?;
+        assert_ready(&tools, false)?;
         let directory =
             select_render_directory(output_directory, html_exists, archive_exists, || {
                 // An unrecorded artifact may belong to an interrupted attempt. Keep
@@ -373,11 +373,11 @@ mod tests {
         let json = br#"{"sourcePath":"/report.md","sourceHash":"abc","htmlPath":"/report.html","htmlUri":"file:///report.html","htmlHash":"def","diagramCount":0,"other":"preserved"}"#;
         let mut manifest: Manifest = from_slice(json).unwrap();
         manifest.archive_hash = Some(hash(b"archive"));
-        let value = to_value(manifest).unwrap();
-        assert_eq!(value.get("sourceHash").unwrap(), "abc");
-        assert_eq!(value.get("htmlHash").unwrap(), "def");
-        assert_eq!(value.get("archiveHash").unwrap(), &hash(b"archive"));
-        assert_eq!(value.get("other").unwrap(), "preserved");
+        let manifest = to_value(manifest).unwrap();
+        assert_eq!(manifest.get("sourceHash").unwrap(), "abc");
+        assert_eq!(manifest.get("htmlHash").unwrap(), "def");
+        assert_eq!(manifest.get("archiveHash").unwrap(), &hash(b"archive"));
+        assert_eq!(manifest.get("other").unwrap(), "preserved");
     }
 
     #[test]

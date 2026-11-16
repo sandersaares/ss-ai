@@ -713,9 +713,13 @@ fn summary(request: &Value) -> Result<Value, String> {
             .ok_or("followUpCount must be a nonnegative 32-bit integer")?,
     };
     let platform = required_text(request, "platform")?;
-    if !matches!(platform, "gitHub" | "azureDevOps") {
+    let platform = if platform.eq_ignore_ascii_case("gitHub") {
+        "gitHub"
+    } else if platform.eq_ignore_ascii_case("azureDevOps") {
+        "azureDevOps"
+    } else {
         return Err("platform must be gitHub or azureDevOps".into());
-    }
+    };
     let lead = if count == 0 {
         "This review raises no findings.".to_owned()
     } else {
@@ -781,10 +785,12 @@ fn findings(request: &Value) -> Result<Vec<&Value>, String> {
 }
 
 /// Enforces the supported destination vocabulary.
-fn destination(request: &Value) -> Result<&str, String> {
+fn destination(request: &Value) -> Result<&'static str, String> {
     let destination = required_text(request, "destination")?;
-    if matches!(destination, "pullRequest" | "tracker") {
-        Ok(destination)
+    if destination.eq_ignore_ascii_case("pullRequest") {
+        Ok("pullRequest")
+    } else if destination.eq_ignore_ascii_case("tracker") {
+        Ok("tracker")
     } else {
         Err("destination must be pullRequest or tracker".into())
     }

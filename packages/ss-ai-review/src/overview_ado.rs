@@ -7,10 +7,10 @@ use ohno::AppError;
 use serde_json::{Value, from_slice, json};
 use sha2::{Digest, Sha256};
 use url::Url;
-use uuid::Uuid;
 
 use crate::error::fail;
 use crate::json::{array, field, text};
+use crate::overview_snapshot::PreparedAdoSnapshot;
 use crate::target::{Platform, Target};
 use crate::transport::Transport;
 
@@ -33,15 +33,11 @@ pub(crate) fn is_open(transport: &mut Transport<'_>, target: &Target) -> Result<
 pub(crate) fn upload(
     transport: &mut Transport<'_>,
     target: &Target,
-    snapshot: &Value,
+    snapshot: &PreparedAdoSnapshot,
 ) -> Result<Value, AppError> {
     route(transport, target)?;
     attachment_name(snapshot)?;
-    let archive_path = text(field(snapshot, "archivePath")?)?;
-    if archive_path.is_empty() {
-        return Err(fail("invalidInput", "Missing frozen overview archive path"));
-    }
-    let bytes = fs::read(archive_path)?;
+    let bytes = fs::read(snapshot.archive_path())?;
     upload_bytes(transport, target, snapshot, &bytes)
 }
 
@@ -49,7 +45,7 @@ pub(crate) fn upload(
 fn upload_bytes(
     transport: &mut Transport<'_>,
     target: &Target,
-    snapshot: &Value,
+    snapshot: &PreparedAdoSnapshot,
     bytes: &[u8],
 ) -> Result<Value, AppError> {
     let path = route(transport, target)?;
@@ -77,7 +73,7 @@ fn upload_bytes(
         )
     })?;
     let id = field(&attachment, "id")
-        .and_then(attachment_id)
+        .and_then(|id| attachment_id(id, &name).map(|()| id.clone()))
         .map_err(|error| {
             crate::error::caused_by(
                 "ambiguousWrite",
@@ -96,12 +92,12 @@ fn upload_bytes(
 pub(crate) fn verify_artifact(
     transport: &mut Transport<'_>,
     target: &Target,
-    snapshot: &Value,
+    snapshot: &PreparedAdoSnapshot,
     payload: &Value,
 ) -> Result<Value, AppError> {
     let path = route(transport, target)?;
-    attachment_id(field(payload, "id")?)?;
     let name = attachment_name(snapshot)?;
+    attachment_id(field(payload, "id")?, &name)?;
     if text(field(payload, "fileName")?)? != name {
         return Err(fail(
             "invalidInput",
@@ -135,7 +131,7 @@ pub(crate) fn comment(
     if body.is_empty() {
         return Err(fail("invalidInput", "Overview comment body is empty"));
     }
-    let response = transport.ado_write_once(
+    let response = transport.ado_write_with_rate_limit_retries(
         &format!("{path}/threads"),
         "POST",
         &json!({
@@ -242,9 +238,9 @@ fn collection(target: &Target) -> Result<&str, AppError> {
 }
 
 /// Derives attachment routing from bounded frozen identifiers, never from a URL.
-fn attachment_name(snapshot: &Value) -> Result<String, AppError> {
-    let run = text(field(snapshot, "runId")?)?;
-    let hash = text(field(snapshot, "archiveHash")?)?;
+fn attachment_name(snapshot: &PreparedAdoSnapshot) -> Result<String, AppError> {
+    let run = snapshot.frozen().run_id();
+    let hash = snapshot.archive_hash();
     if !lower_hex(run, 32) || !lower_hex(hash, 64) {
         return Err(fail("invalidInput", "Invalid frozen overview identifiers"));
     }
@@ -260,8 +256,8 @@ fn lower_hex(value: &str, length: usize) -> bool {
 }
 
 /// Compares raw bytes to the immutable archive digest.
-fn check_hash(bytes: &[u8], snapshot: &Value) -> Result<(), AppError> {
-    let expected = text(field(snapshot, "archiveHash")?)?;
+fn check_hash(bytes: &[u8], snapshot: &PreparedAdoSnapshot) -> Result<(), AppError> {
+    let expected = snapshot.archive_hash();
     if !lower_hex(expected, 64) || format!("{:x}", Sha256::digest(bytes)) != expected {
         return Err(fail(
             "service",
@@ -271,16 +267,10 @@ fn check_hash(bytes: &[u8], snapshot: &Value) -> Result<(), AppError> {
     Ok(())
 }
 
-/// Accepts Azure attachment IDs without allowing unbounded or path-like values.
-fn attachment_id(value: &Value) -> Result<Value, AppError> {
-    if value
-        .as_u64()
-        .is_some_and(|id| id > 0 && u32::try_from(id).is_ok())
-        || value
-            .as_str()
-            .is_some_and(|id| id.len() == 36 && Uuid::parse_str(id).is_ok())
-    {
-        return Ok(value.clone());
+/// Accepts only the generated filename used to route this attachment.
+fn attachment_id(value: &Value, name: &str) -> Result<(), AppError> {
+    if value.as_str() == Some(name) {
+        return Ok(());
     }
     Err(fail("service", "Invalid Azure attachment identifier"))
 }
@@ -327,6 +317,7 @@ mod tests {
     use serde_json::to_vec;
 
     use super::*;
+    use crate::overview_snapshot::{frozen_snapshot_for_test, prepared_ado_snapshot_for_test};
     use crate::{Clock, Http, HttpResponse, Process, ProcessOutput};
 
     /// Retains the expected request and its scripted response.
@@ -419,11 +410,14 @@ mod tests {
         .unwrap()
     }
 
-    fn snapshot(bytes: &[u8]) -> Value {
-        json!({
-            "runId": "0123456789abcdef0123456789abcdef",
-            "archiveHash": format!("{:x}", Sha256::digest(bytes)),
-        })
+    fn snapshot(bytes: &[u8]) -> PreparedAdoSnapshot {
+        prepared_ado_snapshot_for_test(
+            "0123456789abcdef0123456789abcdef",
+            "report.md",
+            &"0".repeat(64),
+            "archive.zip",
+            &format!("{:x}", Sha256::digest(bytes)),
+        )
     }
 
     #[test]
@@ -432,6 +426,7 @@ mod tests {
         struct Upload<'a> {
             bytes: &'a [u8],
             url: &'a str,
+            response: Vec<u8>,
             calls: Cell<usize>,
         }
 
@@ -460,7 +455,7 @@ mod tests {
                 Ok(HttpResponse::new(
                     200,
                     BTreeMap::new(),
-                    br#"{"id":3}"#.to_vec(),
+                    self.response.clone(),
                 ))
             }
         }
@@ -475,6 +470,7 @@ mod tests {
         let http = Upload {
             bytes,
             url: &url,
+            response: format!(r#"{{"id":"{name}"}}"#).into_bytes(),
             calls: Cell::new(0),
         };
         let mut transport = Transport::new(&target, None, &mock, &http, &NoWait);
@@ -482,7 +478,7 @@ mod tests {
         assert_eq!(http.calls.get(), 0);
         assert_eq!(
             upload_bytes(&mut transport, &target, &snapshot, bytes).unwrap(),
-            json!({"id": 3, "url": url, "fileName": name})
+            json!({"id": name, "url": url, "fileName": name})
         );
         assert_eq!(http.calls.get(), 1);
     }
@@ -499,7 +495,8 @@ mod tests {
             attachment_name(&snapshot).unwrap()
         );
         let url = attachment_url(&target, &path).unwrap();
-        let receipt = json!({"id": 3, "url": url, "fileName": attachment_name(&snapshot).unwrap()});
+        let name = attachment_name(&snapshot).unwrap();
+        let receipt = json!({"id": name, "url": url, "fileName": name});
         let mock = Mock::new(vec![("GET", &url, None, bytes.to_vec())]);
         let mut transport = Transport::new(&target, None, &mock, &mock, &NoWait);
         assert_eq!(
@@ -575,19 +572,32 @@ mod tests {
     #[test]
     fn refuses_unbounded_identifiers_and_malformed_receipts() {
         let snapshot = snapshot(b"archive");
-        let mut invalid = snapshot.clone();
-        *invalid.get_mut("runId").unwrap() = json!("../bad");
-        attachment_name(&invalid).unwrap_err();
-        invalid = snapshot.clone();
-        *invalid.get_mut("archiveHash").unwrap() = json!("f".repeat(65));
-        attachment_name(&invalid).unwrap_err();
+        let frozen = frozen_snapshot_for_test(
+            "0123456789abcdef0123456789abcdef",
+            "report.md",
+            &"0".repeat(64),
+        );
+        assert!(
+            PreparedAdoSnapshot::from_render(
+                frozen,
+                "report.html".to_owned(),
+                "0".repeat(64),
+                "archive.zip".to_owned(),
+                "f".repeat(65),
+            )
+            .is_err()
+        );
         for id in [json!(0), json!(-1), json!("../../1"), json!("4294967296")] {
             thread_id(&id).unwrap_err();
         }
         for id in [json!(1), json!("1"), json!(u32::MAX)] {
             assert_ne!(thread_id(&id).unwrap().get(), 0);
         }
-        attachment_id(&json!("../attachment")).unwrap_err();
+        attachment_id(
+            &json!("../attachment"),
+            &attachment_name(&snapshot).unwrap(),
+        )
+        .unwrap_err();
         check_hash(b"archive", &snapshot).unwrap();
         check_hash(b"other", &snapshot).unwrap_err();
     }

@@ -63,12 +63,17 @@ pub fn increment_diagnostic(
     count: NonZeroU32,
     clock: &dyn Clock,
 ) -> Result<(), AppError> {
-    if !COUNTERS.contains(&name) || count.get() > i32::MAX as u32 {
+    if count.get() > i32::MAX as u32 {
         return Err(fail(
             "invalidInput",
             "Invalid input diagnostic name or count",
         ));
     }
+    let name = COUNTERS
+        .iter()
+        .copied()
+        .find(|counter| counter.eq_ignore_ascii_case(name))
+        .ok_or_else(|| fail("invalidInput", "Invalid input diagnostic name or count"))?;
     let path = absolute(path)?;
     let transaction = FileTransaction::open(&path, clock)?;
     let mut record = match transaction.read_bytes()? {

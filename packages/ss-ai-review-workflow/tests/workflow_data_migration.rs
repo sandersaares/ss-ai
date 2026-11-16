@@ -555,7 +555,7 @@ fn merge_approval_requires_matching_pull_request_commit_and_true_baseline() {
     let first = "a".repeat(40);
     let second = "b".repeat(40);
     let context = |commit: &str| {
-        json!({"pullRequestUrl":"https://example.test/pr/1",
+        json!({"schemaVersion":3, "pullRequestUrl":"https://example.test/pr/1",
         "pullRequest":{"reviewedSourceCommit":commit,"isAuthoredBySelf":false}})
     };
     let old = workspace.put("old.json", &context(&first));

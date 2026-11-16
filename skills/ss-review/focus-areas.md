@@ -123,3 +123,18 @@ are actually relevant to achieving the goals of the content you are reviewing. I
 This applies to both high-level concepts (design tenets, APIs) as well as individual fields in structs, layers of types in those fields
 (e.g. does something need to be wrapped in a mutex or smart pointer or can we simplify and do without). There are many opportunities,
 try finding them.
+
+# Look for unjustified duplication
+
+Examine the content for unexpected duplication - does the body of a function seem to match some arbitrary inline logic elsewhere?
+Are two parts of the app independently computing the same value? Do some other parts feel like the same thing expressed in two ways?
+
+Such duplication creates risk of accidental divergence when only one part gets updated as part of a future change - avoid such mutation risk.
+
+Sometimes duplication is unavoidable (e.g. an implementation often resembles the API contract it implements). Analyze each candidate duplication case by case to determine whether it is justified.
+
+# Improve by removing complexity rather than by adding complexity
+
+For any added code, consider whether its goals may have been achieved by removing code instead. Often a more general, a more simple approach can greatly reduce complexity and still achieve the same impact. It is fine to make (suggest) tradeoffs - not every behavior that currently exists may be desirable. Aspects of existing complexity may be incidental implementation choices rather than desirable outcomes. Even explicit existing design choices can often be reconsidered if it brings simplification.
+
+Offer the author of the reviewed work some ways to achieve same or greater yields by removing complexity rather than by adding it.

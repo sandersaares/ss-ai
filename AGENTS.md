@@ -4,6 +4,13 @@ Skills live under `skills/`, native tooling under `packages/`, Waza evaluations 
 Pester tests under `tests/`. Resolve the active checkout root, including
 worktrees and paths containing spaces; never assume a user's installation path.
 
+## Version compatibility
+
+Follow the [workflow-state version policy](packages/ss-ai/docs/design.md#version-compatibility).
+Do not add or retain cross-version session readers, migrations, or recovery
+paths. Read-only recovery is not an exception. Reject incompatible schemas
+without changing stored state; use one utility version throughout a session.
+
 ## PowerShell and script contracts
 
 Target current stable PowerShell; scripts use the 7.6 release line. Every

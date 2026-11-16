@@ -94,6 +94,7 @@ fn publishes_identical_captures_for_both_providers() {
         let output = Output::new();
         let target = context["target"]["webUrl"].as_str().unwrap();
         let prepared = prepare_capture(&output.0, None, target, &clock).unwrap();
+        _ = format!("{prepared:?}");
         let summary = prepared
             .publish(&context, "2026-08-04T12:00:00.0000000Z")
             .unwrap();
@@ -213,16 +214,18 @@ fn concurrent_creators_do_not_replace_the_published_capture() {
     let output = Output::new();
     let url = context["target"]["webUrl"].as_str().unwrap();
     let first = prepare_capture(&output.0, None, url, &clock).unwrap();
-    let path = output.0.clone();
-    let url = url.to_owned();
     let (reached_send, reached_receive) = mpsc::channel();
     let (release_send, release_receive) = mpsc::channel();
-    let worker = thread::spawn(move || {
-        let clock = ContendedClock {
-            reached: reached_send,
-            release: RefCell::new(release_receive),
-        };
-        prepare_capture(&path, None, &url, &clock).is_err()
+    let worker = thread::spawn({
+        let path = output.0.clone();
+        let url = url.to_owned();
+        move || {
+            let clock = ContendedClock {
+                reached: reached_send,
+                release: RefCell::new(release_receive),
+            };
+            prepare_capture(&path, None, &url, &clock).is_err()
+        }
     });
     reached_receive.recv().unwrap();
     first
@@ -522,14 +525,16 @@ fn comparison_reads_sidecar_after_acquiring_baseline_lock() {
     let lock = FileTransaction::open(&baseline.sidecar(), &clock).unwrap();
     let (reached_send, reached_receive) = mpsc::channel();
     let (release_send, release_receive) = mpsc::channel();
-    let baseline_path = baseline.0.clone();
-    let output_path = output.0.clone();
-    let worker = thread::spawn(move || {
-        let clock = ContendedClock {
-            reached: reached_send,
-            release: RefCell::new(release_receive),
-        };
-        prepare_capture(&output_path, Some(&baseline_path), &target, &clock).is_err()
+    let worker = thread::spawn({
+        let baseline_path = baseline.0.clone();
+        let output_path = output.0.clone();
+        move || {
+            let clock = ContendedClock {
+                reached: reached_send,
+                release: RefCell::new(release_receive),
+            };
+            prepare_capture(&output_path, Some(&baseline_path), &target, &clock).is_err()
+        }
     });
     reached_receive.recv().unwrap();
     lock.write_bytes(b"invalid sidecar").unwrap();
@@ -597,11 +602,61 @@ fn publication_never_replaces_files_created_after_preparation() {
             output.0.clone()
         };
         fs::write(&path, b"other owner").unwrap();
-        prepared
+        let error = prepared
             .publish(&context, "2026-08-04T12:00:00.0000000Z")
             .unwrap_err();
+        assert_eq!(classification(&error), "invalidInput");
         assert_eq!(fs::read(path).unwrap(), b"other owner");
+        if sidecar {
+            assert!(!output.0.exists());
+        } else {
+            assert!(!output.sidecar().exists());
+        }
     }
+}
+
+#[test]
+fn preparation_rejections_preserve_comparison_and_output_files() {
+    let clock = SystemClock::default();
+    let context = fixture("github-context.json");
+    let target = context["target"]["webUrl"].as_str().unwrap();
+    let baseline = Output::new();
+    let output = Output::new();
+    let error = prepare_capture(&output.0, Some(&baseline.0), target, &clock).unwrap_err();
+    assert_eq!(classification(&error), "invalidInput");
+    assert!(!baseline.0.exists());
+    assert!(!baseline.sidecar().exists());
+    assert!(!output.0.exists());
+    assert!(!output.sidecar().exists());
+
+    prepare_capture(&baseline.0, None, target, &clock)
+        .unwrap()
+        .publish(&context, "2026-08-04T12:00:00.0000000Z")
+        .unwrap();
+    let baseline_bytes = fs::read(&baseline.0).unwrap();
+    let sidecar_bytes = fs::read(baseline.sidecar()).unwrap();
+    let error = prepare_capture(&baseline.0, Some(&baseline.0), target, &clock).unwrap_err();
+    assert_eq!(classification(&error), "invalidInput");
+    assert_eq!(fs::read(&baseline.0).unwrap(), baseline_bytes);
+    assert_eq!(fs::read(baseline.sidecar()).unwrap(), sidecar_bytes);
+
+    let error = prepare_capture(
+        &output.0,
+        Some(&baseline.0),
+        "https://example.invalid/another",
+        &clock,
+    )
+    .unwrap_err();
+    assert_eq!(classification(&error), "invalidInput");
+    assert_eq!(fs::read(&baseline.0).unwrap(), baseline_bytes);
+    assert_eq!(fs::read(baseline.sidecar()).unwrap(), sidecar_bytes);
+    assert!(!output.0.exists());
+    assert!(!output.sidecar().exists());
+
+    let error = prepare_capture(&baseline.0, None, target, &clock).unwrap_err();
+    assert_eq!(classification(&error), "invalidInput");
+    assert_eq!(fs::read(&baseline.0).unwrap(), baseline_bytes);
+    assert_eq!(fs::read(baseline.sidecar()).unwrap(), sidecar_bytes);
 }
 
 #[test]

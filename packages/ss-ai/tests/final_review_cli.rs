@@ -453,6 +453,9 @@ struct PublicationProvider {
     journal_path: RefCell<Option<PathBuf>>,
     journal_snapshots: RefCell<Vec<Value>>,
     fail_final_readback: bool,
+    pending_review: Cell<bool>,
+    stale_live_commit: Cell<bool>,
+    pull_request_reads: Cell<usize>,
 }
 
 impl PublicationProvider {
@@ -476,17 +479,41 @@ impl PublicationProvider {
             journal_path: RefCell::new(None),
             journal_snapshots: RefCell::new(Vec::new()),
             fail_final_readback,
+            pending_review: Cell::new(false),
+            stale_live_commit: Cell::new(false),
+            pull_request_reads: Cell::new(0),
         }
     }
 
+    /// Simulates an existing draft and records any explicit discard attempt.
+    fn github_pending_response(&self, query: &str) -> Option<Value> {
+        if query.contains("states:[PENDING]") {
+            let nodes = if self.pending_review.get() {
+                json!([{"id":"existing-review","state":"PENDING"}])
+            } else {
+                json!([])
+            };
+            return Some(
+                json!({"data":{"repository":{"pullRequest":{"reviews":{"nodes":nodes}}}}}),
+            );
+        }
+        if query.contains("deletePullRequestReview(") {
+            self.writes.borrow_mut().push("discard".into());
+            return Some(json!({"data":{"deletePullRequestReview":{
+                "pullRequestReview":{"id":"existing-review"}}}}));
+        }
+        None
+    }
+
+    /// Recorded GitHub fixtures establish preflight evidence; writes supply later readbacks.
     fn github_response(&self, route: &str, input: &[u8]) -> Value {
         let responses = &self.responses;
         if route == "graphql" {
             let request: Value = from_slice(input).unwrap();
             let query = request["query"].as_str().unwrap();
             let variables = &request["variables"];
-            if query.contains("states:[PENDING]") {
-                return json!({"data":{"repository":{"pullRequest":{"reviews":{"nodes":[]}}}}});
+            if let Some(response) = self.github_pending_response(query) {
+                return response;
             }
             if query.contains("addPullRequestReviewThread(") {
                 self.writes.borrow_mut().push("finding".into());
@@ -537,6 +564,11 @@ impl PublicationProvider {
                             "path":"src/lib.rs","line":2,"startLine":1,"subjectType":"LINE",
                             "body":self.finding.borrow().as_ref().unwrap()}]}}}});
             }
+            if query.contains("node(id:$threadId)") && self.finding.borrow().is_some() {
+                return json!({"data":{"node":{"id":"thread","diffSide":"RIGHT","subjectType":"LINE",
+                    "comments":{"pageInfo":{"hasNextPage":false,"endCursor":null},
+                            "nodes":[{"id":"comment"}]}}}});
+            }
             if query.contains("reviewThreads(") && self.finding.borrow().is_some() {
                 return json!({"data":{"repository":{"pullRequest":{"reviewThreads":{
                     "pageInfo":{"hasNextPage":false,"endCursor":null},
@@ -561,6 +593,15 @@ impl PublicationProvider {
             "repos/octo/widget/pulls/7" => {
                 let mut pr = responses["pullRequest"].clone();
                 pr["html_url"] = json!("https://github.com/octo/widget/pull/7");
+                let reads = self.pull_request_reads.get();
+                self.pull_request_reads.set(
+                    reads
+                        .checked_add(1)
+                        .expect("test pull request reads fit in usize"),
+                );
+                if self.stale_live_commit.get() && reads > 0 {
+                    pr["head"]["sha"] = json!("cccccccccccccccccccccccccccccccccccccccc");
+                }
                 pr
             }
             "repos/octo/widget/pulls/7/reviews?per_page=100" => json!([responses["reviews"]]),
@@ -829,6 +870,37 @@ fn multi_ado_args(fixture: &Fixture) -> Vec<OsString> {
     document["findings"] = json!([first, reply("R1"), second, reply("R2")]);
     fixture.write("approved 雪.json", &document);
     args
+}
+
+#[test]
+fn stale_live_commit_or_discussion_prevents_authorized_draft_discard() {
+    // Changes appear only in the live capture, after preflight accepts the audited revisions.
+    for changed_evidence in ["commit", "discussion"] {
+        let fixture = Fixture::new();
+        let mut provider = PublicationProvider::new("github", false);
+        provider.pending_review.set(true);
+        let mut args = publication_args(&fixture, "github");
+        args.push("--discard-pending-review".into());
+
+        match changed_evidence {
+            "commit" => provider.stale_live_commit.set(true),
+            "discussion" => {
+                provider.responses["reviewThreads"]["data"]["repository"]["pullRequest"]["reviewThreads"]
+                    ["nodes"][0]["comments"]["nodes"][0]["body"] = json!("Changed discussion");
+            }
+            _ => unreachable!(),
+        }
+
+        let error = run(&args, &provider, &provider, &FixedClock).unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("Pull request evidence changed before publication"),
+            "{error}"
+        );
+        assert!(provider.writes.borrow().is_empty());
+        assert!(!fixture.path("output 雪/publication-result.json").exists());
+    }
 }
 
 #[test]
@@ -1201,12 +1273,10 @@ impl PartialProvider {
                         "path":"src/café.rs","line":5,"startLine":4,"subjectType":"LINE",
                         "body":self.reply.as_ref().unwrap()}]}}}});
             }
-            if query.contains("reviewThreads(") && self.reply.is_some() {
-                return json!({"data":{"repository":{"pullRequest":{"reviewThreads":{
-                    "pageInfo":{"hasNextPage":false,"endCursor":null},
-                    "nodes":[{"id":"PRRT_1","diffSide":"RIGHT","subjectType":"LINE",
-                        "comments":{"pageInfo":{"hasNextPage":false,"endCursor":null},
-                        "nodes":[{"id":"reply-comment"}]}}]}}}}});
+            if query.contains("node(id:$threadId)") && self.reply.is_some() {
+                return json!({"data":{"node":{"id":"PRRT_1","diffSide":"RIGHT","subjectType":"LINE",
+                    "comments":{"pageInfo":{"hasNextPage":false,"endCursor":null},
+                    "nodes":[{"id":"reply-comment"}]}}}});
             }
         }
         self.provider.github_response(route, input)

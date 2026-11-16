@@ -11,7 +11,7 @@ use std::cell::{Cell, RefCell};
 use std::collections::BTreeMap;
 use std::ffi::OsString;
 use std::fs;
-use std::io;
+use std::io::Result as StdIoResult;
 use std::path::Path;
 use std::sync::mpsc;
 use std::thread;
@@ -63,7 +63,7 @@ impl Process for GitHub {
         program: &str,
         arguments: &[String],
         input: &[u8],
-    ) -> io::Result<ProcessOutput> {
+    ) -> StdIoResult<ProcessOutput> {
         assert_eq!(program, "gh");
         let path = &arguments[1];
         let method = &arguments[3];
@@ -185,7 +185,7 @@ fn result_arguments(root: &Path) -> Vec<OsString> {
 struct NoProcess;
 
 impl Process for NoProcess {
-    fn execute(&self, program: &str, _: &[String], _: &[u8]) -> io::Result<ProcessOutput> {
+    fn execute(&self, program: &str, _: &[String], _: &[u8]) -> StdIoResult<ProcessOutput> {
         panic!("Unexpected process: {program}")
     }
 }
@@ -354,7 +354,7 @@ fn changed_identity_policy_and_malformed_records_do_not_overwrite_evidence() {
 }
 
 #[test]
-fn stale_recovery_schema_migrates_only_legacy_runs_and_rejects_malformed_budgets() {
+fn incompatible_assessment_schemas_and_malformed_recovery_budgets_preserve_records() {
     let root = fixture();
     let provider = GitHub::new();
     run(
@@ -365,31 +365,23 @@ fn stale_recovery_schema_migrates_only_legacy_runs_and_rejects_malformed_budgets
     )
     .unwrap();
     let current = record(root.path());
-    assert_eq!(current["schemaVersion"], 8);
+    assert_eq!(current["schemaVersion"], 17);
     let path = root.path().join("run.json");
-    let mut legacy = current.clone();
-    legacy["schemaVersion"] = json!(7);
-    for entry in legacy["inventory"].as_array_mut().unwrap() {
-        entry.as_object_mut().unwrap().remove("recovery");
-    }
-    fs::write(&path, serde_json::to_vec(&legacy).unwrap()).unwrap();
-    let migrated: Value = serde_json::from_str(
-        &run(
+    for version in [7, 8, 9, 10, 11, 12, 13, 14, 15, 16] {
+        let mut legacy = current.clone();
+        legacy["schemaVersion"] = json!(version);
+        fs::write(&path, serde_json::to_vec(&legacy).unwrap()).unwrap();
+        let error = run(
             &result_arguments(root.path()),
             &NoProcess,
             &NoHttp,
             &FixedClock,
         )
-        .unwrap(),
-    )
-    .unwrap();
-    assert_eq!(migrated["schemaVersion"], 8);
-    assert_eq!(
-        migrated["items"][0]["staleRecovery"],
-        json!({"attempts":0, "limit":2, "exhausted":false})
-    );
-    // Read-only results do not rewrite the legacy record or its existing evidence.
-    assert_eq!(record(root.path()), legacy);
+        .unwrap_err();
+        assert_eq!(ss_ai::classification(&error), "invalidState");
+        assert!(error.to_string().contains("Unsupported discovery schema"));
+        assert_eq!(record(root.path()), legacy);
+    }
 
     let id = uuid::Uuid::new_v4().to_string();
     for recovery in [
@@ -569,7 +561,7 @@ impl Process for Interrupted {
         program: &str,
         arguments: &[String],
         input: &[u8],
-    ) -> io::Result<ProcessOutput> {
+    ) -> StdIoResult<ProcessOutput> {
         if arguments[1] == "graphql" {
             let request: Value = serde_json::from_slice(input).unwrap();
             assert_ne!(request["variables"]["num"], 2, "Simulated interruption");
@@ -682,7 +674,7 @@ impl Process for BrokenEvidence {
         program: &str,
         arguments: &[String],
         input: &[u8],
-    ) -> io::Result<ProcessOutput> {
+    ) -> StdIoResult<ProcessOutput> {
         let output = self.provider.execute(program, arguments, input)?;
         let mut value: Value = serde_json::from_slice(&output.stdout).unwrap();
         if arguments[1].contains("pulls?") {
@@ -770,7 +762,7 @@ fn malformed_pages_and_scope_failures_retain_explicit_diagnostics() {
 struct AzureToken;
 
 impl Process for AzureToken {
-    fn execute(&self, program: &str, arguments: &[String], _: &[u8]) -> io::Result<ProcessOutput> {
+    fn execute(&self, program: &str, arguments: &[String], _: &[u8]) -> StdIoResult<ProcessOutput> {
         assert_eq!(program, "az");
         assert!(
             arguments
@@ -1511,11 +1503,11 @@ impl Process for AzureObjectFailure {
         program: &str,
         arguments: &[String],
         input: &[u8],
-    ) -> io::Result<ProcessOutput> {
+    ) -> StdIoResult<ProcessOutput> {
         AzureToken.execute(program, arguments, input)
     }
 
-    fn isolated_git(&self, _: &Path, arguments: &[String]) -> io::Result<ProcessOutput> {
+    fn isolated_git(&self, _: &Path, arguments: &[String]) -> StdIoResult<ProcessOutput> {
         assert!(arguments.iter().any(|arg| arg == "init"));
         Ok(ProcessOutput::new(true, Vec::new(), Vec::new()))
     }
@@ -1526,7 +1518,7 @@ impl Process for AzureObjectFailure {
         arguments: &[String],
         url: &str,
         token: &str,
-    ) -> io::Result<ProcessOutput> {
+    ) -> StdIoResult<ProcessOutput> {
         assert_eq!(url, "https://dev.azure.com/org/project/_git/widgets");
         assert_eq!(token, "fixture-token");
         assert!(arguments.contains(&self.old));
@@ -1762,6 +1754,24 @@ fn ado_inspection_consumers_reject_corrupted_snapshots_and_changed_policy() {
     .unwrap_err();
 }
 
+/// Matches `gh --paginate --slurp`, including an empty response page.
+fn github_slurped_pages(values: &Value) -> Value {
+    let values = values.as_array().unwrap();
+    if values.is_empty() {
+        return json!([[]]);
+    }
+    Value::Array(values.iter().map(|value| json!([value])).collect())
+}
+
+#[test]
+fn github_approval_pages_include_an_empty_response_page() {
+    assert_eq!(github_slurped_pages(&json!([])), json!([[]]));
+    assert_eq!(
+        github_slurped_pages(&json!([{"id": 1}, {"id": 2}])),
+        json!([[{"id": 1}], [{"id": 2}]])
+    );
+}
+
 /// Native GitHub history uses complete REST pages and cursor-based timeline evidence.
 struct GitHubApproval {
     calls: RefCell<Vec<String>>,
@@ -1793,31 +1803,13 @@ impl GitHubApproval {
     }
 }
 
-/// Matches `gh --paginate --slurp`, including an empty response page.
-fn github_slurped_pages(values: &Value) -> Value {
-    let values = values.as_array().unwrap();
-    if values.is_empty() {
-        return json!([[]]);
-    }
-    Value::Array(values.iter().map(|value| json!([value])).collect())
-}
-
-#[test]
-fn github_approval_pages_include_an_empty_response_page() {
-    assert_eq!(github_slurped_pages(&json!([])), json!([[]]));
-    assert_eq!(
-        github_slurped_pages(&json!([{"id": 1}, {"id": 2}])),
-        json!([[{"id": 1}], [{"id": 2}]])
-    );
-}
-
 impl Process for GitHubApproval {
     fn execute(
         &self,
         program: &str,
         arguments: &[String],
         input: &[u8],
-    ) -> io::Result<ProcessOutput> {
+    ) -> StdIoResult<ProcessOutput> {
         assert_eq!(program, "gh");
         let path = arguments[1].as_str();
         let method = arguments[3].as_str();
@@ -2162,41 +2154,44 @@ fn github_retained_approval_uses_effective_rulesets_and_classic_last_push_requir
 }
 
 #[test]
-fn unknown_renewal_is_a_counted_failure_not_completed_indeterminate_work() {
-    let root = fixture();
-    let mut provider = GitHubApproval::new();
-    provider.evidence["reviews"][1]["body"] = json!("<!-- ss-autoreapprove malformed -->");
-    run(
-        &arguments(root.path(), "https://github.com/example/widgets"),
-        &provider,
-        &NoHttp,
-        &FixedClock,
-    )
-    .unwrap();
-    let result: Value = serde_json::from_str(
-        &run(
-            &github_inspect_arguments(root.path(), 1),
+fn github_approval_body_does_not_determine_provider_authority() {
+    let mut anchors = Vec::new();
+    for body in [
+        "Synthetic approving review.",
+        "<!-- ss-autoreapprove malformed -->",
+    ] {
+        let root = fixture();
+        let mut provider = GitHubApproval::new();
+        provider.evidence["reviews"][1]["body"] = json!(body);
+        run(
+            &arguments(root.path(), "https://github.com/example/widgets"),
             &provider,
             &NoHttp,
             &FixedClock,
         )
-        .unwrap(),
-    )
-    .unwrap();
-    assert_eq!(result["state"], "partial");
-    assert_eq!(result["counts"]["failed"], 1);
-    assert_eq!(result["counts"]["indeterminate"], 0);
-    assert_eq!(result["items"][0]["status"], "failed");
-    assert!(
-        result["items"][0]["error"]["message"]
-            .as_str()
-            .unwrap()
-            .contains("unreconciledRenewalEvidence")
-    );
-    let saved = record(root.path());
-    assert!(saved["inventory"][0]["inspection"]["evidence"].is_null());
-    assert!(saved["inventory"][0]["inspection"]["decision"].is_null());
-    assert!(saved["inventory"][0]["inspection"]["snapshotDigest"].is_null());
+        .unwrap();
+        let result: Value = serde_json::from_str(
+            &run(
+                &github_inspect_arguments(root.path(), 1),
+                &provider,
+                &NoHttp,
+                &FixedClock,
+            )
+            .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(result["counts"]["failed"], 0);
+        assert_eq!(result["items"][0]["status"], "assessmentRequired");
+        let saved = record(root.path());
+        let inspection = &saved["inventory"][0]["inspection"];
+        assert_eq!(
+            inspection["evidence"]["observation"]["reviews"][1]["body"],
+            body
+        );
+        assert!(!inspection["snapshotDigest"].is_null());
+        anchors.push(inspection["decision"]["anchor"].clone());
+    }
+    assert_eq!(anchors[0], anchors[1]);
 }
 
 #[test]
@@ -2329,7 +2324,7 @@ impl Process for PausedMetadata {
         program: &str,
         arguments: &[String],
         input: &[u8],
-    ) -> io::Result<ProcessOutput> {
+    ) -> StdIoResult<ProcessOutput> {
         if arguments[1].contains("pulls?") {
             self.signal.send(Signal::Enumerating).unwrap();
             self.release.recv().unwrap();

@@ -25,6 +25,9 @@ use crate::focus_area_source::{SourceSnapshot, Span, decode_text, source_path};
 use crate::workflow_plan::parse_json;
 
 /// A map whose source spans and structural constraints have been checked.
+///
+/// Completeness is checked only when requested at parsing; this type does not
+/// retain that distinction. Final rendering requires a complete map.
 #[derive(Debug)]
 pub struct ValidatedMap {
     value: Value,
@@ -632,6 +635,9 @@ fn normalize_newlines(text: &str) -> String {
 fn base64(bytes: &[u8]) -> String {
     const DIGITS: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
     let mut result = String::new();
+    // RFC 4648 section 4 groups three bytes into four six-bit alphabet indexes.
+    // Missing bytes contribute zero bits to the final index; indexes without
+    // input bits become padding instead: https://www.rfc-editor.org/rfc/rfc4648.html#section-4
     for chunk in bytes.chunks(3) {
         let a = chunk[0];
         let b = chunk.get(1).copied().unwrap_or(0);
@@ -1056,34 +1062,17 @@ fn publish_with_storage(
                 Ok::<(), AppError>(())
             })();
             if let Err(error) = install {
-                for installed_artifact in installed.iter().rev() {
-                    let path = session.join(installed_artifact);
-                    let removal = storage.remove_artifact(&path);
-                    if let Err(rollback) = removal {
-                        rollback_failed = true;
-                        return Err(fail(
-                            "io",
-                            format!(
-                                "Assembly failed: {error}; rollback failed: {rollback}; backups remain at {}",
-                                staging.display()
-                            ),
-                        ));
-                    }
-                }
-                for backed_up_artifact in backed_up.iter().rev() {
-                    if let Err(rollback) = storage.rename(
-                        &staging.join(format!("backup-{backed_up_artifact}")),
-                        &session.join(backed_up_artifact),
-                    ) {
-                        rollback_failed = true;
-                        return Err(fail(
-                            "io",
-                            format!(
-                                "Assembly failed: {error}; rollback failed: {rollback}; backups remain at {}",
-                                staging.display()
-                            ),
-                        ));
-                    }
+                if let Err(rollback) =
+                    rollback_assembly(session, &staging, &installed, &backed_up, storage)
+                {
+                    rollback_failed = true;
+                    return Err(fail(
+                        "io",
+                        format!(
+                            "Assembly failed: {error}; rollback failed: {rollback}; backups remain at {}",
+                            staging.display()
+                        ),
+                    ));
                 }
                 return Err(error);
             }
@@ -1100,6 +1089,26 @@ fn publish_with_storage(
         });
     }
     result
+}
+
+/// Removes newly installed artifacts before restoring backups in reverse order.
+fn rollback_assembly(
+    session: &Path,
+    staging: &Path,
+    installed: &[&str],
+    backed_up: &[&str],
+    storage: &impl AssemblyStorage,
+) -> Result<(), AppError> {
+    for artifact in installed.iter().rev() {
+        storage.remove_artifact(&session.join(artifact))?;
+    }
+    for artifact in backed_up.iter().rev() {
+        storage.rename(
+            &staging.join(format!("backup-{artifact}")),
+            &session.join(artifact),
+        )?;
+    }
+    Ok(())
 }
 
 /// Retries only sharing conflicts while retaining the artifact transaction lock.
@@ -1479,8 +1488,22 @@ mod tests {
         assert!(rendered.contains("Scope: scripts"));
         assert!(rendered.contains("Keep it."));
         assert_eq!(map.value(), &value);
-        assert_eq!(base64(b"abcde"), "YWJjZGU=");
         assert_eq!(quote("```"), "````\n```\n````");
+    }
+
+    #[test]
+    fn base64_matches_rfc_4648_vectors() {
+        for (input, expected) in [
+            ("", ""),
+            ("f", "Zg=="),
+            ("fo", "Zm8="),
+            ("foo", "Zm9v"),
+            ("foob", "Zm9vYg=="),
+            ("fooba", "Zm9vYmE="),
+            ("foobar", "Zm9vYmFy"),
+        ] {
+            assert_eq!(base64(input.as_bytes()), expected);
+        }
     }
 
     #[test]

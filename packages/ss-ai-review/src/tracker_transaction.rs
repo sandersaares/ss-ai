@@ -7,9 +7,12 @@
     clippy::indexing_slicing,
     reason = "Indexes address locally built or validated journal operations"
 )]
-#![expect(
-    clippy::self_named_module_files,
-    reason = "The production transaction remains in its existing file while its offline harness has a separate module"
+#![cfg_attr(
+    any(test, feature = "private-fuzz"),
+    expect(
+        clippy::self_named_module_files,
+        reason = "The production transaction remains in its existing file while its offline harness has a separate module"
+    )
 )]
 
 use std::collections::HashSet;
@@ -22,14 +25,18 @@ use serde::{Deserialize, Deserializer};
 use serde_json::{Map, Value, json};
 use sha2::{Digest, Sha256};
 use ss_ai_runtime::FileTransaction;
+use url::Url;
 
 use crate::classification;
 use crate::error::fail;
-use crate::tracker_body::{AcceptedRewrite, BodyVerdict, compare_ado_body};
+use crate::target::decode;
+use crate::tracker_body::{AcceptedRewrite, BodyVerdict, adjudication_excerpts, compare_ado_body};
 use crate::tracker_target::TrackerTarget;
 
-mod fuzz;
+/// Separates native tracker journal records from legacy skill-produced records.
+const JOURNAL_SCHEMA_VERSION: u64 = 2;
 
+#[cfg(any(test, feature = "private-fuzz"))]
 pub use fuzz::fuzz_tracker_transaction;
 
 /// Provider calls supplied by the composition root, which also performs preflight.
@@ -300,7 +307,7 @@ fn nullable_string(value: Option<&Value>) -> bool {
 fn validate_record(record: &Value) -> Result<(), AppError> {
     let invalid = || fail("invalidState", "Invalid tracker publication journal");
     if !record.is_object()
-        || record["schemaVersion"] != 1
+        || record["schemaVersion"] != JOURNAL_SCHEMA_VERSION
         || validate_target(&record["target"]).is_err()
         || record["platform"] != record["target"]["platform"]
         || !nonempty(&record["startedUtc"])
@@ -444,6 +451,11 @@ fn validate_record(record: &Value) -> Result<(), AppError> {
             || !adjudication["storedExcerpt"].is_string()
             || !valid_hash(&adjudication["expectedBodyHash"])
             || !valid_hash(&adjudication["storedBodyHash"])
+            || adjudication
+                .get("firstDifference")
+                .and_then(Value::as_u64)
+                .and_then(|value| usize::try_from(value).ok())
+                .is_none()
             || !creates.iter().any(|op| {
                 op["outcome"] == "succeeded"
                     && op["itemId"] == adjudication["itemId"]
@@ -601,7 +613,7 @@ pub(crate) fn paused_fixture(target: &Value, state: &Value, plan: &[Value]) -> V
     record["adjudication"] = json!({
         "findingId":first["findingId"], "itemId":"1", "title":first["title"],
         "expectedBodyHash":hash(first["body"].as_str().unwrap()),
-        "storedBodyHash":hash("stored rewrite"), "similarity":null,
+        "storedBodyHash":hash("stored rewrite"), "similarity":null, "firstDifference":0,
         "sentExcerpt":"approved", "storedExcerpt":"stored"
     });
     record
@@ -638,7 +650,7 @@ fn new_record(target: &Value, state: &Value, plan: &[Value], now: &str) -> Value
         json!({"operation":"verifyItems", "findingId":null, "title":null, "outcome":"pending",
         "itemId":null, "itemNodeId":null, "url":null, "message":null}),
     );
-    json!({"schemaVersion":1, "startedUtc":now, "platform":target["platform"], "target":target,
+    json!({"schemaVersion":JOURNAL_SCHEMA_VERSION, "startedUtc":now, "platform":target["platform"], "target":target,
         "trackerUrl":target["webUrl"], "workItemType":metadata(state,"workItemType"),
         "areaPath":metadata(state,"areaPath"), "descriptionField":metadata(state,"descriptionField"),
         "parentItemId":metadata(state,"parentItemId"), "planHash":plan_hash(plan), "status":"inProgress",
@@ -691,7 +703,7 @@ fn verify(
     let actual = effects.read(op)?;
     if actual["itemId"] != op["itemId"]
         || actual["itemNodeId"] != op["itemNodeId"]
-        || actual["url"] != op["url"]
+        || !same_item_url(&record["platform"], &actual["url"], &op["url"])
         || actual["title"] != item["title"]
         || !actual["body"].is_string()
     {
@@ -739,29 +751,56 @@ fn verify(
                 ));
             }
             BodyVerdict::Adjudicate(deviation) => {
+                let (sent_excerpt, stored_excerpt) =
+                    adjudication_excerpts(approved, stored, deviation.first_difference);
                 record["adjudication"] = json!({"findingId":item["findingId"], "itemId":actual["itemId"],
                     "title":item["title"], "expectedBodyHash":hash(approved), "storedBodyHash":hash(stored),
                     "similarity":deviation.similarity, "firstDifference":deviation.first_difference,
-                    "sentExcerpt":excerpt(approved, deviation.first_difference), "storedExcerpt":excerpt(stored, deviation.first_difference)});
+                    "sentExcerpt":sent_excerpt, "storedExcerpt":stored_excerpt});
                 record["status"] = json!("needsAdjudication");
                 return Ok(None);
             }
         }
     }
     Ok(Some(
-        json!({"findingId":item["findingId"], "itemId":actual["itemId"], "url":actual["url"],
+        json!({"findingId":item["findingId"], "itemId":actual["itemId"], "url":op["url"],
         "title":actual["title"], "descriptionFormat":actual["descriptionFormat"]}),
     ))
 }
 
-/// Provides bounded context using the same UTF-16 offset as body comparison.
-///
-/// The radius balances readable context against journal size.
-fn excerpt(text: &str, at: usize) -> String {
-    let units: Vec<u16> = text.encode_utf16().collect();
-    let start = at.saturating_sub(48).min(units.len());
-    let end = at.saturating_add(48).min(units.len());
-    String::from_utf16_lossy(&units[start..end])
+/// Compares Azure item URLs using the case-insensitive tracker identity.
+fn same_item_url(platform: &Value, actual: &Value, expected: &Value) -> bool {
+    if platform == "azureDevOps" {
+        actual
+            .as_str()
+            .and_then(azure_url_identity)
+            .zip(expected.as_str().and_then(azure_url_identity))
+            .is_some_and(|(actual, expected)| actual == expected)
+    } else {
+        actual == expected
+    }
+}
+
+/// Resolves an Azure URL to the case-insensitive path identity used by the API.
+fn azure_url_identity(value: &str) -> Option<(String, Vec<String>)> {
+    let url = Url::parse(value).ok()?;
+    if url.scheme() != "https"
+        || !url.username().is_empty()
+        || url.password().is_some()
+        || url.query().is_some()
+        || url.fragment().is_some()
+    {
+        return None;
+    }
+    let path = url
+        .path_segments()?
+        .map(decode)
+        .collect::<Result<Vec<_>, _>>()
+        .ok()?
+        .into_iter()
+        .map(|segment| segment.to_lowercase())
+        .collect();
+    Some((url.origin().ascii_serialization(), path))
 }
 
 /// Records readback failure separately from the durable creation receipt.
@@ -827,6 +866,10 @@ fn run(
             op["acceptedRewrite"] = json!({"expectedBodyHash":acceptance.expected_body_hash, "storedBodyHash":acceptance.stored_body_hash});
             old["status"] = json!("resumeReady");
             old["adjudication"] = Value::Null;
+            // Keep the accepted decision durable before the next creation
+            // intent; a failed intent save can resume it, while a saved
+            // ambiguous intent must be reconciled. Ref:
+            // skills/ss-review/docs/implementation.md#tracker-publication.
             save(journal, &old)?;
         }
         old
@@ -929,6 +972,9 @@ fn run(
     }
     Ok(outcome(&record, path, summary))
 }
+
+#[cfg(any(test, feature = "private-fuzz"))]
+mod fuzz;
 
 #[cfg(test)]
 #[cfg_attr(coverage_nightly, coverage(off))]
@@ -1346,6 +1392,12 @@ mod tests {
         same_tracker["project"] = json!("pROJECT");
         same_tracker["collectionUrl"] = json!("https://dev.azure.com/ORG");
         same_tracker["webUrl"] = json!("https://dev.azure.com/ORG/pROJECT/_workitems");
+        let expected_url = "https://dev.azure.com/org/Project/_workitems/edit/1";
+        let actual_url = "https://dev.azure.com/ORG/Project/_workitems/edit/1";
+        let mut saved: Value = serde_json::from_slice(journal.bytes.as_ref().unwrap()).unwrap();
+        saved["operations"][0]["url"] = json!(expected_url);
+        journal.bytes = Some(serde_json::to_vec(&saved).unwrap());
+        provider.records[0]["url"] = json!(actual_url);
 
         let mut different_collection = same_tracker.clone();
         different_collection["collectionUrl"] = json!("https://dev.azure.com/ORG/other");
@@ -1367,10 +1419,27 @@ mod tests {
         )
         .unwrap();
         assert_eq!(result["status"], "succeeded");
+        assert_eq!(result["items"][0]["url"], expected_url);
         assert_eq!(
             &provider.calls[..4],
             ["create first", "read 1", "read 1", "create second"]
         );
+    }
+
+    #[test]
+    fn azure_item_url_identity_decodes_case_insensitive_path_segments() {
+        let platform = json!("azureDevOps");
+        let actual = json!("https://dev.azure.com/ORG/Pr%C3%98JECT/_WORKITEMS/EDIT/1");
+        let expected = json!("https://dev.azure.com/org/Pr%C3%B8ject/_workitems/edit/1");
+        assert!(super::same_item_url(&platform, &actual, &expected));
+
+        let different_project =
+            json!("https://dev.azure.com/org/Another%20Project/_workitems/edit/1");
+        assert!(!super::same_item_url(
+            &platform,
+            &actual,
+            &different_project
+        ));
     }
 
     #[test]
@@ -1556,7 +1625,7 @@ mod tests {
     }
 
     #[test]
-    fn legacy_paused_record_is_accepted_but_inconsistent_state_is_not() {
+    fn legacy_paused_record_is_rejected_without_changing_the_journal() {
         let (mut journal, mut provider) = setup();
         provider.rewrite = true;
         let paused = call(&mut journal, &mut provider, "azureDevOps", &plan(), None).unwrap();
@@ -1566,16 +1635,25 @@ mod tests {
             expected_body_hash: a["expectedBodyHash"].as_str().unwrap(),
             stored_body_hash: a["storedBodyHash"].as_str().unwrap(),
         };
-        let mut legacy: Value = serde_json::from_slice(journal.bytes.as_ref().unwrap()).unwrap();
+        let native: Value = serde_json::from_slice(journal.bytes.as_ref().unwrap()).unwrap();
+        let mut legacy = native.clone();
+        legacy["schemaVersion"] = json!(1);
         legacy["adjudication"]
             .as_object_mut()
             .unwrap()
             .remove("firstDifference");
-        journal.bytes = Some(serde_json::to_vec(&legacy).unwrap());
-        _ = check_prior_inner(&mut journal, &target("azureDevOps"), Some(&acceptance)).unwrap();
-        legacy["operations"][1]["outcome"] = json!("ambiguous");
-        journal.bytes = Some(serde_json::to_vec(&legacy).unwrap());
-        _ = check_prior_inner(&mut journal, &target("azureDevOps"), Some(&acceptance)).unwrap_err();
+        let mut incomplete_native = native;
+        incomplete_native["adjudication"]
+            .as_object_mut()
+            .unwrap()
+            .remove("firstDifference");
+        for record in [legacy, incomplete_native] {
+            let bytes = serde_json::to_vec(&record).unwrap();
+            journal.bytes = Some(bytes.clone());
+            _ = check_prior_inner(&mut journal, &target("azureDevOps"), Some(&acceptance))
+                .unwrap_err();
+            assert_eq!(journal.bytes.as_deref(), Some(bytes.as_slice()));
+        }
         assert_eq!(provider.calls, ["create first", "read 1"]);
     }
 

@@ -8,7 +8,9 @@
     reason = "Line offsets and counters are bounded by the allocated source text"
 )]
 
+use std::any::type_name;
 use std::collections::{BTreeMap, btree_map::Entry};
+use std::fmt::{self, Debug};
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -35,9 +37,16 @@ pub struct Span {
 }
 
 /// A complete in-memory generation of both instruction trees.
-#[derive(Debug)]
 pub struct SourceSnapshot {
     files: BTreeMap<(String, String), Vec<String>>,
+}
+
+impl Debug for SourceSnapshot {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct(type_name::<Self>())
+            .field("file_count", &self.files.len())
+            .finish_non_exhaustive()
+    }
 }
 
 impl SourceSnapshot {
@@ -209,8 +218,12 @@ fn read_directory(
     Ok(())
 }
 
-/// Matches the byte-order-mark detection used by the source reader.
-pub(crate) fn decode_text(bytes: &[u8]) -> Result<String, AppError> {
+/// Decodes a complete BOM-selected Unicode text without replacement characters.
+///
+/// # Errors
+///
+/// Returns an error when the encoded text is incomplete or malformed.
+pub fn decode_text(bytes: &[u8]) -> Result<String, AppError> {
     if bytes.starts_with(&[0xff, 0xfe, 0, 0]) || bytes.starts_with(&[0, 0, 0xfe, 0xff]) {
         let little = bytes.starts_with(&[0xff, 0xfe, 0, 0]);
         let mut result = String::new();
@@ -233,18 +246,19 @@ pub(crate) fn decode_text(bytes: &[u8]) -> Result<String, AppError> {
     }
     if bytes.starts_with(&[0xff, 0xfe]) || bytes.starts_with(&[0xfe, 0xff]) {
         let little = bytes.starts_with(&[0xff, 0xfe]);
-        let mut units = Vec::new();
-        for chunk in bytes[2..].chunks(2) {
-            if chunk.len() != 2 {
-                return Err(fail("invalidInput", "Incomplete UTF-16 source"));
-            }
-            units.push(if little {
-                u16::from_le_bytes([chunk[0], chunk[1]])
-            } else {
-                u16::from_be_bytes([chunk[0], chunk[1]])
-            });
+        let (words, remainder) = bytes[2..].as_chunks::<2>();
+        if !remainder.is_empty() {
+            return Err(fail("invalidInput", "Incomplete UTF-16 source"));
         }
-        return String::from_utf16(&units)
+        let units = words.iter().map(|word| {
+            if little {
+                u16::from_le_bytes(*word)
+            } else {
+                u16::from_be_bytes(*word)
+            }
+        });
+        return char::decode_utf16(units)
+            .collect::<Result<String, _>>()
             .map_err(|error| caused_by("invalidInput", "Invalid UTF-16 source", error).into());
     }
     let bytes = bytes.strip_prefix(&[0xef, 0xbb, 0xbf]).unwrap_or(bytes);
@@ -284,6 +298,8 @@ fn text_lines(text: &str) -> Vec<String> {
     reason = "Boolean result checks make invalid-path cases concise"
 )]
 mod tests {
+    use std::collections::BTreeMap;
+
     use super::{decode_text, source_path, text_lines};
 
     #[test]
@@ -299,5 +315,38 @@ mod tests {
         assert_eq!(text_lines("a\r\nb\rc\n"), ["a", "b", "c"]);
         assert_eq!(decode_text(&[0xff, 0xfe, b'a', 0]).unwrap(), "a");
         assert!(decode_text(&[0xff, 0xfe, b'a']).is_err());
+    }
+
+    #[test]
+    fn unicode_decoding_is_strict_for_each_encoding() {
+        for bytes in [
+            &[0xef, 0xbb, 0xbf, b'a'][..],
+            &[0xff, 0xfe, b'a', 0][..],
+            &[0xfe, 0xff, 0, b'a'][..],
+            &[0xff, 0xfe, 0, 0, b'a', 0, 0, 0][..],
+            &[0, 0, 0xfe, 0xff, 0, 0, 0, b'a'][..],
+        ] {
+            assert_eq!(decode_text(bytes).unwrap(), "a");
+        }
+        for bytes in [
+            &[0xff][..],
+            &[0xff, 0xfe, 0][..],
+            &[0xff, 0xfe, 0, 0xd8][..],
+            &[0xfe, 0xff, 0xdc, 0][..],
+            &[0xff, 0xfe, 0, 0, 0][..],
+            &[0, 0, 0xfe, 0xff, 0, 0x11, 0, 0][..],
+        ] {
+            assert!(decode_text(bytes).is_err());
+        }
+        assert_eq!(
+            decode_text(&[0xff, 0xfe, 0x3d, 0xd8, 0, 0xde]).unwrap(),
+            "😀"
+        );
+    }
+
+    #[test]
+    fn snapshot_debug_does_not_panic() {
+        let snapshot = super::SourceSnapshot::from_files(BTreeMap::new());
+        drop(format!("{snapshot:?}"));
     }
 }

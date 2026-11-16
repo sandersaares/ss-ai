@@ -321,7 +321,8 @@ mod tests {
     use serde_json::{Value, json};
     use sha2::{Digest, Sha256};
 
-    use super::{bytes_hash, document_hash, parse_text, powershell_json, snapshot_hash};
+    use super::{document_hash, parse_text, powershell_json, snapshot_hash};
+    use crate::bytes_hash;
 
     #[test]
     fn byte_hash_uses_exact_bytes_and_uppercase_hex() {

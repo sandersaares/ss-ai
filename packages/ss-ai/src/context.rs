@@ -14,13 +14,13 @@ use ohno::AppError;
 use serde_json::{Value, json};
 use ss_ai_review::{capture_target, collect_capture};
 use ss_ai_review_context::{
-    increment_diagnostic, normalize_options, prepare, prepare_capture, prepare_failure, query,
-    read_capture, read_diagnostics, read_saved, write_comment_authorship,
+    decode_file_text, increment_diagnostic, normalize_options, prepare, prepare_capture,
+    prepare_failure, query, read_capture, read_diagnostics, read_saved, write_comment_authorship,
 };
 use ss_ai_runtime::{Clock, caused_by, fail};
 
 /// Keeps local evidence operations independent of provider initialization.
-#[derive(Debug, Parser)]
+#[derive(Parser)]
 #[command(name = "ss-ai context", about = "Inspect captured review evidence")]
 struct ContextCli {
     #[command(subcommand)]
@@ -28,7 +28,7 @@ struct ContextCli {
 }
 
 /// Exposes direct and saved queries, preparation, and diagnostic records.
-#[derive(Debug, Subcommand)]
+#[derive(Subcommand)]
 enum ContextCommand {
     /// Capture provider evidence into a new immutable local document.
     Create {
@@ -129,7 +129,7 @@ enum ContextCommand {
 }
 
 /// Carries selectors in the same shape as persisted query requests.
-#[derive(Debug, Args)]
+#[derive(Args)]
 struct QueryOptions {
     #[arg(long)]
     query: String,
@@ -273,7 +273,7 @@ where
             classification_path,
         } => {
             let text = match classification_path {
-                Some(path) => read_utf8(&path)?,
+                Some(path) => decode_file_text(&fs::read(path)?),
                 None => classification.unwrap_or_default(),
             };
             let value: Value = serde_json::from_str(&text)
