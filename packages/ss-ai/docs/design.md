@@ -74,6 +74,9 @@ uninterpretable history are explicit tooling failures, never successful unresolv
 Current reset settings and a later push alone do not prove why a vote is zero.
 Routine untyped system notifications do not change approval standing or supply
 vote-reset authority.
+Target-branch change notifications likewise supply no approval or reset authority.
+Current target and applicable policy evidence still govern inspection and
+publication freshness; the approving source iteration remains the assessment anchor.
 
 Deleted ADO threads and comments supply no approval, withdrawal, or pending-review
 authority. Inspection ignores their removed payloads and retains the returned

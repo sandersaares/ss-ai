@@ -205,6 +205,11 @@ new evidence. Threads containing human replies, pending review, or deleted histo
 remain guarded.
 Structured event properties establish vote and reviewer authority; generated
 system-comment prose and its edit clock do not enter retained evidence.
+ADO's typed `TargetChanged` notification records a target-branch change, not a
+reviewer decision or proven vote reset. Pure system-only notifications are
+redundant with current target and applicable policy reads. Human replies, pending
+review, and deleted history remain guarded by the same rules as other routine
+notifications.
 
 ADO's content-specific comment update time governs edit detection. The general
 update time serves as a fallback only when the content-specific field is absent.
