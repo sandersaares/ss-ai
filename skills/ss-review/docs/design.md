@@ -708,6 +708,11 @@ source, allowing a review from one platform to be filed on another. Repository
 publication settings are proposed to the user, who confirms the destination and
 required tracker metadata before anything is created.
 
+For a pull-request review, tracker delivery remains bound to the checked capture
+but does not exclude findings based on the pull-request diff. A follow-up link
+can point to any comment present in its captured thread; pull-request replies
+remain limited to comments that accept replies.
+
 Tracker items are visible as soon as they are created and cannot be staged as a
 single review. Delivery reports only items whose stored content has been checked
 against the approved review. If a service rewrite is neither clearly equivalent
