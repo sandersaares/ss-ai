@@ -1,6 +1,8 @@
 //! Preparation and bounded reading of worker guidance.
 
+use std::any::type_name;
 use std::collections::{BTreeMap, HashSet};
+use std::fmt;
 use std::num::{NonZeroU32, NonZeroUsize};
 use std::path::{Path, absolute};
 
@@ -19,7 +21,6 @@ const OUTPUT_LIMIT: usize = 16 * 1024;
 const OUTPUT_NEWLINE: &str = if cfg!(windows) { "\r\n" } else { "\n" };
 
 /// Inputs selected by the primary session for one worker attempt.
-#[derive(Debug)]
 #[expect(
     clippy::exhaustive_structs,
     reason = "This application-internal CLI boundary is constructed directly"
@@ -47,6 +48,15 @@ pub struct AssignmentOptions<'a> {
     pub repository_instructions: bool,
     /// Whether pre-existing findings are authorized.
     pub include_pre_existing: bool,
+}
+
+impl fmt::Debug for AssignmentOptions<'_> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct(type_name::<Self>())
+            .field("phase", &self.phase)
+            .field("has_manifest", &self.manifest_path.is_some())
+            .finish_non_exhaustive()
+    }
 }
 
 /// Immutable record binding a phase to its exact shared guidance.
@@ -116,8 +126,9 @@ pub fn create_assignment(
     }
     let skill = absolute(options.skill_root)?;
 
-    let (template, guide) = phase_files(options.phase)?;
-    if options.phase != "review"
+    let phase = canonical_phase(options.phase)?;
+    let (template, guide) = phase_files(phase)?;
+    if phase != "review"
         && (options.resume || options.manifest_path.is_some() || options.reviewer_id.is_some())
     {
         return Err(invalid(
@@ -129,7 +140,7 @@ pub fn create_assignment(
     let mut focus = String::new();
     let mut queue = String::new();
     let mut resume = options.resume;
-    if options.phase == "review" {
+    if phase == "review" {
         let manifest = review_work::read_manifest(
             options
                 .manifest_path
@@ -215,7 +226,7 @@ pub fn create_assignment(
     let rendered = render(&text(&skill.join(template), clock)?, &bindings)?;
     let mut header = vec![
         "This is authorized bounded phase work, not invocation or delegation of ss-review itself.".to_owned(),
-        format!("Execute only the assigned phase: {}. Do not invoke the skill or advance the overall workflow.", options.phase),
+        format!("Execute only the assigned phase: {phase}. Do not invoke the skill or advance the overall workflow."),
         "Primary orchestration, publication, and every human decision gate remain exclusively with the primary user-facing session.".to_owned(),
         "If user input is needed, report the unresolved question to that session and stop; do not ask or answer it yourself.".to_owned(),
         "For any permitted nested dispatch, use reasoning_effort: \"medium\" and forward this requirement.".to_owned(),
@@ -252,14 +263,14 @@ pub fn create_assignment(
         publish(&data, &format!("{common}\n\n{phase}"), clock)?;
         documents.push(document("workflowData", &data, clock)?);
     }
-    if matches!(options.phase, "overview" | "review") {
+    if matches!(phase, "overview" | "review") {
         documents.push(document(
             "references",
             &session.join("references.md"),
             clock,
         )?);
     }
-    if options.phase == "review" {
+    if phase == "review" {
         documents.push(document("focusArea", Path::new(&focus), clock)?);
         documents.push(document(
             "overview",
@@ -276,7 +287,7 @@ pub fn create_assignment(
     }
     let assignment = Assignment {
         schema_version: 1,
-        phase: options.phase.to_owned(),
+        phase: phase.to_owned(),
         resume,
         diagnostics_path: path_text(&diagnostics)?,
         context_path: context.as_ref().map(|p| path_text(p)).transpose()?,
@@ -290,7 +301,7 @@ pub fn create_assignment(
     let mut dispatch = vec![
         format!(
             "Execute authorized bounded '{}' work, not the ss-review skill. Orchestration and human decisions remain with the primary session.",
-            options.phase
+            phase
         ),
         "Apply this recovery policy before initial shared reads and compaction reloads:".to_owned(),
         recovery,
@@ -309,6 +320,7 @@ pub fn create_assignment(
         "Set-StrictMode -Version Latest".to_owned(),
         "$ErrorActionPreference = 'Stop'".to_owned(),
         "$PSNativeCommandUseErrorActionPreference = $true".to_owned(),
+        "[Console]::OutputEncoding = [System.Text.UTF8Encoding]::new($false)".to_owned(),
         format!("ss-ai workflow worker-document --assignment-path '{powershell_path}' --document-id '{{{{DOCUMENT_ID}}}}' --offset 0"),
         "```".to_owned(),
         "```bash".to_owned(),
@@ -465,6 +477,20 @@ fn select_page(
         );
     }
     best.ok_or_else(|| invalid("Shared document cannot make progress within the output budget"))
+}
+
+/// Normalizes phase names before they become persisted workflow data.
+fn canonical_phase(phase: &str) -> Result<&'static str, AppError> {
+    [
+        "references",
+        "fileGroups",
+        "focusAreas",
+        "overview",
+        "review",
+    ]
+    .into_iter()
+    .find(|candidate| candidate.eq_ignore_ascii_case(phase))
+    .ok_or_else(|| invalid("Unknown worker phase"))
 }
 
 /// Selects only the canonical phase template and structured-data guide.
@@ -627,9 +653,12 @@ fn required_bytes(path: &Path, clock: &dyn Clock) -> Result<Vec<u8>, AppError> {
 /// Reads canonical text without changing its content.
 fn text(path: &Path, clock: &dyn Clock) -> Result<String, AppError> {
     let bytes = required_bytes(path, clock)?;
-    let bytes = bytes.strip_prefix(&[0xef, 0xbb, 0xbf]).unwrap_or(&bytes);
-    String::from_utf8(bytes.to_vec())
-        .map_err(|error| invalid(format!("Invalid UTF-8 guidance: {error}")))
+    let mut text = String::from_utf8(bytes)
+        .map_err(|error| invalid(format!("Invalid UTF-8 guidance: {error}")))?;
+    if text.starts_with('\u{feff}') {
+        text.drain(..'\u{feff}'.len_utf8());
+    }
+    Ok(text)
 }
 
 /// Publishes complete normalized guidance under its retained sibling lock.

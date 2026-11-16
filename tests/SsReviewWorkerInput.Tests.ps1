@@ -155,6 +155,26 @@ Describe 'Prepared bounded worker inputs' {
         $dispatch | Should -Not -Match 'On errors stop and report'
     }
 
+    It 'accepts case-insensitive phase <Phase> and records <Canonical>' -ForEach @(
+        @{ Phase = 'References'; Canonical = 'references' }
+        @{ Phase = 'FILEGROUPS'; Canonical = 'fileGroups' }
+        @{ Phase = 'FocusAreas'; Canonical = 'focusAreas' }
+        @{ Phase = 'OVERVIEW'; Canonical = 'overview' }
+        @{ Phase = 'Review'; Canonical = 'review' }
+    ) {
+        $parameters = @{
+            Phase = $Phase; SessionState = $script:State; ScopePath = $script:Scope
+            OutputDirectory = Join-Path $script:State 'case-attempt'
+        }
+        if ($Canonical -eq 'review') {
+            $parameters.ManifestPath = $script:Work.manifestPath
+            $parameters.ReviewerId = 'focus-001'
+        }
+        $result = New-TestWorkerAssignment @parameters
+        $assignment = ConvertFrom-Json -InputObject ([IO.File]::ReadAllText($result.assignmentPath)) -AsHashtable
+        $assignment.phase | Should -BeExactly $Canonical
+    }
+
     It 'provides bounded initial reads and exact complete guidance for original and resumed reviewers' {
         foreach ($resume in @($false, $true)) {
             $result = New-TestWorkerAssignment -Phase review `

@@ -43,7 +43,9 @@ struct Installer {
     fail_system_operation: RefCell<Option<String>>,
     expected_old_tree: RefCell<Option<PathBuf>>,
     npm_calls: Cell<usize>,
+    npm_program: RefCell<Option<String>>,
     browser_installs: Cell<usize>,
+    npm_path: RefCell<Option<Vec<PathBuf>>>,
     system_calls: RefCell<Vec<Vec<String>>>,
 }
 
@@ -57,10 +59,8 @@ impl Process for Installer {
         if arguments.first().is_some_and(|arg| arg == "-e") {
             assert_eq!(
                 Path::new(program),
-                self.browser
-                    .parent()
-                    .unwrap()
-                    .join("bin")
+                env::var_os("NVM_BIN")
+                    .map_or_else(|| self.browser.parent().unwrap().join("bin"), PathBuf::from)
                     .join(if cfg!(windows) { "node.exe" } else { "node" })
             );
             if self.fail_discovery.get() {
@@ -94,10 +94,8 @@ impl Process for Installer {
         }
         assert_eq!(
             Path::new(program),
-            self.browser
-                .parent()
-                .unwrap()
-                .join("bin")
+            env::var_os("NVM_BIN")
+                .map_or_else(|| self.browser.parent().unwrap().join("bin"), PathBuf::from)
                 .join(if cfg!(windows) { "node.exe" } else { "node" })
         );
         self.browser_installs
@@ -105,7 +103,8 @@ impl Process for Installer {
         if self.fail_browser.get() {
             return Ok(ProcessOutput::new(
                 false,
-                Vec::new(),
+                b"IncompleteInstallationError: chrome revision path: /cache/123/chrome-linux64/chrome"
+                    .to_vec(),
                 b"browser failure".to_vec(),
             ));
         }
@@ -115,12 +114,14 @@ impl Process for Installer {
 
     fn execute_in(
         &self,
-        _program: &str,
+        program: &str,
         arguments: &[String],
         _input: &[u8],
         directory: &Path,
         path: Option<&OsStr>,
     ) -> io::Result<ProcessOutput> {
+        *self.npm_program.borrow_mut() = Some(program.to_owned());
+        *self.npm_path.borrow_mut() = path.map(|path| env::split_paths(path).collect());
         assert_eq!(
             arguments,
             [
@@ -132,9 +133,11 @@ impl Process for Installer {
             ]
         );
         assert!(path.is_some());
+        let expected_node = env::var_os("NVM_BIN")
+            .map_or_else(|| self.browser.parent().unwrap().join("bin"), PathBuf::from);
         assert_eq!(
             env::split_paths(path.unwrap()).next().unwrap(),
-            self.browser.parent().unwrap().join("bin")
+            expected_node
         );
         assert_eq!(fs::read_to_string(directory.join("package.json"))?, "{}");
         assert_eq!(
@@ -194,6 +197,13 @@ fn file(path: &Path, content: &str) {
     ignore = "process isolation requires launching a child executable"
 )]
 fn offline_setup_and_retained_locks() {
+    for (relative_path, node_from_nvm) in [(false, false), (true, false), (true, true)] {
+        run_offline_setup(relative_path, node_from_nvm);
+    }
+}
+
+/// Exercises both absolute and invocation-relative executable discovery.
+fn run_offline_setup(relative_path: bool, node_from_nvm: bool) {
     let workspace = Builder::new()
         .prefix(".report-tools-test-")
         .tempdir_in(env::current_dir().unwrap())
@@ -206,7 +216,12 @@ fn offline_setup_and_retained_locks() {
             name.to_owned()
         }
     };
-    for name in ["node", "pandoc", "sudo", "apt-get"] {
+    let names = if node_from_nvm {
+        &["pandoc", "sudo", "apt-get"][..]
+    } else {
+        &["node", "pandoc", "sudo", "apt-get"][..]
+    };
+    for name in names {
         let path = bin.join(executable(name));
         file(&path, "");
         #[cfg(unix)]
@@ -214,15 +229,39 @@ fn offline_setup_and_retained_locks() {
             fs::set_permissions(path, fs::Permissions::from_mode(0o755)).unwrap();
         }
     }
-    let output = Command::new(env::current_exe().unwrap())
+    let npm = if cfg!(windows) { "npm.cmd" } else { "npm" };
+    file(&bin.join(npm), "");
+    let path = if relative_path {
+        PathBuf::from("bin")
+    } else {
+        bin
+    };
+    let mut command = Command::new(env::current_exe().unwrap());
+    command
         .args(["--exact", "offline_child", "--ignored", "--nocapture"])
         .env("REPORT_TOOLS_TEST_ROOT", workspace.path())
-        .env("PATH", &bin)
+        .current_dir(workspace.path())
+        .env("PATH", &path)
         .env_remove("NVM_BIN")
         .env_remove("NVM_SYMLINK")
-        .env_remove("NVM_DIR")
-        .output()
+        .env_remove("NVM_DIR");
+    if node_from_nvm {
+        let runtime = workspace.path().join("node-runtime");
+        file(&runtime.join(executable("node")), "");
+        #[cfg(unix)]
+        fs::set_permissions(
+            runtime.join(executable("node")),
+            fs::Permissions::from_mode(0o755),
+        )
         .unwrap();
+        let variable = if cfg!(windows) {
+            "NVM_SYMLINK"
+        } else {
+            "NVM_BIN"
+        };
+        command.env(variable, runtime);
+    }
+    let output = command.output().unwrap();
     assert!(
         output.status.success(),
         "{}\n{}",
@@ -264,12 +303,15 @@ fn offline_child() {
         fail_system_operation: RefCell::new(None),
         expected_old_tree: RefCell::new(None),
         npm_calls: Cell::new(0),
+        npm_program: RefCell::new(None),
         browser_installs: Cell::new(0),
+        npm_path: RefCell::new(None),
         system_calls: RefCell::new(Vec::new()),
     };
     let clock = FixedClock;
     let guard = tools_lock(&tools_dir, LockMode::Shared, &clock).unwrap();
     let initial = discover(&skill, &tools_dir, &process, &guard).unwrap();
+    assert!(initial.node.as_ref().unwrap().is_absolute());
     assert!(initial.missing.contains(&"mermaid-cli".to_owned()));
     let before_approval = assert_ready(&initial, false).unwrap_err();
     assert!(
@@ -310,46 +352,8 @@ fn offline_child() {
     assert_eq!(process.npm_calls.get(), 1);
     #[cfg(unix)]
     exercise_unreadable_manifest(&skill, &tools_dir, &process, &clock, &installed);
-    // The executable is inside the Mermaid package beneath node_modules;
-    // Puppeteer is a sibling package in that same node_modules directory.
-    let puppet = installed
-        .mermaid
-        .ancestors()
-        .nth(4)
-        .unwrap()
-        .join("puppeteer");
-    let manifest = puppet.join("package.json");
-    file(&manifest, "{broken");
-    let guard = tools_lock(&tools_dir, LockMode::Shared, &clock).unwrap();
-    assert!(
-        discover(&skill, &tools_dir, &process, &guard)
-            .unwrap()
-            .missing
-            .contains(&"mermaid-cli".to_owned())
-    );
-    file(&manifest, r#"{"main":"lib/main.js"}"#);
-    process.fail_discovery.set(true);
-    let discovery = discover(&skill, &tools_dir, &process, &guard).unwrap();
-    assert!(discovery.missing.contains(&"mermaid-browser".to_owned()));
-    assert!(
-        discovery
-            .diagnostics
-            .join(" ")
-            .contains("browser discovery failure")
-    );
-    assert!(
-        assert_ready(&discovery, false)
-            .unwrap_err()
-            .to_string()
-            .contains("browser discovery failure")
-    );
-    process.fail_discovery.set(false);
-    fs::remove_file(&process.browser).unwrap();
-    let absent = discover(&skill, &tools_dir, &process, &guard).unwrap();
-    assert!(absent.missing.contains(&"mermaid-browser".to_owned()));
-    assert!(!absent.diagnostics.is_empty());
-    file(&process.browser, "browser");
-    drop(guard);
+    check_npm_environment(&process, &root);
+    exercise_discovery_failures(&skill, &tools_dir, &process, &clock, &installed);
     let another_skill = root.join("other-skill");
     file(
         &another_skill.join("tools/package-lock.json"),
@@ -384,10 +388,14 @@ fn offline_child() {
     file(&old_marker, "preserve");
     fs::remove_file(&installed.mermaid).unwrap();
     process.fail_browser.set(true);
-    install(&skill, &tools_dir, &process, &clock, false, |_, _| {
+    let error = install(&skill, &tools_dir, &process, &clock, false, |_, _| {
         panic!("failed setup must not probe")
     })
-    .unwrap_err();
+    .unwrap_err()
+    .to_string();
+    assert!(error.contains("stdout:\n"));
+    assert!(error.contains("chrome revision path: /cache/123/chrome-linux64/chrome"));
+    assert!(error.contains("stderr:\nbrowser failure"));
     assert_eq!(fs::read_to_string(&old_marker).unwrap(), "preserve");
     assert_eq!(process.npm_calls.get(), 2);
     process.fail_browser.set(false);
@@ -422,6 +430,74 @@ fn offline_child() {
     }
     #[cfg(not(target_os = "linux"))]
     install(&skill, &tools_dir, &process, &clock, true, |_, _| Ok(())).unwrap_err();
+}
+
+/// Checks that broken packages and missing browsers are reported as unavailable.
+fn exercise_discovery_failures(
+    skill: &Path,
+    tools_dir: &Path,
+    process: &Installer,
+    clock: &FixedClock,
+    installed: &ReportTools,
+) {
+    // The executable is inside the Mermaid package beneath node_modules;
+    // Puppeteer is a sibling package in that same node_modules directory.
+    let puppet = installed
+        .mermaid
+        .ancestors()
+        .nth(4)
+        .unwrap()
+        .join("puppeteer");
+    let manifest = puppet.join("package.json");
+    file(&manifest, "{broken");
+    let guard = tools_lock(tools_dir, LockMode::Shared, clock).unwrap();
+    assert!(
+        discover(skill, tools_dir, process, &guard)
+            .unwrap()
+            .missing
+            .contains(&"mermaid-cli".to_owned())
+    );
+    file(&manifest, r#"{"main":"lib/main.js"}"#);
+    process.fail_discovery.set(true);
+    let discovery = discover(skill, tools_dir, process, &guard).unwrap();
+    assert!(discovery.missing.contains(&"mermaid-browser".to_owned()));
+    assert!(
+        discovery
+            .diagnostics
+            .join(" ")
+            .contains("browser discovery failure")
+    );
+    assert!(
+        assert_ready(&discovery, false)
+            .unwrap_err()
+            .to_string()
+            .contains("browser discovery failure")
+    );
+    process.fail_discovery.set(false);
+    fs::remove_file(&process.browser).unwrap();
+    let absent = discover(skill, tools_dir, process, &guard).unwrap();
+    assert!(absent.missing.contains(&"mermaid-browser".to_owned()));
+    assert!(!absent.diagnostics.is_empty());
+    file(&process.browser, "browser");
+    drop(guard);
+}
+
+/// Confirms npm receives the selected runtime and absolute executable search paths.
+fn check_npm_environment(process: &Installer, root: &Path) {
+    let npm = if cfg!(windows) { "npm.cmd" } else { "npm" };
+    let node_from_nvm = env::var_os("NVM_BIN").is_some() || env::var_os("NVM_SYMLINK").is_some();
+    if node_from_nvm {
+        assert_eq!(process.npm_program.borrow().as_deref(), Some(npm));
+    } else {
+        assert_eq!(
+            Path::new(process.npm_program.borrow().as_ref().unwrap()),
+            root.join("bin").join(npm)
+        );
+    }
+    let npm_path = process.npm_path.borrow();
+    let npm_entries = npm_path.as_ref().unwrap();
+    assert!(npm_entries.iter().all(|entry| entry.is_absolute()));
+    assert!(npm_entries.contains(&root.join("bin")));
 }
 
 /// Prevents incomplete npm output from publishing even on a first install.

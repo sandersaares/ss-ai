@@ -101,7 +101,13 @@ Describe 'Preflight performs no write' {
                         ConvertTo-Json -InputObject $capture.target -Depth 100 -Compress
                     )
                     $prior = [ordered]@{
-                        schemaVersion = 1; target = $priorTarget; status = 'failed'; inFlight = $null
+                        schemaVersion = 2; target = $priorTarget; platform = $priorTarget.platform
+                        startedUtc = '2026-01-01T00:00:00Z'; pullRequestUrl = $capture.pullRequestUrl
+                        sourceCommit = $capture.pullRequest.reviewedSourceCommit
+                        mergeBaseCommit = $capture.pullRequest.reviewedMergeBaseCommit
+                        status = 'failed'; inFlight = $null; reviewId = $null; reviewUrl = $null
+                        draftDiscarded = $false; draftDiscardMessage = $null; message = $null
+                        preCompletionVerification = $null; verification = $null
                         operations = @(
                             (& $operation 'startReview' 'failed')
                             (& $operation 'verifyFindings' 'pending')

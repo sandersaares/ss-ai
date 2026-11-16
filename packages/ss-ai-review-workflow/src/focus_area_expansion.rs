@@ -1,6 +1,8 @@
 //! Reference-expansion records and inherited applicability chains.
 
-use std::collections::HashSet;
+use std::any::type_name;
+use std::collections::{HashMap, HashSet};
+use std::fmt::{self, Debug};
 use std::path::Path;
 
 use ohno::AppError;
@@ -12,105 +14,8 @@ use ss_ai_runtime::{Clock, FileTransaction, LockMode, ResourceLock, caused_by, f
 use crate::focus_area_source::{SourceSnapshot, Span, decode_text, source_path};
 use crate::workflow_plan::parse_json;
 
-/// A reference source and the scope inherited from that source.
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
-#[expect(
-    clippy::exhaustive_structs,
-    reason = "The wire schema defines these exact fields"
-)]
-pub struct Referrer {
-    /// Parent reference, or null for a materialized direct source.
-    #[serde(deserialize_with = "required_option")]
-    pub parent_id: Option<String>,
-    /// Exact source span containing the reference.
-    pub source: Span,
-    /// Agent-authored scope judgment.
-    pub scope: String,
-    /// Exact source spans supporting the scope judgment.
-    pub declarations: Vec<Span>,
-}
-
-/// An agent-authored registration for a canonical reference.
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
-#[serde(deny_unknown_fields)]
-#[expect(
-    clippy::exhaustive_structs,
-    reason = "The wire schema defines these exact fields"
-)]
-pub struct ReferenceInput {
-    /// Stable identifier for this target.
-    pub id: String,
-    /// Canonical target URI.
-    pub uri: String,
-    /// Independent contexts that refer to this target.
-    pub referrers: Vec<Referrer>,
-}
-
-/// An agent-authored result for a previously registered target.
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
-#[expect(
-    clippy::exhaustive_structs,
-    reason = "The wire schema defines these exact fields"
-)]
-pub struct ReferenceResult {
-    /// Registered target identifier.
-    pub reference_id: String,
-    /// Expanded paths relative to the raw source root.
-    pub outputs: Vec<String>,
-    /// Failure explanation, or null for success.
-    #[serde(deserialize_with = "required_option")]
-    pub error: Option<String>,
-}
-
-/// One reference and its recorded expansion outcome.
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
-#[serde(deny_unknown_fields)]
-struct Reference {
-    id: String,
-    uri: String,
-    referrers: Vec<Referrer>,
-    state: ReferenceState,
-    outputs: Vec<String>,
-    #[serde(deserialize_with = "required_option")]
-    error: Option<String>,
-}
-
-/// One reference edge in a resolved inheritance chain.
-#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub(crate) struct ReferenceContextLink {
-    reference_id: String,
-    pub(crate) uri: String,
-    source: Span,
-    scope: String,
-    pub(crate) declarations: Vec<Span>,
-}
-
-/// The schema's reference outcome vocabulary.
-#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
-enum ReferenceState {
-    Pending,
-    Complete,
-    Failed,
-}
-
-/// The schema's aggregate expansion state.
-#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
-enum ExpansionState {
-    Unknown,
-    Complete,
-    Degraded,
-}
-
-/// Identifies unfinished discovery when finalization is requested.
-#[ohno::error]
-#[display("References are still pending")]
-struct PendingReferences;
-
 /// The full versioned expansion manifest.
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[derive(Clone, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct Expansion {
     schema_version: u32,
@@ -118,34 +23,13 @@ pub struct Expansion {
     references: Vec<Reference>,
 }
 
-/// A single transaction on the expansion manifest.
-#[derive(Debug)]
-#[expect(
-    clippy::exhaustive_enums,
-    reason = "The variants define the supported operations"
-)]
-pub enum Operation {
-    /// Create an empty, unfinished manifest.
-    Initialize,
-    /// Add a target or another distinct referring context.
-    Register(ReferenceInput),
-    /// Record a successful worker result.
-    Complete(ReferenceResult),
-    /// Record a failed worker result.
-    Fail(ReferenceResult),
-    /// Derive the aggregate state after discovery finishes.
-    Finalize,
-    /// Read the manifest and optionally expand one target's chains.
-    Read(Option<String>),
-}
-
-/// Requires explicit null for nullable schema fields instead of accepting omissions.
-fn required_option<'de, D, T>(deserializer: D) -> Result<Option<T>, D::Error>
-where
-    D: Deserializer<'de>,
-    T: Deserialize<'de>,
-{
-    Option::<T>::deserialize(deserializer)
+impl Debug for Expansion {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct(type_name::<Self>())
+            .field("state", &self.state)
+            .field("reference_count", &self.references.len())
+            .finish_non_exhaustive()
+    }
 }
 
 impl Expansion {
@@ -223,6 +107,15 @@ impl Expansion {
             return Err(fail("invalidInput", "Invalid expansion schema version"));
         }
         let mut ids = HashSet::new();
+        let mut references = HashMap::new();
+        for reference in &self.references {
+            if references
+                .insert(reference.id.as_str(), reference)
+                .is_some()
+            {
+                return Err(fail("invalidInput", "Invalid or duplicate reference"));
+            }
+        }
         let mut uris = HashSet::new();
         let mut outputs = HashSet::new();
         let mut pending = false;
@@ -282,7 +175,9 @@ impl Expansion {
                     if !valid_id(parent_id) || referrer.source.root != "instruction-set-raw" {
                         return Err(fail("invalidInput", "Invalid nested referrer"));
                     }
-                    let parent = self.reference(parent_id)?;
+                    let parent = references
+                        .get(parent_id.as_str())
+                        .ok_or_else(|| fail("invalidInput", "Unknown reference"))?;
                     if parent.state != ReferenceState::Complete
                         || !parent.outputs.iter().any(|output| {
                             source_path(output).ok() == source_path(&referrer.source.path).ok()
@@ -300,8 +195,8 @@ impl Expansion {
                     ));
                 }
             }
-            self.chains(&reference.id, &mut Vec::new())?;
         }
+        self.validate_cycles(&references)?;
         let expected = if failed {
             ExpansionState::Degraded
         } else {
@@ -315,6 +210,43 @@ impl Expansion {
         }
         if require_final && (pending || self.state == ExpansionState::Unknown) {
             return Err(fail("invalidInput", "Expansion must be finalized"));
+        }
+        Ok(())
+    }
+
+    /// Checks the graph once without constructing the potentially many paths.
+    fn validate_cycles<'a>(
+        &'a self,
+        references: &HashMap<&'a str, &'a Reference>,
+    ) -> Result<(), AppError> {
+        let mut checked = HashSet::new();
+        let mut active = HashSet::new();
+        for root in &self.references {
+            if checked.contains(root.id.as_str()) {
+                continue;
+            }
+            active.insert(root.id.as_str());
+            let mut stack = vec![(root, root.referrers.iter())];
+            while let Some((reference, referrers)) = stack.last_mut() {
+                if let Some(referrer) = referrers.next() {
+                    if let Some(parent_id) = referrer.parent_id.as_deref() {
+                        if active.contains(parent_id) {
+                            return Err(fail("invalidInput", "Reference cycle detected"));
+                        }
+                        if !checked.contains(parent_id) {
+                            let parent = references
+                                .get(parent_id)
+                                .ok_or_else(|| fail("invalidInput", "Unknown reference"))?;
+                            active.insert(parent_id);
+                            stack.push((parent, parent.referrers.iter()));
+                        }
+                    }
+                } else {
+                    active.remove(reference.id.as_str());
+                    checked.insert(reference.id.as_str());
+                    stack.pop();
+                }
+            }
         }
         Ok(())
     }
@@ -500,6 +432,173 @@ impl Expansion {
     }
 }
 
+/// A reference source and the scope inherited from that source.
+#[derive(Clone, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+#[expect(
+    clippy::exhaustive_structs,
+    reason = "The wire schema defines these exact fields"
+)]
+pub struct Referrer {
+    /// Parent reference, or null for a materialized direct source.
+    #[serde(deserialize_with = "required_option")]
+    pub parent_id: Option<String>,
+    /// Exact source span containing the reference.
+    pub source: Span,
+    /// Agent-authored scope judgment.
+    pub scope: String,
+    /// Exact source spans supporting the scope judgment.
+    pub declarations: Vec<Span>,
+}
+
+impl Debug for Referrer {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct(type_name::<Self>())
+            .field("parent_id", &self.parent_id)
+            .field("source", &self.source)
+            .field("declaration_count", &self.declarations.len())
+            .finish_non_exhaustive()
+    }
+}
+
+/// An agent-authored registration for a canonical reference.
+#[derive(Clone, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+#[expect(
+    clippy::exhaustive_structs,
+    reason = "The wire schema defines these exact fields"
+)]
+pub struct ReferenceInput {
+    /// Stable identifier for this target.
+    pub id: String,
+    /// Canonical target URI.
+    pub uri: String,
+    /// Independent contexts that refer to this target.
+    pub referrers: Vec<Referrer>,
+}
+
+impl Debug for ReferenceInput {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct(type_name::<Self>())
+            .field("id", &self.id)
+            .field("uri", &self.uri)
+            .field("referrer_count", &self.referrers.len())
+            .finish_non_exhaustive()
+    }
+}
+
+/// An agent-authored result for a previously registered target.
+#[derive(Clone, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+#[expect(
+    clippy::exhaustive_structs,
+    reason = "The wire schema defines these exact fields"
+)]
+pub struct ReferenceResult {
+    /// Registered target identifier.
+    pub reference_id: String,
+    /// Expanded paths relative to the raw source root.
+    pub outputs: Vec<String>,
+    /// Failure explanation, or null for success.
+    #[serde(deserialize_with = "required_option")]
+    pub error: Option<String>,
+}
+
+impl Debug for ReferenceResult {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct(type_name::<Self>())
+            .field("reference_id", &self.reference_id)
+            .field("output_count", &self.outputs.len())
+            .field("has_error", &self.error.is_some())
+            .finish_non_exhaustive()
+    }
+}
+
+/// One reference and its recorded expansion outcome.
+#[derive(Clone, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+struct Reference {
+    id: String,
+    uri: String,
+    referrers: Vec<Referrer>,
+    state: ReferenceState,
+    outputs: Vec<String>,
+    #[serde(deserialize_with = "required_option")]
+    error: Option<String>,
+}
+
+/// One reference edge in a resolved inheritance chain.
+#[derive(Clone, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct ReferenceContextLink {
+    reference_id: String,
+    pub(crate) uri: String,
+    source: Span,
+    scope: String,
+    pub(crate) declarations: Vec<Span>,
+}
+
+impl Debug for ReferenceContextLink {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct(type_name::<Self>())
+            .field("reference_id", &self.reference_id)
+            .field("uri", &self.uri)
+            .field("declaration_count", &self.declarations.len())
+            .finish_non_exhaustive()
+    }
+}
+
+/// The schema's reference outcome vocabulary.
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+enum ReferenceState {
+    Pending,
+    Complete,
+    Failed,
+}
+
+/// The schema's aggregate expansion state.
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+enum ExpansionState {
+    Unknown,
+    Complete,
+    Degraded,
+}
+
+/// Identifies unfinished discovery when finalization is requested.
+#[ohno::error]
+#[display("References are still pending")]
+struct PendingReferences;
+
+/// A single transaction on the expansion manifest.
+#[derive(Debug)]
+#[expect(
+    clippy::exhaustive_enums,
+    reason = "The variants define the supported operations"
+)]
+pub enum Operation {
+    /// Create an empty, unfinished manifest.
+    Initialize,
+    /// Add a target or another distinct referring context.
+    Register(ReferenceInput),
+    /// Record a successful worker result.
+    Complete(ReferenceResult),
+    /// Record a failed worker result.
+    Fail(ReferenceResult),
+    /// Derive the aggregate state after discovery finishes.
+    Finalize,
+    /// Read the manifest and optionally expand one target's chains.
+    Read(Option<String>),
+}
+
+/// Requires explicit null for nullable schema fields instead of accepting omissions.
+fn required_option<'de, D, T>(deserializer: D) -> Result<Option<T>, D::Error>
+where
+    D: Deserializer<'de>,
+    T: Deserialize<'de>,
+{
+    Option::<T>::deserialize(deserializer)
+}
+
 /// Checks the workflow schema's reference identifier vocabulary.
 fn valid_id(id: &str) -> bool {
     !id.is_empty()
@@ -615,8 +714,11 @@ mod tests {
 
     use serde_json::json;
 
-    use super::{Expansion, Operation, PendingReferences, ReferenceInput, ReferenceResult};
-    use crate::focus_area_source::SourceSnapshot;
+    use super::{
+        Expansion, ExpansionState, Operation, PendingReferences, Reference, ReferenceInput,
+        ReferenceResult, ReferenceState, Referrer,
+    };
+    use crate::focus_area_source::{SourceSnapshot, Span};
 
     fn sources() -> SourceSnapshot {
         let files = [
@@ -648,6 +750,112 @@ mod tests {
             outputs: vec![path.to_owned()],
             error: None,
         })
+    }
+
+    fn branching_graph(length: usize) -> (Expansion, SourceSnapshot) {
+        let mut files = BTreeMap::new();
+        files.insert(
+            ("instruction-set-source".to_owned(), "source.md".to_owned()),
+            vec!["source".to_owned()],
+        );
+        let mut references = Vec::new();
+        for index in 0..length {
+            let id = format!("ref-{index}");
+            let output = format!("output-{index}.md");
+            files.insert(
+                ("instruction-set-raw".to_owned(), output.clone()),
+                vec!["reference".to_owned()],
+            );
+            let parent = index.checked_sub(1);
+            let referrers = ["first", "second"]
+                .into_iter()
+                .map(|scope| Referrer {
+                    parent_id: parent.map(|parent| format!("ref-{parent}")),
+                    source: Span {
+                        root: if parent.is_some() {
+                            "instruction-set-raw"
+                        } else {
+                            "instruction-set-source"
+                        }
+                        .to_owned(),
+                        path: parent.map_or_else(
+                            || "source.md".to_owned(),
+                            |parent| format!("output-{parent}.md"),
+                        ),
+                        start_line: 1,
+                        end_line: 1,
+                    },
+                    scope: scope.to_owned(),
+                    declarations: Vec::new(),
+                })
+                .collect();
+            references.push(Reference {
+                id: id.clone(),
+                uri: format!("https://example.invalid/{id}"),
+                referrers,
+                state: ReferenceState::Complete,
+                outputs: vec![output],
+                error: None,
+            });
+        }
+        (
+            Expansion {
+                schema_version: 1,
+                state: ExpansionState::Complete,
+                references,
+            },
+            SourceSnapshot::from_files(files),
+        )
+    }
+
+    #[test]
+    fn validation_handles_branching_graph_and_preserves_all_requested_contexts() {
+        // Keep the graph bounded even if validation materializes every chain.
+        let (branching, sources) = branching_graph(8);
+        branching.validate(&sources, true).unwrap();
+        let (small, sources) = branching_graph(3);
+        small.validate(&sources, true).unwrap();
+        let contexts = small.reference_contexts("ref-2").unwrap();
+        let scopes: Vec<Vec<&str>> = contexts
+            .iter()
+            .map(|context| {
+                context["chain"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .map(|link| link["scope"].as_str().unwrap())
+                    .collect()
+            })
+            .collect();
+        assert_eq!(
+            scopes,
+            vec![
+                vec!["first", "first", "first"],
+                vec!["second", "first", "first"],
+                vec!["first", "second", "first"],
+                vec!["second", "second", "first"],
+                vec!["first", "first", "second"],
+                vec!["second", "first", "second"],
+                vec!["first", "second", "second"],
+                vec!["second", "second", "second"],
+            ]
+        );
+        drop(format!("{small:?} {:?}", small.references[0].referrers[0]));
+    }
+
+    #[test]
+    fn graph_validation_rejects_unknown_parents_cycles_and_wrong_owners() {
+        let (mut expansion, sources) = branching_graph(3);
+        expansion.references[1].referrers[0].parent_id = Some("missing".to_owned());
+        assert!(expansion.validate(&sources, true).is_err());
+        expansion.references[1].referrers[0].parent_id = Some("ref-0".to_owned());
+        expansion.references[1].referrers[0].source.path = "output-1.md".to_owned();
+        assert!(expansion.validate(&sources, true).is_err());
+        expansion.references[1].referrers[0].source.path = "output-0.md".to_owned();
+        expansion.references[0].referrers[0].parent_id = Some("ref-2".to_owned());
+        expansion.references[0].referrers[0].source.root = "instruction-set-raw".to_owned();
+        expansion.references[0].referrers[0].source.path = "output-2.md".to_owned();
+        assert!(expansion.validate(&sources, true).is_err());
     }
 
     #[test]

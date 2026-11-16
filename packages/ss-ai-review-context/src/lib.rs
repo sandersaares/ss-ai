@@ -5,13 +5,16 @@
 mod authorship;
 mod capture;
 mod diagnostics;
+mod error;
 mod json;
 mod producer;
 mod query;
 mod request;
 
 pub use authorship::write_comment_authorship;
-pub use capture::{decode_file_text, evidence_hash, read_capture, snapshot_id};
+pub use capture::{
+    decode_file_text, evidence_hash, read_capture, snapshot_id, validate_capture_version,
+};
 pub use diagnostics::{
     decode_workflow_text, increment_diagnostic, parse_json as parse_workflow_json, read_diagnostics,
 };

@@ -169,6 +169,10 @@ fn exact_unicode_pages_and_native_dispatch() {
         dispatch.find("Apply this recovery policy").unwrap()
             < dispatch.find("ss-ai workflow worker-document").unwrap()
     );
+    assert!(
+        dispatch.find("[Console]::OutputEncoding").unwrap()
+            < dispatch.find("ss-ai workflow worker-document").unwrap()
+    );
     assert_eq!(collect(assignment_path, "scope"), expected);
     let data = collect(assignment_path, "workflowData");
     let skill = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../skills/ss-review");
@@ -459,6 +463,8 @@ fn bounded_pages_match_the_largest_encoded_candidate() {
     let scope = workspace.put("scope.md", &text);
     let result = create(&workspace, "references", &scope);
     let assignment = Path::new(result["assignmentPath"].as_str().unwrap());
+    // Sample the supplementary character, escaped-to-ASCII transition, and
+    // final character; their UTF-16 offsets also exercise encoded-byte sizing.
     for offset in [
         0,
         16_999,
@@ -695,6 +701,52 @@ fn invalid_utf8_is_rejected_before_publication() {
     };
     assert!(create_assignment(&options, &TestClock).is_err());
     assert!(!workspace.0.join("attempt/assignment.json").exists());
+}
+
+#[test]
+fn guidance_removes_only_one_utf8_bom_and_rejects_malformed_bytes() {
+    let workspace = Workspace::new("guidance-bom");
+    let scope = workspace.put("scope.md", "scope");
+    let skill = workspace.0.join("skill");
+    fs::create_dir_all(&skill).unwrap();
+    fs::write(skill.join("prepare-references.md"), "template").unwrap();
+    for (name, bytes, expected) in [
+        ("plain", &b"policy"[..], Some("policy")),
+        ("bom", &b"\xef\xbb\xbfpolicy"[..], Some("policy")),
+        (
+            "double",
+            &b"\xef\xbb\xbf\xef\xbb\xbfpolicy"[..],
+            Some("\u{feff}policy"),
+        ),
+        ("invalid", &b"\xef\xbb\xbf\xff"[..], None),
+    ] {
+        fs::write(skill.join("error-recovery.md"), bytes).unwrap();
+        let output = workspace.0.join(name);
+        let result = create_assignment(
+            &AssignmentOptions {
+                phase: "references",
+                session_state: &workspace.0,
+                scope_path: &scope,
+                output_directory: &output,
+                skill_root: &skill,
+                manifest_path: None,
+                reviewer_id: None,
+                context_path: None,
+                resume: false,
+                repository_instructions: false,
+                include_pre_existing: false,
+            },
+            &TestClock,
+        );
+        if let Some(expected) = expected {
+            let result = result.unwrap();
+            let dispatch = result["dispatchPrompt"].as_str().unwrap();
+            assert!(dispatch.contains(&format!("\n{expected}\n")));
+        } else {
+            assert!(result.is_err());
+            assert!(!output.join("assignment.json").exists());
+        }
+    }
 }
 
 #[test]

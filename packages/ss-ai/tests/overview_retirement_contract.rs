@@ -277,7 +277,14 @@ impl Http for AzureProvider {
         self.requests.borrow_mut().push(format!("{method} {url}"));
         let response = if method == "POST" {
             body.unwrap().clone_into(&mut self.archive.borrow_mut());
-            br#"{"id":3}"#.to_vec()
+            let name = url
+                .split_once("/attachments/")
+                .unwrap()
+                .1
+                .split('?')
+                .next()
+                .unwrap();
+            serde_json::to_vec(&json!({"id": name})).unwrap()
         } else {
             assert_eq!(method, "GET");
             self.archive.borrow().clone()

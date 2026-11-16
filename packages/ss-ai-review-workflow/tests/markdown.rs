@@ -585,6 +585,7 @@ fn tracker_provenance_uses_exact_ids_and_preserves_capture_fallback() {
     }
 }
 
+/// Singleton captures must render like arrays across document destinations.
 #[test]
 fn captured_singleton_collections_render_like_arrays() {
     let plain = finding("F1", "reviewer");
@@ -659,6 +660,7 @@ fn captured_singleton_collections_render_like_arrays() {
     }
 }
 
+/// Singleton captures retain the same fallback and rejection rules as arrays.
 #[test]
 fn captured_singleton_collections_preserve_fallback_and_validation() {
     let mut follow = finding("F1", "reviewer");
@@ -720,6 +722,7 @@ fn captured_singleton_collections_preserve_fallback_and_validation() {
     assert!(!output.exists());
 }
 
+/// Check PowerShell request construction and Rust rendering without invoking the native CLI.
 #[test]
 fn singleton_capture_preserves_provenance_for_native_documents() {
     let mut follow = finding("F1", "reviewer");

@@ -48,6 +48,7 @@ BeforeAll {
 
 Describe 'Native review work CLI' {
     BeforeEach {
+        $script:AlternatePaths = $false
         $script:Root = Join-Path $TestDrive ([guid]::NewGuid())
         $script:Areas = Join-Path $script:Root 'focus-areas'
         [void] [IO.Directory]::CreateDirectory($script:Areas)

@@ -137,9 +137,9 @@ pub fn discover(
             .execute(&path_text(node)?, &arguments, &[])
             .map_err(|error| caused_by("io", "Cannot discover Puppeteer browser", error))?;
         if result.success {
-            let output = String::from_utf8(result.stdout)
+            let path = String::from_utf8(result.stdout)
                 .map_err(|error| caused_by("invalidInput", "Browser path is not UTF-8", error))?;
-            let path = PathBuf::from(output.trim_end_matches(['\r', '\n']));
+            let path = PathBuf::from(path.trim_end_matches(['\r', '\n']));
             if !path.as_os_str().is_empty() {
                 browser = Some(path);
             }
@@ -294,7 +294,7 @@ fn package_file(path: &Path) -> Result<bool, AppError> {
 /// Looks up a runtime without evaluating shell profiles or repository configuration.
 fn node_path(process: &dyn Process) -> Result<Option<PathBuf>, AppError> {
     if let Some(path) = find_on_path("node") {
-        return Ok(Some(path));
+        return absolute_node(path).map(Some);
     }
     let variable = if cfg!(windows) {
         "NVM_SYMLINK"
@@ -305,7 +305,7 @@ fn node_path(process: &dyn Process) -> Result<Option<PathBuf>, AppError> {
         .map(|path| PathBuf::from(path).join(executable_name("node")))
         .filter(|path| path.is_file())
     {
-        return Ok(Some(path));
+        return absolute_node(path).map(Some);
     }
     if cfg!(windows) {
         return Ok(None);
@@ -330,10 +330,10 @@ fn node_path(process: &dyn Process) -> Result<Option<PathBuf>, AppError> {
         "ss-review-node".to_owned(),
         path_text(&nvm)?,
     ];
-    let output = run(process, &shell, &arguments)?;
-    let output = String::from_utf8(output)
+    let path = run(process, &shell, &arguments)?;
+    let path = String::from_utf8(path)
         .map_err(|error| caused_by("invalidInput", "nvm returned a non-UTF-8 path", error))?;
-    let path = PathBuf::from(output.trim_end_matches(['\r', '\n']));
+    let path = PathBuf::from(path.trim_end_matches(['\r', '\n']));
     if !path.is_absolute() || !path.is_file() {
         return Err(fail(
             "invalidInput",
@@ -344,6 +344,12 @@ fn node_path(process: &dyn Process) -> Result<Option<PathBuf>, AppError> {
         ));
     }
     Ok(Some(path))
+}
+
+/// Keeps the selected runtime stable when npm runs from its staging directory.
+fn absolute_node(path: PathBuf) -> Result<PathBuf, AppError> {
+    std::path::absolute(path)
+        .map_err(|error| caused_by("io", "Cannot resolve Node.js executable path", error).into())
 }
 
 /// Matches the shell's treatment of empty configuration variables as absent.
@@ -440,9 +446,19 @@ fn install_mermaid(
         .parent()
         .ok_or_else(|| fail("invalidInput", "Node path has no parent"))?;
     let path = env::var_os("PATH").unwrap_or_default();
-    let path =
-        env::join_paths(std::iter::once(parent.to_path_buf()).chain(env::split_paths(&path)))
-            .map_err(|error| caused_by("invalidInput", "Cannot construct npm PATH", error))?;
+    let working_directory = env::current_dir()
+        .map_err(|error| caused_by("io", "Cannot resolve report setup working directory", error))?;
+    // The child runs in staging, so resolve relative entries before changing its working directory.
+    let path = env::join_paths(std::iter::once(parent.to_path_buf()).chain(
+        env::split_paths(&path).map(|entry| {
+            if entry.is_absolute() {
+                entry
+            } else {
+                working_directory.join(entry)
+            }
+        }),
+    ))
+    .map_err(|error| caused_by("invalidInput", "Cannot construct npm PATH", error))?;
     if staging.is_some() {
         for name in ["package.json", "package-lock.json"] {
             fs::copy(skill_root.join("tools").join(name), directory.join(name)).map_err(
@@ -497,7 +513,8 @@ fn install_mermaid(
         return Err(fail(
             "io",
             format!(
-                "Installing Mermaid's browser failed: {}. Follow report-tool-setup.md; browser cache deletion requires separate approval.",
+                "Installing Mermaid's browser failed. stdout:\n{}\nstderr:\n{}. Follow report-tool-setup.md; browser cache deletion requires separate approval.",
+                String::from_utf8_lossy(&output.stdout),
                 String::from_utf8_lossy(&output.stderr)
             ),
         ));

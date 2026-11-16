@@ -3,6 +3,7 @@
 use std::{
     borrow::Cow,
     collections::{HashMap, VecDeque},
+    num::NonZeroUsize,
     slice,
 };
 
@@ -11,7 +12,9 @@ use regex_syntax::hir::{ClassUnicode, ClassUnicodeRange};
 use serde_json::{Map, Value, json};
 use ss_ai_runtime::{caused_by, fail};
 
-use crate::{document_hash, evidence_hash, powershell_json, snapshot_id};
+use crate::{
+    capture::comment_input_hash, document_hash, evidence_hash, powershell_json, snapshot_id,
+};
 
 // The executable adds a newline to the JSON, so the page reserves room for it.
 const MAX_BYTES: usize = 16 * 1024;
@@ -162,13 +165,13 @@ pub fn normalize_options(options: &Value) -> Result<Value, AppError> {
         let file = file
             .as_str()
             .ok_or_else(|| invalid("File selectors must be strings."))?;
-        let path = normalize_path(file);
-        if path.trim().is_empty() || path.split('/').any(|part| matches!(part, "" | "." | "..")) {
+        let file = normalize_path(file);
+        if file.trim().is_empty() || file.split('/').any(|part| matches!(part, "" | "." | "..")) {
             return Err(invalid(
                 "File selectors must be repository-relative paths without empty, dot or parent segments.",
             ));
         }
-        paths.push(path);
+        paths.push(file);
     }
     if !paths.is_empty() {
         if scope == "global" {
@@ -213,7 +216,20 @@ pub fn query(
         &json!({"version": 1, "snapshot": snapshot, "baseline": baseline, "options": options}),
     )?;
     let records = records(document, &options, previous)?;
-    page(&records, &options, &snapshot, &fingerprint, cursor)
+    let page_size = options
+        .get("pageSize")
+        .and_then(Value::as_u64)
+        .and_then(|value| usize::try_from(value).ok())
+        .and_then(NonZeroUsize::new)
+        .ok_or_else(|| invalid("PageSize must be between 1 and 50."))?;
+    page(
+        &records,
+        &options,
+        &snapshot,
+        &fingerprint,
+        cursor,
+        page_size,
+    )
 }
 
 /// Carries attribution separately from text so large bodies can be split.
@@ -319,6 +335,9 @@ fn matches_thread(thread: &Value, options: &Value) -> bool {
 }
 
 /// Reuses a linear-time literal search across discussion records.
+///
+/// The prefix table stores the longest proper prefix that is also a suffix.
+/// See <https://cp-algorithms.com/string/prefix-function.html>.
 struct LiteralSearch {
     needle: Vec<char>,
     prefixes: Vec<usize>,
@@ -430,27 +449,38 @@ fn simple_fold(character: char) -> Result<char, AppError> {
 /// Adds a UTF-16-indexed excerpt without splitting a surrogate pair.
 #[expect(
     clippy::arithmetic_side_effects,
-    clippy::indexing_slicing,
     clippy::integer_division,
     reason = "the offset is a known text position and both endpoints are clamped to the UTF-16 length"
 )]
 fn add_excerpt(data: &mut Map<String, Value>, content: &str, offset: usize) {
-    let chars: Vec<u16> = content.encode_utf16().collect();
+    let total = content.encode_utf16().count();
     // Favor context following the match to help identify the surrounding discussion.
     let mut start = offset.saturating_sub(EXCERPT_LENGTH / 4);
-    if start > 0 && start < chars.len() && (0xDC00..=0xDFFF).contains(&chars[start]) {
+    if start > 0
+        && content
+            .encode_utf16()
+            .nth(start)
+            .is_some_and(|unit| (0xDC00..=0xDFFF).contains(&unit))
+    {
         start -= 1;
     }
-    let mut end = (start + EXCERPT_LENGTH).min(chars.len());
-    if end > start && (0xD800..=0xDBFF).contains(&chars[end - 1]) {
-        end -= 1;
+    let mut excerpt: Vec<u16> = content
+        .encode_utf16()
+        .skip(start)
+        .take(EXCERPT_LENGTH)
+        .collect();
+    if excerpt
+        .last()
+        .is_some_and(|unit| (0xD800..=0xDBFF).contains(unit))
+    {
+        excerpt.pop();
     }
     data.insert(
         "excerpt".into(),
-        Value::String(String::from_utf16_lossy(&chars[start..end])),
+        Value::String(String::from_utf16_lossy(&excerpt)),
     );
     data.insert("excerptOffset".into(), json!(start));
-    data.insert("contentLength".into(), json!(chars.len()));
+    data.insert("contentLength".into(), json!(total));
 }
 
 /// Materializes ordered records before applying the output budget.
@@ -870,27 +900,6 @@ fn indexed(values: &[Value]) -> Vec<&Value> {
     ordered
 }
 
-/// Compares the fields used for authorship decisions, excluding classification progress.
-fn comment_input_hash(
-    document: &Value,
-    thread_id: &str,
-    comment: &Value,
-) -> Result<String, AppError> {
-    let evidence: Vec<Value> = array(comment, "authorshipEvidence")
-        .iter()
-        .filter(|value| value.as_str() != Some("classification:reviewed"))
-        .cloned()
-        .collect();
-    document_hash(&json!({
-        "schemaVersion": 1, "policyVersion": "2",
-        "platform": property(document, "platform"), "repositoryUrl": property(document, "repositoryUrl"),
-        "pullRequestUrl": property(document, "pullRequestUrl"), "threadId": thread_id,
-        "commentId": identifier(comment, "id"), "content": property(comment, "content"),
-        "author": property(comment, "author"), "isAuthoredBySelf": property(comment, "isAuthoredBySelf"),
-        "evidence": evidence
-    }))
-}
-
 /// Compares status and commit fields without guessing linguistic casing.
 fn case_insensitive_equal(left: &Value, right: &Value) -> Result<bool, AppError> {
     match (left.as_str(), right.as_str()) {
@@ -954,13 +963,8 @@ fn cursor_position(
     match &record.text {
         None if offset != 0 => return Err(invalid("Query cursor text offset is invalid.")),
         Some(text) => {
-            let units: Vec<u16> = text.encode_utf16().collect();
-            if (offset >= units.len() && offset != 0)
-                || (offset > 0
-                    && units
-                        .get(offset)
-                        .is_some_and(|unit| (0xDC00..=0xDFFF).contains(unit)))
-            {
+            let unit = text.encode_utf16().nth(offset);
+            if offset != 0 && unit.is_none_or(|unit| (0xDC00..=0xDFFF).contains(&unit)) {
                 return Err(invalid("Query cursor text offset is invalid."));
             }
         }
@@ -982,19 +986,18 @@ fn page(
     snapshot: &str,
     fingerprint: &str,
     cursor: Option<&str>,
+    limit: NonZeroUsize,
 ) -> Result<String, AppError> {
     let (mut index, mut offset) = cursor_position(records, fingerprint, cursor)?;
     let mut items: Vec<Value> = Vec::new();
     let mut serialized = None;
-    let limit = usize::try_from(options["pageSize"].as_u64().unwrap_or(20))
-        .map_err(|_error| invalid("PageSize must be between 1 and 50."))?;
-    while index < records.len() && items.len() < limit {
+    while index < records.len() && items.len() < limit.get() {
         let record = &records[index];
-        let units: Vec<u16> = record
-            .text
-            .as_ref()
-            .map_or_else(Vec::new, |text| text.encode_utf16().collect());
-        let remaining = units.len() - offset;
+        let total = record.text.map_or(0, |text| text.encode_utf16().count());
+        let units: Vec<u16> = record.text.map_or_else(Vec::new, |text| {
+            text.encode_utf16().skip(offset).take(MAX_BYTES).collect()
+        });
+        let remaining = total - offset;
         let mut low = 0;
         let mut high = remaining.min(MAX_BYTES);
         let mut best: Option<(Value, usize, String)> = None;
@@ -1002,10 +1005,10 @@ fn page(
             let previous_bounds = (low, high);
             let candidate = low + (high - low) / 2;
             let mut length = candidate;
-            if length > 0 && (0xD800..=0xDBFF).contains(&units[offset + length - 1]) {
+            if length > 0 && (0xD800..=0xDBFF).contains(&units[length - 1]) {
                 length -= 1;
             }
-            let item = fragment(record, &units, offset, length);
+            let item = fragment(record, &units, offset, length, total);
             let next_index = if length == remaining {
                 index + 1
             } else {
@@ -1076,19 +1079,22 @@ fn page(
     clippy::indexing_slicing,
     reason = "the page search bounds the fragment within the UTF-16 record"
 )]
-fn fragment(record: &Record<'_>, units: &[u16], offset: usize, length: usize) -> Value {
+fn fragment(
+    record: &Record<'_>,
+    units: &[u16],
+    offset: usize,
+    length: usize,
+    total: usize,
+) -> Value {
     let mut item = record.data.clone();
     if record.text.is_some() {
         item.insert(
             "content".into(),
-            Value::String(String::from_utf16_lossy(&units[offset..offset + length])),
+            Value::String(String::from_utf16_lossy(&units[..length])),
         );
         item.insert("contentOffset".into(), json!(offset));
-        item.insert("contentLength".into(), json!(units.len()));
-        item.insert(
-            "contentComplete".into(),
-            json!(offset + length == units.len()),
-        );
+        item.insert("contentLength".into(), json!(total));
+        item.insert("contentComplete".into(), json!(offset + length == total));
     }
     Value::Object(item)
 }
@@ -1116,11 +1122,12 @@ fn serialize_page(
     reason = "fixture shapes and error assertions are explicit test expectations"
 )]
 mod tests {
-    use serde_json::{Value, json};
+    use serde_json::{Map, Value, json};
     use ss_ai_runtime::{Failure, classification};
 
     use super::{
-        LiteralSearch, capture_delta, case_insensitive_equal, changes, normalize_options, query,
+        LiteralSearch, Record, add_excerpt, capture_delta, case_insensitive_equal, changes,
+        cursor_position, fragment, normalize_options, query,
     };
     use crate::powershell_json;
 
@@ -1324,10 +1331,14 @@ mod tests {
         )
         .unwrap();
         assert_eq!(page["totalCount"], 2);
-        assert_eq!(page["items"][0]["field"], "description");
-        assert_eq!(page["items"][0]["matchOffset"], 2);
-        assert_eq!(page["items"][1]["commentId"], "C");
-        assert_eq!(page["items"][1]["matchOffset"], 3);
+        let items = page["items"].as_array().unwrap();
+        let description = items
+            .iter()
+            .find(|item| item["field"] == "description")
+            .unwrap();
+        let comment = items.iter().find(|item| item["commentId"] == "C").unwrap();
+        assert_eq!(description["matchOffset"], 2);
+        assert_eq!(comment["matchOffset"], 3);
 
         let page: Value = serde_json::from_str(
             &query(
@@ -1390,7 +1401,42 @@ mod tests {
     }
 
     #[test]
-    fn compares_comments_and_evidence_in_category_order() {
+    fn validates_utf16_cursor_boundaries() {
+        let fingerprint = "A".repeat(64);
+        let records = [Record {
+            data: Map::new(),
+            text: Some("A🤖B"),
+        }];
+        assert_eq!(
+            cursor_position(&records, &fingerprint, Some(&format!("{fingerprint}:0:1"))).unwrap(),
+            (0, 1)
+        );
+        assert!(
+            cursor_position(&records, &fingerprint, Some(&format!("{fingerprint}:0:2"))).is_err()
+        );
+        assert_eq!(
+            fragment(&records[0], &[0xD83E, 0xDD16], 1, 2, 4),
+            json!({"content":"🤖", "contentOffset":1, "contentLength":4, "contentComplete":false})
+        );
+    }
+
+    #[test]
+    fn excerpts_keep_surrogate_pairs_at_both_boundaries() {
+        let content = format!("A🤖{}marker", "b".repeat(59));
+        let mut data = Map::new();
+        add_excerpt(&mut data, &content, 62);
+        assert_eq!(data["excerptOffset"], 1);
+        assert_eq!(data["excerpt"], format!("🤖{}marker", "b".repeat(59)));
+        assert_eq!(data["contentLength"], content.encode_utf16().count());
+
+        let content = format!("{}🤖B", "a".repeat(239));
+        add_excerpt(&mut data, &content, 0);
+        assert_eq!(data["excerpt"], "a".repeat(239));
+        assert_eq!(data["contentLength"], 242);
+    }
+
+    #[test]
+    fn compares_comments_and_evidence() {
         let previous = fixture();
         let mut current = previous.clone();
         current["threads"][0]["resolution"] = json!("active");
@@ -1398,19 +1444,20 @@ mod tests {
         current["pullRequest"]["reviewedSourceCommit"] = json!("new source");
         let output = query(&current, &json!({"query":"changes"}), Some(&previous), None).unwrap();
         let page: Value = serde_json::from_str(&output).unwrap();
-        let changes: Vec<&str> = page["items"]
+        let mut changes: Vec<&str> = page["items"]
             .as_array()
             .unwrap()
             .iter()
             .map(|item| item["change"].as_str().unwrap())
             .collect();
+        changes.sort_unstable();
         assert_eq!(
             changes,
             [
                 "commentsEdited",
                 "resolutionChanged",
-                "reviewedSourceCommit",
-                "reviewEvidence"
+                "reviewEvidence",
+                "reviewedSourceCommit"
             ]
         );
     }

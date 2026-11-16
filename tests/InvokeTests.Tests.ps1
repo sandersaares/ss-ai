@@ -105,7 +105,9 @@ Describe 'prepared helper' {
 '@.Replace('__TARGET_LOG__', $targetLog.Replace("'", "''")).Replace('__HELPER_NAMES__', $(if ($NativePesterName -eq 'SsReviewWorkerInput.Tests.ps1') {
                     "'SS_AI_WORKER_INPUT_TEST_EXECUTABLE'"
                 } else {
-                    "'SS_AI_FINDING_TEST_EXECUTABLE', 'SS_AI_AUDIT_TEST_EXECUTABLE', 'SS_AI_REVIEW_WORK_TEST_EXECUTABLE'"
+                    "'SS_AI_FINDING_TEST_EXECUTABLE', " +
+                    "'SS_AI_AUDIT_TEST_EXECUTABLE', " +
+                    "'SS_AI_REVIEW_WORK_TEST_EXECUTABLE'"
                 })))
         }
         $testPath = if ($FailNativePester -or $NativePrerequisiteSucceeds) { $root } else { $test }

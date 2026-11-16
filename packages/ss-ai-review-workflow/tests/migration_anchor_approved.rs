@@ -205,7 +205,9 @@ fn approved_inputs(files: &Files, findings: &[Value]) -> (PathBuf, PathBuf, Path
         "reviewers":[],"revisions":[],"threads":[{"id":"T","openingCommentId":"C","kind":"text",
             "resolution":"active","isOutdated":false,"isAuthoredBySelf":false,
             "context":{"filePath":"src/lib.rs"},"decision":null,"url":null,"eventUtc":null,
-            "lastUpdatedUtc":null,"comments":[]}]
+            "lastUpdatedUtc":null,"comments":[{"id":"C","parentId":null,"url":null,
+                "publishedUtc":null,"lastEditedUtc":null,"author":null,"content":null,
+                "authorship":"human","authorshipEvidence":[],"isAuthoredBySelf":false}]}]
     }));
     (artifact, decisions, capture)
 }
@@ -250,7 +252,9 @@ fn approved_projection_preserves_anchors_followups_and_unanchored_reasons() {
         "reviewers":[],"revisions":[],"threads":[{"id":"T","openingCommentId":"C","kind":"text",
             "resolution":"active","isOutdated":false,"isAuthoredBySelf":false,
             "context":{"filePath":"src/lib.rs"},"decision":null,"url":null,"eventUtc":null,
-            "lastUpdatedUtc":null,"comments":[]}]
+            "lastUpdatedUtc":null,"comments":[{"id":"C","parentId":null,"url":null,
+                "publishedUtc":null,"lastEditedUtc":null,"author":null,"content":null,
+                "authorship":"human","authorshipEvidence":[],"isAuthoredBySelf":false}]}]
     }));
     let output = files.path("approved");
     let result = approved::build_approved(

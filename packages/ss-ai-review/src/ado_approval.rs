@@ -1,4 +1,4 @@
-use std::collections::{HashMap, HashSet};
+use std::collections::HashSet;
 
 use jiff::Timestamp;
 use ohno::AppError;
@@ -10,7 +10,7 @@ use crate::approval::{Decision, Evidence as ProviderEvidence};
 use crate::clock::timestamp;
 use crate::error::fail;
 use crate::json::{array, boolean, field, identifier, project, text};
-use crate::renewal::{Anchor, Audit};
+use crate::renewal::Anchor;
 use crate::review_notice::ApprovalEvent;
 use crate::target::{Target, escape};
 use crate::transport::ado_items;
@@ -54,36 +54,55 @@ struct ApprovalPolicy {
     fresh_iteration: bool,
 }
 
-/// Joins a separate authenticated audit to ADO's source-iteration vote event.
-#[derive(Clone, Debug, Deserialize, Serialize)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
-pub(crate) struct Renewal {
-    pub(crate) audit: Audit,
-    pub(crate) vote_event_id: String,
-    pub(crate) iteration_id: u64,
-}
-
 impl Evidence {
-    /// Exposes authenticated positive event times for notice expiry and result reporting.
-    pub(crate) fn approval_events(
+    /// Replays observed account decisions without requiring current PR eligibility.
+    pub(crate) fn reset_superseded(
         &self,
         account: &str,
-        repository: &str,
-        number: u32,
+        current_vote: i64,
         now: Timestamp,
-    ) -> Result<Vec<ApprovalEvent>, AppError> {
+    ) -> Result<bool, AppError> {
         let Self::History {
             threads,
             iterations,
             ..
         } = self
         else {
+            return Err(fail(
+                "invalidState",
+                "Approval reset requires captured ADO history",
+            ));
+        };
+        // Resetting never grants approval: reuse authority replay with no freshness-policy requirement.
+        let decision = decide_history(
+            &ordered_events(threads, now)?,
+            iterations,
+            &ApprovalPolicy::default(),
+            account,
+            Some(current_vote),
+            false,
+        )?;
+        Ok(
+            matches!(decision, Decision::Ineligible { reason } if matches!(
+                reason.as_str(),
+                "negativeDecision" | "approvalWithdrawn" | "reviewerRemoved"
+                    | "pendingHumanReview" | "approvalByOtherActor"
+            )),
+        )
+    }
+
+    /// Exposes authenticated positive event times for notice expiry and result reporting.
+    pub(crate) fn approval_events(
+        &self,
+        account: &str,
+        _repository: &str,
+        _number: u32,
+        now: Timestamp,
+    ) -> Result<Vec<ApprovalEvent>, AppError> {
+        let Self::History { threads, .. } = self else {
             return Ok(Vec::new());
         };
         let events = ordered_events(threads, now)?;
-        let renewals = renewals(
-            threads, &events, iterations, account, repository, number, now,
-        )?;
         let mut approvals = Vec::new();
         for event in events {
             if event.kind == "VoteUpdate"
@@ -98,11 +117,7 @@ impl Evidence {
                     "5" | "10"
                 )
             {
-                approvals.push(ApprovalEvent {
-                    automatic: renewals.contains_key(&event.id),
-                    id: event.id,
-                    at: event.at,
-                });
+                approvals.push(ApprovalEvent { at: event.at });
             }
         }
         Ok(approvals)
@@ -202,38 +217,6 @@ impl Evidence {
                 });
             }
         }
-        // Deleted audit attribution cannot turn an automatic vote into an external
-        // anchor. Retained marker bytes only veto authority (docs/reapproval.md).
-        let deleted_audit = threads.iter().any(|thread| {
-            thread
-                .get("comments")
-                .and_then(Value::as_array)
-                .is_some_and(|comments| {
-                    comments.iter().any(|comment| {
-                        (is_deleted(thread) || is_deleted(comment))
-                            && comment.pointer("/author/id").and_then(Value::as_str)
-                                == Some(account)
-                            && comment
-                                .get("content")
-                                .and_then(Value::as_str)
-                                .is_some_and(|body| body.contains("<!-- ss-autoreapprove"))
-                    })
-                })
-        });
-        let mut renewals = renewals(
-            threads,
-            &events,
-            iterations,
-            account,
-            repository,
-            number,
-            observed_at,
-        )?;
-        if deleted_audit {
-            // Lost attribution prevents interpreting a renewal chain. Still replay
-            // surviving explicit decisions below, but never grant approval authority.
-            renewals.clear();
-        }
         let deleted_history = threads.iter().any(|thread| {
             is_deleted(thread)
                 || thread
@@ -241,21 +224,14 @@ impl Evidence {
                     .and_then(Value::as_array)
                     .is_some_and(|comments| comments.iter().any(is_deleted))
         });
-        let decision = decide_history(
+        decide_history(
             &events,
             iterations,
             &policy,
             account,
             current,
-            &renewals,
             deleted_history,
-        )?;
-        if deleted_audit && !matches!(decision, Decision::Ineligible { .. }) {
-            return Ok(Decision::Ineligible {
-                reason: "approvalEvidenceDeleted".to_owned(),
-            });
-        }
-        Ok(decision)
+        )
     }
 }
 
@@ -276,7 +252,7 @@ pub(crate) fn capture(api: &mut Api<'_>, target: &Target) -> Result<Evidence, Ap
 fn observe(api: &mut Api<'_>, target: &Target) -> Result<Evidence, AppError> {
     let pr = project_pull_request(&api.transport.request(&target.pr_api(), "GET", None)?);
     if excluded(&pr)?.is_some() {
-        return Ok(Evidence::State { pull_request: pr });
+        return compact(&Evidence::State { pull_request: pr });
     }
     let source_commit = read_ref(api, target, text(field(&pr, "sourceRefName")?)?)?;
     let reviewers = unique_list(api, &format!("{}/reviewers", target.pr_api()), "id")?;
@@ -376,6 +352,31 @@ fn compact(evidence: &Evidence) -> Result<Evidence, AppError> {
                 // Evaluation replicas contribute only policy identity, settings and applicability.
                 *configuration =
                     project(&project_policy(configuration), &["id", "type", "settings"]);
+            }
+        }
+    }
+    // Retained provider objects use sorted keys even when context enables
+    // insertion-ordered JSON. Keep the evidence enum's typed field order intact.
+    match &mut evidence {
+        Evidence::State { pull_request } => pull_request.sort_all_objects(),
+        Evidence::History {
+            pull_request,
+            reviewers,
+            iterations,
+            threads,
+            policies,
+            evaluations,
+            ..
+        } => {
+            pull_request.sort_all_objects();
+            for value in reviewers
+                .iter_mut()
+                .chain(iterations)
+                .chain(threads)
+                .chain(policies)
+                .chain(evaluations)
+            {
+                value.sort_all_objects();
             }
         }
     }
@@ -491,12 +492,8 @@ pub(crate) fn project_threads(threads: &[Value]) -> Result<Vec<Value>, AppError>
         }
         if let Some(Value::Array(comments)) = thread.get_mut("comments") {
             for comment in comments {
-                let service_text = comment.get("commentType").and_then(Value::as_str)
-                    == Some("system")
-                    && !comment
-                        .get("content")
-                        .and_then(Value::as_str)
-                        .is_some_and(|body| body.contains("<!-- ss-autoreapprove"));
+                let service_text =
+                    comment.get("commentType").and_then(Value::as_str) == Some("system");
                 let updated = comment
                     .get("lastContentUpdatedDate")
                     .or_else(|| comment.get("lastUpdatedDate"))
@@ -544,10 +541,6 @@ fn routine_thread(thread: &Value) -> Result<bool, AppError> {
         || comments.iter().any(|comment| {
             is_deleted(comment)
                 || comment.get("commentType").and_then(Value::as_str) != Some("system")
-                || comment
-                    .get("content")
-                    .and_then(Value::as_str)
-                    .is_some_and(|body| body.contains("<!-- ss-autoreapprove"))
         })
     {
         return Ok(false);
@@ -1063,7 +1056,6 @@ fn decide_history(
     policy: &ApprovalPolicy,
     account: &str,
     current: Option<i64>,
-    renewals: &HashMap<String, Renewal>,
     deleted_history: bool,
 ) -> Result<Decision, AppError> {
     let mut latest = None;
@@ -1087,51 +1079,19 @@ fn decide_history(
                 })?;
                 vote(&json!(value))?;
                 if voter == account {
-                    let mut applicable = initiator == account && matches!(value, 5 | 10);
-                    if let Some(renewal) = renewals.get(&event.id) {
-                        if deleted_history
-                            && (approval.is_none()
-                                || !events
-                                    .iter()
-                                    .any(|event| event.id == renewal.audit.anchor.review_id))
-                        {
-                            // A renewal cannot replace its deleted external anchor.
-                            applicable = false;
-                            anchor = None;
-                        } else {
-                            let previous: &Event<'_> = approval.ok_or_else(|| {
-                                fail("service", "ADO renewal has no preceding approval authority")
-                            })?;
-                            if initiator != account
-                                || !matches!(value, 5 | 10)
-                                || anchor.as_ref() != Some(&renewal.audit.anchor)
-                                || latest != Some(value)
-                                || field(iteration_at(iterations, previous.at)?, "id")?
-                                    == field(iteration_at(iterations, event.at)?, "id")?
-                            {
-                                return Err(fail(
-                                    "service",
-                                    "ADO renewal does not preserve invalidated external authority",
-                                ));
-                            }
-                        }
-                    } else {
-                        anchor = (initiator == account && matches!(value, 5 | 10))
-                            .then(|| -> Result<Anchor, AppError> {
-                                Ok(Anchor {
-                                    review_id: event.id.clone(),
-                                    source_commit: text(field(
-                                        field(
-                                            iteration_at(iterations, event.at)?,
-                                            "sourceRefCommit",
-                                        )?,
-                                        "commitId",
-                                    )?)?
-                                    .to_owned(),
-                                })
+                    let applicable = initiator == account && matches!(value, 5 | 10);
+                    anchor = applicable
+                        .then(|| -> Result<Anchor, AppError> {
+                            Ok(Anchor {
+                                review_id: event.id.clone(),
+                                source_commit: text(field(
+                                    field(iteration_at(iterations, event.at)?, "sourceRefCommit")?,
+                                    "commitId",
+                                )?)?
+                                .to_owned(),
                             })
-                            .transpose()?;
-                    }
+                        })
+                        .transpose()?;
                     latest = Some(value);
                     // A proxy positive vote is not the account's approval authority.
                     approval = applicable.then_some(event);
@@ -1194,7 +1154,7 @@ fn decide_history(
                     if reviewer == account {
                         relevant = true;
                         // Neither declining nor undoing a decline approves a source.
-                        // A later direct vote must establish its own external anchor.
+                        // A later direct vote must establish its own approval baseline.
                         approval = None;
                         anchor = None;
                         declined = Some(value);
@@ -1261,7 +1221,7 @@ fn decide_history(
         return Ok(Decision::NoPriorApproval);
     }
     if latest.is_none() && deleted_history {
-        // A current positive vote alone supplies neither an external approval
+        // A current positive vote alone supplies neither an approval
         // event nor an approved source. Missing deleted authority is not work.
         return Ok(Decision::NoPriorApproval);
     }
@@ -1293,7 +1253,7 @@ fn decide_history(
         if advanced && policy.fresh_iteration {
             return Ok(Decision::AssessmentRequired {
                 anchor: anchor
-                    .ok_or_else(|| fail("service", "ADO approval lost its external anchor"))?,
+                    .ok_or_else(|| fail("service", "ADO approval lost its source anchor"))?,
                 approval_event_id: approval.id.clone(),
             });
         }
@@ -1339,31 +1299,6 @@ fn updated_reviewer<'a>(
     }
 }
 
-/// Producer and publication validation use the same latest source-iteration binding.
-pub(crate) fn source_iteration(evidence: &ProviderEvidence) -> Result<(u64, &str), AppError> {
-    let ProviderEvidence::AzureDevOps(Evidence::History {
-        iterations,
-        source_commit,
-        ..
-    }) = evidence
-    else {
-        return Err(fail(
-            "invalidState",
-            "ADO publication requires complete source evidence",
-        ));
-    };
-    let iteration = iterations
-        .iter()
-        .max_by_key(|item| item.get("id").and_then(Value::as_u64))
-        .ok_or_else(|| fail("service", "Missing ADO source iteration"))?;
-    Ok((
-        field(iteration, "id")?
-            .as_u64()
-            .ok_or_else(|| fail("service", "Invalid ADO iteration"))?,
-        source_commit,
-    ))
-}
-
 /// The transaction preserves the account's existing positive vote strength.
 pub(crate) fn current_vote(evidence: &ProviderEvidence, account: &str) -> Result<i64, AppError> {
     let ProviderEvidence::AzureDevOps(Evidence::History { reviewers, .. }) = evidence else {
@@ -1374,191 +1309,6 @@ pub(crate) fn current_vote(evidence: &ProviderEvidence, account: &str) -> Result
         .find(|reviewer| reviewer.get("id").and_then(Value::as_str) == Some(account))
         .ok_or_else(|| fail("service", "ADO reviewer is absent"))?;
     vote(field(reviewer, "vote")?)
-}
-
-/// Mutable reviewer readback alone cannot identify an accepted reapproval.
-pub(crate) fn new_vote(
-    before: &ProviderEvidence,
-    after: &ProviderEvidence,
-    account: &str,
-    expected_vote: i64,
-) -> Result<String, AppError> {
-    let ProviderEvidence::AzureDevOps(Evidence::History { threads: old, .. }) = before else {
-        return Err(fail("invalidState", "Missing ADO preflight history"));
-    };
-    let ProviderEvidence::AzureDevOps(Evidence::History { threads, .. }) = after else {
-        return Err(fail("staleEvidence", "Missing ADO readback history"));
-    };
-    let old_ids = old
-        .iter()
-        .map(|thread| identifier(field(thread, "id")?))
-        .collect::<Result<HashSet<_>, _>>()?;
-    let mut matches = Vec::new();
-    for thread in threads {
-        let id = identifier(field(thread, "id")?)?;
-        if old_ids.contains(&id)
-            || !has_system_comment(thread)?
-            || system_event_kind(thread)? != Some("VoteUpdate")
-        {
-            continue;
-        }
-        if actor(thread, "CodeReviewVotedByIdentity")? == account
-            && actor(thread, "CodeReviewVotedByInitiatorIdentity")? == account
-            && text(property(thread, "CodeReviewVoteResult", "System.String")?)?
-                == expected_vote.to_string()
-        {
-            matches.push(id);
-        }
-    }
-    let [id] = matches.as_slice() else {
-        return Err(fail(
-            "ambiguousWrite",
-            "Expected exactly one new account-owned positive ADO vote event",
-        ));
-    };
-    Ok(id.clone())
-}
-
-/// Exact service-authored immutable audit bytes bind a later read to its own effect.
-pub(crate) fn matching_audit(
-    thread: &Value,
-    body: &str,
-    account: &str,
-) -> Result<String, AppError> {
-    let mut comments = array(field(thread, "comments")?)?
-        .iter()
-        .filter(|comment| !is_deleted(comment));
-    let comment = comments
-        .next()
-        .ok_or_else(|| fail("service", "ADO renewal audit has missing discussion"))?;
-    if comments.next().is_some() {
-        return Err(fail(
-            "service",
-            "ADO renewal audit has additional discussion",
-        ));
-    }
-    if thread.get("isDeleted") == Some(&json!(true))
-        || comment.get("isDeleted") == Some(&json!(true))
-        || text(field(comment, "commentType")?)? != "text"
-        || text(field(field(comment, "author")?, "id")?)? != account
-        || text(field(comment, "content")?)? != body
-    {
-        return Err(fail(
-            "service",
-            "ADO renewal audit author, content or deletion evidence changed",
-        ));
-    }
-    let published = timestamp(text(field(comment, "publishedDate")?)?)?;
-    if let Some(updated) = comment
-        .get("lastContentUpdatedDate")
-        .or_else(|| comment.get("lastUpdatedDate"))
-        && timestamp(text(updated)?)? != published
-    {
-        return Err(fail(
-            "service",
-            "Edited ADO renewal audit cannot establish provenance",
-        ));
-    }
-    identifier(field(thread, "id")?)
-}
-
-/// Audit prose supplies attribution only after joining service author, event and iteration.
-fn renewals(
-    threads: &[Value],
-    events: &[Event<'_>],
-    iterations: &[Value],
-    account: &str,
-    repository: &str,
-    number: u32,
-    now: Timestamp,
-) -> Result<HashMap<String, Renewal>, AppError> {
-    let mut result = HashMap::new();
-    let mut operations = HashSet::new();
-    for thread in threads {
-        if is_deleted(thread) {
-            continue;
-        }
-        for comment in array(field(thread, "comments")?)? {
-            if is_deleted(comment)
-                || comment.pointer("/author/id").and_then(Value::as_str) != Some(account)
-            {
-                continue;
-            }
-            let Some(body) = comment.get("content").and_then(Value::as_str) else {
-                continue;
-            };
-            let Some((_, remainder)) = body.split_once("<!-- ss-autoreapprove") else {
-                continue;
-            };
-            // Needs-review notices carry no vote authority and have their own strict parser.
-            if remainder.starts_with("-needs-review ") {
-                continue;
-            }
-            let remainder = remainder
-                .strip_prefix("-ado ")
-                .ok_or_else(|| fail("service", "Unrecognized ADO renewal audit marker"))?;
-            let (document, suffix) = remainder
-                .split_once("-->")
-                .ok_or_else(|| fail("service", "Unterminated ADO renewal marker"))?;
-            let renewal: Renewal = serde_json::from_str(document.trim())?;
-            renewal.audit.validate()?;
-            matching_audit(thread, body, account)?;
-            let audit_at = timestamp(text(field(comment, "publishedDate")?)?)?;
-            if suffix.contains("<!-- ss-autoreapprove")
-                || renewal.audit.account_id != account
-                || renewal.audit.repository_id != repository
-                || renewal.audit.pull_request_id != number
-                || audit_at > now
-                || !operations.insert(renewal.audit.operation_id.clone())
-            {
-                return Err(fail(
-                    "service",
-                    "ADO renewal audit has conflicting scope, source, event or ordering",
-                ));
-            }
-            let event = events
-                .iter()
-                .find(|event| event.id == renewal.vote_event_id);
-            if event.is_none() {
-                let mut deleted_vote = false;
-                for thread in threads {
-                    if identifier(field(thread, "id")?)? == renewal.vote_event_id {
-                        deleted_vote = is_deleted(thread)
-                            || (array(field(thread, "comments")?)?.iter().any(is_deleted)
-                                && !has_system_comment(thread)?);
-                    }
-                }
-                if deleted_vote {
-                    // A surviving audit is attribution, not authority for its deleted vote.
-                    continue;
-                }
-            }
-            let event = event.ok_or_else(|| {
-                fail(
-                    "service",
-                    "ADO renewal audit refers to a missing vote event",
-                )
-            })?;
-            let iteration = iteration_at(iterations, event.at)?;
-            if event.kind != "VoteUpdate"
-                || actor(event.value, "CodeReviewVotedByIdentity")? != account
-                || actor(event.value, "CodeReviewVotedByInitiatorIdentity")? != account
-                || field(iteration, "id")?.as_u64() != Some(renewal.iteration_id)
-                || text(field(field(iteration, "sourceRefCommit")?, "commitId")?)?
-                    != renewal.audit.source_commit
-                || audit_at < event.at
-                || result
-                    .insert(renewal.vote_event_id.clone(), renewal)
-                    .is_some()
-            {
-                return Err(fail(
-                    "service",
-                    "ADO renewal audit has conflicting scope, source, event or ordering",
-                ));
-            }
-        }
-    }
-    Ok(result)
 }
 
 /// Approval time selects the immutable source iteration, never a commit timestamp.
@@ -1649,14 +1399,12 @@ mod tests {
         reason = "Tests mutate bounded paths in the verified service fixture"
     )]
 
+    use super::{Decision, Evidence};
+    use crate::clock::timestamp;
+    use crate::renewal::Anchor;
     use ohno::AppError;
     use serde_json::{Value, json};
     use uuid::Uuid;
-
-    use super::{Decision, Evidence};
-    use crate::approval::Evidence as ProviderEvidence;
-    use crate::clock::timestamp;
-    use crate::renewal::Anchor;
 
     fn fixture() -> Value {
         serde_json::from_str(include_str!(
@@ -1673,6 +1421,29 @@ mod tests {
             "threads": stage["threads"], "policies": stage["policies"],
             "evaluations": stage["evaluations"]
         })
+    }
+
+    #[test]
+    fn retained_dynamic_objects_have_feature_independent_bytes() {
+        let history: Evidence = serde_json::from_value(evidence(&fixture()["stages"][0])).unwrap();
+        let state = match &history {
+            Evidence::History { pull_request, .. } => Evidence::State {
+                pull_request: pull_request.clone(),
+            },
+            Evidence::State { .. } => unreachable!(),
+        };
+        for evidence in [state, history] {
+            let compact = super::compact(&evidence).unwrap();
+            let bytes = serde_json::to_string(&compact).unwrap();
+            // Sorting the entire typed evidence would incorrectly move scope.
+            assert!(bytes.starts_with("{\"scope\":"));
+            let value = serde_json::to_value(compact).unwrap();
+            for value in value.as_object().unwrap().values() {
+                let mut expected = value.clone();
+                expected.sort_all_objects();
+                assert_eq!(value.to_string(), expected.to_string());
+            }
+        }
     }
 
     fn decide(value: Value) -> Result<Decision, AppError> {
@@ -1714,41 +1485,19 @@ mod tests {
         }));
     }
 
-    /// A synthetic renewal joins sanitized service vote fields to a documented audit thread.
+    /// A later ordinary vote supplies the baseline for subsequent changes.
     fn renewed() -> Value {
         let mut value = evidence(&fixture()["stages"][2]);
         reviewer_policy(&mut value, json!({"requireVoteOnLastIteration": true}));
-        let Decision::AssessmentRequired { anchor, .. } = decide(value.clone()).unwrap() else {
-            panic!("Fixture must require an assessment");
-        };
         let mut event = value["threads"][1].clone();
         event["id"] = json!(20);
         event["publishedDate"] = json!("2026-01-01T01:00:00Z");
         value["threads"].as_array_mut().unwrap().push(event);
-        let last = value["iterations"].as_array().unwrap().last().unwrap();
-        let marker = json!({"audit": {"schemaVersion": 1, "operationId": Uuid::new_v4().to_string(),
-            "repositoryId": value["pullRequest"]["repository"]["id"], "accountId": fixture()["accountId"],
-            "pullRequestId": 1, "anchor": anchor, "sourceCommit": value["sourceCommit"],
-            // Arbitrary valid digests exercise provenance, not semantic assessment.
-            "policyDigest": "a".repeat(64), "assessmentDigest": "b".repeat(64), "state": "submitted"},
-            "voteEventId": "20", "iterationId": last["id"]});
-        append_audit(&mut value, &marker);
         value
     }
 
-    fn append_audit(value: &mut Value, marker: &Value) {
-        value["threads"].as_array_mut().unwrap().push(json!({
-            "id": 30, "status": "closed", "isDeleted": false,
-            "comments": [{"id": 1, "parentCommentId": 0, "commentType": "text",
-                "author": {"id": fixture()["accountId"]},
-                "content": format!("[Copilot speaking]\n<!-- ss-autoreapprove-ado {marker} -->"),
-                "publishedDate": "2026-01-01T01:05:00Z", "lastUpdatedDate": "2026-01-01T01:05:00Z",
-                "isDeleted": false}]
-        }));
-    }
-
     #[test]
-    fn renewed_votes_retain_the_original_anchor_across_pushes_and_policy_changes() {
+    fn later_votes_set_the_baseline_for_subsequent_pushes() {
         let mut value = renewed();
         assert_eq!(
             decide(value.clone()).unwrap(),
@@ -1756,7 +1505,7 @@ mod tests {
                 approval_event_id: "20".to_owned()
             }
         );
-        let original = evidence(&fixture()["stages"][2]);
+        let previous_source = value["sourceCommit"].as_str().unwrap().to_owned();
         value["iterations"].as_array_mut().unwrap().push(json!({
             "id": 3, "createdDate": "2026-01-01T02:00:00Z",
             "sourceRefCommit": {"commitId": "d".repeat(40)}
@@ -1769,75 +1518,13 @@ mod tests {
         else {
             panic!("A later iteration needs cumulative assessment");
         };
-        assert_eq!(anchor.review_id, "2");
-        assert_eq!(
-            anchor.source_commit,
-            original["iterations"][0]["sourceRefCommit"]["commitId"]
-                .as_str()
-                .unwrap()
-        );
+        assert_eq!(anchor.review_id, "20");
+        assert_eq!(anchor.source_commit, previous_source);
         assert_eq!(approval_event_id, "20");
-        // Current policy changes do not rewrite the provenance of an older renewal.
+        // A policy without an iteration requirement accepts the existing vote.
         value["evaluations"] = json!([]);
         value["policies"] = json!([]);
         assert_eq!(decide(value).unwrap().status(), "alreadyValid");
-    }
-
-    #[test]
-    fn malformed_or_conflicting_audits_never_supply_a_new_external_anchor() {
-        for (path, replacement) in [
-            ("/audit/anchor/reviewId", json!("another-approval")),
-            ("/audit/anchor/sourceCommit", json!("d".repeat(40))),
-            ("/audit/sourceCommit", json!("d".repeat(40))),
-            ("/audit/accountId", json!("another-account")),
-            ("/audit/repositoryId", json!("another-repository")),
-            ("/audit/pullRequestId", json!(2)),
-            ("/audit/policyDigest", json!("invalid")),
-            ("/voteEventId", json!("2")),
-            ("/iterationId", json!(1)),
-        ] {
-            let mut value = renewed();
-            let thread = value["threads"].as_array_mut().unwrap().pop().unwrap();
-            let body = thread["comments"][0]["content"].as_str().unwrap();
-            let document = body
-                .split_once("-ado ")
-                .unwrap()
-                .1
-                .split_once("-->")
-                .unwrap()
-                .0;
-            let mut marker: Value = serde_json::from_str(document).unwrap();
-            *marker.pointer_mut(path).unwrap() = replacement;
-            append_audit(&mut value, &marker);
-            decide(value).unwrap_err();
-        }
-        for (path, replacement) in [
-            ("/comments/0/lastUpdatedDate", json!("2026-01-01T02:00:00Z")),
-            (
-                "/comments/0/content",
-                json!("<!-- ss-autoreapprove-ado malformed -->"),
-            ),
-        ] {
-            let mut value = renewed();
-            *value["threads"]
-                .as_array_mut()
-                .unwrap()
-                .last_mut()
-                .unwrap()
-                .pointer_mut(path)
-                .unwrap_or_else(|| panic!("Missing test field {path}")) = replacement;
-            decide(value).unwrap_err();
-        }
-        let mut duplicated = renewed();
-        let mut thread = duplicated["threads"]
-            .as_array()
-            .unwrap()
-            .last()
-            .unwrap()
-            .clone();
-        thread["id"] = json!(31);
-        duplicated["threads"].as_array_mut().unwrap().push(thread);
-        decide(duplicated).unwrap_err();
     }
 
     #[test]
@@ -1985,19 +1672,6 @@ mod tests {
     }
 
     #[test]
-    fn audit_content_clock_ignores_reaction_updates_but_not_content_edits() {
-        let mut value = renewed();
-        let expected = decide(value.clone()).unwrap();
-        let audit = value["threads"].as_array_mut().unwrap().last_mut().unwrap();
-        audit["comments"][0]["lastContentUpdatedDate"] = json!("2026-01-01T01:05:00Z");
-        audit["comments"][0]["lastUpdatedDate"] = json!("2026-01-01T02:00:00Z");
-        assert_eq!(decide(value.clone()).unwrap(), expected);
-        let audit = value["threads"].as_array_mut().unwrap().last_mut().unwrap();
-        audit["comments"][0]["lastContentUpdatedDate"] = json!("2026-01-01T02:00:00Z");
-        decide(value).unwrap_err();
-    }
-
-    #[test]
     fn project_bookkeeping_exclusion_preserves_substantive_evidence_guards() {
         let mut original = renewed();
         // Synthetic PR content and scope exercise guards alongside unrelated metadata churn.
@@ -2097,12 +1771,15 @@ mod tests {
         let Evidence::History { threads, .. } = &mut progress else {
             unreachable!()
         };
-        threads.last_mut().unwrap()["comments"][0]["content"] = json!("New human objection");
+        threads.last_mut().unwrap()["comments"]
+            .as_array_mut()
+            .unwrap()
+            .push(json!({"commentType": "text", "content": "New human objection"}));
         assert!(!super::equivalent(&original, &progress).unwrap());
     }
 
     #[test]
-    fn later_human_decisions_supersede_a_renewal_without_moving_its_anchor_implicitly() {
+    fn later_direct_decisions_supersede_earlier_votes() {
         for (vote, status) in [
             (0, "ineligible"),
             (-5, "ineligible"),
@@ -2793,17 +2470,17 @@ mod tests {
     }
 
     #[test]
-    fn decline_prevents_a_renewal_from_reusing_earlier_external_authority() {
+    fn a_later_direct_vote_resumes_review_after_a_decline() {
         let mut value = renewed();
         value["threads"]
             .as_array_mut()
             .unwrap()
             .push(decline_event());
-        assert!(
-            decide(value)
-                .unwrap_err()
-                .to_string()
-                .contains("no preceding approval authority")
+        assert_eq!(
+            decide(value).unwrap(),
+            Decision::AlreadyValid {
+                approval_event_id: "20".to_owned()
+            }
         );
     }
 
@@ -3022,126 +2699,7 @@ mod tests {
     }
 
     #[test]
-    fn deleted_renewal_provenance_cannot_manufacture_external_authority() {
-        for path in ["/isDeleted", "/comments/0/isDeleted"] {
-            let mut value = renewed();
-            *value["threads"]
-                .as_array_mut()
-                .unwrap()
-                .last_mut()
-                .unwrap()
-                .pointer_mut(path)
-                .unwrap() = json!(true);
-            assert_eq!(
-                decide(value).unwrap(),
-                Decision::Ineligible {
-                    reason: "approvalEvidenceDeleted".to_owned()
-                }
-            );
-            let mut value = renewed();
-            *value["threads"]
-                .as_array_mut()
-                .unwrap()
-                .last_mut()
-                .unwrap()
-                .pointer_mut(path)
-                .unwrap() = json!(true);
-            let mut withdrawal = value["threads"][1].clone();
-            withdrawal["id"] = json!(40);
-            withdrawal["publishedDate"] = json!("2026-01-01T02:00:00Z");
-            withdrawal["properties"]["CodeReviewVoteResult"]["$value"] = json!("0");
-            value["threads"].as_array_mut().unwrap().push(withdrawal);
-            value["reviewers"][0]["vote"] = json!(0);
-            assert_eq!(
-                decide(value).unwrap(),
-                Decision::Ineligible {
-                    reason: "approvalWithdrawn".to_owned()
-                }
-            );
-        }
-        for comment_only in [false, true] {
-            let mut value = renewed();
-            if comment_only {
-                value["threads"][1]["comments"][0]["isDeleted"] = json!(true);
-            } else {
-                value["threads"][1]["isDeleted"] = json!(true);
-            }
-            assert_eq!(
-                decide(value).unwrap(),
-                Decision::Ineligible {
-                    reason: "approvalEvidenceDeleted".to_owned()
-                }
-            );
-
-            let mut value = renewed();
-            let event = value["threads"]
-                .as_array_mut()
-                .unwrap()
-                .iter_mut()
-                .find(|thread| thread["id"] == 20)
-                .unwrap();
-            if comment_only {
-                event["comments"][0]["isDeleted"] = json!(true);
-            } else {
-                *event = json!({"id": 20, "isDeleted": true});
-            }
-            assert_eq!(
-                decide(value).unwrap(),
-                Decision::AssessmentRequired {
-                    anchor: Anchor {
-                        review_id: "2".to_owned(),
-                        source_commit:
-                            fixture()["stages"][2]["iterations"][0]["sourceRefCommit"]["commitId"]
-                                .as_str()
-                                .unwrap()
-                                .to_owned(),
-                    },
-                    approval_event_id: "2".to_owned(),
-                }
-            );
-        }
-    }
-
-    #[test]
-    fn publication_readback_requires_a_surviving_new_vote() {
-        let before = ProviderEvidence::AzureDevOps(
-            serde_json::from_value(evidence(&fixture()["stages"][2])).unwrap(),
-        );
-        for comment_only in [false, true] {
-            let mut value = renewed();
-            let event = value["threads"]
-                .as_array_mut()
-                .unwrap()
-                .iter_mut()
-                .find(|thread| thread["id"] == 20)
-                .unwrap();
-            let mut surviving = event.clone();
-            if comment_only {
-                event["comments"][0]["isDeleted"] = json!(true);
-            } else {
-                *event = json!({"id": 20, "isDeleted": true});
-            }
-            let after =
-                ProviderEvidence::AzureDevOps(serde_json::from_value(value.clone()).unwrap());
-            let account = fixture()["accountId"].as_str().unwrap().to_owned();
-            assert!(
-                super::new_vote(&before, &after, &account, 10)
-                    .unwrap_err()
-                    .to_string()
-                    .contains("exactly one new")
-            );
-            surviving["id"] = json!(21);
-            value["threads"].as_array_mut().unwrap().push(surviving);
-            let after = ProviderEvidence::AzureDevOps(serde_json::from_value(value).unwrap());
-            assert_eq!(
-                super::new_vote(&before, &after, &account, 10).unwrap(),
-                "21"
-            );
-        }
-    }
-
-    #[test]
-    fn deleted_replies_do_not_hide_surviving_system_votes_or_renewal_audits() {
+    fn deleted_replies_do_not_hide_surviving_system_votes() {
         let mut value = renewed();
         for thread in value["threads"].as_array_mut().unwrap() {
             thread["comments"]
@@ -3153,60 +2711,6 @@ mod tests {
             decide(value).unwrap(),
             Decision::AlreadyValid {
                 approval_event_id: "20".to_owned()
-            }
-        );
-    }
-
-    #[test]
-    fn deleted_audit_in_a_renewal_chain_is_ineligible_not_a_new_anchor_or_failure() {
-        let mut value = renewed();
-        let body = value["threads"].as_array().unwrap().last().unwrap()["comments"][0]["content"]
-            .as_str()
-            .unwrap();
-        let document = body
-            .split_once("-ado ")
-            .unwrap()
-            .1
-            .split_once("-->")
-            .unwrap()
-            .0;
-        let mut marker: Value = serde_json::from_str(document).unwrap();
-        // A later source and renewal exercise lost attribution inside a chain.
-        value["sourceCommit"] = json!("d".repeat(40));
-        let source = value["sourceCommit"].clone();
-        value["iterations"].as_array_mut().unwrap().push(json!({
-            "id": 3, "createdDate": "2026-01-01T02:00:00Z",
-            "sourceRefCommit": {"commitId": source}
-        }));
-        let mut event = value["threads"][1].clone();
-        event["id"] = json!(21);
-        event["publishedDate"] = json!("2026-01-01T03:00:00Z");
-        value["threads"].as_array_mut().unwrap().push(event);
-        marker["audit"]["operationId"] = json!(Uuid::new_v4().to_string());
-        marker["audit"]["sourceCommit"] = value["sourceCommit"].clone();
-        marker["voteEventId"] = json!("21");
-        marker["iterationId"] = json!(3);
-        append_audit(&mut value, &marker);
-        let thread = value["threads"].as_array_mut().unwrap().last_mut().unwrap();
-        thread["id"] = json!(31);
-        thread["comments"][0]["publishedDate"] = json!("2026-01-01T03:05:00Z");
-        thread["comments"][0]["lastUpdatedDate"] = json!("2026-01-01T03:05:00Z");
-        assert_eq!(
-            decide(value.clone()).unwrap(),
-            Decision::AlreadyValid {
-                approval_event_id: "21".to_owned()
-            }
-        );
-        value["threads"]
-            .as_array_mut()
-            .unwrap()
-            .iter_mut()
-            .find(|thread| thread["id"] == 30)
-            .unwrap()["isDeleted"] = json!(true);
-        assert_eq!(
-            decide(value).unwrap(),
-            Decision::Ineligible {
-                reason: "approvalEvidenceDeleted".to_owned()
             }
         );
     }

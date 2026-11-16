@@ -19,7 +19,7 @@ use jiff::Timestamp;
 use ohno::AppError;
 use serde_json::{Value, from_slice, json, to_vec};
 use ss_ai_review_context::{read_capture, snapshot_id, write_comment_authorship};
-use ss_ai_runtime::{Clock, FileTransaction, SystemClock};
+use ss_ai_runtime::{Clock, FileTransaction, SystemClock, classification};
 
 /// Isolates capture and sidecar files in the checkout for each test.
 struct Files {
@@ -146,6 +146,7 @@ fn rejects_entire_batch_without_changing_existing_sidecar() {
     let snapshot = files.snapshot();
     write_comment_authorship(&files.capture, &snapshot, &json!([]), &clock).unwrap();
     let before = fs::read(&files.sidecar).unwrap();
+    let capture_before = fs::read(&files.capture).unwrap();
     let invalid = [
         json!({}),
         json!([{"threadId":"T","commentId":"C","kind":"agent","extra":1}]),
@@ -156,11 +157,16 @@ fn rejects_entire_batch_without_changing_existing_sidecar() {
         json!([{"threadId":"T","commentId":"C","kind":"agent"},{"threadId":"T","commentId":"missing","kind":"human"}]),
     ];
     for batch in invalid {
-        assert!(write_comment_authorship(&files.capture, &snapshot, &batch, &clock).is_err());
+        let error =
+            write_comment_authorship(&files.capture, &snapshot, &batch, &clock).unwrap_err();
+        assert_eq!(classification(&error), "invalidInput");
         assert_eq!(fs::read(&files.sidecar).unwrap(), before);
+        assert_eq!(fs::read(&files.capture).unwrap(), capture_before);
     }
-    assert!(write_comment_authorship(&files.capture, "stale", &json!([]), &clock).is_err());
+    let error = write_comment_authorship(&files.capture, "stale", &json!([]), &clock).unwrap_err();
+    assert_eq!(classification(&error), "invalidInput");
     assert_eq!(fs::read(&files.sidecar).unwrap(), before);
+    assert_eq!(fs::read(&files.capture).unwrap(), capture_before);
 }
 
 #[test]
@@ -286,11 +292,15 @@ fn rejected_classifications_explain_the_specific_problem() {
 
     let valid = json!([{"threadId":"T","commentId":"C","kind":"agent"}]);
     write_comment_authorship(&files.capture, &snapshot, &valid, &clock).unwrap();
+    let capture_before = fs::read(&files.capture).unwrap();
+    let sidecar_before = fs::read(&files.sidecar).unwrap();
     let conflict = json!([{"threadId":"T","commentId":"C","kind":"human"}]);
-    let error = write_comment_authorship(&files.capture, &files.snapshot(), &conflict, &clock)
-        .unwrap_err()
-        .to_string();
-    assert!(error.contains("cannot be reclassified"));
+    let error =
+        write_comment_authorship(&files.capture, &files.snapshot(), &conflict, &clock).unwrap_err();
+    assert_eq!(classification(&error), "invalidInput");
+    assert!(error.to_string().contains("cannot be reclassified"));
+    assert_eq!(fs::read(&files.capture).unwrap(), capture_before);
+    assert_eq!(fs::read(&files.sidecar).unwrap(), sidecar_before);
 
     let mut capture: Value = from_slice(&fs::read(&files.capture).unwrap()).unwrap();
     capture["schemaVersion"] = json!(99);

@@ -1,7 +1,8 @@
 //! Persists account-owned review requirements without granting approval authority.
 
 use std::collections::HashSet;
-use std::mem::replace;
+use std::iter::once;
+use std::mem::{replace, take};
 use std::path::Path;
 
 use jiff::Timestamp;
@@ -21,13 +22,16 @@ use crate::github_approval::Evidence as GitHubEvidence;
 use crate::journal::FileJournal;
 use crate::json::{array, field, identifier, text};
 use crate::publication::{Input, Scope, hash};
-use crate::renewal::{Anchor, Audit, State as AuditState};
+use crate::renewal::Anchor;
 use crate::target::{Platform, Target};
 
-/// Separate syntax prevents a discussion notice from becoming a renewal audit.
+/// Separate syntax identifies account-owned review notices in discussion.
 const MARKER: &str = "<!-- ss-autoreapprove-needs-review ";
+/// Keep complete UTF-8 comments, including escaped marker JSON, comfortably below
+/// GitHub's comment limit; the same conservative budget applies to ADO notices.
+const NOTICE_BYTES: usize = 16_384;
 
-/// Service-authenticated creation time controls whether an external approval resets a notice.
+/// Service-authenticated creation time controls whether an approval resets a notice.
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub(crate) struct Notice {
@@ -36,19 +40,9 @@ pub(crate) struct Notice {
     pub(crate) rationale: String,
 }
 
-/// Summary metadata distinguishes automatic approvals from independent reviews.
-#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
-pub(crate) struct AutomaticApproval {
-    pub(crate) approval_event_id: String,
-    pub(crate) approved_at: String,
-}
-
-/// Provider-derived positive events retain their external-versus-automatic origin.
+/// A provider-derived positive event can supersede an older notice.
 pub(crate) struct ApprovalEvent {
-    pub(crate) id: String,
     pub(crate) at: Timestamp,
-    pub(crate) automatic: bool,
 }
 
 /// The marker binds the refusal to its authenticated scope and completed assessment.
@@ -87,6 +81,32 @@ struct Attempt {
     marker: Marker,
     body: String,
     state: State,
+    resets: Vec<ApprovalReset>,
+}
+
+/// Each captured positive decision has its own durable, nonreplayable reset intent.
+#[derive(Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct ApprovalReset {
+    review_id: String,
+    state: ResetState,
+}
+
+/// Readback, not a missing acknowledgement, determines whether reset intent completed.
+#[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+enum ResetState {
+    Pending,
+    Intent,
+    Verified,
+    Refused,
+}
+
+/// Standing and write eligibility are independent when a PR becomes inactive.
+enum ResetStanding {
+    Cleared,
+    Required,
+    Inactive,
 }
 
 #[derive(Debug, Deserialize, Serialize, PartialEq, Eq)]
@@ -98,6 +118,92 @@ enum State {
 }
 
 impl Marker {
+    /// Bounds the nonexhaustive notice, retaining complete reasons in the assessment.
+    fn notice(mut self, attribution: &str) -> Result<(Self, String), AppError> {
+        let explanation = take(&mut self.rationale);
+        let mut body = self.body(attribution)?;
+        for reason in explanation.split("\n\n- ") {
+            let previous = self.rationale.len();
+            if previous != 0 {
+                self.rationale.push_str("\n\n- ");
+            }
+            self.rationale.push_str(reason);
+            let candidate = self.body(attribution)?;
+            if candidate.len() > NOTICE_BYTES {
+                self.rationale.truncate(previous);
+                // Prefer whole reasons; only an individually oversized first reason needs truncation.
+                if previous == 0 {
+                    self.truncate_reason(reason, attribution)?;
+                    body = self.body(attribution)?;
+                }
+                break;
+            }
+            body = candidate;
+        }
+        if self.rationale.trim().is_empty() || body.len() > NOTICE_BYTES {
+            return Err(fail(
+                "invalidInput",
+                "Notice metadata leaves no room for a refusal reason",
+            ));
+        }
+        Ok((self, body))
+    }
+
+    /// Actual marker encoding participates in sizing, including escaped comment terminators.
+    fn body(&self, attribution: &str) -> Result<String, AppError> {
+        let document = serde_json::to_string(self)?.replace("-->", "\\u002d\\u002d>");
+        Ok(format!(
+            "{attribution}\n\n## Automatic reapproval withheld\n\n### Reasons (nonexhaustive)\n\n{}\n\n{MARKER}{document} -->",
+            self.rationale
+        ))
+    }
+
+    /// Binary search preserves UTF-8 boundaries and makes progress independent of input size.
+    fn truncate_reason(&mut self, reason: &str, attribution: &str) -> Result<(), AppError> {
+        let boundaries = reason
+            .char_indices()
+            .map(|(index, _)| index)
+            .chain(once(reason.len()))
+            .collect::<Vec<_>>();
+        let mut low = 0;
+        let mut high = boundaries.len();
+        while low < high {
+            let previous = (low, high);
+            let middle = low.midpoint(high);
+            let boundary = *boundaries
+                .get(middle)
+                .ok_or_else(|| fail("invalidState", "Missing notice character boundary"))?;
+            let prefix = reason
+                .get(..boundary)
+                .ok_or_else(|| fail("invalidState", "Invalid notice character boundary"))?;
+            self.rationale = format!("{prefix}...");
+            if self.body(attribution)?.len() <= NOTICE_BYTES {
+                low = middle.saturating_add(1);
+            } else {
+                high = middle;
+            }
+            debug_assert!(
+                low > previous.0 || high < previous.1,
+                "Notice sizing must make progress"
+            );
+        }
+        let boundary = low
+            .checked_sub(1)
+            .and_then(|index| boundaries.get(index))
+            .ok_or_else(|| fail("invalidInput", "Notice metadata exceeds comment budget"))?;
+        let prefix = reason
+            .get(..*boundary)
+            .filter(|prefix| !prefix.trim().trim_start_matches("- ").trim().is_empty())
+            .ok_or_else(|| {
+                fail(
+                    "invalidInput",
+                    "Notice metadata leaves no room for a refusal reason",
+                )
+            })?;
+        self.rationale = format!("{prefix}...");
+        Ok(())
+    }
+
     fn parse(body: &str) -> Result<Option<Self>, AppError> {
         let Some((_, remainder)) = body.split_once(MARKER) else {
             return Ok(None);
@@ -114,22 +220,22 @@ impl Marker {
     }
 
     fn validate(&self) -> Result<(), AppError> {
-        // Reuse the renewal identity and digest contract without treating this as an approval.
-        Audit {
-            schema_version: self.schema_version,
-            operation_id: self.operation_id.clone(),
-            repository_id: self.scope.repository_id.clone(),
-            account_id: self.scope.account_id.clone(),
-            pull_request_id: self.scope.pull_request_id,
-            anchor: self.anchor.clone(),
-            source_commit: self.source_commit.clone(),
-            policy_digest: self.policy_digest.clone(),
-            assessment_digest: self.assessment_digest.clone(),
-            state: AuditState::Submitted,
+        if self.schema_version != 1
+            || Uuid::parse_str(&self.operation_id).is_err()
+            || self.scope.repository_id.trim().is_empty()
+            || self.scope.account_id.trim().is_empty()
+            || self.scope.pull_request_id == 0
+            || self.anchor.review_id.trim().is_empty()
+            || self.rationale.trim().is_empty()
+        {
+            return Err(fail("service", "Invalid needs-review marker"));
         }
-        .validate()?;
-        if self.rationale.trim().is_empty() {
-            return Err(fail("service", "Needs-review marker has no rationale"));
+        github_approval::commit(&self.anchor.source_commit)?;
+        github_approval::commit(&self.source_commit)?;
+        for digest in [&self.policy_digest, &self.assessment_digest] {
+            if digest.len() != 64 || !digest.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+                return Err(fail("service", "Invalid needs-review marker digest"));
+            }
         }
         Ok(())
     }
@@ -160,14 +266,8 @@ fn approvals(
                                     == Some("APPROVED")
                         });
                 if approved {
-                    // Only interpretable audits supply reset metadata; the provider validates standing.
-                    let Ok(audit) = Audit::parse(text(field(review, "body")?)?) else {
-                        continue;
-                    };
                     events.push(ApprovalEvent {
-                        id: id.to_owned(),
                         at: timestamp(text(field(review, "submitted_at")?)?)?,
-                        automatic: audit.is_some(),
                     });
                 }
             }
@@ -293,6 +393,43 @@ fn parse_notices(
     Ok(found)
 }
 
+/// Exact bytes and an authenticated author identify the intended prior comment.
+fn matching_notice(
+    attempt: &Attempt,
+    platform: Platform,
+    scope: &Scope,
+    comments: &[Value],
+    now: Timestamp,
+) -> Result<Notice, AppError> {
+    if attempt.state == State::Refused {
+        return Err(fail(
+            "invalidState",
+            "Needs-review comment was refused; start a fresh run",
+        ));
+    }
+    let found = parse_notices(
+        comments,
+        platform,
+        scope,
+        now,
+        None,
+        Some(&attempt.marker.operation_id),
+    )?;
+    let matching = found
+        .iter()
+        .filter(|(marker, _, body)| {
+            marker.operation_id == attempt.marker.operation_id && body == &attempt.body
+        })
+        .collect::<Vec<_>>();
+    let [(_, notice, _)] = matching.as_slice() else {
+        return Err(fail(
+            "ambiguousWrite",
+            "No unique owned needs-review comment; publication was not replayed",
+        ));
+    };
+    Ok(notice.clone())
+}
+
 /// Notice effects need fenced discussion, not source refs or current approval authority.
 fn capture_comments(
     api: &mut Api<'_>,
@@ -350,7 +487,7 @@ fn observe_comments(
     }
 }
 
-/// A later external approval resets every older notice, but a renewal never does.
+/// A later provider approval resets older notices for the same account.
 pub(crate) fn apply(
     evidence: &Evidence,
     decision: Decision,
@@ -364,16 +501,15 @@ pub(crate) fn apply(
         repository_id: repository.to_owned(),
         pull_request_id: number,
     };
-    let external = approvals(evidence, &scope, now)?
+    let approval = approvals(evidence, &scope, now)?
         .into_iter()
-        .filter(|event| !event.automatic)
         .map(|event| event.at)
         .max();
-    let notices = notices(evidence, &scope, now, external, None)?;
+    let notices = notices(evidence, &scope, now, approval, None)?;
     let mut active = None;
     for (_, notice, _) in notices {
         let at = timestamp(&notice.created_at)?;
-        if external.is_none_or(|external| external <= at)
+        if approval.is_none_or(|approval| approval <= at)
             && active.as_ref().is_none_or(|(latest, _)| *latest < at)
         {
             active = Some((at, notice));
@@ -387,33 +523,167 @@ pub(crate) fn apply(
     Ok(decision)
 }
 
-/// Resolves the timestamp only for the current standing automatic approval.
-pub(crate) fn automatic_approval(
-    evidence: &Evidence,
+/// Bind resets to positive decisions captured before the notice, never future approvals.
+fn planned_resets(evidence: &Evidence, scope: &Scope) -> Result<Vec<ApprovalReset>, AppError> {
+    let (items, github) = match evidence {
+        Evidence::GitHub(GitHubEvidence::History { reviews, .. }) => (reviews, true),
+        Evidence::AzureDevOps(AdoEvidence::History { reviewers, .. }) => (reviewers, false),
+        _ => {
+            return Err(fail(
+                "invalidState",
+                "Approval reset requires complete captured history",
+            ));
+        }
+    };
+    let mut resets = Vec::new();
+    for item in items {
+        let account = if github { field(item, "user")? } else { item };
+        if identifier(field(account, "id")?)? != scope.account_id {
+            continue;
+        }
+        let positive = if github {
+            text(field(item, "state")?)? == "APPROVED"
+        } else {
+            matches!(field(item, "vote")?.as_i64(), Some(5 | 10))
+        };
+        if positive {
+            resets.push(ApprovalReset {
+                review_id: identifier(field(item, "id")?)?,
+                state: ResetState::Pending,
+            });
+        }
+    }
+    Ok(resets)
+}
+
+/// Recheck ownership and standing without requiring current source refs or approval eligibility.
+fn reset_required(
+    api: &mut Api<'_>,
+    target: &Target,
     scope: &Scope,
+    review_id: &str,
+    original: &Evidence,
     now: Timestamp,
-) -> Result<Option<AutomaticApproval>, AppError> {
-    let platform = match evidence {
-        Evidence::GitHub(_) => Platform::GitHub,
-        Evidence::AzureDevOps(_) => Platform::AzureDevOps,
+) -> Result<ResetStanding, AppError> {
+    if api.identity()?.id.as_deref() != Some(&scope.account_id) {
+        return Err(fail("authentication", "Approval reset account changed"));
+    }
+    let pr = api.transport.request(&target.pr_api(), "GET", None)?;
+    let github = target.platform == Platform::GitHub;
+    let evidence = if github {
+        Evidence::GitHub(GitHubEvidence::State {
+            pull_request: pr.clone(),
+        })
+    } else {
+        Evidence::AzureDevOps(AdoEvidence::State {
+            pull_request: pr.clone(),
+        })
     };
-    let decision = evidence.decide(
-        platform,
-        &scope.account_id,
-        &scope.repository_id,
-        scope.pull_request_id,
-        now,
-    )?;
-    let Decision::AlreadyValid { approval_event_id } = decision else {
-        return Ok(None);
+    evidence.validate_scope(&scope.repository_id, scope.pull_request_id)?;
+    // Closed and draft PR recovery verifies prior effects without initiating new ones.
+    let active = if github {
+        text(field(&pr, "state")?)? == "open" && field(&pr, "draft")? == &Value::Bool(false)
+    } else {
+        text(field(&pr, "status")?)? == "active" && field(&pr, "isDraft")? == &Value::Bool(false)
     };
-    Ok(approvals(evidence, scope, now)?
-        .into_iter()
-        .find(|event| event.id == approval_event_id && event.automatic)
-        .map(|event| AutomaticApproval {
-            approval_event_id: event.id,
-            approved_at: event.at.to_string(),
-        }))
+    let items = api.transport.list(&format!(
+        "{}/{}",
+        target.pr_api(),
+        if github { "reviews" } else { "reviewers" }
+    ))?;
+    let mut item = None;
+    for candidate in &items {
+        if identifier(field(candidate, "id")?)? == review_id {
+            if item.is_some() {
+                return Err(fail("service", "Duplicate approval reset identity"));
+            }
+            item = Some(candidate);
+        }
+    }
+    let Some(item) = item else {
+        if github {
+            return Err(fail(
+                "service",
+                "Captured approval disappeared during reset readback",
+            ));
+        }
+        // A removed ADO reviewer has no approval to clear.
+        return Ok(ResetStanding::Cleared);
+    };
+    let account = if github { field(item, "user")? } else { item };
+    if identifier(field(account, "id")?)? != scope.account_id {
+        return Err(fail(
+            "service",
+            "Approval reset review belongs to another account",
+        ));
+    }
+    if github {
+        // Review IDs are immutable: dismissing this old review cannot dismiss a new review.
+        return Ok(if text(field(item, "state")?)? != "APPROVED" {
+            ResetStanding::Cleared
+        } else if active {
+            ResetStanding::Required
+        } else {
+            ResetStanding::Inactive
+        });
+    }
+    let vote = field(item, "vote")?
+        .as_i64()
+        .ok_or_else(|| fail("service", "Invalid reviewer vote during approval reset"))?;
+    if !matches!(vote, -10 | -5 | 0 | 5 | 10) {
+        return Err(fail(
+            "service",
+            "Unknown reviewer vote during approval reset",
+        ));
+    }
+    if vote <= 0 || item.get("hasDeclined") == Some(&Value::Bool(true)) {
+        // Do not replace withdrawals, negative votes, or declined reviews.
+        return Ok(ResetStanding::Cleared);
+    }
+    let mut current = original.clone();
+    let Evidence::AzureDevOps(AdoEvidence::History { threads, .. }) = &mut current else {
+        return Err(fail(
+            "invalidState",
+            "ADO reset lacks captured approval history",
+        ));
+    };
+    *threads = capture_comments(api, target, scope)?;
+    let approval_times = |evidence: &Evidence| -> Result<Vec<Timestamp>, AppError> {
+        Ok(approvals(evidence, scope, now)?
+            .into_iter()
+            .map(|event| event.at)
+            .collect())
+    };
+    // A later independent approval belongs to the human, even if its vote strength is unchanged.
+    let current_approvals = approval_times(&current)?;
+    let original_approvals = approval_times(original)?;
+    let unchanged = current_approvals == original_approvals;
+    if !unchanged && current_approvals.iter().max() <= original_approvals.iter().max() {
+        return Err(fail(
+            "service",
+            "Approval history changed without a provably later approval; reset requires manual attention",
+        ));
+    }
+    if unchanged
+        && let Evidence::AzureDevOps(history) = &current
+        && history.reset_superseded(&scope.account_id, vote, now)?
+    {
+        // History captured after the reviewer read can already contain a withdrawal or rejection.
+        return Ok(ResetStanding::Cleared);
+    }
+    if api.identity()?.id.as_deref() != Some(&scope.account_id) {
+        return Err(fail(
+            "authentication",
+            "Approval reset account changed during capture",
+        ));
+    }
+    Ok(if !unchanged {
+        ResetStanding::Cleared
+    } else if active {
+        ResetStanding::Required
+    } else {
+        ResetStanding::Inactive
+    })
 }
 
 impl<'a> Store<'a> {
@@ -429,14 +699,23 @@ impl<'a> Store<'a> {
             .join(format!("{}.json", hash(&(platform, scope))?));
         let journal = FileJournal::open(&path, clock)?;
         let record = match journal.read_bytes()? {
-            Some(bytes) => serde_json::from_slice::<Record>(&bytes)?,
+            Some(bytes) => {
+                let document: Value = serde_json::from_slice(&bytes)?;
+                if document.get("schemaVersion") != Some(&json!(2)) {
+                    return Err(fail(
+                        "invalidState",
+                        "Unsupported needs-review journal schema",
+                    ));
+                }
+                serde_json::from_value::<Record>(document)?
+            }
             None => Record {
-                schema_version: 1,
+                schema_version: 2,
                 scope: scope.clone(),
                 attempts: Vec::new(),
             },
         };
-        if record.schema_version != 1 || record.scope != *scope {
+        if record.schema_version != 2 || record.scope != *scope {
             return Err(fail("invalidState", "Invalid needs-review journal scope"));
         }
 
@@ -444,11 +723,19 @@ impl<'a> Store<'a> {
         let mut operations = HashSet::new();
         for attempt in &record.attempts {
             attempt.marker.validate()?;
+            let mut resets = HashSet::new();
             if attempt.marker.scope != *scope
                 || Uuid::parse_str(&attempt.run_id).is_err()
                 || !runs.insert(&attempt.run_id)
                 || !operations.insert(&attempt.marker.operation_id)
                 || Marker::parse(&attempt.body)?.as_ref() != Some(&attempt.marker)
+                || attempt.resets.iter().any(|reset| {
+                    reset.review_id.trim().is_empty()
+                        || !resets.insert(&reset.review_id)
+                        || platform == Platform::AzureDevOps && reset.review_id != scope.account_id
+                        || platform == Platform::GitHub && reset.review_id.parse::<u64>().is_err()
+                        || attempt.state == State::Verified && reset.state != ResetState::Verified
+                })
             {
                 return Err(fail("invalidState", "Invalid needs-review journal attempt"));
             }
@@ -465,7 +752,7 @@ impl<'a> Store<'a> {
         {
             return Err(fail(
                 "ambiguousWrite",
-                "An unresolved needs-review comment blocks publication; reconcile its original notify invocation",
+                "An unresolved needs-review notification blocks publication; reconcile its original notify invocation",
             ));
         }
         Ok(())
@@ -487,7 +774,7 @@ impl<'a> Store<'a> {
             .any(|attempt| attempt.run_id == run && attempt.state == State::Intent)
     }
 
-    /// Refreshes immutable evidence before a single comment POST and reconciles intent read-only.
+    /// Posts a decision notice once, then clears only the captured account-owned approvals.
     pub(crate) fn publish(
         &mut self,
         api: &mut Api<'_>,
@@ -513,17 +800,28 @@ impl<'a> Store<'a> {
                 .get(index)
                 .ok_or_else(|| fail("invalidState", "Missing notice attempt"))?
                 .marker;
+            let expected = planned_resets(input.evidence, &self.record.scope)?;
+            let attempt = self
+                .record
+                .attempts
+                .get(index)
+                .ok_or_else(|| fail("invalidState", "Missing notice attempt"))?;
             if marker.assessment_digest != input.assessment_digest
                 || marker.policy_digest != input.policy_digest
                 || marker.anchor != *input.anchor
                 || marker.source_commit != input.source_commit
+                || !attempt
+                    .resets
+                    .iter()
+                    .map(|reset| &reset.review_id)
+                    .eq(expected.iter().map(|reset| &reset.review_id))
             {
                 return Err(fail(
                     "invalidState",
                     "Notice recovery requires the original immutable assessment",
                 ));
             }
-            return self.readback(api, target, clock, index);
+            return self.readback(api, target, clock, index, input);
         }
         // New notices require full preflight evidence; readback cannot authorize a new effect.
         let fresh = Evidence::capture(api, target)?;
@@ -564,22 +862,22 @@ impl<'a> Store<'a> {
             assessment_digest: input.assessment_digest.to_owned(),
             rationale: input.explanation.to_owned(),
         };
-        let document = serde_json::to_string(&marker)?.replace("-->", "\\u002d\\u002d>");
-        let body = format!(
-            "{}\n\nThis pull request cannot be automatically reapproved and needs a separate new review.\n\n{}\n\n{MARKER}{document} -->",
-            input.attribution, input.explanation
-        );
+        let (marker, body) = marker.notice(input.attribution)?;
         if Marker::parse(&body)?.as_ref() != Some(&marker) {
             return Err(fail(
                 "invalidInput",
                 "Notice explanation or attribution conflicts with its reserved marker",
             ));
         }
+        if let Some(deadline) = input.effect_deadline {
+            deadline.check(clock)?;
+        }
         self.record.attempts.push(Attempt {
             run_id: input.run_id.to_owned(),
             marker,
             body: body.clone(),
             state: State::Intent,
+            resets: planned_resets(&fresh, &self.record.scope)?,
         });
         if let Err(error) = self.save() {
             // No effect starts before intent is durable, so a failed save leaves no owned attempt.
@@ -598,16 +896,17 @@ impl<'a> Store<'a> {
         }
         // A lost acknowledgement does not permit another POST, even if readback fails.
         let index = self.record.attempts.len().saturating_sub(1);
-        self.readback(api, target, clock, index)
+        self.readback(api, target, clock, index, input)
     }
 
-    /// Accepted or uncertain writes share read-only recovery, including closed and draft PRs.
+    /// Reconciles comments and reset intents without replaying either uncertain write.
     fn readback(
         &mut self,
         api: &mut Api<'_>,
         target: &Target,
         clock: &dyn Clock,
         index: usize,
+        input: &Input<'_>,
     ) -> Result<Notice, AppError> {
         let comments = capture_comments(api, target, &self.record.scope).map_err(|error| fail("ambiguousWrite", format!("Needs-review comment may exist; retain the original run for reconciliation: {error}")))?;
         if api.identity()?.id.as_deref() != Some(&self.record.scope.account_id) {
@@ -616,50 +915,167 @@ impl<'a> Store<'a> {
                 "Needs-review comment may exist but authenticated account changed",
             ));
         }
-        self.reconcile(index, target.platform, &comments, clock.now())
-    }
-
-    fn reconcile(
-        &mut self,
-        index: usize,
-        platform: Platform,
-        comments: &[Value],
-        now: Timestamp,
-    ) -> Result<Notice, AppError> {
         let attempt = self
             .record
             .attempts
             .get(index)
             .ok_or_else(|| fail("invalidState", "Missing needs-review intent"))?;
-        if attempt.state == State::Refused {
-            return Err(fail(
-                "invalidState",
-                "Needs-review comment was refused; start a fresh run",
-            ));
-        }
-        let found = parse_notices(
-            comments,
-            platform,
+        let notice = matching_notice(
+            attempt,
+            target.platform,
             &self.record.scope,
-            now,
-            None,
-            Some(&attempt.marker.operation_id),
+            &comments,
+            clock.now(),
         )?;
-        let matching = found
-            .iter()
-            .filter(|(marker, _, body)| {
-                marker.operation_id == attempt.marker.operation_id && body == &attempt.body
-            })
-            .collect::<Vec<_>>();
-        let [(_, notice, _)] = matching.as_slice() else {
-            return Err(fail(
-                "ambiguousWrite",
-                "No unique owned needs-review comment; publication was not replayed",
-            ));
-        };
-        let notice = notice.clone();
+        // A completed operation cannot clear approvals from a later independent review.
+        if attempt.state == State::Verified {
+            return Ok(notice);
+        }
+        self.reset_approvals(api, target, clock, index, input)?;
         self.save_state(index, State::Verified)?;
         Ok(notice)
+    }
+
+    /// Only pending resets may write; intent and refusals are never automatically resent.
+    fn reset_approvals(
+        &mut self,
+        api: &mut Api<'_>,
+        target: &Target,
+        clock: &dyn Clock,
+        index: usize,
+        input: &Input<'_>,
+    ) -> Result<(), AppError> {
+        let reset_count = self
+            .record
+            .attempts
+            .get(index)
+            .ok_or_else(|| fail("invalidState", "Missing notice intent"))?
+            .resets
+            .len();
+        for reset_index in 0..reset_count {
+            let reset = self
+                .record
+                .attempts
+                .get(index)
+                .and_then(|attempt| attempt.resets.get(reset_index))
+                .ok_or_else(|| fail("invalidState", "Missing approval reset"))?;
+            let state = reset.state;
+            let review_id = reset.review_id.clone();
+            if state == ResetState::Verified {
+                continue;
+            }
+            match reset_required(
+                api,
+                target,
+                &self.record.scope,
+                &review_id,
+                input.evidence,
+                clock.now(),
+            )? {
+                ResetStanding::Cleared => {
+                    self.save_reset_state(index, reset_index, ResetState::Verified)?;
+                    continue;
+                }
+                ResetStanding::Inactive => {
+                    return Err(fail(
+                        "ambiguousWrite",
+                        "Needs-review comment exists, but an inactive PR still has an uncleared approval; reset remains incomplete",
+                    ));
+                }
+                ResetStanding::Required => {}
+            }
+            if state == ResetState::Refused {
+                return Err(fail(
+                    "service",
+                    "Needs-review comment exists, but approval reset was refused; clear the approval manually",
+                ));
+            }
+            if state == ResetState::Intent {
+                return Err(fail(
+                    "ambiguousWrite",
+                    "Approval reset remains unverified; the request was not replayed",
+                ));
+            }
+            if let Some(deadline) = input.effect_deadline {
+                deadline.check(clock)?;
+            }
+            if api.identity()?.id.as_deref() != Some(&self.record.scope.account_id) {
+                return Err(fail(
+                    "authentication",
+                    "Approval reset account changed before submission",
+                ));
+            }
+            self.save_reset_state(index, reset_index, ResetState::Intent)?;
+            let rationale = &self
+                .record
+                .attempts
+                .get(index)
+                .ok_or_else(|| fail("invalidState", "Missing notice intent"))?
+                .marker
+                .rationale;
+            let result = match target.platform {
+                Platform::GitHub => api.transport.github_dismiss_once(
+                    &format!("{}/reviews/{review_id}/dismissals", target.pr_api()),
+                    &json!({"message": format!("{}\n\n{rationale}", input.attribution)}),
+                ),
+                Platform::AzureDevOps => api.transport.ado_write_once(
+                    &format!("{}/reviewers/{review_id}", target.pr_api()),
+                    "PUT",
+                    &json!({"id": review_id, "vote": 0}),
+                ),
+            };
+            if let Err(error) = result
+                && classification(&error) != "ambiguousWrite"
+            {
+                self.save_reset_state(index, reset_index, ResetState::Refused)?;
+                return Err(error);
+            }
+            // Acknowledgements alone do not prove that the account's old approval is gone.
+            if !matches!(
+                reset_required(
+                    api,
+                    target,
+                    &self.record.scope,
+                    &review_id,
+                    input.evidence,
+                    clock.now(),
+                )?,
+                ResetStanding::Cleared
+            ) {
+                return Err(fail(
+                    "ambiguousWrite",
+                    "Needs-review comment exists, but approval reset could not be verified",
+                ));
+            }
+            self.save_reset_state(index, reset_index, ResetState::Verified)?;
+        }
+        Ok(())
+    }
+
+    /// Failed saves must not turn a pending or uncertain reset into a replayable request.
+    fn save_reset_state(
+        &mut self,
+        index: usize,
+        reset_index: usize,
+        state: ResetState,
+    ) -> Result<(), AppError> {
+        let reset = self
+            .record
+            .attempts
+            .get_mut(index)
+            .and_then(|attempt| attempt.resets.get_mut(reset_index))
+            .ok_or_else(|| fail("invalidState", "Missing approval reset"))?;
+        let previous = replace(&mut reset.state, state);
+        if let Err(error) = self.save() {
+            self.record
+                .attempts
+                .get_mut(index)
+                .and_then(|attempt| attempt.resets.get_mut(reset_index))
+                .ok_or_else(|| fail("invalidState", "Missing approval reset"))?
+                .state = previous;
+            return Err(error);
+        }
+        Ok(())
     }
 
     /// Recovery checks retain the last durable state when a terminal save fails.
@@ -701,12 +1117,14 @@ mod tests {
     use serde_json::{Value, json};
     use uuid::Uuid;
 
-    use super::{Marker, notices};
+    use super::{
+        Attempt, MARKER, Marker, NOTICE_BYTES, State, matching_notice, notices, planned_resets,
+    };
     use crate::ado_approval::Evidence as AdoEvidence;
     use crate::approval::{Decision, Evidence};
     use crate::clock::timestamp;
     use crate::publication::Scope;
-    use crate::renewal::{Anchor, Audit, State};
+    use crate::renewal::Anchor;
     use crate::target::Platform;
 
     /// Supplies the same complete provider history used by approval authority tests.
@@ -748,6 +1166,178 @@ mod tests {
         }
     }
 
+    /// Full encoded notices must fit even when many reasons contain JSON escapes or UTF-8.
+    #[test]
+    fn notice_budget_keeps_whole_reasons_and_accounts_for_hidden_marker_bytes() {
+        let mut marker = marker();
+        let expected = marker.body("[Copilot speaking]").unwrap();
+        let (unchanged, body) = marker.clone().notice("[Copilot speaking]").unwrap();
+        assert_eq!(body, expected);
+        assert_eq!(unchanged, marker);
+        let reasons = (0..100)
+            .map(|index| {
+                format!(
+                    "- Blocking effect {index}: {}",
+                    "Repeated design impact. ".repeat(20)
+                )
+            })
+            .collect::<Vec<_>>();
+        marker.rationale = reasons.join("\n\n");
+        let original = marker.clone();
+        assert!(original.body("[Copilot speaking]").unwrap().len() > 65_536);
+        let (bounded, body) = marker.notice("[Copilot speaking]").unwrap();
+        assert!(body.len() <= NOTICE_BYTES);
+        assert!(original.rationale.starts_with(&bounded.rationale));
+        assert!(bounded.rationale.len() < original.rationale.len());
+        assert!(
+            reasons
+                .iter()
+                .any(|reason| bounded.rationale.ends_with(reason))
+        );
+        assert_eq!(Marker::parse(&body).unwrap(), Some(bounded));
+    }
+
+    /// An oversized single reason still leaves a readable UTF-8 prefix and a complete marker.
+    #[test]
+    fn notice_budget_bounds_single_reasons_and_rejects_oversized_metadata() {
+        let mut marker = marker();
+        marker.rationale = format!(
+            "- Blocking effect: {}",
+            "\"\\\n--> \u{1f6a7}".repeat(NOTICE_BYTES)
+        );
+        let (bounded, body) = marker.clone().notice("[Copilot speaking]").unwrap();
+        assert!(body.len() <= NOTICE_BYTES);
+        assert!(bounded.rationale.starts_with("- Blocking effect: "));
+        assert!(bounded.rationale.ends_with("..."));
+        assert_eq!(Marker::parse(&body).unwrap(), Some(bounded.clone()));
+        assert_eq!(body.matches(MARKER).count(), 1);
+        assert!(
+            marker
+                .rationale
+                .starts_with(bounded.rationale.trim_end_matches("..."))
+        );
+        assert_eq!(
+            crate::classification(&marker.notice(&"x".repeat(NOTICE_BYTES)).unwrap_err()),
+            "invalidInput"
+        );
+    }
+
+    /// Only account-owned positive decisions are reset targets, even when several remain.
+    #[test]
+    fn reset_plans_exclude_other_accounts_and_nonpositive_decisions() {
+        let scope = marker().scope;
+        let mut history = fixture();
+        history["reviews"][0]["state"] = json!("APPROVED");
+        history["reviews"][1]["state"] = json!("APPROVED");
+        let mut older = history["reviews"][1].clone();
+        older["id"] = json!(4);
+        older["node_id"] = json!("older-review");
+        history["reviews"].as_array_mut().unwrap().push(older);
+        let evidence = serde_json::from_value::<Evidence>(
+            json!({"platform": "gitHub", "observation": history}),
+        )
+        .unwrap();
+        let plan = planned_resets(&evidence, &scope).unwrap();
+        assert_eq!(
+            plan.iter()
+                .map(|reset| reset.review_id.as_str())
+                .collect::<Vec<_>>(),
+            ["2", "4"]
+        );
+
+        let mut history: Value = serde_json::from_str(include_str!(
+            "../tests/fixtures/ado-no-approval-policy.json"
+        ))
+        .unwrap();
+        let account = history["stages"][2]["reviewers"][0]["id"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        let scope = Scope {
+            account_id: account.clone(),
+            ..scope
+        };
+        for vote in [-10, -5, 0, 5, 10] {
+            history["stages"][2]["reviewers"][0]["vote"] = json!(vote);
+            let stage = &history["stages"][2];
+            let evidence = Evidence::AzureDevOps(AdoEvidence::History {
+                pull_request: stage["pullRequest"].clone(),
+                source_commit: stage["sourceCommit"].as_str().unwrap().to_owned(),
+                reviewers: stage["reviewers"].as_array().unwrap().clone(),
+                iterations: stage["iterations"].as_array().unwrap().clone(),
+                threads: stage["threads"].as_array().unwrap().clone(),
+                policies: stage["policies"].as_array().unwrap().clone(),
+                evaluations: stage["evaluations"].as_array().unwrap().clone(),
+            });
+            let plan = planned_resets(&evidence, &scope).unwrap();
+            assert_eq!(plan.len(), usize::from(vote > 0));
+            if vote > 0 {
+                assert_eq!(plan[0].review_id, account);
+            }
+        }
+    }
+
+    #[test]
+    fn readback_requires_one_exact_owned_comment_on_each_provider() {
+        let marker = marker();
+        let body = format!(
+            "Notice\n\n<!-- ss-autoreapprove-needs-review {} -->",
+            serde_json::to_string(&marker).unwrap()
+        );
+        let attempt = Attempt {
+            run_id: Uuid::new_v4().to_string(),
+            marker: marker.clone(),
+            body: body.clone(),
+            state: State::Intent,
+            resets: Vec::new(),
+        };
+        let now = timestamp("2026-01-10T00:00:00Z").unwrap();
+        for platform in [Platform::GitHub, Platform::AzureDevOps] {
+            let comment = if platform == Platform::GitHub {
+                json!({"id": 60, "user": {"id": 42}, "created_at": "2026-01-09T00:00:00Z",
+                    "updated_at": "2026-01-09T00:00:00Z", "body": body})
+            } else {
+                json!({"id": 1, "comments": [{"id": 60, "commentType": "text",
+                    "author": {"id": "42"}, "publishedDate": "2026-01-09T00:00:00Z",
+                    "lastContentUpdatedDate": "2026-01-09T00:00:00Z", "content": body}]})
+            };
+            let notice = matching_notice(
+                &attempt,
+                platform,
+                &marker.scope,
+                std::slice::from_ref(&comment),
+                now,
+            )
+            .unwrap();
+            assert_eq!(notice.comment_id, "60");
+            let error = matching_notice(&attempt, platform, &marker.scope, &[], now).unwrap_err();
+            assert_eq!(crate::classification(&error), "ambiguousWrite");
+            let error = matching_notice(
+                &attempt,
+                platform,
+                &marker.scope,
+                &[comment.clone(), comment.clone()],
+                now,
+            )
+            .unwrap_err();
+            assert_eq!(crate::classification(&error), "ambiguousWrite");
+            let mut changed = comment.clone();
+            if platform == Platform::GitHub {
+                changed["user"]["id"] = json!(99);
+            } else {
+                changed["comments"][0]["author"]["id"] = json!("99");
+            }
+            matching_notice(&attempt, platform, &marker.scope, &[changed], now).unwrap_err();
+            let mut changed = comment;
+            if platform == Platform::GitHub {
+                changed["body"] = json!(format!("Changed {body}"));
+            } else {
+                changed["comments"][0]["content"] = json!(format!("Changed {body}"));
+            }
+            matching_notice(&attempt, platform, &marker.scope, &[changed], now).unwrap_err();
+        }
+    }
+
     fn add_notice(evidence: &mut Value, at: &str, id: u32) {
         evidence["comments"].as_array_mut().unwrap().push(json!({
             "id": id, "user": {"id": 42}, "created_at": at, "updated_at": at,
@@ -755,25 +1345,13 @@ mod tests {
         }));
     }
 
-    /// Positive events vary only their service author, submission time, and renewal origin.
+    /// Approval body content does not change the provider's approval event.
     fn add_approval(evidence: &mut Value, at: &str, owned: bool, automatic: bool) {
-        let audit = Audit {
-            schema_version: 1,
-            operation_id: Uuid::new_v4().to_string(),
-            repository_id: "123".into(),
-            account_id: "42".into(),
-            pull_request_id: 1,
-            anchor: marker().anchor,
-            source_commit: "b".repeat(40),
-            policy_digest: "c".repeat(64),
-            assessment_digest: "d".repeat(64),
-            state: State::Submitted,
-        };
         evidence["reviews"].as_array_mut().unwrap().push(json!({
             "id": 50, "node_id": "new-approval",
             "user": if owned { json!({"id": 42, "node_id": "user-42"}) } else { json!({"id": 99, "node_id": "user-99"}) },
             "state": "APPROVED", "submitted_at": at, "commit_id": "b".repeat(40),
-            "body": if automatic { format!("<!-- ss-autoreapprove {} -->", serde_json::to_string(&audit).unwrap()) } else { "External approval".into() }
+            "body": if automatic { "Automatic approval" } else { "Approval" }
         }));
         evidence["timeline"].as_array_mut().unwrap().push(json!({
             "__typename": "PullRequestReview", "id": "new-approval", "state": "APPROVED"
@@ -781,12 +1359,12 @@ mod tests {
     }
 
     #[test]
-    fn only_strictly_later_owned_external_approvals_expire_notices() {
+    fn only_strictly_later_owned_approvals_expire_notices() {
         for (at, owned, automatic, expected) in [
             ("2026-01-08T23:00:00Z", true, false, "needsReview"),
             ("2026-01-09T00:00:00Z", true, false, "needsReview"),
             ("2026-01-09T01:00:00Z", false, false, "needsReview"),
-            ("2026-01-09T01:00:00Z", true, true, "needsReview"),
+            ("2026-01-09T01:00:00Z", true, true, "alreadyValid"),
             ("2026-01-09T01:00:00Z", true, false, "alreadyValid"),
         ] {
             let mut evidence = fixture();
@@ -874,12 +1452,12 @@ mod tests {
         assert_eq!(decide(&evidence).unwrap().status(), "alreadyValid");
     }
 
-    /// Superseded invalid audits cannot block a later independent approval or expire notices.
+    /// Provider approval events, not body markers, determine notice expiry.
     #[test]
-    fn later_external_approval_supersedes_malformed_audit_without_granting_authority() {
+    fn approval_body_markers_do_not_change_provider_authority() {
         let mut evidence = fixture();
         evidence["reviews"][1]["body"] = json!("<!-- ss-autoreapprove malformed -->");
-        decide(&evidence).unwrap_err();
+        assert_eq!(decide(&evidence).unwrap().status(), "assessmentRequired");
         add_approval(&mut evidence, "2026-01-09T01:00:00Z", true, false);
         assert_eq!(decide(&evidence).unwrap().status(), "alreadyValid");
         add_notice(&mut evidence, "2026-01-09T00:00:00Z", 60);
@@ -889,7 +1467,7 @@ mod tests {
             .unwrap()
             .last_mut()
             .unwrap()["body"] = json!("<!-- ss-autoreapprove malformed -->");
-        decide(&evidence).unwrap_err();
+        assert_eq!(decide(&evidence).unwrap().status(), "alreadyValid");
     }
 
     /// Deleted discussion must neither break scanning nor satisfy notice readback.

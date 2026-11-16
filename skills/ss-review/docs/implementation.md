@@ -542,6 +542,11 @@ in the consolidated artifact, re-renders the finding, and rebuilds the approved
 artifact under the existing decision. It neither asks for renewed approval nor
 appends a policy approval that would replace the original approval source.
 
+Tracker projections use the checked capture without a repository path. This
+preserves the evidence binding and validates follow-up comment provenance
+without filtering findings against the pull-request diff. Pull-request
+publication supplies the repository path to retain anchor filtering.
+
 Merge approval is kept in a separate source-commit-bound record. After recording
 revalidation decisions, the orchestrator queries `auditFindingIds`. An empty
 list keeps the prior merge decision in effect without returning to the audit
@@ -1135,6 +1140,10 @@ no draft review, so findings become visible individually and the summary is the
 completion marker. These strategies differ at the adapter boundary while
 sharing the same plan, preflight, journal, and verification model.
 
+GitHub readback uses the thread and comment IDs returned by each successful
+finding write. It queries only those threads and confirms that each review
+comment appears in its receipted thread, avoiding reads of unrelated discussion.
+
 On Azure DevOps, the journal records finding writes and their receipts
 sequentially. Readback verifies each actual comment and the relative order of
 comments within the same thread. Independent threads do not provide a
@@ -1190,6 +1199,15 @@ A paused body-adjudication state is the only resumable path. Continuation is
 bound to the exact item, approved body, stored body, destination metadata, and
 remaining publication plan. This allows the existing run to continue without
 turning general failure recovery into a duplicate-producing retry mechanism.
+Azure DevOps destination and item URL comparisons use case-insensitive
+identities; verification preserves the original item URL recorded by the journal.
+Continuation also treats Azure area paths as case-insensitive identities and
+preserves their recorded spelling.
+The accepted decision is persisted before a later creation intent. If persisting
+that intent fails, the same decision can continue; once the intent is durable,
+the possible provider write requires reconciliation.
+Native tracker journals use a distinct schema identity and require complete
+native adjudication evidence rather than accepting older record shapes.
 
 The review summary is returned to the orchestrator rather than filed as work,
 because it describes the delivery and does not represent an independently
@@ -1216,7 +1234,8 @@ prose. This matches the encoding applied to Markdown work-item fields by
 
 An uncertain transformation is a user decision, not a similarity heuristic
 disguised as approval. The journal records enough exact and summarized evidence
-for that decision, and content hashes ensure the accepted bodies have not
+for that decision. Excerpt offsets use the same normalized, HTML-decoded text
+used by comparison, and content hashes ensure the accepted bodies have not
 changed before continuation.
 
 ## Tracker adapters
@@ -1244,13 +1263,19 @@ session state and uses platform adapters separate from review submission.
 The recipe supplies its inputs directly to that operation.
 `overview-snapshot.json`
 binds its immutable Markdown to the PR, inspected commits, run identifier, and
-content hash. A separately frozen HTML artifact and its ZIP container serve ADO. The mutable local
-overview and audit documents may subsequently describe newer content.
+content hash. The native boundary carries that validated identity in a frozen
+snapshot type instead of passing arbitrary JSON to provider adapters. ADO
+publication requires a separately prepared state with the rendered HTML and ZIP
+paths and hashes; both states serialize through the existing journal record
+shape. The mutable local overview and audit documents may subsequently describe
+newer content.
 
 `overview-publication-result.json` records intent before each non-idempotent
 write and retains returned IDs before verification. Upload is verified before the
 linking comment is created. Known successful attempts are reused; an attempt
 that wrote or may have written remote state is not automatically replayed.
+Transports retry service-confirmed rate-limit refusals until accepted, without
+replaying ambiguous writes.
 The initial comment is not edited and later overview generation does not publish.
 The caller supplies attribution in a UTF-8 file and passes its path to the native operation. The native transaction
 uses the verified artifact URL on either platform and prepends a nonempty prefix

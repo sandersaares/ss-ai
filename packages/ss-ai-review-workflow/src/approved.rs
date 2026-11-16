@@ -19,7 +19,8 @@ struct IncompleteDecisionJournal;
 
 /// Builds and atomically publishes the current approved finding set.
 ///
-/// The capture and repository must either both be supplied or both be absent.
+/// A capture binds PR evidence; a repository additionally enables diff-anchor filtering.
+/// Repository-based filtering requires the capture that names the reviewed commits.
 ///
 /// # Errors
 ///
@@ -37,9 +38,6 @@ pub fn build_approved(
     clock: &dyn Clock,
     process: &dyn Process,
 ) -> Result<Value, AppError> {
-    if context_path.is_some() && repository_path.is_none() {
-        return Err(invalid("A refreshed capture also requires -RepositoryPath"));
-    }
     if repository_path.is_some() && context_path.is_none() {
         return Err(invalid(
             "Checking the reviewed diff also requires -ContextPath",
@@ -124,6 +122,8 @@ pub fn build_approved(
             DecisionValue::Approved | DecisionValue::AutoApproved => {}
         }
         if let Some(context) = &context {
+            // Trackers use capture provenance without reply restrictions; PR publication applies
+            // its reply-capability check separately before any service write.
             check_follow_up(context, finding)
                 .map_err(|error| invalid(format!("Finding '{id}' cannot be published: {error}")))?;
         }
@@ -301,7 +301,7 @@ pub(crate) fn check_approved_schema(document: &Value) -> Result<(), AppError> {
     Ok(())
 }
 
-/// Confirms a follow-up addresses the opening comment of a reply-capable thread.
+/// Confirms a follow-up names a comment present in its captured thread.
 pub(crate) fn check_follow_up(context: &Value, finding: &Value) -> Result<(), AppError> {
     let Some(follow_up) = finding.get("followUp").filter(|value| !value.is_null()) else {
         return Ok(());
@@ -321,17 +321,20 @@ pub(crate) fn check_follow_up(context: &Value, finding: &Value) -> Result<(), Ap
                 "Follow-up thread '{thread_id}' is absent from the capture"
             ))
         })?;
-    if !identifier_matches(thread.get("openingCommentId"), comment_id)
-        || thread.get("kind").and_then(Value::as_str) != Some("text")
+    let comments = match thread.get("comments") {
+        Some(Value::Array(comments)) => comments.as_slice(),
+        Some(comment @ Value::Object(_)) => std::slice::from_ref(comment),
+        _ => return Err(invalid("Missing or invalid follow-up comments")),
+    };
+    if comments
+        .iter()
+        .any(|comment| identifier_matches(comment.get("id"), comment_id))
     {
-        return Err(invalid(
-            "Follow-up does not name a reply-capable opening comment",
-        ));
-    }
-    match context.get("platform").and_then(Value::as_str) {
-        Some("gitHub") if !thread.get("context").is_none_or(Value::is_null) => Ok(()),
-        Some("azureDevOps") => Ok(()),
-        _ => Err(invalid("Follow-up thread cannot accept replies")),
+        Ok(())
+    } else {
+        Err(invalid(format!(
+            "Follow-up comment '{comment_id}' is absent from thread '{thread_id}'"
+        )))
     }
 }
 

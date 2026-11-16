@@ -115,7 +115,7 @@ Describe 'Tracker publication command preflight' {
             repository = 'tracker'; webUrl = 'https://github.com/acme/tracker/issues'
         }
         $record = @{
-            schemaVersion = 1; startedUtc = '2026-01-01T00:00:00Z'; platform = 'gitHub'; target = $target
+            schemaVersion = 2; startedUtc = '2026-01-01T00:00:00Z'; platform = 'gitHub'; target = $target
             trackerUrl = $target.webUrl; workItemType = $null; areaPath = $null; descriptionField = $null
             parentItemId = $null; planHash = ('a' * 64); status = 'failed'; message = $null
             verification = $null; adjudication = $null

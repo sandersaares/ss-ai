@@ -14,8 +14,8 @@ use std::rc::Rc;
 use ohno::AppError;
 use serde_json::{Value, json};
 
-use super::{Acceptance, Effects, Journal, run};
 use crate::error::fail;
+use crate::tracker_transaction::{Acceptance, Effects, Journal, run};
 
 /// Simulates atomic journal replacement and one selected failed write.
 struct Memory {

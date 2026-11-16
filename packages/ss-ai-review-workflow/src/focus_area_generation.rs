@@ -234,6 +234,7 @@ struct SnapshotIdentity {
 /// Returns an error when the invalidation cannot be published.
 pub fn invalidate_snapshot_locked(session: &Path, clock: &dyn Clock) -> Result<(), AppError> {
     let transaction = FileTransaction::open(&session.join(SNAPSHOT), clock)?;
+    read_snapshot_record(&transaction)?;
     transaction.write_bytes(&serde_json::to_vec(&SnapshotIdentity {
         schema_version: 1,
         identity: None,
@@ -250,6 +251,7 @@ pub fn bind_snapshot_locked(session: &Path, clock: &dyn Clock) -> Result<String,
     let source_digest = tree_digest(&session.join("instruction-set-source"), clock)?;
     let identity = new_epoch(session)?;
     let transaction = FileTransaction::open(&session.join(SNAPSHOT), clock)?;
+    read_snapshot_record(&transaction)?;
     transaction.write_bytes(&serde_json::to_vec(&SnapshotIdentity {
         schema_version: 1,
         identity: Some(identity.clone()),
@@ -324,6 +326,13 @@ fn read_snapshot_identity(
     clock: &dyn Clock,
 ) -> Result<Option<SnapshotIdentity>, AppError> {
     let transaction = FileTransaction::open(&session.join(SNAPSHOT), clock)?;
+    read_snapshot_record(&transaction)
+}
+
+/// Validates the existing source identity under its retained record lock.
+fn read_snapshot_record(
+    transaction: &FileTransaction<'_>,
+) -> Result<Option<SnapshotIdentity>, AppError> {
     let Some(bytes) = transaction.read_bytes()? else {
         return Ok(None);
     };
@@ -339,6 +348,19 @@ fn read_snapshot_identity(
         return Err(fail("invalidInput", "Invalid instruction source identity"));
     }
     Ok(Some(value))
+}
+
+/// Rejects incompatible preparation records before a multi-record invalidation.
+pub(crate) fn validate_session_records_locked(
+    session: &Path,
+    clock: &dyn Clock,
+) -> Result<(), AppError> {
+    let transaction = FileTransaction::open(&session.join(ACTIVE), clock)?;
+    read_active(&transaction)?;
+    drop(transaction);
+    read_snapshot_identity(session, clock)?;
+    read_generation_key_locked(session, clock)?;
+    Ok(())
 }
 
 /// Invalidates preparation while the caller owns the real session operation lock.
@@ -775,6 +797,8 @@ fn write_active(
     transaction: &FileTransaction<'_>,
     value: &ActiveGeneration,
 ) -> Result<(), AppError> {
+    // Refuse to replace an incompatible stored record, even when invalidating it.
+    read_active(transaction)?;
     transaction.write_bytes(&serde_json::to_vec(&value.to_record())?)
 }
 
@@ -940,9 +964,9 @@ fn canonical_session(path: &Path) -> Result<PathBuf, AppError> {
     if !path.is_absolute() {
         return Err(fail("invalidInput", "Session path must be absolute"));
     }
-    let canonical = fs::canonicalize(path)?;
-    ensure_existing_directory(&canonical)?;
-    Ok(canonical)
+    let path = fs::canonicalize(path)?;
+    ensure_existing_directory(&path)?;
+    Ok(path)
 }
 
 /// Creates or validates the private generation container.

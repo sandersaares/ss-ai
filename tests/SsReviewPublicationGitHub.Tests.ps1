@@ -152,16 +152,13 @@ Describe 'Native GitHub follow-up publication' {
                 body = $(if ($submitted) { $state.summary } else { '' })
                 comments = @{ pageInfo = @{ hasNextPage = $false; endCursor = $null }; nodes = $comments }
             } } }
-        } elseif ($query.Contains('reviewThreads(') -and $state.replies.Count -gt 0) {
-            $threads = @($state.replies | ForEach-Object {
-                @{
-                    id = $_.thread; diffSide = 'RIGHT'; subjectType = $_.subject
-                    comments = @{ pageInfo = @{ hasNextPage = $false; endCursor = $null }; nodes = @(@{ id = $_.id }) }
-                }
-            })
-            $response = @{ data = @{ repository = @{ pullRequest = @{ reviewThreads = @{
-                pageInfo = @{ hasNextPage = $false; endCursor = $null }; nodes = $threads
-            } } } } }
+        } elseif ($query.Contains('node(id:$threadId)')) {
+            $replies = @($state.replies | Where-Object { $_.thread -eq $variables.threadId })
+            if ($replies.Count -eq 0) { throw "Unknown written thread $($variables.threadId)" }
+            $response = @{ data = @{ node = @{
+                id = $variables.threadId; diffSide = 'RIGHT'; subjectType = $replies[0].subject
+                comments = @{ pageInfo = @{ hasNextPage = $false; endCursor = $null }; nodes = @($replies | ForEach-Object { @{ id = $_.id } }) }
+            } } }
         } elseif ($query.Contains('reviewThreads(')) {
             $response = $responses.reviewThreads
         } elseif ($query.Contains('timelineItems(')) {

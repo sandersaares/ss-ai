@@ -4,13 +4,86 @@ use ohno::AppError;
 use serde_json::{Value, from_value, to_value};
 
 use crate::ado_capture::collect as collect_ado;
-use crate::error::fail;
 use crate::github_capture::collect as collect_github;
 use crate::target::{Platform, Target, escape};
 use crate::transport::Transport;
 use crate::{Clock, Http, Process};
 
+/// Groups capture validation failures without changing application recovery.
+#[ohno::error]
+pub(crate) struct CaptureError;
+
+// Keep the validation invariant and the runtime recovery category in the same
+// source chain, matching the assessment package's classified-error pattern.
+macro_rules! classified_capture_error {
+    ($name:ident, $kind:literal, $message:literal, field) => {
+        #[ohno::error]
+        pub(crate) struct $name;
+
+        impl $name {
+            fn classified(field: &str) -> ohno::AppError {
+                crate::capture::CaptureError::caused_by(Self::caused_by(
+                    ss_ai_runtime::fail($kind, format!($message, field)).into_std_error(),
+                ))
+                .into()
+            }
+        }
+    };
+    ($name:ident, $kind:literal, $message:literal) => {
+        #[ohno::error]
+        pub(crate) struct $name;
+
+        impl $name {
+            fn classified() -> ohno::AppError {
+                crate::capture::CaptureError::caused_by(Self::caused_by(
+                    ss_ai_runtime::fail($kind, $message).into_std_error(),
+                ))
+                .into()
+            }
+        }
+    };
+}
+pub(crate) use classified_capture_error;
+
+classified_capture_error!(UnknownPlatform, "invalidInput", "Unknown capture platform");
+classified_capture_error!(
+    MissingPlatform,
+    "invalidInput",
+    "Capture requires a URL or platform"
+);
+classified_capture_error!(
+    MissingOrganization,
+    "invalidInput",
+    "Capture requires an organization"
+);
+classified_capture_error!(
+    InvalidPullRequestId,
+    "invalidInput",
+    "Capture requires a positive pull request identifier"
+);
+classified_capture_error!(
+    MissingGitHubRepository,
+    "invalidInput",
+    "GitHub capture requires a repository"
+);
+classified_capture_error!(
+    MissingReturnedTarget,
+    "service",
+    "Provider omitted capture target"
+);
+classified_capture_error!(
+    ChangedReturnedTarget,
+    "service",
+    "Provider returned a different capture target"
+);
+
 /// Resolves named target inputs before authentication or provider access.
+///
+/// The JSON object accepts `url` or `platform`, `organization`, and
+/// `pullRequestId` coordinates. `platform` accepts GitHub or `AzureDevOps`
+/// case-insensitively. Optional `repository`, `project`, `collectionUrl`, and
+/// `pullRequestId` fields override URL coordinates where applicable. The result
+/// is a target object with canonical `gitHub` or `azureDevOps` platform names.
 pub fn capture_target(input: &Value) -> Result<Value, AppError> {
     let text = |name| {
         input
@@ -19,29 +92,22 @@ pub fn capture_target(input: &Value) -> Result<Value, AppError> {
             .filter(|s| !s.is_empty())
     };
     let platform = match text("platform") {
-        Some("gitHub") => Some(Platform::GitHub),
-        Some("azureDevOps") => Some(Platform::AzureDevOps),
-        Some(_) => return Err(fail("invalidInput", "Unknown capture platform")),
+        Some(value) if value.eq_ignore_ascii_case("github") => Some(Platform::GitHub),
+        Some(value) if value.eq_ignore_ascii_case("azuredevops") => Some(Platform::AzureDevOps),
+        Some(_) => return Err(UnknownPlatform::classified()),
         None => None,
     };
     let mut target = if let Some(url) = text("url") {
         Target::pull_request(url, platform)?
     } else {
-        let platform =
-            platform.ok_or_else(|| fail("invalidInput", "Capture requires a URL or platform"))?;
-        let organization = text("organization")
-            .ok_or_else(|| fail("invalidInput", "Capture requires an organization"))?;
+        let platform = platform.ok_or_else(MissingPlatform::classified)?;
+        let organization = text("organization").ok_or_else(MissingOrganization::classified)?;
         let id = input
             .get("pullRequestId")
             .and_then(Value::as_u64)
             .and_then(|id| u32::try_from(id).ok())
             .filter(|id| *id > 0)
-            .ok_or_else(|| {
-                fail(
-                    "invalidInput",
-                    "Capture requires a positive pull request identifier",
-                )
-            })?;
+            .ok_or_else(InvalidPullRequestId::classified)?;
         Target {
             platform,
             collection_url: (platform == Platform::AzureDevOps).then(|| {
@@ -70,7 +136,7 @@ pub fn capture_target(input: &Value) -> Result<Value, AppError> {
     } else {
         target.project = None;
         if target.repository.is_empty() {
-            return Err(fail("invalidInput", "GitHub capture requires a repository"));
+            return Err(MissingGitHubRepository::classified());
         }
     }
     if let Some(id) = input.get("pullRequestId") {
@@ -78,12 +144,7 @@ pub fn capture_target(input: &Value) -> Result<Value, AppError> {
             .as_u64()
             .and_then(|id| u32::try_from(id).ok())
             .filter(|id| *id > 0)
-            .ok_or_else(|| {
-                fail(
-                    "invalidInput",
-                    "Capture requires a positive pull request identifier",
-                )
-            })?;
+            .ok_or_else(InvalidPullRequestId::classified)?;
     }
     target.refresh_url();
     Ok(to_value(target)?)
@@ -107,25 +168,82 @@ pub fn collect_capture(
         context
             .get("target")
             .cloned()
-            .ok_or_else(|| fail("service", "Provider omitted capture target"))?,
+            .ok_or_else(MissingReturnedTarget::classified)?,
     )?;
     if returned.platform != target.platform
         || returned.pull_request_id != target.pull_request_id
         || returned.collection_url != target.collection_url
     {
-        return Err(fail(
-            "service",
-            "Provider returned a different capture target",
-        ));
+        return Err(ChangedReturnedTarget::classified());
     }
     Ok(context)
 }
 
 #[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
-    use serde_json::json;
+    use serde_json::{Value, json};
 
     use crate::capture_target;
+
+    #[test]
+    fn platform_names_are_case_insensitive_and_serialized_canonically() {
+        for (name, canonical) in [
+            ("GitHub", "gitHub"),
+            ("GITHUB", "gitHub"),
+            ("gitHub", "gitHub"),
+            ("AzureDevOps", "azureDevOps"),
+            ("AZUREDEVOPS", "azureDevOps"),
+            ("azureDevOps", "azureDevOps"),
+        ] {
+            let target = capture_target(&json!({
+                "platform": name, "organization": "org", "repository": "repo",
+                "pullRequestId": 17
+            }))
+            .unwrap();
+            assert_eq!(
+                target.get("platform").and_then(Value::as_str),
+                Some(canonical)
+            );
+        }
+        capture_target(&json!({"platform": "other"})).unwrap_err();
+        let target = capture_target(&json!({
+            "platform":"GITHUB", "url":"https://github.com/org/repo/pull/17"
+        }))
+        .unwrap();
+        assert_eq!(
+            target.get("platform").and_then(Value::as_str),
+            Some("gitHub")
+        );
+        let target = capture_target(&json!({
+            "platform":"AZUREDEVOPS",
+            "url":"https://dev.azure.com/org/project/_git/repo/pullrequest/17"
+        }))
+        .unwrap();
+        assert_eq!(
+            target.get("platform").and_then(Value::as_str),
+            Some("azureDevOps")
+        );
+    }
+
+    #[test]
+    fn capture_validation_exposes_distinct_leaves_and_runtime_classifications() {
+        let platform = capture_target(&json!({"platform":"other"})).unwrap_err();
+        let id = capture_target(&json!({
+            "platform":"GitHub", "organization":"org", "repository":"repo", "pullRequestId":0
+        }))
+        .unwrap_err();
+        assert!(platform.find_source::<super::CaptureError>().is_some());
+        assert!(platform.find_source::<super::UnknownPlatform>().is_some());
+        assert!(
+            platform
+                .find_source::<super::InvalidPullRequestId>()
+                .is_none()
+        );
+        assert!(id.find_source::<super::InvalidPullRequestId>().is_some());
+        assert_eq!(crate::classification(&platform), "invalidInput");
+        assert_eq!(crate::classification(&id), "invalidInput");
+    }
 
     #[test]
     fn resolves_azure_www_url_without_changing_the_organization() {

@@ -104,6 +104,7 @@ BeforeAll {
 
 Describe 'ss-review focus-area preparation' {
     BeforeEach {
+        $script:AlternatePaths = $false
         $script:Session = Join-Path $TestDrive ([guid]::NewGuid().ToString('N'))
         $script:MapPath = Join-Path $script:Session 'focus-area-map.json'
         $script:ScopedText = @(

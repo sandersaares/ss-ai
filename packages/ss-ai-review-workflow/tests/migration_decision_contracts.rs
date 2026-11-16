@@ -240,7 +240,7 @@ fn empty_and_malformed_approved_sets_are_checked_before_publication() {
 }
 
 #[test]
-fn follow_up_binding_requires_a_reply_capable_current_thread() {
+fn follow_up_binding_requires_a_captured_comment() {
     let workspace = Workspace::new("followups");
     let mut item = finding("F1", "src/lib.rs", "file");
     item["followUp"] = json!({"threadId":"T","commentId":"C"});
@@ -259,7 +259,9 @@ fn follow_up_binding_requires_a_reply_capable_current_thread() {
     let mut context = capture(&"a".repeat(40), &"b".repeat(40));
     context["threads"] = json!([{"id":"T","openingCommentId":"C","kind":"text","resolution":"active",
         "isOutdated":false,"isAuthoredBySelf":false,"context":{"filePath":"src/lib.rs"},"decision":null,
-        "url":null,"eventUtc":null,"lastUpdatedUtc":null,"comments":[]}]);
+        "url":null,"eventUtc":null,"lastUpdatedUtc":null,"comments":[{"id":"C","parentId":null,
+            "url":null,"publishedUtc":null,"lastEditedUtc":null,"author":null,"content":null,
+            "authorship":"human","authorshipEvidence":[],"isAuthoredBySelf":false}]}]);
     let path = workspace.put("capture.json", &context);
     let build = || {
         approved::build_approved(
@@ -274,12 +276,12 @@ fn follow_up_binding_requires_a_reply_capable_current_thread() {
     };
     assert_eq!(build().unwrap()["approved"], 1);
     let before = fs::read(&output).unwrap();
-    for change in ["missing", "system"] {
+    for change in ["missing thread", "missing comment"] {
         let mut changed = context.clone();
-        if change == "missing" {
+        if change == "missing thread" {
             changed["threads"][0]["id"] = json!("other");
         } else {
-            changed["threads"][0]["kind"] = json!("system");
+            changed["threads"][0]["comments"][0]["id"] = json!("other");
         }
         fs::write(&path, serde_json::to_vec(&changed).unwrap()).unwrap();
         assert!(build().is_err(), "{change}");

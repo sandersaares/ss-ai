@@ -21,6 +21,9 @@ use ss_ai_runtime::FileTransaction;
 use crate::error::fail;
 use crate::{Clock, classification};
 
+/// Separates native publication journals from the prior PowerShell record format.
+const JOURNAL_SCHEMA_VERSION: u64 = 2;
+
 /// Provider effects retain their review handle in the composition layer.
 pub(crate) trait Effects {
     fn start(&mut self) -> Result<Value, AppError>;
@@ -214,8 +217,22 @@ fn check_prior_inner(journal: &mut dyn Journal, target: &Value) -> Result<(), Ap
     let operations = old["operations"]
         .as_array()
         .ok_or_else(|| fail("invalidState", "Publication record has no operations"))?;
-    if old["schemaVersion"] != 1
+    let in_flight = old.get("inFlight");
+    if old["schemaVersion"] != JOURNAL_SCHEMA_VERSION
         || !valid_target(&old["target"])
+        || old["platform"] != old["target"]["platform"]
+        || !old["startedUtc"].is_string()
+        || !old["pullRequestUrl"].is_string()
+        || !old["sourceCommit"].is_string()
+        || !old["mergeBaseCommit"].is_string()
+        || !has_nullable_string(&old, "reviewId")
+        || !has_nullable_string(&old, "reviewUrl")
+        || !old["draftDiscarded"].is_boolean()
+        || !has_nullable_string(&old, "draftDiscardMessage")
+        || !has_nullable_string(&old, "message")
+        || !has_nullable_object(&old, "preCompletionVerification")
+        || !has_nullable_object(&old, "verification")
+        || !in_flight.is_some_and(valid_in_flight)
         || !matches!(
             old["status"].as_str(),
             Some("inProgress" | "failed" | "succeeded" | "publishedWithFollowUpFailure")
@@ -251,7 +268,7 @@ fn check_prior_inner(journal: &mut dyn Journal, target: &Value) -> Result<(), Ap
     // An initial record or a pending intent is not evidence that no request ran.
     // Only a terminal, definitive start refusal proves that no effect occurred.
     let clean_refusal = old["status"] == "failed"
-        && old["inFlight"].is_null()
+        && in_flight == Some(&Value::Null)
         && operations
             .first()
             .is_some_and(|op| op["operation"] == "startReview" && op["outcome"] == "failed")
@@ -266,6 +283,40 @@ fn check_prior_inner(journal: &mut dyn Journal, target: &Value) -> Result<(), Ap
         ));
     }
     Ok(())
+}
+
+/// Requires a field that the journal may leave unset until its effect succeeds.
+fn has_nullable_string(record: &Value, name: &str) -> bool {
+    matches!(record.get(name), Some(Value::Null | Value::String(_)))
+}
+
+/// Requires a verification field that may remain unset before it is read.
+fn has_nullable_object(record: &Value, name: &str) -> bool {
+    matches!(record.get(name), Some(Value::Null | Value::Object(_)))
+}
+
+/// Validates the durable intent written before each provider effect.
+fn valid_in_flight(value: &Value) -> bool {
+    let Some(intent) = value.as_object() else {
+        return value.is_null();
+    };
+    matches!(
+        intent.get("operation").and_then(Value::as_str),
+        Some(
+            "startReview"
+                | "newLineThread"
+                | "newFileThread"
+                | "reply"
+                | "verifyFindings"
+                | "approveReview"
+                | "completeReview"
+                | "verify"
+                | "reopenThread"
+                | "discard"
+        )
+    ) && intent
+        .get("index")
+        .is_some_and(|index| index.is_null() || index.as_u64().is_some())
 }
 
 /// Tracks which journal operations may follow the validated prefix.
@@ -366,21 +417,10 @@ fn validate_plan(plan: &[Value]) -> Result<(), AppError> {
             if replies
                 || entry["requiresReopen"] == true
                 || entry["anchor"]["path"].as_str().is_none_or(str::is_empty)
-                || (name == "newLineThread"
-                    && entry["anchor"]["endLine"]
-                        .as_u64()
-                        .is_none_or(|line| line == 0))
-                || (name == "newLineThread"
-                    && entry["anchor"].get("startLine").is_some_and(|start| {
-                        !start.is_null()
-                            && start.as_u64().is_none_or(|start| {
-                                start == 0
-                                    || entry["anchor"]["endLine"]
-                                        .as_u64()
-                                        .is_none_or(|end| start > end)
-                            })
-                    }))
             {
+                return Err(fail("invalidInput", "Invalid anchor or publication order"));
+            }
+            if name == "newLineThread" && !valid_line_range(&entry["anchor"]) {
                 return Err(fail("invalidInput", "Invalid anchor or publication order"));
             }
         }
@@ -396,12 +436,71 @@ pub(crate) fn preflight(target: &Value, state: &Value, plan: &[Value]) -> Result
     validate_plan(plan)
 }
 
+/// Checks a line anchor's required endpoint and optional starting endpoint.
+fn valid_line_range(anchor: &Value) -> bool {
+    let Some(end) = anchor["endLine"].as_u64().filter(|line| *line > 0) else {
+        return false;
+    };
+    match anchor.get("startLine") {
+        None | Some(Value::Null) => true,
+        Some(start) => start
+            .as_u64()
+            .is_some_and(|start| start > 0 && start <= end),
+    }
+}
+
 /// Distinguishes proven provider refusals from unknown write outcomes.
 fn refusal(error: &AppError, platform: &Value) -> bool {
     let kind = classification(error);
     matches!(kind, "permissionDenied" | "authentication")
         || (platform == "gitHub" && kind == "explicitRateLimited")
         || (platform == "azureDevOps" && kind == "rateLimited")
+}
+
+/// Couples each journaled effect identity to its replay-safety classification.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum EffectKind {
+    StartReview,
+    NewLineThread,
+    NewFileThread,
+    Reply,
+    VerifyFindings,
+    ApproveReview,
+    CompleteReview,
+    Verify,
+    ReopenThread,
+}
+
+impl EffectKind {
+    /// Returns the stable operation name stored in publication records.
+    fn operation_name(self) -> &'static str {
+        match self {
+            Self::StartReview => "startReview",
+            Self::NewLineThread => "newLineThread",
+            Self::NewFileThread => "newFileThread",
+            Self::Reply => "reply",
+            Self::VerifyFindings => "verifyFindings",
+            Self::ApproveReview => "approveReview",
+            Self::CompleteReview => "completeReview",
+            Self::Verify => "verify",
+            Self::ReopenThread => "reopenThread",
+        }
+    }
+
+    /// Converts a validated finding operation into its effect kind.
+    fn finding(name: &str) -> Option<Self> {
+        match name {
+            "newLineThread" => Some(Self::NewLineThread),
+            "newFileThread" => Some(Self::NewFileThread),
+            "reply" => Some(Self::Reply),
+            _ => None,
+        }
+    }
+
+    /// Identifies reads whose failure cannot leave an unknown provider write.
+    fn is_read_only(self) -> bool {
+        matches!(self, Self::VerifyFindings | Self::Verify)
+    }
 }
 
 /// Marks storage failures so cleanup cannot follow a failed durable write.
@@ -419,14 +518,13 @@ fn effect(
     journal: &mut dyn Journal,
     result: &mut Value,
     index: Option<usize>,
-    name: &str,
-    read_only: bool,
+    kind: EffectKind,
     action: impl FnOnce() -> Result<Value, AppError>,
 ) -> Result<Value, AppError> {
+    let name = kind.operation_name();
+    let read_only = kind.is_read_only();
     let intent = json!({"operation": name, "index": index});
     result["inFlight"] = intent.clone();
-    // Schema-1 readers that do not know `inFlight` still refuse replay while
-    // the provider call may have reached the service.
     if !read_only && let Some(index) = index {
         result["operations"][index]["outcome"] = json!("ambiguous");
     }
@@ -439,20 +537,28 @@ fn effect(
             if let Some(index) = index {
                 result["operations"][index]["outcome"] = json!("succeeded");
                 result["operations"][index]["receipt"] = receipt.clone();
-                if name == "startReview" {
-                    result["reviewId"] = receipt["reviewId"].clone();
-                } else if name == "completeReview" {
-                    result["reviewUrl"] = receipt["url"].clone();
-                } else if matches!(name, "newLineThread" | "newFileThread" | "reply") {
-                    result["operations"][index]["threadId"] = receipt["threadId"].clone();
-                    result["operations"][index]["commentId"] = receipt["commentId"].clone();
+                match kind {
+                    EffectKind::StartReview => {
+                        result["reviewId"] = receipt["reviewId"].clone();
+                    }
+                    EffectKind::CompleteReview => {
+                        result["reviewUrl"] = receipt["url"].clone();
+                    }
+                    EffectKind::NewLineThread | EffectKind::NewFileThread | EffectKind::Reply => {
+                        result["operations"][index]["threadId"] = receipt["threadId"].clone();
+                        result["operations"][index]["commentId"] = receipt["commentId"].clone();
+                    }
+                    _ => {}
                 }
             }
-            if name == "verifyFindings" {
-                result["preCompletionVerification"] = receipt.clone();
-            }
-            if name == "verify" {
-                result["verification"] = receipt.clone();
+            match kind {
+                EffectKind::VerifyFindings => {
+                    result["preCompletionVerification"] = receipt.clone();
+                }
+                EffectKind::Verify => {
+                    result["verification"] = receipt.clone();
+                }
+                _ => {}
             }
             result["inFlight"] = Value::Null;
             if let Err(error) = save(journal, result) {
@@ -463,20 +569,12 @@ fn effect(
         }
         Err(error) => {
             if let Some(index) = index {
-                let vote_may_exist = name == "completeReview"
-                    && result["operations"].as_array().is_some_and(|operations| {
-                        operations.iter().any(|op| {
-                            op["operation"] == "approveReview"
-                                && matches!(op["outcome"].as_str(), Some("succeeded" | "ambiguous"))
-                        })
+                result["operations"][index]["outcome"] =
+                    json!(if read_only || refusal(&error, &result["platform"]) {
+                        "failed"
+                    } else {
+                        "ambiguous"
                     });
-                result["operations"][index]["outcome"] = json!(if !vote_may_exist
-                    && (read_only || refusal(&error, &result["platform"]))
-                {
-                    "failed"
-                } else {
-                    "ambiguous"
-                });
                 result["operations"][index]["message"] = json!(error.to_string());
             }
             result["inFlight"] = Value::Null;
@@ -719,7 +817,29 @@ fn execute_inner(
             false,
         ));
     }
-    let mut result = json!({"schemaVersion": 1, "startedUtc": now, "platform": target["platform"],
+    // Keep saved indices aligned with the validated journal phase sequence.
+    debug_assert!(valid_operations(&operations));
+    debug_assert_eq!(
+        operations
+            .get(verify_index)
+            .and_then(|op| op["operation"].as_str()),
+        Some("verifyFindings")
+    );
+    if let Some(index) = approval_index {
+        debug_assert_eq!(
+            operations
+                .get(index)
+                .and_then(|op| op["operation"].as_str()),
+            Some("approveReview")
+        );
+    }
+    debug_assert_eq!(
+        operations
+            .get(complete_index)
+            .and_then(|op| op["operation"].as_str()),
+        Some("completeReview")
+    );
+    let mut result = json!({"schemaVersion": JOURNAL_SCHEMA_VERSION, "startedUtc": now, "platform": target["platform"],
         "target": target, "pullRequestUrl": target["webUrl"], "sourceCommit": state["sourceCommit"],
         "mergeBaseCommit": state["mergeBaseCommit"], "status": "inProgress", "reviewId": null,
         "reviewUrl": null, "draftDiscarded": false, "draftDiscardMessage": null, "message": null,
@@ -728,48 +848,52 @@ fn execute_inner(
     let mut started = false;
     let mut submitted = false;
     let run = (|| -> Result<(), AppError> {
-        effect(journal, &mut result, Some(0), "startReview", false, || {
-            let receipt = effects.start()?;
-            if receipt["reviewId"].as_str().is_none_or(str::is_empty) {
-                return Err(fail(
-                    "ambiguousWrite",
-                    "Start returned no review identifier",
-                ));
-            }
-            Ok(receipt)
-        })?;
+        effect(
+            journal,
+            &mut result,
+            Some(0),
+            EffectKind::StartReview,
+            || {
+                let receipt = effects.start()?;
+                if receipt["reviewId"].as_str().is_none_or(str::is_empty) {
+                    return Err(fail(
+                        "ambiguousWrite",
+                        "Start returned no review identifier",
+                    ));
+                }
+                Ok(receipt)
+            },
+        )?;
         started = true;
         for (index, entry) in plan.iter().enumerate() {
             let name = entry["operation"].as_str().unwrap_or_default();
+            let kind = EffectKind::finding(name).ok_or_else(|| {
+                fail(
+                    "invalidState",
+                    "Validated publication plan contains an unknown operation",
+                )
+            })?;
             let record_index = index
                 .checked_add(1)
                 .expect("A plan index fits after the start operation");
-            effect(
-                journal,
-                &mut result,
-                Some(record_index),
-                name,
-                false,
-                || {
-                    let receipt = effects.add(entry)?;
-                    if receipt["threadId"].as_str().is_none_or(str::is_empty)
-                        || (name == "reply" && receipt["threadId"] != entry["threadId"])
-                    {
-                        return Err(fail(
-                            "ambiguousWrite",
-                            "Finding returned no matching thread identifier",
-                        ));
-                    }
-                    Ok(receipt)
-                },
-            )?;
+            effect(journal, &mut result, Some(record_index), kind, || {
+                let receipt = effects.add(entry)?;
+                if receipt["threadId"].as_str().is_none_or(str::is_empty)
+                    || (kind == EffectKind::Reply && receipt["threadId"] != entry["threadId"])
+                {
+                    return Err(fail(
+                        "ambiguousWrite",
+                        "Finding returned no matching thread identifier",
+                    ));
+                }
+                Ok(receipt)
+            })?;
         }
         let verification = effect(
             journal,
             &mut result,
             Some(verify_index),
-            "verifyFindings",
-            true,
+            EffectKind::VerifyFindings,
             || effects.verify_findings(),
         )?;
         let checked = if target["platform"] == "gitHub" && verification["state"] != "PENDING" {
@@ -784,16 +908,11 @@ fn execute_inner(
             return Err(error);
         }
         if let Some(index) = approval_index {
-            // Legacy readers recognize an ambiguous completion as an obstacle.
-            // Keep it ambiguous until summary completion is durably recorded,
-            // because the vote is already an independent visible write.
-            result["operations"][complete_index]["outcome"] = json!("ambiguous");
             effect(
                 journal,
                 &mut result,
                 Some(index),
-                "approveReview",
-                false,
+                EffectKind::ApproveReview,
                 || {
                     let receipt = effects.approve()?;
                     if receipt["id"].as_str().is_none_or(str::is_empty)
@@ -814,8 +933,7 @@ fn execute_inner(
             journal,
             &mut result,
             Some(complete_index),
-            "completeReview",
-            false,
+            EffectKind::CompleteReview,
             || {
                 let receipt = effects.complete(summary, approve)?;
                 if receipt["reviewId"] != review_id
@@ -830,7 +948,7 @@ fn execute_inner(
             },
         )?;
         submitted = true;
-        let verification = effect(journal, &mut result, None, "verify", true, || {
+        let verification = effect(journal, &mut result, None, EffectKind::Verify, || {
             effects.verify()
         })?;
         verify_completed(
@@ -849,11 +967,6 @@ fn execute_inner(
         // only durable evidence, and another effect would overwrite that evidence.
         if classification(&error) == "journalFailure" || !result["inFlight"].is_null() {
             return Err(error);
-        }
-        if approval_index.is_some_and(|index| result["operations"][index]["outcome"] != "failed")
-            && !submitted
-        {
-            result["operations"][complete_index]["outcome"] = json!("ambiguous");
         }
         result["status"] = json!("failed");
         result["message"] = json!(error.to_string());
@@ -897,8 +1010,7 @@ fn execute_inner(
             journal,
             &mut result,
             Some(follow_index),
-            "reopenThread",
-            false,
+            EffectKind::ReopenThread,
             || effects.reopen(thread).map(|()| Value::Null),
         );
         if let Err(error) = reopened {
@@ -924,11 +1036,12 @@ fn execute_inner(
 #[cfg(test)]
 #[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
-    use std::cell::Cell;
+    use std::cell::{Cell, RefCell};
     use std::io;
+    use std::rc::Rc;
     use std::time::Duration;
 
-    use super::{Effects, Journal, check_prior_inner, execute_inner};
+    use super::{Effects, JOURNAL_SCHEMA_VERSION, Journal, check_prior_inner, execute_inner};
     use crate::classification;
     use crate::error::fail;
     use crate::target::Target;
@@ -950,6 +1063,7 @@ mod tests {
         fail_at: Option<usize>,
         fail_verification_record: bool,
         failure_triggered: bool,
+        events: Rc<RefCell<Vec<String>>>,
     }
 
     impl Journal for Memory {
@@ -974,6 +1088,9 @@ mod tests {
                 });
             if self.fail_at == Some(self.writes) || failed_verification {
                 self.failure_triggered = true;
+                self.events
+                    .borrow_mut()
+                    .push("journal:write-failed".to_owned());
                 return Err(fail("io", "Journal refused replacement"));
             }
             self.record = Some(value.clone());
@@ -995,11 +1112,13 @@ mod tests {
         approved: bool,
         bad_approval: Option<&'static str>,
         two_findings: bool,
+        events: Rc<RefCell<Vec<String>>>,
     }
 
     impl Provider {
         fn call(&mut self, name: &str) -> Result<(), AppError> {
             self.calls.push(name.to_owned());
+            self.events.borrow_mut().push(format!("provider:{name}"));
             if let Some((operation, kind)) = self.failure
                 && operation == name
             {
@@ -1135,6 +1254,10 @@ mod tests {
             let mut provider = Provider::default();
             let result = run(&mut journal, &mut provider, platform, true).unwrap();
             assert_eq!(result["status"], "succeeded");
+            assert_eq!(
+                journal.record.as_ref().unwrap()["schemaVersion"],
+                JOURNAL_SCHEMA_VERSION
+            );
             assert_eq!(result["publishedFindingCount"], 1);
             assert_eq!(result["resultPath"], "publication-result.json");
             let expected = if platform == "gitHub" {
@@ -1264,7 +1387,10 @@ mod tests {
 
     #[test]
     fn approval_vote_remains_visible_when_ado_summary_fails() {
-        for kind in ["permissionDenied", "ambiguousWrite"] {
+        for (kind, expected_completion) in [
+            ("permissionDenied", "failed"),
+            ("ambiguousWrite", "ambiguous"),
+        ] {
             let mut journal = Memory::default();
             let mut provider = Provider {
                 failure: Some(("complete", kind)),
@@ -1283,45 +1409,72 @@ mod tests {
                 ops.iter()
                     .find(|op| op["operation"] == "completeReview")
                     .unwrap()["outcome"],
-                "ambiguous"
+                expected_completion
             );
-            assert!(journal.history.iter().all(|version| {
+            assert!(journal.history.iter().any(|version| {
                 let ops = version["operations"].as_array().unwrap();
-                !ops.iter()
+                ops.iter()
                     .any(|op| op["operation"] == "approveReview" && op["outcome"] == "succeeded")
-                    || ops.iter().any(|op| {
-                        op["operation"] == "completeReview"
-                            && matches!(op["outcome"].as_str(), Some("ambiguous" | "succeeded"))
-                    })
+                    && ops
+                        .iter()
+                        .any(|op| op["operation"] == "completeReview" && op["outcome"] == "pending")
             }));
             _ = check_prior_inner(&mut journal, &target("azureDevOps")).unwrap_err();
         }
     }
 
     #[test]
-    fn legacy_pending_and_corrupt_records_never_authorize_replay() {
-        let prior = json!({"schemaVersion": 1, "target": target("gitHub"), "status": "inProgress",
+    fn incompatible_and_incomplete_records_never_authorize_replay() {
+        let prior = json!({"schemaVersion": JOURNAL_SCHEMA_VERSION, "startedUtc":"2026-01-01T00:00:00Z",
+        "platform":"gitHub","target": target("gitHub"),"pullRequestUrl":"https://github.com/acme/repo/pull/42",
+        "sourceCommit":"head","mergeBaseCommit":"base","reviewId":null,"reviewUrl":null,
+        "draftDiscarded":false,"draftDiscardMessage":null,"message":null,
+        "preCompletionVerification":null,"verification":null,"inFlight":null,"status": "inProgress",
         "operations": [
             super::operation("startReview", None, &Value::Null, false),
             super::operation("verifyFindings", None, &Value::Null, false),
             super::operation("completeReview", None, &Value::Null, false)
         ]});
+        let mut legacy = prior.clone();
+        legacy["schemaVersion"] = json!(1);
+        legacy.as_object_mut().unwrap().remove("inFlight");
+        legacy["status"] = json!("failed");
+        legacy["operations"][0]["outcome"] = json!("failed");
+        let mut missing_in_flight = prior.clone();
+        missing_in_flight
+            .as_object_mut()
+            .unwrap()
+            .remove("inFlight");
+        let mut missing_verification = prior.clone();
+        missing_verification
+            .as_object_mut()
+            .unwrap()
+            .remove("verification");
+        let mut clean_refusal = prior;
+        clean_refusal["status"] = json!("failed");
+        clean_refusal["operations"][0]["outcome"] = json!("failed");
+        let mut malformed_intent = clean_refusal.clone();
+        malformed_intent["inFlight"] = json!({"operation":"unknown","index":null});
+
         for record in [
-            prior.clone(),
+            legacy,
+            missing_in_flight,
+            missing_verification,
+            malformed_intent,
             json!({"schemaVersion": 1, "target": target("gitHub"), "status":"failed", "operations": []}),
-            json!({"schemaVersion": 2, "target": target("gitHub"), "status":"failed", "operations": []}),
+            json!({"schemaVersion": 3, "target": target("gitHub"), "status":"failed", "operations": []}),
         ] {
+            let raw = to_vec(&record).unwrap();
             let mut journal = Memory {
-                record: Some(record),
+                raw: Some(raw.clone()),
                 ..Memory::default()
             };
             _ = check_prior_inner(&mut journal, &target("gitHub")).unwrap_err();
+            assert_eq!(journal.raw.as_deref(), Some(raw.as_slice()));
+            assert_eq!(journal.writes, 0);
         }
-        let mut prior = prior;
-        prior["status"] = json!("failed");
-        prior["operations"][0]["outcome"] = json!("failed");
         let mut journal = Memory {
-            record: Some(prior),
+            record: Some(clean_refusal),
             ..Memory::default()
         };
         check_prior_inner(&mut journal, &target("gitHub")).unwrap();
@@ -1631,14 +1784,31 @@ mod tests {
         run(&mut baseline, &mut Provider::default(), "gitHub", false).unwrap();
         // The initial write has no prior record to protect; test every later write.
         for fail_at in 2..=baseline.writes {
+            let events: Rc<RefCell<Vec<String>>> = Rc::default();
             let mut journal = Memory {
                 fail_at: Some(fail_at),
+                events: Rc::clone(&events),
                 ..Memory::default()
             };
-            let mut provider = Provider::default();
+            let mut provider = Provider {
+                events: Rc::clone(&events),
+                ..Provider::default()
+            };
             _ = run(&mut journal, &mut provider, "gitHub", false)
                 .expect_err(&format!("write {fail_at} must fail"));
             assert!(journal.failure_triggered);
+            let events = events.borrow();
+            let failed_write = events
+                .iter()
+                .position(|event| event == "journal:write-failed")
+                .expect("failed journal write is recorded");
+            assert!(
+                !events
+                    .iter()
+                    .skip(failed_write + 1)
+                    .any(|event| event.starts_with("provider:")),
+                "provider effect followed failed journal write {fail_at}: {events:?}"
+            );
             assert!(
                 !provider.calls.iter().any(|call| call == "discard"),
                 "{fail_at}"
