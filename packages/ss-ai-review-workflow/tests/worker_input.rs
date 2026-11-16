@@ -7,6 +7,7 @@
 
 use std::cell::Cell;
 use std::fs;
+use std::iter::repeat_with;
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::{self, Receiver, Sender};
 use std::thread;
@@ -422,10 +423,12 @@ fn concurrent_reads_preserve_diagnostics() {
     let lock = FileTransaction::open(&diagnostics, &TestClock).unwrap();
     let (observed, events) = mpsc::channel();
     let mut releases = Vec::new();
+    let mut outcomes = Vec::new();
     thread::scope(|scope| {
         for id in ids {
             let (release, gate) = mpsc::channel();
-            releases.push(release);
+            let (completed, outcome) = mpsc::channel();
+            releases.push((release, outcome));
             scope.spawn({
                 let observed = observed.clone();
                 let path = &path;
@@ -439,18 +442,33 @@ fn concurrent_reads_preserve_diagnostics() {
                     if !clock.reported.get() {
                         observed.send(false).unwrap();
                     }
-                    assert_eq!(result.is_ok(), id != "missing");
+                    completed
+                        .send((
+                            id,
+                            result.is_ok(),
+                            result.err().map(|error| error.to_string()),
+                        ))
+                        .unwrap();
                 }
             });
         }
-        let all_contended = (0..ids.len()).all(|_| events.recv().unwrap());
+        let all_contended = repeat_with(|| events.recv().unwrap())
+            .take(ids.len())
+            .fold(true, |all, observed| all & observed);
         drop(lock);
         let mut all_released = true;
-        for release in releases {
+        // All reads overlapped on the held lock. Releasing one at a time avoids
+        // exhausting a fake-clock retry budget while another reader is descheduled.
+        for (release, outcome) in releases {
             all_released &= release.send(()).is_ok();
+            outcomes.push(outcome.recv());
         }
         assert!(all_contended && all_released);
     });
+    for outcome in outcomes {
+        let (id, succeeded, error) = outcome.unwrap();
+        assert_eq!(succeeded, id != "missing", "{id}: {error:?}");
+    }
     let counts = read_diagnostics(&diagnostics, &TestClock).unwrap();
     assert_eq!(counts["counts"]["documentReadCalls"], ids.len());
     assert_eq!(counts["counts"]["firstReadFailures"], 1);
