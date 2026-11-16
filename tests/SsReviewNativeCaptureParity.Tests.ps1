@@ -69,7 +69,12 @@ BeforeAll {
     # Exercise retained GitHub mapping with offline responses. PreDocument
     # returns the checked provider context; otherwise assemble a canonical capture.
     function New-OfflineGitHubCapture {
-        param([switch] $PreDocument, [string] $ReplacementContent, [switch] $NullBody)
+        param(
+            [switch] $PreDocument,
+            [string] $ReplacementContent,
+            [switch] $NullBody,
+            [switch] $DeletedHeadRepository
+        )
 
         $fixturePath = Join-Path $PSScriptRoot 'fixtures\ss-review-native-capture\github.json'
         $fixture = ConvertFrom-JsonVerbatim -Text ([IO.File]::ReadAllText($fixturePath, [Text.Encoding]::UTF8))
@@ -77,6 +82,7 @@ BeforeAll {
             $fixture['responses']['reviewThreads']['data']['repository']['pullRequest']['reviewThreads']['nodes'][0]['comments']['nodes'][0]['body'] = $ReplacementContent
         }
         if ($NullBody) { $fixture['responses']['pullRequest']['body'] = $null }
+        if ($DeletedHeadRepository) { $fixture['responses']['pullRequest']['head']['repo'] = $null }
         $script:Responses = $fixture['responses']
         $script:Requests = [Collections.Generic.List[string]]::new()
         $invoke = {
@@ -109,7 +115,9 @@ BeforeAll {
             -GetUtcNow { $script:Instant }
         $context = Get-GitHubPullRequestContext -Transport $transport -Target $fixture['target']
         $name = if ($PSBoundParameters.ContainsKey('ReplacementContent')) { 'github-refresh' } else { 'github' }
-        if (-not $NullBody) { Assert-ProviderExpectation -Context $context -Name $name }
+        if (-not $NullBody -and -not $DeletedHeadRepository) {
+            Assert-ProviderExpectation -Context $context -Name $name
+        }
         if ($PreDocument) { return $context }
         New-PullRequestContextDocument -Context $context -NowUtc $script:Instant
     }
@@ -176,25 +184,42 @@ AfterAll {
 }
 
 Describe 'Offline provider capture and native reading compatibility' {
-    It 'accepts matching native and retained evidence when GitHub returns a null pull request body' {
-        $live = New-OfflineGitHubCapture -PreDocument -NullBody
-        $retained = New-PullRequestContextDocument -Context $live -NowUtc $script:Instant
-        $retained['pullRequest']['description'] | Should -BeExactly ''
-        $fixturePath = Join-Path $PSScriptRoot 'fixtures/ss-review-native-capture/github.json'
-        $fixture = ConvertFrom-JsonVerbatim -Text ([IO.File]::ReadAllText($fixturePath, [Text.Encoding]::UTF8))
-        $fixture['responses']['pullRequest']['body'] = $null
-        $root = Join-Path $script:Scratch 'null-body'
-        $responses = Join-Path $root 'responses'
-        [void] [IO.Directory]::CreateDirectory($responses)
-        foreach ($key in $fixture['responses'].Keys) {
-            $value = $fixture['responses'][$key]
-            if ($key -in @('reviews', 'issueComments', 'requestedReviewers')) { $value = ,$value }
-            [IO.File]::WriteAllText((Join-Path $responses "$key.json"),
-                (ConvertTo-Json -InputObject $value -Depth 100 -Compress), [Text.UTF8Encoding]::new($false))
-        }
+    It 'accepts matching native and retained evidence for null bodies and deleted GitHub heads' {
+        $scenarios = @(
+            @{ name = 'null-body'; nullBody = $true; deletedHeadRepository = $false },
+            @{ name = 'deleted-head-repository'; nullBody = $false; deletedHeadRepository = $true }
+        )
+        foreach ($scenario in $scenarios) {
+            $retainedArguments = @{ PreDocument = $true }
+            if ($scenario.nullBody) { $retainedArguments.NullBody = $true }
+            if ($scenario.deletedHeadRepository) { $retainedArguments.DeletedHeadRepository = $true }
+            $live = New-OfflineGitHubCapture @retainedArguments
+            $retained = New-PullRequestContextDocument -Context $live -NowUtc $script:Instant
+            if ($scenario.nullBody) {
+                $retained['pullRequest']['description'] | Should -BeExactly ''
+            }
+            if ($scenario.deletedHeadRepository) {
+                $retained['pullRequest']['sourceRef'] | Should -BeExactly 'topic'
+            }
 
-        # A local executable serves the recorded responses; it rejects provider writes.
-        $standIn = @'
+            $fixturePath = Join-Path $PSScriptRoot 'fixtures/ss-review-native-capture/github.json'
+            $fixture = ConvertFrom-JsonVerbatim -Text ([IO.File]::ReadAllText($fixturePath, [Text.Encoding]::UTF8))
+            if ($scenario.nullBody) { $fixture['responses']['pullRequest']['body'] = $null }
+            if ($scenario.deletedHeadRepository) {
+                $fixture['responses']['pullRequest']['head']['repo'] = $null
+            }
+            $root = Join-Path $script:Scratch $scenario.name
+            $responses = Join-Path $root 'responses'
+            [void] [IO.Directory]::CreateDirectory($responses)
+            foreach ($key in $fixture['responses'].Keys) {
+                $value = $fixture['responses'][$key]
+                if ($key -in @('reviews', 'issueComments', 'requestedReviewers')) { $value = ,$value }
+                [IO.File]::WriteAllText((Join-Path $responses "$key.json"),
+                    (ConvertTo-Json -InputObject $value -Depth 100 -Compress), [Text.UTF8Encoding]::new($false))
+            }
+
+            # A local executable serves the recorded responses; it rejects provider writes.
+            $standIn = @'
 #!/usr/bin/env pwsh
 #Requires -Version 7.6
 Set-StrictMode -Version Latest
@@ -222,39 +247,42 @@ else { throw "Unexpected provider request: $command" }
 [Console]::OutputEncoding = [Text.UTF8Encoding]::new($false)
 [Console]::Write([IO.File]::ReadAllText((Join-Path $env:FIXTURE_ROOT "responses/$key.json"), [Text.Encoding]::UTF8))
 '@
-        $fake = Join-Path $root $(if ($IsWindows) { 'gh.ps1' } else { 'gh' })
-        [IO.File]::WriteAllText($fake, $standIn, [Text.UTF8Encoding]::new($false))
-        if ($IsWindows) {
-            [IO.File]::WriteAllText((Join-Path $root 'gh.cmd'), '@pwsh -NoProfile -NonInteractive -File "%~dp0gh.ps1" %*')
-        } else {
-            [IO.File]::SetUnixFileMode($fake, [IO.UnixFileMode]::UserRead -bor [IO.UnixFileMode]::UserWrite -bor [IO.UnixFileMode]::UserExecute)
-        }
-        $oldPath = $env:PATH
-        $oldFixtureRoot = $env:FIXTURE_ROOT
-        try {
-            $env:PATH = $root + [IO.Path]::PathSeparator + $oldPath
-            $env:FIXTURE_ROOT = $root
-            $result = & $script:Native context create --url=https://github.com/octo/widget/pull/7 `
-                "--output-directory=$root" '--now-utc=2026-08-04T12:00:00Z'
-            $summary = $result | ConvertFrom-Json
-            $native = Read-PullRequestContextDocument -Path $summary.contextPath
-            $native['pullRequest']['description'] | Should -BeExactly ''
-            $expectedHash = Get-PullRequestEvidenceHash -Document $retained
-            Get-PullRequestEvidenceHash -Document $native | Should -BeExactly $expectedHash
-            $approved = [ordered]@{
-                schemaVersion = 2; target = $native['target']
-                reviewedSourceCommit = $native['pullRequest']['reviewedSourceCommit']
-                reviewedMergeBaseCommit = $native['pullRequest']['reviewedMergeBaseCommit']
-                reviewedContextHash = $expectedHash; findings = @()
+            $fake = Join-Path $root $(if ($IsWindows) { 'gh.ps1' } else { 'gh' })
+            [IO.File]::WriteAllText($fake, $standIn, [Text.UTF8Encoding]::new($false))
+            if ($IsWindows) {
+                [IO.File]::WriteAllText((Join-Path $root 'gh.cmd'), '@pwsh -NoProfile -NonInteractive -File "%~dp0gh.ps1" %*')
+            } else {
+                [IO.File]::SetUnixFileMode($fake, [IO.UnixFileMode]::UserRead -bor [IO.UnixFileMode]::UserWrite -bor [IO.UnixFileMode]::UserExecute)
             }
-            # The preflight first asks native code to recompute the checked capture's evidence hash,
-            # then compares it with a fresh retained PowerShell provider observation.
-            { Assert-PullRequestPublicationEvidence -Approved $approved -Context $native -LiveContext $live } | Should -Not -Throw
-            $approved['reviewedContextHash'] = '0' * 64
-            { Assert-PullRequestPublicationEvidence -Approved $approved -Context $native -LiveContext $live } | Should -Throw
-        } finally {
-            $env:PATH = $oldPath
-            $env:FIXTURE_ROOT = $oldFixtureRoot
+            $oldPath = $env:PATH
+            $oldFixtureRoot = $env:FIXTURE_ROOT
+            try {
+                $env:PATH = $root + [IO.Path]::PathSeparator + $oldPath
+                $env:FIXTURE_ROOT = $root
+                $result = & $script:Native context create --url=https://github.com/octo/widget/pull/7 `
+                    "--output-directory=$root" '--now-utc=2026-08-04T12:00:00Z'
+                $summary = $result | ConvertFrom-Json
+                $native = Read-PullRequestContextDocument -Path $summary.contextPath
+                if ($scenario.nullBody) { $native['pullRequest']['description'] | Should -BeExactly '' }
+                if ($scenario.deletedHeadRepository) {
+                    $native['pullRequest']['sourceRef'] | Should -BeExactly 'topic'
+                }
+                $expectedHash = Get-PullRequestEvidenceHash -Document $retained
+                Get-PullRequestEvidenceHash -Document $native | Should -BeExactly $expectedHash
+                $approved = [ordered]@{
+                    schemaVersion = 2; target = $native['target']
+                    reviewedSourceCommit = $native['pullRequest']['reviewedSourceCommit']
+                    reviewedMergeBaseCommit = $native['pullRequest']['reviewedMergeBaseCommit']
+                    reviewedContextHash = $expectedHash; findings = @()
+                }
+                # The preflight recomputes the capture hash and compares it with the retained provider.
+                { Assert-PullRequestPublicationEvidence -Approved $approved -Context $native -LiveContext $live } | Should -Not -Throw
+                $approved['reviewedContextHash'] = '0' * 64
+                { Assert-PullRequestPublicationEvidence -Approved $approved -Context $native -LiveContext $live } | Should -Throw
+            } finally {
+                $env:PATH = $oldPath
+                $env:FIXTURE_ROOT = $oldFixtureRoot
+            }
         }
     }
 

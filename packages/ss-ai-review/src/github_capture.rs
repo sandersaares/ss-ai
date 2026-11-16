@@ -297,7 +297,7 @@ pub(crate) fn collect(transport: &mut Transport<'_>, target: &Target) -> Result<
         && !text(field(head_repo, "full_name")?)?
             .eq_ignore_ascii_case(text(field(base_repo, "full_name")?)?);
     let merge_base = merge_base(transport, target, base_sha, head_sha, head_repo, fork)?;
-    let source_ref = source_ref(head, head_repo, fork)?;
+    let source_ref = source_ref(head, fork)?;
     unique(&threads, "id")?;
     Ok(json!({
         "target": target,
@@ -317,18 +317,11 @@ pub(crate) fn collect(transport: &mut Transport<'_>, target: &Target) -> Result<
     }))
 }
 
-/// Keeps an owner-qualified branch name whenever its repository is not local.
-fn source_ref<'a>(head: &'a Value, head_repo: &Value, fork: bool) -> Result<&'a str, AppError> {
-    // A deleted head repository cannot prove that the branch was local. GitHub's
-    // label retains the owner and avoids making an ambiguous branch name local.
-    nonempty(field(
-        head,
-        if fork || head_repo.is_null() {
-            "label"
-        } else {
-            "ref"
-        },
-    )?)
+/// Projects the same source branch name as the retained PowerShell adapter.
+fn source_ref<'a>(head: &'a Value, fork: bool) -> Result<&'a str, AppError> {
+    // The retained adapter qualifies known forks; matching it keeps evidence hashes stable,
+    // including when GitHub no longer returns the deleted head repository.
+    nonempty(field(head, if fork { "label" } else { "ref" })?)
 }
 
 /// Resolves an immutable merge base without treating other refusals as absence.
@@ -1439,18 +1432,11 @@ mod tests {
     }
 
     #[test]
-    fn deleted_head_repository_keeps_owner_qualified_source_ref() {
+    fn source_ref_qualifies_only_known_forks() {
         let head = json!({"ref":"topic","label":"fork-owner:topic"});
-        assert_eq!(source_ref(&head, &json!({}), false).unwrap(), "topic");
-        assert_eq!(
-            source_ref(&head, &json!({}), true).unwrap(),
-            "fork-owner:topic"
-        );
-        assert_eq!(
-            source_ref(&head, &Value::Null, false).unwrap(),
-            "fork-owner:topic"
-        );
-        source_ref(&json!({"ref":"topic","label":null}), &Value::Null, false).unwrap_err();
+        assert_eq!(source_ref(&head, false).unwrap(), "topic");
+        assert_eq!(source_ref(&head, true).unwrap(), "fork-owner:topic");
+        source_ref(&json!({"ref":null}), false).unwrap_err();
     }
 
     #[test]
