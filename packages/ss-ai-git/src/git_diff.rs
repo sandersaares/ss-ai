@@ -41,13 +41,63 @@ patch_error!(MismatchedLine, "Patch text differs from captured source");
 patch_error!(LineOffsetOverflow, "Patch line offset overflow");
 
 /// Changed path and commentable ranges in an exact unified comparison.
-#[derive(Debug, Serialize)]
-#[serde(rename_all = "camelCase")]
+#[derive(Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct FileDiff {
     path: String,
     previous_path: Option<String>,
     status: Status,
     hunks: Vec<Hunk>,
+}
+
+impl FileDiff {
+    /// Validates a file diff received through a structured boundary.
+    ///
+    /// # Errors
+    ///
+    /// Rejects missing paths and invalid hunk ranges.
+    pub fn validate(&self) -> Result<(), AppError> {
+        if self.path.is_empty() {
+            return Err(fail("invalidInput", "Diff file has no path"));
+        }
+        for hunk in &self.hunks {
+            for (start, count) in [
+                (hunk.old_start, hunk.old_count),
+                (hunk.new_start, hunk.new_count),
+            ] {
+                if count > 0 && (start == 0 || start.checked_add(count.saturating_sub(1)).is_none())
+                {
+                    return Err(fail("invalidInput", "Invalid Git diff line range"));
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// Returns the path used by review services for this change.
+    #[inline]
+    #[must_use]
+    pub fn path(&self) -> &str {
+        &self.path
+    }
+
+    /// Checks whether one hunk covers the complete range on the selected side.
+    #[must_use]
+    pub fn contains_range(&self, start: u32, end: u32, left: bool) -> bool {
+        if start == 0 || end < start {
+            return false;
+        }
+        self.hunks.iter().any(|hunk| {
+            let (first, count) = if left {
+                (hunk.old_start, hunk.old_count)
+            } else {
+                (hunk.new_start, hunk.new_count)
+            };
+            count > 0
+                && start >= first
+                && end.checked_sub(first).is_some_and(|offset| offset < count)
+        })
+    }
 }
 
 /// Side-specific ranges, including the context displayed by review services.
@@ -66,7 +116,7 @@ pub struct Hunk {
 }
 
 /// File operation labels consumed by the existing review anchor model.
-#[derive(Debug, PartialEq, Eq, Serialize)]
+#[derive(Debug, Deserialize, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "lowercase")]
 enum Status {
     Added,
@@ -432,7 +482,22 @@ fn exact_line<'a>(
 
 #[cfg(test)]
 mod tests {
+    use std::error::Error;
+
     use super::*;
+
+    #[test]
+    fn range_must_fit_one_hunk_on_the_requested_side() {
+        let files = parse("diff --git a/name b/name\n--- a/name\n+++ b/name\n@@ -1,2 +1,3 @@\n-old\n+new\n+extra\n context\n@@ -10 +11 @@\n-before\n+after\n").unwrap();
+        let file = files.first().unwrap();
+        assert_eq!(file.path(), "name");
+        assert!(file.contains_range(1, 3, false));
+        assert!(!file.contains_range(1, 3, true));
+        assert!(file.contains_range(10, 10, true));
+        assert!(!file.contains_range(2, 11, false));
+        assert!(!file.contains_range(0, 1, false));
+        assert!(!file.contains_range(2, 1, false));
+    }
 
     #[test]
     fn exact_patches_preserve_line_endings_and_reject_omitted_reordered_or_corrupt_text() {
@@ -474,7 +539,7 @@ mod tests {
 
     #[test]
     fn exact_patch_failures_preserve_distinct_reconstruction_causes() {
-        fn has_cause<T: std::error::Error + 'static>(error: ExactPatchError) {
+        fn has_cause<T: Error + 'static>(error: ExactPatchError) {
             let error: AppError = error.into();
             assert!(error.find_source::<T>().is_some());
         }

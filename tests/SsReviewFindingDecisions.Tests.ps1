@@ -147,6 +147,7 @@ BeforeAll {
             publishedUtc       = '2024-05-06T07:08:09.0000000Z'
             lastEditedUtc      = $null
             isEdited           = $false
+            isAuthoredBySelf   = $false
             authorship         = 'human'
             authorshipEvidence = @()
         }
@@ -177,6 +178,7 @@ BeforeAll {
             resolution       = 'active'
             kind             = $Kind
             isOutdated       = $false
+            isAuthoredBySelf = $false
             context          = [ordered]@{
                 filePath          = '/src/retry.rs'
                 side              = 'right'
@@ -234,6 +236,7 @@ BeforeAll {
             }
             pullRequest           = [ordered]@{
                 title                   = 'Add retry policy'
+                description             = $null
                 reviewedSourceCommit    = $SourceCommit
                 reviewedMergeBaseCommit = $MergeBaseCommit
             }
@@ -529,6 +532,24 @@ Describe 'Recording executable' {
         $recorded = Resolve-FindingDecision -Document $document -FindingId 'F1'
         $recorded['decision'] | Should -BeExactly 'auto-approved'
         $recorded['reason'] | Should -BeExactly 'Obvious: clarifies ambiguous documentation.'
+    }
+
+    It 'records mixed-case individual decisions in canonical form' -TestCases @(
+        @{ Decision = 'APPROVED'; Expected = 'approved' }
+        @{ Decision = 'Auto-Approved'; Expected = 'auto-approved' }
+    ) {
+        param($Decision, $Expected)
+
+        $result = Invoke-SkillExecutable -Name 'Add-FindingDecision.ps1' -ArgumentList @(
+            '-OutputDirectory', $script:WorkRoot
+            '-FindingId', 'F1'
+            '-Decision', $Decision
+            '-NowUtc', '2024-05-06T09:10:11.0000000Z'
+        )
+
+        $result['exitCode'] | Should -Be 0 -Because $result['standardError']
+        $document = Read-FindingDecisionDocument -Path $script:DecisionsPath
+        (Resolve-FindingDecision -Document $document -FindingId 'F1')['decision'] | Should -BeExactly $Expected
     }
 
     It 'records a batch named in a plan' {        Write-TestJsonFile -Path $script:PlanPath -Value ([ordered]@{
@@ -1274,9 +1295,7 @@ Describe 'Approval executable' {
         Test-Path -LiteralPath $script:ApprovedPath | Should -BeFalse
     }
 
-    # The freshness check reads the reviewed diff and the capture states which commits to read it
-    # between, so neither input answers the question alone.
-    It 'refuses a refreshed capture supplied without a checkout' {
+    It 'binds a tracker projection to a capture without filtering anchors' {
         Write-TestJsonFile -Path $script:ContextPath -Value (New-CaptureDocument -Thread @()) | Out-Null
 
         $result = Invoke-SkillExecutable -Name 'New-ApprovedFindings.ps1' -ArgumentList @(
@@ -1286,10 +1305,17 @@ Describe 'Approval executable' {
             '-ContextPath', $script:ContextPath
         )
 
-        $result['exitCode'] | Should -Not -Be 0
-        $result['standardOutput'] | Should -BeNullOrEmpty
-        (Get-SingleLineErrorText -Text $result['standardError']) | Should -BeLike '*-RepositoryPath*'
-        Test-Path -LiteralPath $script:ApprovedPath | Should -BeFalse
+        $result['exitCode'] | Should -Be 0
+        $result['standardError'] | Should -BeNullOrEmpty
+
+        $emitted = ConvertFrom-JsonVerbatim -Text $result['standardOutput']
+        $emitted['approved'] | Should -Be 1
+        $emitted['unanchored'] | Should -Be 0
+        @($emitted['findingId']) | Should -Be @('F1')
+
+        $document = Read-TestJsonFile -Path $script:ApprovedPath
+        $document['reviewedSourceCommit'] | Should -BeExactly '1111111111111111111111111111111111111111'
+        [string]::IsNullOrWhiteSpace([string] $document['reviewedContextHash']) | Should -BeFalse
     }
 
     It 'refuses a checkout supplied without a refreshed capture' {

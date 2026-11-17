@@ -21,6 +21,7 @@ $ErrorActionPreference = 'Stop'
 . "$PSScriptRoot\lib\GitHubCliTransport.ps1"
 . "$PSScriptRoot\lib\GitHubPullRequestApi.ps1"
 . "$PSScriptRoot\lib\PullRequestPlatform.ps1"
+. "$PSScriptRoot\lib\NativeWorkflowBridge.ps1"
 . "$PSScriptRoot\lib\FindingMarkdown.ps1"
 . "$PSScriptRoot\lib\ReportTools.ps1"
 . "$PSScriptRoot\lib\ReviewHtml.ps1"

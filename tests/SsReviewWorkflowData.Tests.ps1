@@ -5,6 +5,7 @@ BeforeAll {
     . "$script:Scripts\lib\WorkflowData.ps1"
     . "$script:Scripts\lib\FindingModel.ps1"
     . "$script:Scripts\lib\ReviewWork.ps1"
+    . "$script:Scripts\lib\NativeWorkflowBridge.ps1"
     . "$script:Scripts\lib\ReviewAuditState.ps1"
     . "$script:Scripts\lib\FocusAreaPreparation.ps1"
     . "$script:Scripts\lib\FocusAreaExpansion.ps1"
@@ -17,7 +18,24 @@ BeforeAll {
         $start.RedirectStandardOutput = $true
         $start.RedirectStandardError = $true
         $start.RedirectStandardInput = $true
-        foreach ($argument in @('-NoProfile', '-NonInteractive', '-File', "$script:Scripts\$Name") + $Arguments) {
+        # Assert diagnostic messages, not the host's colored, width-dependent ErrorRecord view.
+        $command = @'
+Set-StrictMode -Version Latest
+$ErrorActionPreference = 'Stop'
+$PSNativeCommandUseErrorActionPreference = $true
+if ($PSVersionTable.PSVersion -lt [version]'7.6') {
+    throw 'PowerShell 7.6 or later is required.'
+}
+$scriptPath = $args[0]
+$scriptArguments = @($args | Select-Object -Skip 1)
+try {
+    & $scriptPath @scriptArguments
+} catch {
+    [Console]::Error.WriteLine($_.Exception.Message)
+    exit 1
+}
+'@
+        foreach ($argument in @('-NoProfile', '-NonInteractive', '-CommandWithArgs', $command, "$script:Scripts\$Name") + $Arguments) {
             $start.ArgumentList.Add($argument)
         }
         $process = [Diagnostics.Process]::Start($start)
@@ -454,6 +472,7 @@ Describe 'Human audit records' {
         $script:FindingId = Add-FindingToArtifact -Document $artifact -Finding (New-FeedbackFinding) -Origin synthesis
         Write-FindingArtifact -Path $script:FindingsPath -Document $artifact
         $script:Context = @{
+            schemaVersion = $script:PullRequestContextSchemaVersion
             pullRequestUrl = 'https://github.com/example/repo/pull/1'
             pullRequest = @{ reviewedSourceCommit = ('a' * 40); isAuthoredBySelf = $false }
         }
@@ -471,6 +490,39 @@ Describe 'Human audit records' {
         { Add-ReviewAuditFeedback @feedbackArguments } | Should -Throw '*immutable*'
         $feedbackArguments.FindingId = 'missing'
         { Add-ReviewAuditFeedback @feedbackArguments } | Should -Throw
+    }
+
+    It 'returns timestamp-shaped feedback as the original string' {
+        $text = '2026-10-07T00:00:00Z'
+        Add-ReviewAuditFeedback -Path $script:FeedbackPath -FindingsPath $script:FindingsPath `
+            -ResponseId response-1 -FindingId $script:FindingId -Text $text
+
+        $feedback = Get-ReviewAuditFeedback -Path $script:FeedbackPath -FindingId $script:FindingId
+        $feedback | Should -BeOfType [string]
+        $feedback | Should -BeExactly $text
+    }
+
+    It 'stages audit inputs outside a read-only working directory' -Skip:$IsWindows {
+        $readOnly = Join-Path $script:Root 'read-only'
+        [IO.Directory]::CreateDirectory($readOnly) | Out-Null
+        $originalMode = [IO.File]::GetUnixFileMode($readOnly)
+        $readOnlyMode = [IO.UnixFileMode]::UserRead -bor [IO.UnixFileMode]::UserExecute
+        [IO.File]::SetUnixFileMode($readOnly, $readOnlyMode)
+        Push-Location -LiteralPath $readOnly
+        try {
+            { [IO.File]::WriteAllText((Join-Path $readOnly 'probe'), 'x') } | Should -Throw
+            Add-ReviewAuditFeedback -Path $script:FeedbackPath -FindingsPath $script:FindingsPath `
+                -ResponseId response-1 -FindingId $script:FindingId -Text 'Human response'
+            Set-ReviewMergeApproval -Path $script:ApprovalPath -Context $script:Context -ApproveMerge $true |
+                Should -Be 'Recorded'
+            Get-ReviewAuditFeedback -Path $script:FeedbackPath -FindingId $script:FindingId |
+                Should -BeExactly 'Human response'
+            Test-ReviewMergeApproval -Path $script:ApprovalPath -PullRequestUrl $script:Context.pullRequestUrl `
+                -SourceCommit ('a' * 40) | Should -BeTrue
+        } finally {
+            Pop-Location
+            [IO.File]::SetUnixFileMode($readOnly, $originalMode)
+        }
     }
 
     It 'loads accumulated feedback in the decision command rather than a shell-generated argument' {
@@ -497,7 +549,11 @@ Describe 'Human audit records' {
     }
 
     It 'carries forward only an existing true baseline-bound approval' {
-        $newContext = @{ pullRequestUrl = $script:Context.pullRequestUrl; pullRequest = @{ reviewedSourceCommit = ('b' * 40); isAuthoredBySelf = $false } }
+        $newContext = @{
+            schemaVersion = $script:PullRequestContextSchemaVersion
+            pullRequestUrl = $script:Context.pullRequestUrl
+            pullRequest = @{ reviewedSourceCommit = ('b' * 40); isAuthoredBySelf = $false }
+        }
         $approvalArguments = @{ Path = $script:ApprovalPath; Context = $newContext; PreviousContext = $script:Context; CarryForward = $true }
         Set-ReviewMergeApproval @approvalArguments | Should -Be 'NoApproval'
         Set-ReviewMergeApproval -Path $script:ApprovalPath -Context $script:Context -ApproveMerge $false | Out-Null

@@ -61,7 +61,8 @@ fn execute() -> Result<(), AppError> {
             .first()
             .into_iter()
             .chain(arguments.iter().skip(2));
-        run_workflow(workflow_arguments, &SystemClock::default())?
+        let process = NativeProcess::new(&env::current_dir()?);
+        run_workflow(workflow_arguments, &process, &SystemClock::default())?
     } else {
         let process = NativeProcess::new(&env::current_dir()?);
         let http = NativeHttp::new()?;

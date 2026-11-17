@@ -9,6 +9,7 @@ BeforeAll {
     . (Join-Path $script:LibraryRoot 'PullRequestModel.ps1')
     . (Join-Path $script:LibraryRoot 'WorkflowData.ps1')
     . (Join-Path $script:LibraryRoot 'FindingModel.ps1')
+    . (Join-Path $script:LibraryRoot 'NativeWorkflowBridge.ps1')
     . (Join-Path $script:LibraryRoot 'FindingMarkdown.ps1')
     . (Join-Path $script:LibraryRoot 'FocusAreaCacheDiagnostics.ps1')
 
@@ -150,6 +151,13 @@ BeforeAll {
 }
 
 Describe 'Finding rendering' {
+    It 'accepts case-insensitive destinations in the rendering library' {
+        $finding = New-TestRecord
+        $canonical = @(Get-FindingMarkdownBlock -Finding $finding -Destination 'tracker')
+        $mixedCase = @(Get-FindingMarkdownBlock -Finding $finding -Destination 'TRACKER')
+        ($mixedCase -join "`n") | Should -BeExactly ($canonical -join "`n")
+    }
+
     # Pins the whole body rather than a fragment of it. Every other assertion here names one section
     # at a time, so a change to the blocks between them, to their order or to the blank lines that
     # separate them would pass unnoticed while altering the text a reviewer approved and the text a
@@ -645,6 +653,12 @@ Describe 'Combined document' {
 }
 
 Describe 'Review summary' {
+    It 'accepts case-insensitive platform values' {
+        $canonical = New-ReviewSummaryMarkdown -Diagnostics @{ cache = 'Hit' } -Platform 'azureDevOps'
+        New-ReviewSummaryMarkdown -Diagnostics @{ cache = 'Hit' } -Platform 'AZUREDEVOPS' |
+            Should -BeExactly $canonical
+    }
+
     It 'states how much was published and how much followed up' {
         $summary = New-ReviewSummaryMarkdown `
             -Finding @((New-TestRecord), (New-TestRecord), (New-TestRecord)) `
@@ -885,6 +899,18 @@ Describe 'Rendering executable' {
         }
     }
 
+    It 'accepts case-insensitive destination values' {
+        $result = Invoke-SkillExecutable -Name 'ConvertTo-FindingMarkdown.ps1' -ArgumentList @(
+            '-Path', $script:ArtifactPath
+            '-OutputDirectory', $script:MarkdownRoot
+            '-Destination', 'TRACKER'
+        )
+
+        $result.exitCode | Should -Be 0 -Because $result.standardError
+        [IO.File]::ReadAllText((Join-Path $script:MarkdownRoot 'F1.md')) |
+            Should -BeLike 'Title: Reviewer finding*'
+    }
+
     It 'writes the combined document when asked for one' {
         $combinedPath = Join-Path $script:WorkRoot 'findings.md'
 
@@ -957,7 +983,7 @@ Describe 'Rendering executable' {
         $emitted = ConvertFrom-JsonVerbatim -Text $result['standardOutput']
         (Get-JsonProperty -Node $emitted -Name 'auditDocumentPath') | Should -BeExactly $auditPath
         (Get-JsonProperty -Node $emitted -Name 'auditDocumentUri') |
-            Should -BeExactly ([uri] $auditPath).AbsoluteUri
+            Should -BeExactly ([uri]::new($auditPath, [UriKind]::Absolute)).AbsoluteUri
         (Get-JsonProperty -Node $emitted -Name 'auditDocumentUri') |
             Should -Match '/audit%20files%20\(local\)/audit-findings\.md$'
 

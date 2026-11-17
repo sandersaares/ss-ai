@@ -106,6 +106,7 @@ $ErrorActionPreference = 'Stop'
 . "$PSScriptRoot\lib\PullRequestModel.ps1"
 . "$PSScriptRoot\lib\WorkflowData.ps1"
 . "$PSScriptRoot\lib\FindingModel.ps1"
+. "$PSScriptRoot\lib\NativeWorkflowBridge.ps1"
 . "$PSScriptRoot\lib\FindingMarkdown.ps1"
 . "$PSScriptRoot\lib\TrackerItem.ps1"
 . "$PSScriptRoot\lib\PullRequestTransportHost.ps1"
