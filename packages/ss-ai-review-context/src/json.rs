@@ -9,7 +9,11 @@ use sha2::{Digest, Sha256};
 use ss_ai_runtime::{caused_by, fail};
 
 /// Reads JSON without discarding duplicate or ambiguous property names.
-pub(crate) fn parse_text(text: &str) -> Result<Value, AppError> {
+///
+/// # Errors
+///
+/// Rejects malformed JSON, duplicate or ambiguous names, and excessive nesting.
+pub fn parse_text(text: &str) -> Result<Value, AppError> {
     parse_value(text, 0)
 }
 
