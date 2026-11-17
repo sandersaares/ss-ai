@@ -558,6 +558,11 @@ Describe 'Initial overview snapshots and best-effort publication' {
         $artifactDirectory = if ($Retry) { Join-Path $directory '.overview-attempt-test' } else { $directory }
         $htmlPath = Join-Path $artifactDirectory 'report.html'
         $archivePath = Join-Path $artifactDirectory 'report.zip'
+        if ($IsWindows) {
+            # Native renderers record extended canonical paths even when the publication root is ordinary.
+            $htmlPath = '\\?\' + $htmlPath
+            $archivePath = '\\?\' + $archivePath
+        }
         Write-PullRequestOutputFile -Path $htmlPath -Content '<html>Frozen</html>'
         $archive = Write-OverviewArchive -HtmlPath $htmlPath -ArchivePath $archivePath
         $manifest = @{
@@ -722,6 +727,41 @@ Describe 'Overview manifest in-memory validation' {
 }
 
 Describe 'Overview artifact path validation' {
+    It 'accepts ordinary and extended Windows representations in either direction' -Skip:(-not $IsWindows) {
+        $root = Join-Path $TestDrive 'publication'
+        [void] [IO.Directory]::CreateDirectory($root)
+        $path = Join-Path $root 'report.html'
+        [IO.File]::WriteAllText($path, '<html>Frozen</html>')
+        $extendedRoot = '\\?\' + $root
+        $extendedPath = '\\?\' + $path
+        Resolve-OverviewArtifactPath -Path $extendedPath -PublicationDirectory $root |
+            Should -BeExactly $extendedPath
+        Resolve-OverviewArtifactPath -Path $path -PublicationDirectory $extendedRoot |
+            Should -BeExactly $path
+        $outside = '\\?\' + (Join-Path $TestDrive 'outside.html')
+        { Resolve-OverviewArtifactPath -Path $outside -PublicationDirectory $root } |
+            Should -Throw '*inside*'
+        ConvertTo-OverviewComparisonPath -Path '\\?\UNC\server\share\report.html' |
+            Should -BeExactly '\\server\share\report.html'
+    }
+
+    It 'retains reparse-point rejection for artifact paths' {
+        $root = Join-Path $TestDrive 'publication'
+        $outside = Join-Path $TestDrive 'outside'
+        [void] [IO.Directory]::CreateDirectory($root)
+        [void] [IO.Directory]::CreateDirectory($outside)
+        $link = Join-Path $root 'linked'
+        if ($IsWindows) {
+            # Junctions exercise reparse checks without requiring symbolic-link privileges.
+            [void] (New-Item -ItemType Junction -Path $link -Target $outside)
+            $link = '\\?\' + $link
+        } else {
+            [void] [IO.Directory]::CreateSymbolicLink($link, $outside)
+        }
+        { Resolve-OverviewArtifactPath -Path (Join-Path $link 'report.zip') -PublicationDirectory $root } |
+            Should -Throw '*symbolic link*'
+    }
+
     It 'accepts a path below the publication root and rejects a sibling or traversal' {
         $inside = Join-Path $PSScriptRoot 'SsReviewReports.Tests.ps1'
         Resolve-OverviewArtifactPath -Path $inside -PublicationDirectory $PSScriptRoot |

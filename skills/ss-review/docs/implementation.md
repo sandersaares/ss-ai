@@ -1269,6 +1269,11 @@ paths and hashes; both states serialize through the existing journal record
 shape. The mutable local overview and audit documents may subsequently describe
 newer content.
 
+Manifest reuse compares filesystem-resolved artifact directories with the
+generation root or its immediate retry directory and retains the recorded path
+spellings. PowerShell containment checks normalize ordinary and extended Windows
+path prefixes before checking each component for reparse points.
+
 `overview-publication-result.json` records intent before each non-idempotent
 write and retains returned IDs before verification. Upload is verified before the
 linking comment is created. Known successful attempts are reused; an attempt
