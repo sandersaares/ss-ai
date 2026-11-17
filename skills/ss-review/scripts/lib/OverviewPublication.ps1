@@ -162,13 +162,15 @@ function Resolve-OverviewArtifactPath {
 
     $root = [IO.Path]::TrimEndingDirectorySeparator([IO.Path]::GetFullPath((Resolve-PullRequestPath -Path $PublicationDirectory)))
     $fullPath = [IO.Path]::GetFullPath((Resolve-PullRequestPath -Path $Path))
-    $prefix = $root + [IO.Path]::DirectorySeparatorChar
-    if (-not $fullPath.StartsWith($prefix, [StringComparison]::Ordinal)) {
+    $comparisonRoot = ConvertTo-OverviewComparisonPath -Path $root
+    $comparisonPath = ConvertTo-OverviewComparisonPath -Path $fullPath
+    $prefix = $comparisonRoot + [IO.Path]::DirectorySeparatorChar
+    if (-not $comparisonPath.StartsWith($prefix, [StringComparison]::Ordinal)) {
         throw 'The overview artifact path must be inside the publication directory.'
     }
 
-    $relative = [IO.Path]::GetRelativePath($root, $fullPath)
-    $current = $root
+    $relative = [IO.Path]::GetRelativePath($comparisonRoot, $comparisonPath)
+    $current = $comparisonRoot
     $parts = $relative.Split([char[]] @([IO.Path]::DirectorySeparatorChar, [IO.Path]::AltDirectorySeparatorChar), [StringSplitOptions]::RemoveEmptyEntries)
     for ($index = -1; $index -lt $parts.Length; $index++) {
         if ($index -ge 0) { $current = Join-Path $current $parts[$index] }
@@ -184,6 +186,22 @@ function Resolve-OverviewArtifactPath {
         }
     }
     $fullPath
+}
+
+# Windows canonical and ordinary paths name the same location; keep reparse checks separate.
+function ConvertTo-OverviewComparisonPath {
+    param([Parameter(Mandatory)][string] $Path)
+
+    if ($IsWindows) {
+        if ($Path.StartsWith('\\?\UNC\', [StringComparison]::OrdinalIgnoreCase)) {
+            return [IO.Path]::GetFullPath('\\' + $Path.Substring(8))
+        }
+        if ($Path.StartsWith('\\?\', [StringComparison]::Ordinal) -and
+            [IO.Path]::IsPathFullyQualified($Path.Substring(4))) {
+            return [IO.Path]::GetFullPath($Path.Substring(4))
+        }
+    }
+    $Path
 }
 
 # Picks the matching legacy or run-specific manifest without rewriting either.
