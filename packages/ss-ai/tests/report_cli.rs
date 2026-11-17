@@ -148,6 +148,7 @@ fn report_dispatch_child() {
     let tools = root.join("tools");
     let lock = b"{\"lockfileVersion\":3}";
     fixture_file(&skill.join("tools/package-lock.json"), lock);
+    fixture_file(&skill.join("templates/report.html"), b"offline template");
     let hash = format!("{:x}", Sha256::digest(lock));
     let packages = tools.join(format!("mermaid-{hash}")).join("node_modules");
     fixture_file(&packages.join("@mermaid-js/mermaid-cli/src/cli.js"), b"");
@@ -195,8 +196,14 @@ fn report_dispatch_child() {
     )
     .unwrap();
     let result: Value = serde_json::from_str(&result).unwrap();
-    assert_eq!(result.get("sourcePath").unwrap(), source.to_str().unwrap());
-    assert_eq!(result.get("htmlPath").unwrap(), output.to_str().unwrap());
+    assert_eq!(
+        Path::new(result.get("sourcePath").unwrap().as_str().unwrap()),
+        fs::canonicalize(&source).unwrap()
+    );
+    assert_eq!(
+        Path::new(result.get("htmlPath").unwrap().as_str().unwrap()),
+        fs::canonicalize(&output).unwrap()
+    );
     assert_eq!(
         result.get("sourceHash").unwrap().as_str().unwrap(),
         format!("{:x}", Sha256::digest(fs::read(&source).unwrap()))
