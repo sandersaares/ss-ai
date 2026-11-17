@@ -147,6 +147,7 @@ fn overlap_child() {
     let source_hash = format!("{:x}", Sha256::digest(markdown));
     let lockfile = b"{}";
     file(&skill.join("tools/package-lock.json"), lockfile);
+    file(&skill.join("templates/report.html"), b"offline template");
     file(&source, markdown);
     fs::create_dir_all(&output).unwrap();
     let cache = tools.join(format!("mermaid-{:x}", Sha256::digest(lockfile)));
