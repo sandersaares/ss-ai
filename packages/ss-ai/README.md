@@ -134,7 +134,8 @@ comments or change approvals.
 `snapshotId` returned by the bounded reader for the effective capture read by
 the caller; pass that exact value as `--snapshot-id`. The
 [classification recipe](../../skills/ss-review/pwsh-calls/classify-comment-authorship.md)
-describes the batch and read-then-write process. The capture itself remains unchanged.
+describes the batch and read-then-write process. Classification JSON must not
+contain duplicate or ASCII case-variant property names. The capture itself remains unchanged.
 
 ```powershell
 #Requires -Version 7.6
