@@ -784,7 +784,7 @@ fn hidden_entry(entry: &fs::DirEntry) -> Result<bool, AppError> {
     const FILE_ATTRIBUTE_HIDDEN: u32 = 0x2;
     let metadata = entry
         .metadata()
-        .map_err(|error| ss_ai_runtime::caused_by("io", "Cannot inspect directory entry", error))?;
+        .map_err(|error| caused_by("io", "Cannot inspect directory entry", error))?;
     Ok(metadata.file_attributes() & FILE_ATTRIBUTE_HIDDEN != 0)
 }
 
