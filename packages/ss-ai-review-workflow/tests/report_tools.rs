@@ -49,6 +49,19 @@ struct Installer {
     system_calls: RefCell<Vec<Vec<String>>>,
 }
 
+impl Installer {
+    /// Identifies the runtime supplied by the isolated fixture.
+    fn expected_node_directory(&self) -> PathBuf {
+        let variable = if cfg!(windows) {
+            "NVM_SYMLINK"
+        } else {
+            "NVM_BIN"
+        };
+        env::var_os(variable)
+            .map_or_else(|| self.browser.parent().unwrap().join("bin"), PathBuf::from)
+    }
+}
+
 impl Process for Installer {
     fn execute(
         &self,
@@ -59,9 +72,11 @@ impl Process for Installer {
         if arguments.first().is_some_and(|arg| arg == "-e") {
             assert_eq!(
                 Path::new(program),
-                env::var_os("NVM_BIN")
-                    .map_or_else(|| self.browser.parent().unwrap().join("bin"), PathBuf::from)
-                    .join(if cfg!(windows) { "node.exe" } else { "node" })
+                self.expected_node_directory().join(if cfg!(windows) {
+                    "node.exe"
+                } else {
+                    "node"
+                })
             );
             if self.fail_discovery.get() {
                 return Ok(ProcessOutput::new(
@@ -94,8 +109,7 @@ impl Process for Installer {
         }
         assert_eq!(
             Path::new(program),
-            env::var_os("NVM_BIN")
-                .map_or_else(|| self.browser.parent().unwrap().join("bin"), PathBuf::from)
+            self.expected_node_directory()
                 .join(if cfg!(windows) { "node.exe" } else { "node" })
         );
         self.browser_installs
@@ -133,11 +147,9 @@ impl Process for Installer {
             ]
         );
         assert!(path.is_some());
-        let expected_node = env::var_os("NVM_BIN")
-            .map_or_else(|| self.browser.parent().unwrap().join("bin"), PathBuf::from);
         assert_eq!(
             env::split_paths(path.unwrap()).next().unwrap(),
-            expected_node
+            self.expected_node_directory()
         );
         assert_eq!(fs::read_to_string(directory.join("package.json"))?, "{}");
         assert_eq!(
