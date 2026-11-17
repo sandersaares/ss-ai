@@ -31,28 +31,14 @@ param(
 
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
+$PSNativeCommandUseErrorActionPreference = $true
 
-. "$PSScriptRoot\lib\JsonValue.ps1"
-. "$PSScriptRoot\lib\PullRequestModel.ps1"
-. "$PSScriptRoot\lib\WorkflowData.ps1"
-. "$PSScriptRoot\lib\FindingModel.ps1"
-
-$transactionLock = Open-PullRequestFileLock -Path $OutputPath
-try {
-    $artifacts = Read-FindingReviewerArtifactSet -Path $ReviewerArtifactDirectory
-    $groups = Read-FindingMergePlan -Path $MergePlanPath
-    $document = New-ConsolidatedFindingDocument -ReviewerArtifact $artifacts -MergeGroup $groups
-
-    # The artifact is written only after every group has been accepted, so a plan naming a finding twice
-    # leaves no half-consolidated set behind for the next phase to read.
-    Write-FindingArtifact -Path $OutputPath -Document $document
-
-    $summary = Get-FindingConsolidationSummary -Document $document
-
-    [ordered]@{
-        outputPath       = Resolve-PullRequestPath -Path $OutputPath
-        findingCount     = $summary['findingCount']
-        mergedCount      = $summary['mergedCount']
-        carriedOverCount = $summary['carriedOverCount']
-    } | ConvertTo-Json -Depth 32 -Compress
-} finally { $transactionLock.Dispose() }
+. "$PSScriptRoot\lib\NativeWorkflowBridge.ps1"
+$directory = $ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath($ReviewerArtifactDirectory)
+$output = $ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath($OutputPath)
+$arguments = @('consolidate-findings', "--reviewer-directory=$directory", "--output-path=$output")
+if ($MergePlanPath) {
+    $plan = $ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath($MergePlanPath)
+    $arguments += "--plan-path=$plan"
+}
+Invoke-NativeReviewWorkflow -Arguments $arguments

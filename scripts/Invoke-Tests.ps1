@@ -42,16 +42,21 @@ if ($Suite -in @('All', 'Pester')) {
     $nativeConsumers = @(
         'Generate-Inventory.Tests.ps1', 'Graders.Tests.ps1',
         'SsAutoreapprove.Tests.ps1',
-        'SsReviewFindingDecisions.Tests.ps1', 'SsReviewFindingMarkdown.Tests.ps1',
+        'SsReviewCoverageBatch.Tests.ps1', 'SsReviewFindingConsolidation.Tests.ps1',
+        'SsReviewFindingDecisions.Tests.ps1',
+        'SsReviewFindingMarkdown.Tests.ps1', 'SsReviewFindingModel.Tests.ps1',
         'SsReviewGitDiff.Tests.ps1', 'SsReviewPublicationAzureDevOps.Tests.ps1',
         'SsReviewPublicationGitHub.Tests.ps1', 'SsReviewPublicationPlan.Tests.ps1',
         'SsReviewPullRequestAnchor.Tests.ps1', 'SsReviewTrackerPublication.Tests.ps1',
         'SsReviewTrackerGitHub.Tests.ps1', 'SsReviewTrackerAzureDevOps.Tests.ps1',
-        'SsReviewPullRequestQuery.Tests.ps1', 'SsReviewWorkerInput.Tests.ps1'
+        'SsReviewPullRequestQuery.Tests.ps1', 'SsReviewSelfReview.Tests.ps1',
+        'SsReviewSharedFiles.Tests.ps1', 'SsReviewWorkflowData.Tests.ps1',
+        'SsReviewWork.Tests.ps1', 'SsReviewWorkerInput.Tests.ps1'
     )
     $selected = @(Get-ChildItem -LiteralPath $Path -Recurse -File | Where-Object Name -In $nativeConsumers)
     $blockedPesterPaths = @()
     $nativeReady = $false
+    $findingTestExecutable = $null
 
     if ($selected.Count -gt 0) {
         Push-Location -LiteralPath (Split-Path -Parent $PSScriptRoot)
@@ -61,15 +66,44 @@ if ($Suite -in @('All', 'Pester')) {
                 throw 'Building the native review test prerequisite failed.'
             }
 
-            $metadata = & cargo metadata --no-deps --format-version 1 --locked | ConvertFrom-Json
+            $metadataJson = & cargo metadata --no-deps --format-version 1 --locked
             if ($LASTEXITCODE -ne 0) {
                 throw 'Locating the native review test executable failed.'
             }
+            $metadata = $metadataJson | ConvertFrom-Json
             $nativeReady = $true
         } catch {
             # Only native-consuming Pester files depend on this build; unrelated checks still run.
             Write-Host "Pester prerequisite failed: $_"
             $blockedPesterPaths = @($selected.FullName)
+            $failed = $true
+        } finally {
+            Pop-Location
+        }
+    }
+
+    $sharedFileTests = @($selected | Where-Object Name -EQ 'SsReviewSharedFiles.Tests.ps1')
+    if ($nativeReady -and $sharedFileTests.Count -gt 0) {
+        Push-Location -LiteralPath (Split-Path -Parent $PSScriptRoot)
+        try {
+            # Prepare the process helper before tests acquire any shared locks.
+            $messages = @(& cargo test --package ss-ai-review-workflow --test finding_plans --no-run --locked --message-format json)
+            if ($LASTEXITCODE -ne 0) {
+                throw 'Building the finding concurrency test prerequisite failed.'
+            }
+            $executables = @($messages | ForEach-Object {
+                $message = $_ | ConvertFrom-Json
+                if ($message.reason -eq 'compiler-artifact' -and $message.target.name -eq 'finding_plans' -and $message.executable) {
+                    $message.executable
+                }
+            })
+            if ($executables.Count -ne 1 -or -not (Test-Path -LiteralPath $executables[0] -PathType Leaf)) {
+                throw 'Could not identify the finding concurrency test executable.'
+            }
+            $findingTestExecutable = $executables[0]
+        } catch {
+            Write-Host "Pester prerequisite failed: $_"
+            $blockedPesterPaths += @($sharedFileTests.FullName)
             $failed = $true
         } finally {
             Pop-Location
@@ -98,14 +132,30 @@ if ($Suite -in @('All', 'Pester')) {
     $configuration.Output.Verbosity = 'Detailed'
 
     $originalPath = $env:PATH
+    $originalFindingTestExecutable = $env:SS_AI_FINDING_TEST_EXECUTABLE
+    $findingTestCopy = $null
     try {
         if ($nativeReady) {
             $env:PATH = (Join-Path $metadata.target_directory 'debug') + [IO.Path]::PathSeparator + $env:PATH
+        }
+        if ($findingTestExecutable) {
+            # Each invocation retains its own immutable helper while Cargo may rebuild its output.
+            $extension = [IO.Path]::GetExtension($findingTestExecutable)
+            $findingTestCopy = Join-Path ([IO.Path]::GetTempPath()) "ss-ai-finding-test-$([guid]::NewGuid().ToString('N'))$extension"
+            [IO.File]::Copy($findingTestExecutable, $findingTestCopy)
+            if (-not $IsWindows) {
+                [IO.File]::SetUnixFileMode($findingTestCopy, [IO.File]::GetUnixFileMode($findingTestExecutable))
+            }
+            $env:SS_AI_FINDING_TEST_EXECUTABLE = $findingTestCopy
         }
 
         $result = Invoke-Pester -Configuration $configuration
     } finally {
         $env:PATH = $originalPath
+        $env:SS_AI_FINDING_TEST_EXECUTABLE = $originalFindingTestExecutable
+        if ($findingTestCopy -and [IO.File]::Exists($findingTestCopy)) {
+            [IO.File]::Delete($findingTestCopy)
+        }
     }
     $failed = $failed -or $result.Result -ne 'Passed'
 }

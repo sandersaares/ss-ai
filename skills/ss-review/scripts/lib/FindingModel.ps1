@@ -538,6 +538,14 @@ function Assert-FindingFollowUpTarget {
     throw "The captured discussion reports platform '$platform', and this helper knows where a reply may be posted only on gitHub and azureDevOps."
 }
 
+# Identifies the sibling staging names of the PowerShell and native file writers.
+function Test-FindingArtifactStagingName {
+    param([Parameter(Mandatory)][string] $Name)
+
+    return $Name -imatch '\A\..+\.json\.[0-9a-f]{32}\.tmp\z' -or
+        $Name -cmatch '\A\.ss-ai-transaction-[a-zA-Z0-9]{24}\.tmp\z'
+}
+
 # Reports whether a set of artifacts is fit to consolidate.
 #
 # `-Path` names either one artifact or the directory holding a run's reviewer artifacts. Naming the
@@ -581,7 +589,7 @@ function Get-FindingArtifactValidation {
             }
             # Retained locks and unique staging files belong to the shared artifact writer,
             # not to the reviewer set. A concurrent writer may still be using either file.
-            if ($entry.Name -like '*.json.lock' -or $entry.Name -match '^\..+\.json\.[0-9a-f]{32}\.tmp$') {
+            if ($entry.Name -like '*.json.lock' -or (Test-FindingArtifactStagingName -Name $entry.Name)) {
                 continue
             }
             if ($entry.Extension -ine '.json') {
@@ -670,35 +678,6 @@ function Get-FindingArtifactPath {
 
     Assert-FindingReviewerId -ReviewerId $ReviewerId
     Resolve-PullRequestPath -Path (Join-Path $OutputDirectory "$ReviewerId.json")
-}
-
-# Reads a list of identifiers supplied on a command line.
-#
-# The skill starts every script with `pwsh -File`, and that form hands each argument to the script
-# as one literal string: an array parameter given several values keeps only the first, silently.
-# Splitting on commas here is what lets a caller name more than one identifier at all, and it costs
-# nothing, because the identifiers this accepts are composed by the tooling from reviewer identifiers
-# and ordinals, which never contain a comma.
-#
-# An empty value names nothing, so a caller that substitutes an argument it has no value for reads
-# as a caller that named no identifiers.
-function ConvertTo-FindingIdentifierList {
-    param(
-        [Parameter(Mandatory)]
-        [AllowEmptyCollection()]
-        [AllowEmptyString()]
-        [string[]] $Value
-    )
-
-    $identifiers = [System.Collections.Generic.List[string]]::new()
-    foreach ($entry in $Value) {
-        foreach ($part in $entry.Split(',')) {
-            $identifier = $part.Trim()
-            if ($identifier) { $identifiers.Add($identifier) }
-        }
-    }
-
-    , $identifiers.ToArray()
 }
 
 # Refuses to overwrite an artifact that already holds a reviewer's work.

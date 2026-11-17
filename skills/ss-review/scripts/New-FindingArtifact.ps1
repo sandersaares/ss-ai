@@ -43,32 +43,15 @@ param(
 
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
+$PSNativeCommandUseErrorActionPreference = $true
 
-. "$PSScriptRoot\lib\JsonValue.ps1"
-. "$PSScriptRoot\lib\PullRequestModel.ps1"
-. "$PSScriptRoot\lib\WorkflowData.ps1"
-. "$PSScriptRoot\lib\FindingModel.ps1"
-. "$PSScriptRoot\lib\ReviewWork.ps1"
-
-$artifactPath = Get-FindingArtifactPath -OutputDirectory $OutputDirectory -ReviewerId $ReviewerId
-$lock = Open-WorkflowDataLock -Path $artifactPath
-try {
-    if ($FileGroupQueuePath) {
-        Assert-ReviewWorkerArtifactState -ArtifactPath $artifactPath -QueuePath $FileGroupQueuePath
-    }
-    $resumedExisting = $Resume -and (Test-Path -LiteralPath $artifactPath -PathType Leaf)
-    if ($resumedExisting) {
-        $document = Open-FindingArtifactForResume -Path $artifactPath -ReviewerId $ReviewerId -FocusArea $FocusArea
-    } else {
-        Assert-FindingArtifactWritable -Path $artifactPath -Force:$Force
-        $document = New-FindingArtifactDocument -Kind 'reviewer' -ReviewerId $ReviewerId -FocusArea $FocusArea
-    }
-    Write-FindingArtifact -Path $artifactPath -Document $document
-} finally { $lock.Dispose() }
-
-[ordered]@{
-    artifactPath = $artifactPath
-    reviewerId   = $ReviewerId
-    findingCount = (Get-JsonArrayProperty -Node $document -Name 'findings').Count
-    resumedExisting = $resumedExisting
-} | ConvertTo-Json -Depth 32 -Compress
+. "$PSScriptRoot\lib\NativeWorkflowBridge.ps1"
+$directory = $ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath($OutputDirectory)
+$arguments = @('initialize-finding', "--output-directory=$directory", "--reviewer-id=$ReviewerId", "--focus-area=$FocusArea")
+if ($Force) { $arguments += '--force' }
+if ($Resume) { $arguments += '--resume' }
+if ($FileGroupQueuePath) {
+    $queue = $ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath($FileGroupQueuePath)
+    $arguments += "--queue-path=$queue"
+}
+Invoke-NativeReviewWorkflow -Arguments $arguments
