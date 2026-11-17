@@ -18,7 +18,24 @@ BeforeAll {
         $start.RedirectStandardOutput = $true
         $start.RedirectStandardError = $true
         $start.RedirectStandardInput = $true
-        foreach ($argument in @('-NoProfile', '-NonInteractive', '-File', "$script:Scripts\$Name") + $Arguments) {
+        # Assert diagnostic messages, not the host's colored, width-dependent ErrorRecord view.
+        $command = @'
+Set-StrictMode -Version Latest
+$ErrorActionPreference = 'Stop'
+$PSNativeCommandUseErrorActionPreference = $true
+if ($PSVersionTable.PSVersion -lt [version]'7.6') {
+    throw 'PowerShell 7.6 or later is required.'
+}
+$scriptPath = $args[0]
+$scriptArguments = @($args | Select-Object -Skip 1)
+try {
+    & $scriptPath @scriptArguments
+} catch {
+    [Console]::Error.WriteLine($_.Exception.Message)
+    exit 1
+}
+'@
+        foreach ($argument in @('-NoProfile', '-NonInteractive', '-CommandWithArgs', $command, "$script:Scripts\$Name") + $Arguments) {
             $start.ArgumentList.Add($argument)
         }
         $process = [Diagnostics.Process]::Start($start)
