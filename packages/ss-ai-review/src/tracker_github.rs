@@ -90,7 +90,7 @@ pub(crate) fn create(
         &json!({"repositoryId":repository_id,"title":title,"body":body}),
     )?;
     // Missing or malformed receipt fields cannot establish that no write occurred.
-    record(
+    identity(
         node(&response, "/data/createIssue/issue", "ambiguousWrite")?,
         "ambiguousWrite",
     )
@@ -149,8 +149,8 @@ fn boolean(value: &Value, name: &str) -> Result<bool, AppError> {
         .ok_or_else(|| fail("service", format!("Missing or invalid {name}")))
 }
 
-/// Normalizes complete issue evidence without modifying the stored prose.
-fn record(issue: &Value, kind: &'static str) -> Result<Value, AppError> {
+/// Extracts creation coordinates before content readback can fail.
+fn identity(issue: &Value, kind: &'static str) -> Result<Value, AppError> {
     let id = required(issue, "id", kind)?;
     let number = issue
         .get("number")
@@ -163,12 +163,19 @@ fn record(issue: &Value, kind: &'static str) -> Result<Value, AppError> {
     if parsed.scheme() != "https" || parsed.host_str().is_none() {
         return Err(fail(kind, "Invalid issue URL"));
     }
-    let title = string(issue, "title", kind)?;
-    let body = string(issue, "body", kind)?;
-    Ok(
-        json!({"itemId":number.to_string(),"itemNodeId":id,"url":url,
-        "title":title,"body":body,"descriptionFormat":"Markdown"}),
-    )
+    Ok(json!({"itemId":number.to_string(),"itemNodeId":id,"url":url}))
+}
+
+/// Adds readback content to validated issue coordinates without changing prose.
+fn record(issue: &Value, kind: &'static str) -> Result<Value, AppError> {
+    let mut record = identity(issue, kind)?;
+    let fields = record
+        .as_object_mut()
+        .ok_or_else(|| fail(kind, "Invalid issue identity record"))?;
+    fields.insert("title".into(), json!(string(issue, "title", kind)?));
+    fields.insert("body".into(), json!(string(issue, "body", kind)?));
+    fields.insert("descriptionFormat".into(), json!("Markdown"));
+    Ok(record)
 }
 
 #[cfg(test)]
@@ -299,10 +306,11 @@ mod tests {
         assert_eq!(
             receipt,
             json!({"itemId":"42","itemNodeId":"issue-id",
-            "url":"https://github.com/acme/tracker/issues/42","title":item["title"],
-            "body":item["body"],"descriptionFormat":"Markdown"})
+            "url":"https://github.com/acme/tracker/issues/42"})
         );
-        assert_eq!(read(&transport, &receipt).unwrap(), receipt);
+        let stored = read(&transport, &receipt).unwrap();
+        assert_eq!(stored["title"], item["title"]);
+        assert_eq!(stored["body"], item["body"]);
         let requests = script.requests.borrow();
         assert_eq!(
             requests[0],
@@ -349,8 +357,6 @@ mod tests {
             ("number", json!("42")),
             ("number", json!(0)),
             ("url", json!("not a URL")),
-            ("title", Value::Null),
-            ("body", json!(123)),
         ] {
             let mut issue = issue();
             issue[field] = value;
@@ -396,6 +402,33 @@ mod tests {
         .unwrap_err();
         assert_eq!(classification(&error), "ambiguousWrite");
         assert_eq!(script.requests.borrow().len(), 1);
+    }
+
+    #[test]
+    fn creation_identity_survives_missing_or_malformed_content() {
+        for field in ["title", "body"] {
+            for value in [Value::Null, json!(123)] {
+                let mut issue = issue();
+                issue[field] = value;
+                let script = Script::new(vec![
+                    response(&json!({"data":{"createIssue":{"issue":issue}}})),
+                    response(&json!({"data":{"node":issue}})),
+                ]);
+                let transport =
+                    Transport::new(&transport_target(), None, &script, &NoEffects, &NoEffects);
+                let receipt = create(
+                    &transport,
+                    &json!({"platform":"gitHub","repositoryId":"r","trackerName":"a/b"}),
+                    &json!({"title":"title","body":"body"}),
+                )
+                .unwrap();
+                assert_eq!(receipt["itemId"], "42");
+                assert_eq!(receipt["itemNodeId"], "issue-id");
+                let error = read(&transport, &receipt).unwrap_err();
+                assert_eq!(classification(&error), "service");
+                assert_eq!(script.requests.borrow().len(), 2);
+            }
+        }
     }
 
     #[test]

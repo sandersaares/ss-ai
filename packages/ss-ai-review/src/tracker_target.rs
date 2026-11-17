@@ -128,10 +128,11 @@ impl TrackerTarget {
             && equal(Some(&self.organization), Some(&other.organization))
             && equal(self.project.as_deref(), other.project.as_deref())
             && equal(self.repository.as_deref(), other.repository.as_deref())
-            && equal(
-                self.collection_url.as_deref(),
-                other.collection_url.as_deref(),
-            ))
+            && match (&self.collection_url, &other.collection_url) {
+                (Some(left), Some(right)) => azure_url_identity(left) == azure_url_identity(right),
+                (None, None) => true,
+                _ => false,
+            })
     }
 
     /// Checks destination-specific metadata before a caller opens a transport.
@@ -285,6 +286,28 @@ struct TrackerTargetRecord {
     project: Option<String>,
     repository: Option<String>,
     collection_url: Option<String>,
+}
+
+/// Resolves Azure URL identity using decoded, case-insensitive path segments.
+pub(crate) fn azure_url_identity(value: &str) -> Option<(String, Vec<String>)> {
+    let url = Url::parse(value).ok()?;
+    if url.scheme() != "https"
+        || !url.username().is_empty()
+        || url.password().is_some()
+        || url.query().is_some()
+        || url.fragment().is_some()
+    {
+        return None;
+    }
+    let path = url
+        .path_segments()?
+        .map(decode)
+        .collect::<Result<Vec<_>, _>>()
+        .ok()?
+        .into_iter()
+        .map(|segment| segment.to_lowercase())
+        .collect();
+    Some((url.origin().ascii_serialization(), path))
 }
 
 /// Rejects malformed metadata rather than coercing it into absent values.
@@ -909,5 +932,27 @@ mod tests {
         assert!(case.matches(&github()).unwrap());
         let different = resolve_url("https://github.com/octo/other");
         assert!(!different.matches(&github()).unwrap());
+    }
+
+    #[test]
+    fn collection_identity_decodes_unicode_without_merging_distinct_routes() {
+        let resolve = |url| {
+            TrackerTarget::resolve(TrackerTargetInput {
+                url: Some(url),
+                platform: Some(Platform::AzureDevOps),
+                ..Default::default()
+            })
+            .unwrap()
+        };
+        let original = resolve("https://server.example/org/C%C3%B8llection/Project/_workitems");
+        let case = resolve("https://server.example/org/C%C3%98LLECTION/PROJECT/_workitems");
+        assert!(original.matches(&case).unwrap());
+        for different in [
+            "https://other.example/org/C%C3%B8llection/Project/_workitems",
+            "https://server.example/org/Other/Project/_workitems",
+            "https://server.example/org/C%C3%B8llection/Extra/Project/_workitems",
+        ] {
+            assert!(!original.matches(&resolve(different)).unwrap());
+        }
     }
 }
