@@ -1,5 +1,6 @@
 //! Freezes a local HTML overview and its deterministic attachment archive.
 
+use std::fs;
 use std::io::{Cursor, ErrorKind, Write};
 use std::path::{Path, PathBuf};
 
@@ -246,6 +247,37 @@ fn manifest_archive_path(output: &Path, manifest: &Manifest) -> Result<PathBuf, 
     let directory = html
         .parent()
         .ok_or_else(|| unexpected_path("Overview HTML path has no parent"))?;
+    // Renderer manifests use canonical paths; callers may reach the same root through an alias.
+    let resolved_output = fs::canonicalize(output)
+        .map_err(|error| caused_by("io", "Cannot resolve overview output directory", error))?;
+    let resolved_directory = fs::canonicalize(directory)
+        .map_err(|error| caused_by("io", "Cannot resolve overview HTML directory", error))?;
+    validate_manifest_directory(&resolved_output, &resolved_directory, html)?;
+    let archive = manifest
+        .archive_path
+        .clone()
+        .unwrap_or_else(|| directory.join("report.zip"));
+    let archive_directory = archive
+        .parent()
+        .ok_or_else(|| unexpected_path("Overview archive path has no parent"))?;
+    let resolved_archive_directory = fs::canonicalize(archive_directory)
+        .map_err(|error| caused_by("io", "Cannot resolve overview archive directory", error))?;
+    if archive.file_name().is_none_or(|name| name != "report.zip")
+        || resolved_archive_directory != resolved_directory
+    {
+        return Err(unexpected_path(
+            "Overview manifest has an unexpected archive path",
+        ));
+    }
+    Ok(archive)
+}
+
+/// Restricts resolved directory identities without changing recorded artifact paths.
+fn validate_manifest_directory(
+    output: &Path,
+    directory: &Path,
+    html: &Path,
+) -> Result<(), AppError> {
     let retry_directory = directory.parent() == Some(output)
         && directory
             .file_name()
@@ -258,17 +290,7 @@ fn manifest_archive_path(output: &Path, manifest: &Manifest) -> Result<PathBuf, 
             "Overview manifest has an unexpected HTML path",
         ));
     }
-    let archive = directory.join("report.zip");
-    if manifest
-        .archive_path
-        .as_ref()
-        .is_some_and(|path| path != &archive)
-    {
-        return Err(unexpected_path(
-            "Overview manifest has an unexpected archive path",
-        ));
-    }
-    Ok(archive)
+    Ok(())
 }
 
 /// Requires the complete snapshot instead of treating absent input as finished.
@@ -351,7 +373,7 @@ mod tests {
 
     use super::{
         Manifest, MissingArtifact, ModifiedArtifact, UnexpectedArtifactPath, hash, make_archive,
-        manifest_archive_path, missing, select_render_directory, verify_hash,
+        missing, select_render_directory, validate_manifest_directory, verify_hash,
     };
 
     #[test]
@@ -401,7 +423,12 @@ mod tests {
 
         let json = br#"{"sourcePath":"/report.md","sourceHash":"abc","htmlPath":"/other/report.html","htmlUri":"file:///report.html","htmlHash":"def","diagramCount":0}"#;
         let manifest: Manifest = from_slice(json).unwrap();
-        let error = manifest_archive_path(Path::new("/generation"), &manifest).unwrap_err();
+        let error = validate_manifest_directory(
+            Path::new("/generation"),
+            Path::new("/other"),
+            &manifest.html_path,
+        )
+        .unwrap_err();
         assert!(error.find_source::<UnexpectedArtifactPath>().is_some());
         assert_eq!(classification(&error), "invalidInput");
     }
@@ -423,9 +450,6 @@ mod tests {
         );
         let json = br#"{"sourcePath":"/report.md","sourceHash":"abc","htmlPath":"/generation/.overview-attempt-example/report.html","htmlUri":"file:///report.html","htmlHash":"def","diagramCount":0}"#;
         let manifest: Manifest = from_slice(json).unwrap();
-        assert_eq!(
-            manifest_archive_path(output, &manifest).unwrap(),
-            retry.join("report.zip")
-        );
+        validate_manifest_directory(output, &retry, &manifest.html_path).unwrap();
     }
 }
