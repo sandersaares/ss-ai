@@ -6,6 +6,8 @@ use std::fs;
 use std::io;
 #[cfg(unix)]
 use std::os::unix::fs::PermissionsExt;
+#[cfg(unix)]
+use std::os::unix::fs::symlink;
 use std::panic::{RefUnwindSafe, UnwindSafe};
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -15,10 +17,12 @@ use std::time::Duration;
 
 use jiff::Timestamp;
 use ohno::AppError;
+use serde_json::{Value, from_slice, json, to_vec};
 use sha2::{Digest, Sha256};
 use ss_ai_review_workflow::overview_artifact::{OverviewArtifact, Preparation, freeze};
 use ss_ai_review_workflow::report_html::write_report;
-use ss_ai_runtime::{Clock, FileTransaction, Process, ProcessOutput, fail};
+use ss_ai_review_workflow::report_tools::{discover, tools_lock};
+use ss_ai_runtime::{Clock, FileTransaction, LockMode, Process, ProcessOutput, fail};
 use tempfile::Builder;
 
 /// Converts contention into an explicit signal and a caller-controlled retry.
@@ -166,6 +170,8 @@ fn overlap_child() {
     file(&browser, b"");
     let process = FakeProcess { browser };
 
+    reuse_renderer_manifest(&root, &skill, &tools, &source, &source_hash, &process);
+
     thread::scope(|scope| {
         let (render_events_tx, render_events_rx) = mpsc::channel();
         let (render_release_tx, render_release_rx) = mpsc::channel();
@@ -283,4 +289,99 @@ fn overlap_child() {
             )
         );
     });
+}
+
+/// Reuses actual renderer paths through ordinary, canonical and symlinked roots.
+fn reuse_renderer_manifest(
+    root: &Path,
+    skill: &Path,
+    tools_directory: &Path,
+    source: &Path,
+    source_hash: &str,
+    process: &dyn Process,
+) {
+    let guard = tools_lock(tools_directory, LockMode::Shared, &NoWaitClock).unwrap();
+    let tools = discover(skill, tools_directory, process, &guard).unwrap();
+    for retry in [false, true] {
+        let output = root.join(if retry { "reuse-retry" } else { "reuse-root" });
+        fs::create_dir_all(&output).unwrap();
+        let requested = PathBuf::from(env::var_os("OVERVIEW_OVERLAP_ROOT").unwrap())
+            .join(output.file_name().unwrap());
+        #[cfg(unix)]
+        let requested = {
+            let alias = requested.with_extension("alias");
+            symlink(&output, &alias).unwrap();
+            alias
+        };
+        let directory = if retry {
+            requested.join(".overview-attempt-rendered")
+        } else {
+            requested.clone()
+        };
+        fs::create_dir_all(&directory).unwrap();
+        let rendered = write_report(
+            source,
+            &directory.join("report.html"),
+            skill,
+            "Overview",
+            &tools,
+            &guard,
+            process,
+            &NoWaitClock,
+        )
+        .unwrap();
+        let html_path = rendered.html_path;
+        let manifest_path = requested.join("html.json");
+        fs::write(
+            &manifest_path,
+            to_vec(&json!({
+                "sourcePath": rendered.source_path,
+                "sourceHash": rendered.source_hash,
+                "htmlPath": html_path,
+                "htmlUri": rendered.html_uri,
+                "htmlHash": rendered.html_hash,
+                "diagramCount": rendered.diagram_count
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+        let prepare = || {
+            freeze(
+                source,
+                source_hash,
+                &requested,
+                skill,
+                tools_directory,
+                process,
+                &NoWaitClock,
+                |_, _, _, _| panic!("A completed renderer manifest must be reused"),
+            )
+        };
+        let Preparation::Ready(first) = prepare().unwrap() else {
+            panic!("tools missing")
+        };
+        assert_eq!(first.html_path, html_path);
+        let saved = fs::read(&manifest_path).unwrap();
+        let manifest: Value = from_slice(&saved).unwrap();
+        assert_eq!(manifest.get("htmlPath").unwrap(), &json!(html_path));
+        let Preparation::Ready(second) = prepare().unwrap() else {
+            panic!("tools missing")
+        };
+        assert_eq!(second.archive_hash, first.archive_hash);
+        assert_eq!(fs::read(&manifest_path).unwrap(), saved);
+        for field in ["htmlPath", "archivePath"] {
+            // Equivalent spellings must not authorize artifacts outside the generation.
+            let mut invalid = manifest.clone();
+            invalid.as_object_mut().unwrap().insert(
+                field.to_string(),
+                json!(root.join(if field == "htmlPath" {
+                    "report.html"
+                } else {
+                    "report.zip"
+                })),
+            );
+            fs::write(&manifest_path, to_vec(&invalid).unwrap()).unwrap();
+            assert!(prepare().unwrap_err().to_string().contains("unexpected"));
+        }
+    }
 }
