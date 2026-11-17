@@ -443,8 +443,17 @@ Describe 'ss-review focus-area cache' {
         [void] [IO.Directory]::CreateDirectory($bin)
         $executable = Join-Path $bin ([IO.Path]::GetFileName($source))
         [IO.File]::Copy($source, $executable)
+        $repackagedBin = Join-Path $script:CaseRoot 'repackaged-bin'
+        [void] [IO.Directory]::CreateDirectory($repackagedBin)
+        $repackagedExecutable = Join-Path $repackagedBin ([IO.Path]::GetFileName($source))
+        [IO.File]::Copy($source, $repackagedExecutable)
+        # Prepare both packages before execution so Windows image sharing cannot block mutation.
+        # Packaging bytes do not alter the fingerprint compiled into the executable.
+        $stream = [IO.File]::Open($repackagedExecutable, [IO.FileMode]::Append, [IO.FileAccess]::Write)
+        try { $stream.WriteByte(0) } finally { $stream.Dispose() }
         if (-not $IsWindows) {
             [IO.File]::SetUnixFileMode($executable, [IO.File]::GetUnixFileMode($source))
+            [IO.File]::SetUnixFileMode($repackagedExecutable, [IO.File]::GetUnixFileMode($source))
         }
         $originalPath = $env:PATH
         try {
@@ -466,9 +475,7 @@ Describe 'ss-review focus-area cache' {
             $manifestPath = Join-Path $script:Cache "$($stored.key)\manifest.json"
             $manifest = Get-Content -LiteralPath $manifestPath -Raw | ConvertFrom-Json
             @($manifest.inputs | Where-Object path -CEQ '__generation__/native-build').Count | Should -Be 1
-            # Packaging bytes do not alter the fingerprint compiled into the executable.
-            $stream = [IO.File]::Open($executable, [IO.FileMode]::Append, [IO.FileAccess]::Write)
-            try { $stream.WriteByte(0) } finally { $stream.Dispose() }
+            $env:PATH = $repackagedBin + [IO.Path]::PathSeparator + $originalPath
             $result = Restore-TestCache @arguments
             $result.status | Should -Be 'Hit'
             $result.key | Should -BeExactly $stored.key
