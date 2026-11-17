@@ -7,6 +7,7 @@
 
 use std::cell::{Cell, RefCell};
 use std::collections::HashSet;
+use std::env;
 use std::fs;
 use std::num::NonZeroU32;
 use std::path::{Path, PathBuf};
@@ -282,7 +283,7 @@ impl Clock for DiagnosticClock<'_> {
 )]
 fn concurrent_native_diagnostic_updates_are_not_lost() {
     // Other tests launch processes; isolate the lock holder from their fork/exec windows.
-    let output = Command::new(std::env::current_exe().unwrap())
+    let output = Command::new(env::current_exe().unwrap())
         .args([
             "--exact",
             "diagnostic_update_child",
@@ -761,6 +762,78 @@ fn unicode_search_crosses_the_process_boundary() {
     assert_eq!(result["totalCount"], 1);
     assert_eq!(result["items"][0]["matchOffset"], 3);
     assert_eq!(result["items"][0]["excerpt"], "a🤖É suffix");
+}
+
+#[test]
+#[cfg_attr(miri, ignore = "requires native subprocesses")]
+fn duplicate_classification_properties_are_rejected_without_writing() {
+    for existing in [false, true] {
+        let fixture = Fixture::new();
+        let capture = Fixture::path(&fixture.capture);
+        let capture_bytes = fs::read(&fixture.capture).unwrap();
+        let snapshot = page(fixture.native(&[
+            "read",
+            "--path",
+            capture,
+            "--query",
+            "comments",
+            "--thread-id",
+            "T",
+        ]));
+        let snapshot = snapshot["snapshotId"].as_str().unwrap();
+        let sidecar = PathBuf::from(format!("{capture}.authorship.json"));
+        let sidecar_bytes = if existing {
+            page(fixture.native(&[
+                "set-authorship",
+                "--path",
+                capture,
+                "--snapshot-id",
+                snapshot,
+                "--classification",
+                "[]",
+            ]));
+            Some(fs::read(&sidecar).unwrap())
+        } else {
+            None
+        };
+        for batch in [
+            r#"[{"threadId":"T","commentId":"C","kind":"human","kind":"agent"}]"#,
+            r#"[{"threadId":"T","commentId":"C","kind":"human","\u006bind":"agent"}]"#,
+            r#"[{"threadId":"other","threadId":"T","commentId":"C","kind":"human"}]"#,
+            r#"[{"threadId":"T","commentId":"C","kind":"human","Kind":"agent"}]"#,
+        ] {
+            let classification = fixture.root.join("classification.json");
+            fs::write(&classification, batch).unwrap();
+            for (option, value) in [
+                ("--classification", batch),
+                ("--classification-path", Fixture::path(&classification)),
+            ] {
+                let output = fixture.native(&[
+                    "set-authorship",
+                    "--path",
+                    capture,
+                    "--snapshot-id",
+                    snapshot,
+                    option,
+                    value,
+                ]);
+                assert!(!output.status.success());
+                assert!(output.stdout.is_empty());
+                let error = String::from_utf8(output.stderr).unwrap();
+                assert!(error.contains("invalidInput"), "{error}");
+                assert!(
+                    error.contains("Duplicate or ambiguous JSON property"),
+                    "{error}"
+                );
+                assert_eq!(fs::read(&fixture.capture).unwrap(), capture_bytes);
+                if let Some(bytes) = &sidecar_bytes {
+                    assert_eq!(&fs::read(&sidecar).unwrap(), bytes);
+                } else {
+                    assert!(!sidecar.exists());
+                }
+            }
+        }
+    }
 }
 
 #[test]

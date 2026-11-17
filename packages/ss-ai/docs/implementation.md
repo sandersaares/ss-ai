@@ -31,6 +31,8 @@ producer. The producer retains the destination lock across collection and
 publishes the sidecar before the immutable capture, so readers never observe
 a capture without its initial decisions. Semantic decisions use the same
 sidecar lock and remain separate from provider evidence.
+Classification JSON uses the context package's duplicate-preserving parser before
+materializing a batch, so conflicting properties cannot disappear before validation.
 Local finding operations use the shared runtime transactions to preserve
 accepted updates and artifact history.
 Individual audit decision input is normalized before the shared policy and

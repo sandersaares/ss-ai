@@ -264,7 +264,8 @@ regardless of casing; continuation preserves their recorded spelling.
 Creation receipts retain known item identities before content readback.
 Readback failures preserve these coordinates for reconciliation without
 authorizing creation replay. Azure collection identity uses the URL origin and
-decoded, case-insensitive path segments.
+decoded, case-insensitive path segments, including when validating parent work
+item links.
 
 ## Review reports
 

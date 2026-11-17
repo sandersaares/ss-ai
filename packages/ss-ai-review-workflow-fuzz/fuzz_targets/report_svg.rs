@@ -93,6 +93,8 @@ impl Files {
         let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
             .join(format!(".report-svg-fuzz-{}-{id}", std::process::id()));
         fs::create_dir(&root).unwrap();
+        fs::create_dir(root.join("templates")).unwrap();
+        fs::write(root.join("templates/report.html"), "offline template").unwrap();
         Self(root)
     }
 }

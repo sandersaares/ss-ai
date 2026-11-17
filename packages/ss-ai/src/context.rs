@@ -14,8 +14,8 @@ use ohno::AppError;
 use serde_json::{Value, json};
 use ss_ai_review::{capture_target, collect_capture};
 use ss_ai_review_context::{
-    SavedRequestAction, decode_file_text, increment_diagnostic, normalize_options, prepare,
-    prepare_capture, prepare_failure, query, read_capture, read_diagnostics, read_saved,
+    SavedRequestAction, decode_file_text, increment_diagnostic, normalize_options, parse_text,
+    prepare, prepare_capture, prepare_failure, query, read_capture, read_diagnostics, read_saved,
     write_comment_authorship,
 };
 use ss_ai_runtime::{Clock, caused_by, fail};
@@ -277,7 +277,7 @@ where
                 Some(path) => decode_file_text(&fs::read(path)?),
                 None => classification.unwrap_or_default(),
             };
-            let value: Value = serde_json::from_str(&text)
+            let value = parse_text(&text)
                 .map_err(|error| caused_by("invalidInput", "Invalid classification JSON", error))?;
             if !value.is_array() {
                 return Err(fail("invalidInput", "Classifications must be a JSON array"));
