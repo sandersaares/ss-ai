@@ -443,8 +443,16 @@ Describe 'Prepared bounded worker inputs' {
         }
         # The native fixture holds the diagnostics lock and signals each observed conflict
         # before releasing contenders; the PowerShell wait mock cannot control native retries.
-        $output = & $executable concurrent_reads_preserve_diagnostics --exact
-        $LASTEXITCODE | Should -Be 0
+        # Preserve native panic output in the assertion instead of replacing it with an exit-code exception.
+        $previousNativeErrorPreference = $PSNativeCommandUseErrorActionPreference
+        try {
+            $PSNativeCommandUseErrorActionPreference = $false
+            $output = & $executable concurrent_reads_preserve_diagnostics --exact --nocapture 2>&1
+            $exitCode = $LASTEXITCODE
+        } finally {
+            $PSNativeCommandUseErrorActionPreference = $previousNativeErrorPreference
+        }
+        $exitCode | Should -Be 0 -Because ($output -join "`n")
         ($output -join "`n") | Should -Match '1 passed'
     }
 
