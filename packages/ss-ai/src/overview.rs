@@ -95,9 +95,8 @@ pub(crate) fn run(
             process,
             clock,
             |tools, guard, source, output| {
-                // The report renderer removes parent components lexically. Resolve
-                // existing paths first so `..` after a symlink keeps filesystem
-                // semantics, then retain the requested artifact path in the manifest.
+                // Match the renderer's resolved output path while retaining the
+                // requested artifact path in the manifest.
                 let renderer_source = renderer_path(source)?;
                 let parent = output
                     .parent()
@@ -105,7 +104,7 @@ pub(crate) fn run(
                 let name = output
                     .file_name()
                     .ok_or_else(|| fail("invalidState", "Report output has no filename"))?;
-                let rendered_output = renderer_path(parent)?.join(name);
+                let rendered_output = fs::canonicalize(parent)?.join(name);
                 let renderer_skill_root = renderer_path(&skill_root)?;
                 let mut result = report_html::write_report(
                     &renderer_source,

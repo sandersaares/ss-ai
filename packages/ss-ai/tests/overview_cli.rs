@@ -795,7 +795,7 @@ fn cli_renders_parent_component_paths_with_offline_tools() {
 #[test]
 #[ignore = "launched with an isolated environment"]
 fn cli_renders_parent_component_paths_child() {
-    let root = PathBuf::from(env::var_os("OVERVIEW_CLI_TEST_ROOT").unwrap());
+    let root = fs::canonicalize(env::var_os("OVERVIEW_CLI_TEST_ROOT").unwrap()).unwrap();
     let lock = b"{\"lockfileVersion\":3}";
     let tools = root.join("local/ss-review/tools");
     let packages = tools
@@ -817,10 +817,15 @@ fn cli_renders_parent_component_paths_child() {
     };
 
     #[cfg(unix)]
-    let cases = [("ordinary", false), ("symlink", true)].as_slice();
+    let cases = [
+        ("ordinary", false, true),
+        ("symlink-parent", true, true),
+        ("symlink-direct", true, false),
+    ]
+    .as_slice();
     #[cfg(not(unix))]
-    let cases = [("ordinary", false)].as_slice();
-    for &(name, use_symlink) in cases {
+    let cases = [("ordinary", false, true)].as_slice();
+    for &(name, use_symlink, use_parent) in cases {
         let case = root.join(name);
         fs::create_dir_all(&case).unwrap();
         prepare(&case);
@@ -839,12 +844,20 @@ fn cli_renders_parent_component_paths_child() {
             fs::create_dir_all(&destination).unwrap();
             #[cfg(unix)]
             symlink(&destination, case.join("step")).unwrap();
-            case.join("destination")
+            if use_parent {
+                case.join("destination")
+            } else {
+                destination
+            }
         } else {
             fs::create_dir_all(case.join("step")).unwrap();
             case.clone()
         };
-        let requested_output = case.join("step/../output 雪");
+        let requested_output = if use_parent {
+            case.join("step/../output 雪")
+        } else {
+            case.join("step/output 雪")
+        };
         let mut args = arguments(&case);
         let argument = args
             .iter_mut()
