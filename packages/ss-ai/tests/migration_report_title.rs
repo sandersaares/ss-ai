@@ -42,7 +42,12 @@ struct ReportProcesses {
 }
 
 impl Process for ReportProcesses {
-    fn execute(&self, program: &str, arguments: &[String], _: &[u8]) -> io::Result<ProcessOutput> {
+    fn execute(
+        &self,
+        program: &str,
+        arguments: &[String],
+        input: &[u8],
+    ) -> io::Result<ProcessOutput> {
         if arguments.first().is_some_and(|arg| arg == "-e") {
             return Ok(ProcessOutput::new(
                 true,
@@ -58,11 +63,11 @@ impl Process for ReportProcesses {
                 Vec::new(),
             ));
         }
-        let metadata = arguments
-            .windows(2)
-            .find(|pair| pair[0] == "--metadata")
-            .unwrap();
-        *self.title.borrow_mut() = Some(metadata[1].clone());
+        assert!(!arguments.iter().any(|argument| argument == "--metadata"));
+        let document: Value = serde_json::from_slice(input)?;
+        assert_eq!(document["meta"]["title"]["t"], "MetaString");
+        *self.title.borrow_mut() =
+            Some(document["meta"]["title"]["c"].as_str().unwrap().to_owned());
         Ok(ProcessOutput::new(
             true,
             b"<!DOCTYPE html><html><meta http-equiv=\"Content-Security-Policy\" content=\"default-src 'none'; img-src data:; style-src 'unsafe-inline'; base-uri 'none'; form-action 'none'\"><body></body></html>".to_vec(),
@@ -173,7 +178,7 @@ fn title_child() {
     assert_eq!(env::current_dir().unwrap(), initial_directory);
     assert_eq!(
         process.title.borrow().as_deref(),
-        Some("title=Review – overview\nTitle")
+        Some("Review – overview\nTitle")
     );
     let source = fs::canonicalize(invocation.join("source.md")).unwrap();
     let output = fs::canonicalize(root.join("reports/report.html")).unwrap();

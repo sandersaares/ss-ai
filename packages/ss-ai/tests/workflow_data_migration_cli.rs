@@ -4,6 +4,7 @@
     reason = "The tests inspect fixed JSON fixture shapes"
 )]
 
+use std::env;
 use std::fs;
 use std::path::PathBuf;
 use std::process::{Command, Output};
@@ -158,6 +159,31 @@ fn candidates_cli_validates_empty_indexes_and_nonempty_plans() {
 #[cfg_attr(miri, ignore = "requires a native subprocess")]
 #[cfg_attr(mutants, ignore = "mutated native subprocesses may block")]
 fn input_and_assessment_cli_publish_validated_records() {
+    // Isolate retained queue locks from sibling tests' fork/exec windows.
+    let output = Command::new(env::current_exe().unwrap())
+        .args([
+            "--exact",
+            "input_and_assessment_child",
+            "--ignored",
+            "--nocapture",
+        ])
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(String::from_utf8_lossy(&output.stdout).contains("1 passed"));
+}
+
+/// Retains strict lock and record assertions without unrelated process launches.
+#[test]
+#[ignore = "launched by the isolated input and assessment test"]
+#[cfg_attr(miri, ignore = "requires a native subprocess")]
+#[cfg_attr(mutants, ignore = "mutated native subprocesses may block")]
+fn input_and_assessment_child() {
     let workspace = Workspace::new();
     let files = json!([{"path":workspace.path("a.rs"),"sizeBytes":1,"change":"modified"},
         {"path":workspace.path("deleted.rs"),"sizeBytes":1,"change":"deleted"}]);
