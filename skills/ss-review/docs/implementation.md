@@ -1221,6 +1221,11 @@ that intent fails, the same decision can continue; once the intent is durable,
 the possible provider write requires reconciliation.
 Native tracker journals use a distinct schema identity and require complete
 native adjudication evidence rather than accepting older record shapes.
+Creation receipts retain validated item coordinates independently of response
+content. The transaction persists these coordinates before readback validates
+the stored prose; failed readback retains reconciliation evidence without
+authorizing creation replay. Azure collection identity compares the origin and
+decoded, case-insensitive path segments.
 
 The review summary is returned to the orchestrator rather than filed as work,
 because it describes the delivery and does not represent an independently

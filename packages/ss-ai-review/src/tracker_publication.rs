@@ -531,7 +531,12 @@ mod tests {
         let receipt = effects
             .create(&json!({"title":"title","body":"body"}))
             .unwrap();
-        assert_eq!(effects.read(&receipt).unwrap(), receipt);
+        let readback = effects.read(&receipt).unwrap();
+        for key in ["itemId", "itemNodeId", "url"] {
+            assert_eq!(readback.get(key), receipt.get(key));
+        }
+        assert_eq!(readback.get("title"), Some(&json!("title")));
+        assert_eq!(readback.get("body"), Some(&json!("body")));
         effects.wait_between_creates().unwrap();
         assert_eq!(offline.requests.borrow().len(), 3);
         assert_eq!(*offline.waits.borrow(), [Duration::from_secs(1)]);

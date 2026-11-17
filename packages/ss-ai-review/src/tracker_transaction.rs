@@ -22,13 +22,11 @@ use serde::{Deserialize, Deserializer};
 use serde_json::{Map, Value, json};
 use sha2::{Digest, Sha256};
 use ss_ai_runtime::FileTransaction;
-use url::Url;
 
 use crate::classification;
 use crate::error::fail;
-use crate::target::decode;
 use crate::tracker_body::{AcceptedRewrite, BodyVerdict, adjudication_excerpts, compare_ado_body};
-use crate::tracker_target::TrackerTarget;
+use crate::tracker_target::{TrackerTarget, azure_url_identity};
 
 /// Separates native tracker journal records from legacy skill-produced records.
 const JOURNAL_SCHEMA_VERSION: u64 = 2;
@@ -778,28 +776,6 @@ fn same_item_url(platform: &Value, actual: &Value, expected: &Value) -> bool {
     }
 }
 
-/// Resolves an Azure URL to the case-insensitive path identity used by the API.
-fn azure_url_identity(value: &str) -> Option<(String, Vec<String>)> {
-    let url = Url::parse(value).ok()?;
-    if url.scheme() != "https"
-        || !url.username().is_empty()
-        || url.password().is_some()
-        || url.query().is_some()
-        || url.fragment().is_some()
-    {
-        return None;
-    }
-    let path = url
-        .path_segments()?
-        .map(decode)
-        .collect::<Result<Vec<_>, _>>()
-        .ok()?
-        .into_iter()
-        .map(|segment| segment.to_lowercase())
-        .collect();
-    Some((url.origin().ascii_serialization(), path))
-}
-
 /// Records readback failure separately from the durable creation receipt.
 fn checked_verify(
     effects: &mut dyn Effects,
@@ -1433,6 +1409,22 @@ mod tests {
             &provider.calls[..4],
             ["create first", "read 1", "read 1", "create second"]
         );
+    }
+
+    #[test]
+    fn readback_failure_preserves_created_identity_and_forbids_replay() {
+        for platform in ["gitHub", "azureDevOps"] {
+            let (mut journal, mut provider) = setup();
+            provider.fail_read = true;
+            let result = call(&mut journal, &mut provider, platform, &plan(), None).unwrap();
+            assert_eq!(result["status"], "failed");
+            let saved: Value = serde_json::from_slice(journal.bytes.as_ref().unwrap()).unwrap();
+            assert_eq!(saved["operations"][0]["itemId"], "1");
+            assert_eq!(saved["operations"][0]["url"], "https://example.test/1");
+            let calls = provider.calls.clone();
+            _ = call(&mut journal, &mut provider, platform, &plan(), None).unwrap_err();
+            assert_eq!(provider.calls, calls);
+        }
     }
 
     #[test]
