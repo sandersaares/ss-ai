@@ -14,7 +14,7 @@ use crate::error::{caused_by, fail};
 use crate::json::{array, field, text};
 use crate::target::{Platform, decode, escape};
 use crate::tracker_body;
-use crate::tracker_target::TrackerTarget as Target;
+use crate::tracker_target::{TrackerTarget as Target, azure_url_identity};
 use crate::transport::Transport;
 
 /// Azure's preview resource supports the per-field Markdown format operation.
@@ -345,8 +345,12 @@ fn same_name(left: &str, right: &str) -> bool {
 
 /// Restricts parent links to the collection and globally identified work item.
 fn parent_url_matches(url: &str, collection: &str, project: &str, id: NonZeroU32) -> bool {
+    // Parent links follow the same decoded collection identity as tracker targets.
+    let Some(identity) = azure_url_identity(url) else {
+        return false;
+    };
     let suffix = format!("_apis/wit/workItems/{id}");
-    if url.eq_ignore_ascii_case(&format!("{collection}/{suffix}")) {
+    if azure_url_identity(&format!("{collection}/{suffix}")).as_ref() == Some(&identity) {
         return true;
     }
 
@@ -365,7 +369,8 @@ fn parent_url_matches(url: &str, collection: &str, project: &str, id: NonZeroU32
         return false;
     };
     (same_name(&decoded, project) || Uuid::parse_str(&decoded).is_ok())
-        && url.eq_ignore_ascii_case(&format!("{collection}/{segment}/{suffix}"))
+        && azure_url_identity(&format!("{collection}/{segment}/{suffix}")).as_ref()
+            == Some(&identity)
 }
 
 /// Rejects malformed or reserved body fields before authentication or writes.
@@ -788,6 +793,30 @@ mod tests {
             "https://dev.azure.com/org/1f9c8c6e-0000-0000-0000-000000000000/_apis/wit/workItems/10",
             "https://dev.azure.com/org/_apis/wit/workItems/9?redirect=other",
             "https://dev.azure.com/org/extra/1f9c8c6e-0000-0000-0000-000000000000/_apis/wit/workItems/9",
+        ] {
+            assert!(!parent_url_matches(url, collection, project, id), "{url}");
+        }
+    }
+
+    #[test]
+    fn parent_links_match_decoded_unicode_collection_identity() {
+        let id = NonZeroU32::new(9).unwrap();
+        let collection = "https://ado.example/org/C%C3%B8llection";
+        let project = "Prøject";
+        for url in [
+            "https://ado.example/org/C%C3%98LLECTION/_apis/wit/workItems/9",
+            "https://ado.example/org/C%C3%98LLECTION/Pr%C3%98ject/_apis/wit/workItems/9",
+            "https://ado.example/org/C%C3%98LLECTION/1f9c8c6e-0000-0000-0000-000000000000/_apis/wit/workItems/9",
+        ] {
+            assert!(parent_url_matches(url, collection, project, id), "{url}");
+        }
+        for url in [
+            "https://other.example/org/C%C3%98LLECTION/_apis/wit/workItems/9",
+            "https://ado.example/org/Other/_apis/wit/workItems/9",
+            "https://ado.example/org/C%C3%98LLECTION/Other/_apis/wit/workItems/9",
+            "https://ado.example/org/C%C3%98LLECTION/extra/Pr%C3%98ject/_apis/wit/workItems/9",
+            "https://ado.example/org/C%C3%98LLECTION/Pr%C3%98ject/_apis/wit/workItems/10",
+            "https://ado.example/org/C%C3%98LLECTION/_apis/wit/workItems/9?redirect=other",
         ] {
             assert!(!parent_url_matches(url, collection, project, id), "{url}");
         }
