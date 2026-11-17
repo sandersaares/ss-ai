@@ -9,6 +9,8 @@
 use std::cell::RefCell;
 use std::fs;
 use std::io;
+#[cfg(unix)]
+use std::os::unix::fs::symlink;
 use std::panic::{RefUnwindSafe, UnwindSafe};
 use std::path::{Path, PathBuf};
 use std::time::Duration;
@@ -458,6 +460,50 @@ fn failures_preserve_existing_output_and_reject_input_aliases() {
         .is_err()
     );
     assert_eq!(fs::read_to_string(source).unwrap(), "# Source");
+}
+
+/// Resolves parent components through symlinks before reading or publishing.
+#[test]
+#[cfg(unix)]
+fn report_paths_follow_symlinks_before_parent_components() {
+    let directory = directory();
+    let actual = directory.path().join("actual");
+    let view = directory.path().join("view");
+    fs::create_dir_all(actual.join("child")).unwrap();
+    fs::create_dir_all(&view).unwrap();
+    symlink(actual.join("child"), view.join("link")).unwrap();
+    fs::write(actual.join("source.md"), "# Actual").unwrap();
+    fs::write(view.join("source.md"), "# Wrong").unwrap();
+    let guard = tools_lock(directory.path(), LockMode::Shared, &TestClock).unwrap();
+    let fake = process(vec![], "<svg/>");
+
+    let result = write_report(
+        &view.join("link/../source.md"),
+        &view.join("link/../report.html"),
+        &skill_root(),
+        "Report",
+        &tools(),
+        &guard,
+        &fake,
+        &TestClock,
+    )
+    .unwrap();
+    let actual = fs::canonicalize(actual).unwrap();
+    assert_eq!(result.source_path, actual.join("source.md"));
+    assert_eq!(
+        result.source_hash,
+        format!("{:x}", Sha256::digest(b"# Actual"))
+    );
+    assert_eq!(result.html_path, actual.join("report.html"));
+    assert_eq!(
+        url::Url::parse(&result.html_uri)
+            .unwrap()
+            .to_file_path()
+            .unwrap(),
+        result.html_path
+    );
+    assert!(result.html_path.is_file());
+    assert!(!view.join("report.html").exists());
 }
 
 /// A hard-linked output cannot replace the canonical Markdown source.
