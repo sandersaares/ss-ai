@@ -570,7 +570,7 @@ function Invoke-PreparedRustTests {
     $includeDoctests = $false
 
     if ($Preparation.status -ceq 'providerFailed') {
-        Write-Host "Blocked native tests: $($Preparation.providerFailure)"
+        Write-Host "Blocked provider-dependent tests: $($Preparation.providerFailure)"
         if (-not $TestTarget) {
             $metadata = & cargo metadata --no-deps --format-version 1 --locked | ConvertFrom-Json
             if ($LASTEXITCODE -ne 0) {
@@ -579,13 +579,15 @@ function Invoke-PreparedRustTests {
 
             $TestTarget = @($metadata.packages |
                 Where-Object id -In $metadata.workspace_members |
-                ForEach-Object targets | Where-Object { $_.kind -contains 'test' -and $_.name -notin @('native', 'capture_parity') } |
+                ForEach-Object targets | Where-Object {
+                    $_.kind -contains 'test' -and $_.name -notin @('native', 'capture_parity', 'final_review_cli')
+                } |
                 Select-Object -ExpandProperty name -Unique)
             $selection += @('--lib', '--bins')
             # Explicit target selectors omit doctests, so run those separately below.
             $includeDoctests = $true
         } else {
-            $TestTarget = @($TestTarget | Where-Object { $_ -notin @('native', 'capture_parity') })
+            $TestTarget = @($TestTarget | Where-Object { $_ -notin @('native', 'capture_parity', 'final_review_cli') })
             if (-not $TestTarget) {
                 throw 'All selected Rust tests are blocked by provider preparation failure.'
             }

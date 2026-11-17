@@ -39,7 +39,7 @@ BeforeAll {
             return
         }
         if ($args[0] -eq 'metadata') {
-            return '{"workspace_members":["fixture"],"packages":[{"id":"fixture","targets":[{"name":"native","kind":["test"]},{"name":"capture_parity","kind":["test"]},{"name":"git","kind":["test"]}]}]}'
+            return '{"workspace_members":["fixture"],"packages":[{"id":"fixture","targets":[{"name":"native","kind":["test"]},{"name":"capture_parity","kind":["test"]},{"name":"final_review_cli","kind":["test"]},{"name":"git","kind":["test"]}]}]}'
         }
 
         $target = $args[[array]::IndexOf($args, '--target-dir') + 1]
@@ -263,7 +263,7 @@ Describe 'Rust preparation boundary' {
         @(Get-ChildItem -LiteralPath $fixture.root -Directory -Filter 'rust-tests-*') | Should -BeNullOrEmpty
     }
 
-    It 'reports provider failure explicitly, blocks native only, and still runs other tests and doctests' {
+    It 'reports provider failure explicitly, blocks provider-dependent tests, and still runs other tests and doctests' {
         $script:FailProvider = $true
         $prepared = New-RustTestPreparation -RepositoryRoot $fixture.root -PrerequisitePath $fixture.record
         $prepared.status | Should -Be 'providerFailed'
@@ -277,6 +277,7 @@ Describe 'Rust preparation boundary' {
         $script:CargoCalls[2] | Should -Contain '--lib'
         $script:CargoCalls[2] | Should -Not -Contain 'native'
         $script:CargoCalls[2] | Should -Not -Contain 'capture_parity'
+        $script:CargoCalls[2] | Should -Not -Contain 'final_review_cli'
         $script:CargoCalls[3] | Should -Contain '--doc'
     }
 
@@ -300,7 +301,7 @@ Describe 'Rust preparation boundary' {
         $null = Read-RustTestPreparation -RepositoryRoot $cliFixture.root -PrerequisitePath $cliFixture.record -TestTarget final_review_cli
     }
 
-    It 'excludes capture parity when provider preparation fails' {
+    It 'excludes provider-dependent selected tests when provider preparation fails' {
         $script:FailProvider = $true
         $prepared = New-RustTestPreparation -RepositoryRoot $fixture.root -PrerequisitePath $fixture.record -TestTarget capture_parity
         $prepared.status | Should -Be 'providerFailed'
@@ -309,10 +310,11 @@ Describe 'Rust preparation boundary' {
             $script:CargoCalls.Add(@($ArgumentList))
             $global:LASTEXITCODE = 0
         }
-        { Invoke-PreparedRustTests -Preparation $failed -PrerequisitePath $fixture.record -TestTarget capture_parity,git } |
+        { Invoke-PreparedRustTests -Preparation $failed -PrerequisitePath $fixture.record -TestTarget capture_parity,final_review_cli,git } |
             Should -Throw '*execution failed*'
         $script:CargoCalls[-1] | Should -Contain 'git'
         $script:CargoCalls[-1] | Should -Not -Contain 'capture_parity'
+        $script:CargoCalls[-1] | Should -Not -Contain 'final_review_cli'
     }
 
     It 'preserves selected targets and filters as separate Cargo arguments' {
