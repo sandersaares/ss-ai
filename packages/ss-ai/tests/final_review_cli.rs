@@ -17,7 +17,7 @@ use std::io::{BufRead, BufReader, Read, Write};
 use std::net::{TcpListener, TcpStream};
 #[cfg(unix)]
 use std::os::unix::fs::PermissionsExt;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 #[cfg(unix)]
 use std::thread;
@@ -26,6 +26,7 @@ use std::time::Duration;
 use jiff::Timestamp;
 use ohno::AppError;
 use serde_json::{Value, from_slice, from_str, json, to_vec};
+use sha2::{Digest, Sha256};
 use ss_ai::{Clock, Http, HttpResponse, Process, ProcessOutput, SystemClock, run};
 use ss_ai_review_context::evidence_hash;
 use tempfile::{Builder, TempDir};
@@ -199,6 +200,128 @@ fn command() -> Command {
     {
         Command::new(env!("CARGO_BIN_EXE_ss-ai"))
     }
+}
+
+/// Records successful tool exchanges for the real executable's private launchers.
+struct ProcessRecording<'a> {
+    provider: &'a PublicationProvider,
+    root: PathBuf,
+    next: Cell<usize>,
+}
+
+impl Process for ProcessRecording<'_> {
+    fn execute(
+        &self,
+        program: &str,
+        arguments: &[String],
+        input: &[u8],
+    ) -> io::Result<ProcessOutput> {
+        let output = self.provider.execute(program, arguments, input)?;
+        assert!(output.success);
+        let index = self.next.get();
+        self.next.set(index.checked_add(1).unwrap());
+        // Fixed-width names preserve exchange order for repeated identical requests.
+        let exchange = self.root.join(format!("{index:08}"));
+        fs::create_dir_all(&exchange)?;
+        fs::write(exchange.join("arguments"), arguments.join("\0"))?;
+        fs::write(exchange.join("input"), input)?;
+        fs::write(exchange.join("stdout"), &output.stdout)?;
+        fs::write(exchange.join("stderr"), &output.stderr)?;
+        Ok(output)
+    }
+
+    fn isolated_git(&self, _: &Path, arguments: &[String]) -> io::Result<ProcessOutput> {
+        // NativeProcess supplies the directory separately rather than adding -C.
+        self.execute("git", arguments, &[])
+    }
+}
+
+/// Installs the immutable prepared helper without compiling or using ambient tools.
+fn install_replay_tools(directory: &Path) {
+    let record = env::var_os("SS_AI_RUST_TEST_PREREQUISITES")
+        .expect("Run scripts/Invoke-Tests.ps1 -Suite Rust -RustTest final_review_cli");
+    let record: Value = from_slice(&fs::read(record).unwrap()).unwrap();
+    assert_eq!(record["schemaVersion"], 3);
+    assert_eq!(record["status"], "complete");
+    let source = Path::new(record["provider"]["source"]["path"].as_str().unwrap());
+    let executable = Path::new(record["provider"]["executable"]["path"].as_str().unwrap());
+    assert!(source.is_absolute() && executable.is_absolute());
+    let bytes = fs::read(source).unwrap();
+    assert_eq!(bytes, include_bytes!("support/provider.rs"));
+    assert_eq!(
+        format!("{:X}", Sha256::digest(&bytes)),
+        record["provider"]["source"]["sha256"]
+    );
+    assert_eq!(
+        format!("{:X}", Sha256::digest(fs::read(executable).unwrap())),
+        record["provider"]["executable"]["sha256"]
+    );
+    fs::create_dir_all(directory).unwrap();
+    for program in ["git", "gh"] {
+        #[cfg(windows)]
+        {
+            fs::copy(executable, directory.join(format!("{program}.exe"))).unwrap();
+        }
+        #[cfg(not(windows))]
+        {
+            fs::copy(executable, directory.join(program)).unwrap();
+        }
+    }
+}
+
+#[test]
+#[cfg_attr(miri, ignore = "requires a native subprocess")]
+fn executable_emits_json_and_fails_after_published_follow_up_failure() {
+    let fixture = Fixture::new();
+    let mut provider = PublicationProvider::new("github", false);
+    provider.fail_github_reopen = true;
+    provider.responses["reviewThreads"]["data"]["repository"]["pullRequest"]["reviewThreads"]["nodes"]
+        [0]["isResolved"] = json!(true);
+    let mut args = publication_args(&fixture, "github");
+    args.extend(["--now-utc", "2026-08-04T12:00:00Z"].map(OsString::from));
+    let mut capture = recorded("github-expected");
+    capture["threads"][0]["resolution"] = json!("resolved");
+    capture["threads"][0]["rawStatus"] = json!("resolved");
+    fixture.write("context 雪.json", &capture);
+    let mut document = approved(&capture, true);
+    document["findings"][0]["followUp"] = json!({"threadId":"PRRT_1","commentId":"PRRC_1"});
+    fixture.write("approved 雪.json", &document);
+
+    // Generate exchanges through the ordinary publication pipeline, then replay
+    // the same inputs through main to cover its stdout and exit-status contract.
+    let recording = ProcessRecording {
+        provider: &provider,
+        root: fixture.path("exchanges"),
+        next: Cell::new(0),
+    };
+    let result: Value = from_str(&run(&args, &recording, &provider, &FixedClock).unwrap()).unwrap();
+    assert_eq!(result["status"], "publishedWithFollowUpFailure", "{result}");
+    assert_eq!(
+        *provider.writes.borrow(),
+        ["start", "reply", "complete", "reopen"]
+    );
+    fs::remove_file(fixture.path("output 雪/publication-result.json")).unwrap();
+    let tools = fixture.path("tools");
+    install_replay_tools(&tools);
+    let output = command()
+        .env("PATH", &tools)
+        .env("FIXTURE_PROCESS_REPLAY", &recording.root)
+        .args(&args[1..])
+        .output()
+        .unwrap();
+    assert!(
+        output.status.code().is_some_and(|code| code != 0),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let outcome: Value = from_slice(&output.stdout).unwrap();
+    assert_eq!(outcome["status"], "publishedWithFollowUpFailure");
+    assert_eq!(outcome["publishedFindingCount"], 1);
+    assert!(
+        fs::read_dir(&recording.root)
+            .unwrap()
+            .all(|exchange| exchange.unwrap().path().join("consumed").exists())
+    );
 }
 
 #[test]
@@ -456,6 +579,7 @@ struct PublicationProvider {
     pending_review: Cell<bool>,
     stale_live_commit: Cell<bool>,
     pull_request_reads: Cell<usize>,
+    fail_github_reopen: bool,
 }
 
 impl PublicationProvider {
@@ -482,6 +606,7 @@ impl PublicationProvider {
             pending_review: Cell::new(false),
             stale_live_commit: Cell::new(false),
             pull_request_reads: Cell::new(0),
+            fail_github_reopen: false,
         }
     }
 
@@ -505,6 +630,29 @@ impl PublicationProvider {
         None
     }
 
+    /// Returns review-scoped comments before and after submission for both finding kinds.
+    fn github_review_response(&self) -> Value {
+        let summary = self.summary.borrow();
+        let submitted = summary.is_some();
+        self.readbacks
+            .borrow_mut()
+            .push(if submitted { "completed" } else { "draft" }.into());
+        let body = if submitted && self.fail_final_readback {
+            "different"
+        } else {
+            summary.as_deref().unwrap_or("")
+        };
+        json!({"data":{"node":{"id":"review",
+            "state":if !submitted {"PENDING"} else if self.approval_expected.get() {"APPROVED"} else {"COMMENTED"},
+            "url":"https://github.com/octo/widget/pull/7#review","body":body,
+            "comments":{"pageInfo":{"hasNextPage":false,"endCursor":null},
+            "nodes":[{"id":"comment","state":if submitted {"SUBMITTED"} else {"PENDING"},
+                "path":if self.fail_github_reopen {"src/café.rs"} else {"src/lib.rs"},
+                "line":if self.fail_github_reopen {5} else {2},
+                "startLine":if self.fail_github_reopen {4} else {1},"subjectType":"LINE",
+                "body":self.finding.borrow().as_ref().unwrap()}]}}}})
+    }
+
     /// Recorded GitHub fixtures establish preflight evidence; writes supply later readbacks.
     fn github_response(&self, route: &str, input: &[u8]) -> Value {
         let responses = &self.responses;
@@ -514,6 +662,18 @@ impl PublicationProvider {
             let variables = &request["variables"];
             if let Some(response) = self.github_pending_response(query) {
                 return response;
+            }
+            if query.contains("unresolveReviewThread(") {
+                assert!(self.fail_github_reopen);
+                self.writes.borrow_mut().push("reopen".into());
+                return json!({"errors":[{"message":"Reopening refused"}]});
+            }
+            if query.contains("addPullRequestReviewThreadReply(") {
+                assert!(self.fail_github_reopen);
+                assert_eq!(variables["threadId"], "PRRT_1");
+                self.writes.borrow_mut().push("reply".into());
+                *self.finding.borrow_mut() = Some(variables["body"].as_str().unwrap().to_owned());
+                return json!({"data":{"addPullRequestReviewThreadReply":{"comment":{"id":"comment"}}}});
             }
             if query.contains("addPullRequestReviewThread(") {
                 self.writes.borrow_mut().push("finding".into());
@@ -546,26 +706,11 @@ impl PublicationProvider {
                         "url":"https://github.com/octo/widget/pull/7#review"}}}});
             }
             if query.contains("node(id:$reviewId)") {
-                let summary = self.summary.borrow();
-                let submitted = summary.is_some();
-                self.readbacks
-                    .borrow_mut()
-                    .push(if submitted { "completed" } else { "draft" }.into());
-                let body = if submitted && self.fail_final_readback {
-                    "different"
-                } else {
-                    summary.as_deref().unwrap_or("")
-                };
-                return json!({"data":{"node":{"id":"review",
-                        "state":if !submitted {"PENDING"} else if self.approval_expected.get() {"APPROVED"} else {"COMMENTED"},
-                        "url":"https://github.com/octo/widget/pull/7#review","body":body,
-                        "comments":{"pageInfo":{"hasNextPage":false,"endCursor":null},
-                        "nodes":[{"id":"comment","state":if submitted {"SUBMITTED"} else {"PENDING"},
-                            "path":"src/lib.rs","line":2,"startLine":1,"subjectType":"LINE",
-                            "body":self.finding.borrow().as_ref().unwrap()}]}}}});
+                return self.github_review_response();
             }
             if query.contains("node(id:$threadId)") && self.finding.borrow().is_some() {
-                return json!({"data":{"node":{"id":"thread","diffSide":"RIGHT","subjectType":"LINE",
+                return json!({"data":{"node":{"id":if self.fail_github_reopen {"PRRT_1"} else {"thread"},
+                    "diffSide":"RIGHT","subjectType":"LINE",
                     "comments":{"pageInfo":{"hasNextPage":false,"endCursor":null},
                             "nodes":[{"id":"comment"}]}}}});
             }
