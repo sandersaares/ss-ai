@@ -60,14 +60,12 @@ impl Process for ReportProcesses {
                 vec![],
             ));
         }
-        let metadata = arguments
-            .windows(2)
-            .find(|pair| pair.first().is_some_and(|arg| arg == "--metadata"))
-            .unwrap();
-        self.titles
-            .borrow_mut()
-            .push(metadata.get(1).unwrap().clone());
         let ast: Value = serde_json::from_slice(input)?;
+        let metadata = ast.get("meta").unwrap().get("title").unwrap();
+        let title = metadata.get("c").unwrap().as_str().unwrap();
+        assert_eq!(metadata.get("t").unwrap(), "MetaString");
+        assert!(!arguments.iter().any(|argument| argument.contains(title)));
+        self.titles.borrow_mut().push(title.to_owned());
         let body = ast
             .get("blocks")
             .unwrap()
@@ -223,6 +221,6 @@ fn report_dispatch_child() {
     );
     assert_eq!(
         process.titles.borrow().as_slice(),
-        ["title=Review report", "title=Review – overview"]
+        ["Review report", "Review – overview"]
     );
 }
