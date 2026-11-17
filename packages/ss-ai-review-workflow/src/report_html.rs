@@ -108,7 +108,10 @@ pub fn write_report(
     {
         return Err(invalid("Pandoc returned an invalid document"));
     }
-    object.insert("meta".into(), json!({}));
+    object.insert(
+        "meta".into(),
+        json!({"title": {"t": "MetaString", "c": title}}),
+    );
     let mut renderer = DiagramRenderer {
         process,
         tools,
@@ -128,8 +131,6 @@ pub fn write_report(
         "--syntax-highlighting=pygments".into(),
         "--template".into(),
         path_text(&template)?,
-        "--metadata".into(),
-        format!("title={title}"),
     ];
     let input = serde_json::to_vec(&ast)
         .map_err(|error| caused_by("invalidInput", "Cannot encode Pandoc document", error))?;

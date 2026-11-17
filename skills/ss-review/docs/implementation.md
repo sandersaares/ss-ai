@@ -1405,6 +1405,8 @@ to `ss-ai workflow render-review-html`. It resolves the output path against the 
 location, creates its parent directory if necessary, writes the title to a UTF-8 file beside
 the output, passes its path as `--title-path`, and removes the file afterward. The output
 directory must be writable; the native process keeps the caller's working directory.
+The native renderer passes the title as a Pandoc `MetaString` in the JSON document
+on standard input, keeping title prose out of renderer command-line arguments.
 The native renderer reads canonical Markdown and uses Pandoc's GFM syntax
 tree. Source raw nodes become visible text/code, while
 only the renderer's Mermaid transformation inserts controlled raw HTML.
