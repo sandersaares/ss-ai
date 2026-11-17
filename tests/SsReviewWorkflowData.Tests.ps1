@@ -458,6 +458,7 @@ Describe 'Human audit records' {
         $script:FindingId = Add-FindingToArtifact -Document $artifact -Finding (New-FeedbackFinding) -Origin synthesis
         Write-FindingArtifact -Path $script:FindingsPath -Document $artifact
         $script:Context = @{
+            schemaVersion = $script:PullRequestContextSchemaVersion
             pullRequestUrl = 'https://github.com/example/repo/pull/1'
             pullRequest = @{ reviewedSourceCommit = ('a' * 40); isAuthoredBySelf = $false }
         }
@@ -534,7 +535,11 @@ Describe 'Human audit records' {
     }
 
     It 'carries forward only an existing true baseline-bound approval' {
-        $newContext = @{ pullRequestUrl = $script:Context.pullRequestUrl; pullRequest = @{ reviewedSourceCommit = ('b' * 40); isAuthoredBySelf = $false } }
+        $newContext = @{
+            schemaVersion = $script:PullRequestContextSchemaVersion
+            pullRequestUrl = $script:Context.pullRequestUrl
+            pullRequest = @{ reviewedSourceCommit = ('b' * 40); isAuthoredBySelf = $false }
+        }
         $approvalArguments = @{ Path = $script:ApprovalPath; Context = $newContext; PreviousContext = $script:Context; CarryForward = $true }
         Set-ReviewMergeApproval @approvalArguments | Should -Be 'NoApproval'
         Set-ReviewMergeApproval -Path $script:ApprovalPath -Context $script:Context -ApproveMerge $false | Out-Null
