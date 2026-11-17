@@ -13,7 +13,7 @@ use sha2::{Digest, Sha256};
 use ss_ai_runtime::{Clock, FileTransaction, decode_text_with_bom, read_bytes};
 use uuid::Uuid;
 
-use crate::target::Target;
+use crate::target::{Platform, Target};
 
 /// Selects an already loaded capture or a complete capture file.
 #[derive(Clone, Copy)]
@@ -413,9 +413,9 @@ pub(crate) fn validate_context(context: &Value) -> Result<ValidatedContext<'_>, 
         || target.pull_request_id != parsed.pull_request_id
         || target.web_url != url
         || parsed.web_url != url
-        || !target
-            .organization
-            .eq_ignore_ascii_case(&parsed.organization)
+        // Azure captures route through the explicit collection, not a hostname-derived label.
+        || (target.platform == Platform::GitHub
+            && !target.organization.eq_ignore_ascii_case(&parsed.organization))
         || !target.repository.eq_ignore_ascii_case(&parsed.repository)
         || target.project.as_deref().map(str::to_lowercase)
             != parsed.project.as_deref().map(str::to_lowercase)
@@ -973,6 +973,47 @@ mod tests {
         let context = validate_context(&capture).unwrap();
         assert_eq!(context.target.organization, "OWNER");
         assert_eq!(Some(context.target_json), capture.get("target"));
+    }
+
+    #[test]
+    fn validated_context_accepts_explicit_azure_collection_coordinates() {
+        let target = crate::capture_target(&json!({
+            "platform": "azureDevOps",
+            "organization": "contoso",
+            "collectionUrl": "https://ado.example.com/tfs/DefaultCollection",
+            "project": "Project",
+            "repository": "Repo",
+            "pullRequestId": 42
+        }))
+        .unwrap();
+        let mut capture = capture();
+        *capture.get_mut("platform").unwrap() = json!("azureDevOps");
+        *capture.get_mut("pullRequestUrl").unwrap() = target.get("webUrl").unwrap().clone();
+        *capture.get_mut("target").unwrap() = target;
+        let context = validate_context(&capture).unwrap();
+        assert_eq!(context.target.organization, "contoso");
+        assert_eq!(Some(context.target_json), capture.get("target"));
+
+        for field in ["collectionUrl", "project", "repository", "pullRequestId"] {
+            let mut mismatched = capture.clone();
+            *mismatched
+                .get_mut("target")
+                .unwrap()
+                .get_mut(field)
+                .unwrap() = if field == "pullRequestId" {
+                json!(43)
+            } else {
+                json!("different")
+            };
+            assert!(validate_context(&mismatched).is_err(), "{field}");
+        }
+    }
+
+    #[test]
+    fn validated_context_rejects_different_github_owners() {
+        let mut capture = capture();
+        *capture.pointer_mut("/target/organization").unwrap() = json!("different");
+        validate_context(&capture).unwrap_err();
     }
 
     #[test]
