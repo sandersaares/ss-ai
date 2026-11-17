@@ -6,7 +6,7 @@
 
 use std::borrow::Cow;
 use std::fs;
-use std::path::{Component, Path, PathBuf};
+use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
 
 use base64::{Engine, engine::general_purpose::STANDARD};
@@ -66,8 +66,9 @@ pub fn write_report(
     clock: &dyn Clock,
 ) -> Result<ReportResult, AppError> {
     assert_ready(tools, false)?;
-    let source_path = absolute(source)?;
-    let html_path = absolute(output)?;
+    let source_path = fs::canonicalize(source)
+        .map_err(|error| caused_by("io", "Cannot resolve report source", error))?;
+    let html_path = output_path(output)?;
     let html_uri = Url::from_file_path(&html_path)
         .map_err(|()| invalid("Cannot construct report file URI"))?
         .to_string();
@@ -114,7 +115,8 @@ pub fn write_report(
         count: 0,
     };
     transform(&mut ast, &mut renderer)?;
-    let template = absolute(&skill_root.join("templates").join("report.html"))?;
+    let template = fs::canonicalize(skill_root.join("templates").join("report.html"))
+        .map_err(|error| caused_by("io", "Cannot resolve report template", error))?;
     let arguments = vec![
         "--from=json".into(),
         "--to=html5".into(),
@@ -689,21 +691,23 @@ fn path_text(path: &Path) -> Result<String, AppError> {
         .ok_or_else(|| invalid("Report path is not UTF-8"))
 }
 
-/// Resolves the caller's path without requiring an existing output.
-fn absolute(path: &Path) -> Result<PathBuf, AppError> {
-    let path = std::path::absolute(path)
-        .map_err(|error| caused_by("io", "Cannot resolve report path", error))?;
-    let mut result = PathBuf::new();
-    for component in path.components() {
-        match component {
-            Component::CurDir => {}
-            Component::ParentDir => {
-                result.pop();
-            }
-            other => result.push(other.as_os_str()),
-        }
-    }
-    Ok(result)
+/// Resolves the output directory while allowing the report to be created.
+fn output_path(path: &Path) -> Result<PathBuf, AppError> {
+    let name = path
+        .file_name()
+        .ok_or_else(|| invalid("Output requires a filename"))?;
+    let parent = path
+        .parent()
+        .ok_or_else(|| invalid("Output requires a parent"))?;
+    // Resolve parent components before publication; keep the final entry for atomic replacement.
+    let parent = if parent.as_os_str().is_empty() {
+        Path::new(".")
+    } else {
+        parent
+    };
+    Ok(fs::canonicalize(parent)
+        .map_err(|error| caused_by("io", "Cannot resolve output directory", error))?
+        .join(name))
 }
 
 /// Matches the text reader's BOM detection before computing the source hash.
