@@ -288,11 +288,22 @@ Describe 'Rust preparation boundary' {
         $script:ProviderBuilds | Should -Be 0
     }
 
-    It 'prepares a provider for capture parity and excludes it when preparation fails' {
+    It 'prepares a provider for capture parity and final review CLI replay' {
         $prepared = New-RustTestPreparation -RepositoryRoot $fixture.root -PrerequisitePath $fixture.record -TestTarget capture_parity
         $script:ProviderBuilds | Should -Be 1
         $null = Read-RustTestPreparation -RepositoryRoot $fixture.root -PrerequisitePath $fixture.record -TestTarget capture_parity
 
+        $cliFixture = New-PreparationFixture
+        $prepared = New-RustTestPreparation -RepositoryRoot $cliFixture.root -PrerequisitePath $cliFixture.record -TestTarget final_review_cli
+        $script:ProviderBuilds | Should -Be 2
+        Test-Path -LiteralPath $prepared.provider.executable.path | Should -BeTrue
+        $null = Read-RustTestPreparation -RepositoryRoot $cliFixture.root -PrerequisitePath $cliFixture.record -TestTarget final_review_cli
+    }
+
+    It 'excludes capture parity when provider preparation fails' {
+        $script:FailProvider = $true
+        $prepared = New-RustTestPreparation -RepositoryRoot $fixture.root -PrerequisitePath $fixture.record -TestTarget capture_parity
+        $prepared.status | Should -Be 'providerFailed'
         $failed = @{ status = 'providerFailed'; providerFailure = 'fixture'; targetDirectory = 'unused' }
         Mock Invoke-RustTestCargo {
             $script:CargoCalls.Add(@($ArgumentList))

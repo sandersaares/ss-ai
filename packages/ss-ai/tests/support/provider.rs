@@ -9,6 +9,10 @@ use std::process;
 /// Routes native process scenarios without an installed provider CLI or live credentials.
 fn main() {
     let args: Vec<_> = env::args().skip(1).collect();
+    if let Some(root) = env::var_os("FIXTURE_PROCESS_REPLAY") {
+        replay(Path::new(&root), &args);
+        return;
+    }
     match args.first().map(String::as_str) {
         Some("pipe") => {
             // Exceed ordinary pipe capacity before reading, catching sequential pipe deadlocks.
@@ -44,6 +48,35 @@ fn main() {
         Some("api") => github(&args),
         _ => panic!("Unexpected fixture arguments: {args:?}"),
     }
+}
+
+/// Replays test-owned process exchanges without installed tools or network access.
+fn replay(root: &Path, args: &[String]) {
+    let mut input = Vec::new();
+    io::stdin().read_to_end(&mut input).unwrap();
+    let mut exchanges: Vec<_> = fs::read_dir(root)
+        .unwrap()
+        .map(|entry| entry.unwrap().path())
+        .collect();
+    // Repeated reads may have different replies before and after publication.
+    exchanges.sort();
+    for exchange in exchanges {
+        if exchange.join("consumed").exists()
+            || fs::read(exchange.join("arguments")).unwrap() != args.join("\0").as_bytes()
+            || fs::read(exchange.join("input")).unwrap() != input
+        {
+            continue;
+        }
+        fs::write(exchange.join("consumed"), []).unwrap();
+        io::stdout()
+            .write_all(&fs::read(exchange.join("stdout")).unwrap())
+            .unwrap();
+        io::stderr()
+            .write_all(&fs::read(exchange.join("stderr")).unwrap())
+            .unwrap();
+        return;
+    }
+    panic!("Unexpected replay request: {args:?}");
 }
 
 /// Keeps remote responses and mutable claim files inside the caller's private fixture.

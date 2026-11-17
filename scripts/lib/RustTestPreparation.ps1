@@ -268,7 +268,9 @@ function New-RustTestPreparation {
         $providerSource = Join-Path $RepositoryRoot 'packages/ss-ai/tests/support/provider.rs'
         $provider = Join-Path $owned $(if ($IsWindows) { 'provider.exe' } else { 'provider' })
         $providerFailure = $null
-        $requiresProvider = -not $TestTarget -or $TestTarget -contains 'native' -or $TestTarget -contains 'capture_parity'
+        # final_review_cli replays provider subprocess calls through the prepared helper.
+        $requiresProvider = -not $TestTarget -or $TestTarget -contains 'native' -or
+            $TestTarget -contains 'capture_parity' -or $TestTarget -contains 'final_review_cli'
         if ($requiresProvider) {
             try {
                 Invoke-TestPhase -Name 'prepare provider (compilerInvocations=1)' -Action {
@@ -409,7 +411,9 @@ function Read-RustTestPreparation {
         }
     }
 
-    $requiresProvider = -not $TestTarget -or $TestTarget -contains 'native' -or $TestTarget -contains 'capture_parity'
+    # Keep prerequisite validation aligned with the targets that consume the helper.
+    $requiresProvider = -not $TestTarget -or $TestTarget -contains 'native' -or
+        $TestTarget -contains 'capture_parity' -or $TestTarget -contains 'final_review_cli'
     if ($record.status -ceq 'providerFailed') {
         if (-not $requiresProvider -or $null -ne $record.provider -or
             $record.providerFailure -isnot [string] -or [string]::IsNullOrWhiteSpace($record.providerFailure)) {
