@@ -257,7 +257,8 @@ fn offline_child() {
     let npm = if cfg!(windows) { "npm.cmd" } else { "npm" };
     let node_from_nvm = env::var_os("NVM_BIN").is_some() || env::var_os("NVM_SYMLINK").is_some();
     if node_from_nvm {
-        assert_eq!(process.npm_program.borrow().as_deref(), Some(npm));
+        // Without an npm beside the selected runtime, the process resolves it on PATH.
+        assert_eq!(process.npm_program.borrow().as_deref(), Some("npm"));
     } else {
         assert_eq!(
             Path::new(process.npm_program.borrow().as_ref().unwrap()),
