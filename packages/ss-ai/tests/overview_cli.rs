@@ -795,7 +795,7 @@ fn cli_renders_parent_component_paths_with_offline_tools() {
 #[test]
 #[ignore = "launched with an isolated environment"]
 fn cli_renders_parent_component_paths_child() {
-    let root = PathBuf::from(env::var_os("OVERVIEW_CLI_TEST_ROOT").unwrap());
+    let root = fs::canonicalize(env::var_os("OVERVIEW_CLI_TEST_ROOT").unwrap()).unwrap();
     let lock = b"{\"lockfileVersion\":3}";
     let tools = root.join("local/ss-review/tools");
     let packages = tools
@@ -817,10 +817,15 @@ fn cli_renders_parent_component_paths_child() {
     };
 
     #[cfg(unix)]
-    let cases = [("ordinary", false), ("symlink", true)].as_slice();
+    let cases = [
+        ("ordinary", false, true),
+        ("symlink-parent", true, true),
+        ("symlink-direct", true, false),
+    ]
+    .as_slice();
     #[cfg(not(unix))]
-    let cases = [("ordinary", false)].as_slice();
-    for &(name, use_symlink) in cases {
+    let cases = [("ordinary", false, true)].as_slice();
+    for &(name, use_symlink, use_parent) in cases {
         let case = root.join(name);
         fs::create_dir_all(&case).unwrap();
         prepare(&case);
@@ -830,17 +835,29 @@ fn cli_renders_parent_component_paths_child() {
         )
         .unwrap();
         report_fixture_file(&case.join("skill 雪/tools/package-lock.json"), lock);
+        report_fixture_file(
+            &case.join("skill 雪/templates/report.html"),
+            b"offline template",
+        );
         let output_parent = if use_symlink {
             let destination = case.join("destination/nested");
             fs::create_dir_all(&destination).unwrap();
             #[cfg(unix)]
             symlink(&destination, case.join("step")).unwrap();
-            case.join("destination")
+            if use_parent {
+                case.join("destination")
+            } else {
+                destination
+            }
         } else {
             fs::create_dir_all(case.join("step")).unwrap();
             case.clone()
         };
-        let requested_output = case.join("step/../output 雪");
+        let requested_output = if use_parent {
+            case.join("step/../output 雪")
+        } else {
+            case.join("step/output 雪")
+        };
         let mut args = arguments(&case);
         let argument = args
             .iter_mut()
@@ -866,16 +883,15 @@ fn cli_renders_parent_component_paths_child() {
             .join(first["snapshot"]["runId"].as_str().unwrap());
         let manifest_bytes = fs::read(generation.join("html.json")).unwrap();
         let manifest: Value = from_slice(&manifest_bytes).unwrap();
-        assert_eq!(manifest["sourcePath"], first["snapshot"]["markdownPath"]);
+        assert_eq!(
+            fs::canonicalize(manifest["sourcePath"].as_str().unwrap()).unwrap(),
+            fs::canonicalize(first["snapshot"]["markdownPath"].as_str().unwrap()).unwrap()
+        );
         let html_path = Path::new(manifest["htmlPath"].as_str().unwrap());
         let archive_path = Path::new(manifest["archivePath"].as_str().unwrap());
         assert_eq!(
-            html_path,
-            absolute(&requested_output)
-                .unwrap()
-                .join("overview-publication")
-                .join(first["snapshot"]["runId"].as_str().unwrap())
-                .join("report.html")
+            fs::canonicalize(html_path).unwrap(),
+            fs::canonicalize(generation.join("report.html")).unwrap()
         );
         assert_eq!(
             fs::read(html_path).unwrap(),
