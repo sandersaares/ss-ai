@@ -138,7 +138,8 @@ fn overlapping_freezes_and_source_writer() {
 #[test]
 #[ignore = "launched with isolated discovery environment"]
 fn overlap_child() {
-    let root = PathBuf::from(env::var_os("OVERVIEW_OVERLAP_ROOT").unwrap());
+    // The renderer returns canonical paths, including Windows extended prefixes.
+    let root = fs::canonicalize(env::var_os("OVERVIEW_OVERLAP_ROOT").unwrap()).unwrap();
     let skill = root.join("skill");
     let tools = root.join("tools");
     let output = root.join("generation");

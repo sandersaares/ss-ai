@@ -296,7 +296,7 @@ pub(crate) fn create(
             "Azure work item creation returned a continuation",
         ));
     }
-    record(target, state, &page.payload).map_err(|error| {
+    identity(target, &page.payload).map_err(|error| {
         caused_by(
             "ambiguousWrite",
             "Azure work item creation returned incomplete evidence",
@@ -463,7 +463,7 @@ fn get(
 
 /// Normalizes Azure response evidence to the shared tracker record.
 fn record(target: &Target, state: &Value, work_item: &Value) -> Result<Value, AppError> {
-    let id = positive_id(field(work_item, "id")?, "service")?;
+    let mut record = identity(target, work_item)?;
     let fields = field(work_item, "fields")?;
     let description = input_text(state, "descriptionField")?;
     let formats = work_item.get("multilineFieldsFormat");
@@ -476,6 +476,18 @@ fn record(target: &Target, state: &Value, work_item: &Value) -> Result<Value, Ap
         },
         _ => return Err(fail("service", "Invalid work item description formats")),
     };
+    let result = record
+        .as_object_mut()
+        .ok_or_else(|| fail("service", "Invalid work item identity record"))?;
+    result.insert("title".into(), json!(service_text(fields, "System.Title")?));
+    result.insert("body".into(), json!(text(field(fields, description)?)?));
+    result.insert("descriptionFormat".into(), json!(format));
+    Ok(record)
+}
+
+/// Retains known creation coordinates independently of later content evidence.
+fn identity(target: &Target, work_item: &Value) -> Result<Value, AppError> {
+    let id = positive_id(field(work_item, "id")?, "service")?;
     let collection = target
         .collection_url
         .as_deref()
@@ -485,9 +497,6 @@ fn record(target: &Target, state: &Value, work_item: &Value) -> Result<Value, Ap
     Ok(json!({
         "itemId": id.to_string(), "itemNodeId": id.to_string(),
         "url": item_url(collection, project, id),
-        "title": service_text(fields, "System.Title")?,
-        "body": text(field(fields, description)?)?,
-        "descriptionFormat": format,
     }))
 }
 
@@ -697,12 +706,10 @@ mod tests {
             &json!({"title":"Tést","body":"<é> &amp;"}),
         )
         .unwrap();
-        assert_eq!(
-            read(&mut transport, &target, &state, &receipt).unwrap(),
-            receipt
-        );
-        assert_eq!(receipt["body"], "&lt;é&gt; &amp;");
-        assert_eq!(receipt["descriptionFormat"], "Markdown");
+        let stored = read(&mut transport, &target, &state, &receipt).unwrap();
+        assert_eq!(stored["itemId"], receipt["itemId"]);
+        assert_eq!(stored["body"], "&lt;é&gt; &amp;");
+        assert_eq!(stored["descriptionFormat"], "Markdown");
         assert_eq!(
             receipt["url"],
             "https://dev.azure.com/org/Pr%C3%B8ject/_workitems/edit/12"
@@ -1001,7 +1008,7 @@ mod tests {
     }
 
     #[test]
-    fn incomplete_creation_evidence_is_ambiguous_and_missing_format_is_not_assumed() {
+    fn creation_identity_survives_missing_content_and_format_is_not_assumed() {
         let mock = Mock::new(vec![
             json!({"id":12}),
             json!({
@@ -1014,16 +1021,42 @@ mod tests {
         let state = json!({"platform":"azureDevOps","collectionUrl":"https://dev.azure.com/org",
             "project":"Prøject","areaPath":"Prøject","workItemType":"Bug",
             "descriptionField":DESCRIPTION,"parent":null});
-        let error = create(
+        let receipt = create(
             &mut transport,
             &target,
             &state,
             &json!({"title":"T","body":"body"}),
         )
-        .unwrap_err();
-        assert_eq!(crate::classification(&error), "ambiguousWrite");
+        .unwrap();
+        assert_eq!(receipt["itemId"], "12");
         let item = read(&mut transport, &target, &state, &json!({"itemId":"12"})).unwrap();
         assert_eq!(item["descriptionFormat"], "");
+        assert_eq!(mock.requests.borrow().len(), 2);
+    }
+
+    #[test]
+    fn malformed_readback_does_not_discard_creation_coordinates() {
+        let mock = Mock::new(vec![json!({"id":12}), json!({"id":12,"fields":{}})]);
+        let transport_target = transport_target();
+        let mut transport = Transport::new(&transport_target, None, &mock, &mock, &NoWait);
+        let target = target();
+        let state = json!({"platform":"azureDevOps","collectionUrl":"https://dev.azure.com/org",
+            "project":"Prøject","areaPath":"Prøject","workItemType":"Bug",
+            "descriptionField":DESCRIPTION,"parent":null});
+        let receipt = create(
+            &mut transport,
+            &target,
+            &state,
+            &json!({"title":"T","body":"body"}),
+        )
+        .unwrap();
+        assert_eq!(receipt["itemId"], "12");
+        assert_eq!(
+            receipt["url"],
+            "https://dev.azure.com/org/Pr%C3%B8ject/_workitems/edit/12"
+        );
+        let error = read(&mut transport, &target, &state, &receipt).unwrap_err();
+        assert_eq!(crate::classification(&error), "service");
         assert_eq!(mock.requests.borrow().len(), 2);
     }
 }
