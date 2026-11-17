@@ -101,6 +101,8 @@ impl Process for FakeProcess {
                 vec![],
             ))
         } else {
+            assert!(!arguments.iter().any(|arg| arg == "--metadata"));
+            assert!(!arguments.iter().any(|arg| arg.contains("Private report")));
             if let Some(html) = &self.html_override {
                 return Ok(ProcessOutput::new(true, html.as_bytes().to_vec(), vec![]));
             }
@@ -228,7 +230,7 @@ fn embeds_checked_diagrams_and_transforms_the_pandoc_ast() {
         &source,
         &output,
         &skill_root(),
-        "Report",
+        "Private report\nUnicode: \u{2013}",
         &tools(),
         &guard,
         &process,
@@ -245,7 +247,10 @@ fn embeds_checked_diagrams_and_transforms_the_pandoc_ast() {
     assert!(html.contains("graph LR\n A--&gt;B"));
     let ast = process.observed_ast.borrow();
     let ast = ast.as_ref().unwrap();
-    assert_eq!(ast["meta"], json!({}));
+    assert_eq!(
+        ast["meta"],
+        json!({"title": {"t": "MetaString", "c": "Private report\nUnicode: \u{2013}"}})
+    );
     let raw_block = &ast["blocks"][1];
     assert_eq!(visible_text(raw_block), "<script>alert(1)</script>");
     assert!(!contains_raw_markup(raw_block));
