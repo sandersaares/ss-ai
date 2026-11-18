@@ -11,6 +11,7 @@ A finding is obvious when it matches any of these categories:
 * It recommends handling additional error cases that do not require logic changes beyond simple detection (e.g. no need for adding new recovery paths or refactoring existing code to enable such detection).
 * It recommends strengthening the data model to make greater use of the type system (e.g. more narrowly bounded types like `NonZero<u32>`, replacing stringly typed fields with concrete types like `String` -> `EmailAddress`, reflecting validity/state via transforming data into different types like `RawCustomer` before validation to `Customer` after validation, and similar).
 * It recommends improving correctness of parsing/processing some schematized/well-defined format/protocol/data-structure.
+* It highlights a gap in a Rust API's safety contract, including incomplete or incorrect documented safety requirements on `unsafe` functions or traits, or incomplete or incorrect documented safety guarantees in comments.
 * It recommends addressing a broken guarantee in a comment or error message (e.g. "this never happens because X" but it turns out X is not always true).
 * It recommends fixing an order of operations where the existing order has clearly identifiable defects.
 * It recommends addressing a possible panic/exception that may be raised and cause unexpected logic flow.
