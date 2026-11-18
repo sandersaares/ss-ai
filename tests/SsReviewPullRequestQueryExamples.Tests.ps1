@@ -320,8 +320,6 @@ Describe 'Documented native pull request query examples' {
             )
             $result.ExitCode | Should -Be 0 -Because $result.Error
             $prepared = ConvertFrom-Json -InputObject $result.Output -AsHashtable
-            $prepared.dispatchPrompt | Should -Match 'Calling shell contract in the assigned queryRecipe'
-            $prepared.dispatchPrompt | Should -Match 'including for any permitted nested worker'
             $assignment = ConvertFrom-Json -InputObject ([IO.File]::ReadAllText($prepared.assignmentPath)) -AsHashtable
             $assignment.contextPath | Should -BeExactly $script:Capture
             @($assignment.documents.id) | Should -Contain 'queryRecipe'

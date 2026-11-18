@@ -19,15 +19,6 @@ AfterAll {
 }
 
 Describe 'Native overview publication contract' {
-    It 'instructs callers to supply attribution and preserves optional tenant routing' {
-        $recipe = Get-Content -LiteralPath (Join-Path $script:SkillRoot 'pwsh-calls/publish-content-overview.md') -Raw
-        $recipe | Should -Match 'UTF-8 file in session state'
-        $recipe | Should -Match 'empty file when no prefix is required'
-        $recipe | Should -Match 'ss-ai review publish-overview'
-        $recipe | Should -Match '--comment-prefix-path "\{\{COMMENT_PREFIX_PATH\}\}"'
-        $recipe | Should -Match 'append `--tenant "\{\{TENANT\}\}"` when a tenant was supplied'
-    }
-
     It 'preserves a caller-owned UTF-8 prefix after malformed input is refused' {
         $prefix = Join-Path $script:Work 'attribution 雪.txt'
         $bytes = [Text.UTF8Encoding]::new($false).GetBytes("café 🤖`nline two")

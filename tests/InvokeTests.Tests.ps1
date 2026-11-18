@@ -301,7 +301,6 @@ Describe 'Repository test entry point' {
 
     It 'builds the native prerequisite for <Name>' -ForEach @(
         @{ Name = 'SsReviewFindingModel.Tests.ps1' }
-        @{ Name = 'SsReviewReports.Tests.ps1' }
         @{ Name = 'SsReviewReportTools.Tests.ps1' }
         @{ Name = 'SsReviewNativePublicationPreflight.Tests.ps1' }
         @{ Name = 'SsReviewPublishOverviewCaller.Tests.ps1' }

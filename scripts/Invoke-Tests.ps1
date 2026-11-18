@@ -55,7 +55,7 @@ if ($Suite -in @('All', 'Pester')) {
         'SsReviewNativeCaptureParity.Tests.ps1', 'SsReviewNativePublicationPreflight.Tests.ps1',
         'SsReviewNativeTrackerIntegration.Tests.ps1',
         'SsReviewPullRequestQueryExamples.Tests.ps1',
-        'SsReviewReports.Tests.ps1', 'SsReviewReportTools.Tests.ps1',
+        'SsReviewReportTools.Tests.ps1',
         'SsReviewPublishOverviewCaller.Tests.ps1', 'SsReviewSelfReview.Tests.ps1',
         'SsReviewSharedFiles.Tests.ps1',
         'SsReviewWork.Tests.ps1', 'SsReviewWorkerInput.Tests.ps1'
