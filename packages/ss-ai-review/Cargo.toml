@@ -13,6 +13,10 @@ include.workspace = true
 [package.metadata.docs.rs]
 all-features = true
 
+[features]
+# Keep offline transaction simulators out of ordinary utility builds.
+private-fuzz = []
+
 [dependencies]
 clap = { workspace = true, features = ["derive"] }
 jiff = { workspace = true }

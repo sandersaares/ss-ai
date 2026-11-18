@@ -1,16 +1,17 @@
-```powershell
-pwsh -NoProfile -NonInteractive -File "{{SKILL_ROOT}}/scripts/ConvertTo-ReviewHtml.ps1" `
-  -Path "{{MARKDOWN_PATH}}" `
-  -OutputPath "{{HTML_PATH}}" `
-  -Title "{{TITLE}}"
+```text
+ss-ai workflow render-review-html --path "{{MARKDOWN_PATH}}" --output-path "{{HTML_PATH}}" --skill-root "{{SKILL_ROOT}}" --tools-directory "{{TOOLS_DIRECTORY}}" --title-path "{{TITLE_PATH}}"
 ```
 
 | Placeholder | Description |
 | --- | --- |
-| `SKILL_ROOT` | Directory containing the active `SKILL.md`. |
+| `SKILL_ROOT` | Absolute directory containing the active `SKILL.md`. |
 | `MARKDOWN_PATH` | Absolute path of the canonical Markdown document. For audit, use the emitted `auditDocumentPath`. |
 | `HTML_PATH` | Absolute sibling HTML path, such as the session's `audit-findings.html`. |
-| `TITLE` | Reader-facing document title, such as `Review audit`. |
+| `TOOLS_DIRECTORY` | Absolute shared user-local tools directory from `check-report-tools.md`. |
+| `TITLE_PATH` | Absolute path to a UTF-8 file containing the reader-facing title, such as `Review audit`. |
+
+Write the title file in session state. The output directory must be writable. The native process
+keeps the caller's working directory.
 
 The command emits JSON containing `sourcePath`, `sourceHash`, `htmlPath`, `htmlUri`, `htmlHash`,
 and `diagramCount`. Present `htmlUri` as a named Markdown hyperlink where the client supports

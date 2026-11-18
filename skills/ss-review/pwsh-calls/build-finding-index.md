@@ -1,7 +1,5 @@
-```powershell
-pwsh -NoProfile -NonInteractive -File "{{SKILL_ROOT}}/scripts/Get-FindingIndex.ps1" `
-  -ReviewerArtifactDirectory "{{SESSION_STATE}}/findings" `
-  -OutputPath "{{SESSION_STATE}}/finding-index.json"
+```text
+ss-ai workflow finding-index --reviewer-directory "{{SESSION_STATE}}/findings" --output-path "{{SESSION_STATE}}/finding-index.json"
 ```
 
 Placeholders to replace:

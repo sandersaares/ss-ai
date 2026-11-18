@@ -1,11 +1,13 @@
-BeforeAll {
-    $script:RepoRoot = Split-Path -Parent $PSScriptRoot
-    $script:CacheLibrary = Join-Path $script:RepoRoot 'skills\ss-review\scripts\lib\FocusAreaCache.ps1'
-    $script:CacheCliDirectory = Join-Path $script:RepoRoot 'skills\ss-review\scripts'
-    $script:MoveItemCommand = Get-Command Move-Item -CommandType Cmdlet
-    . (Join-Path $script:CacheCliDirectory 'lib\PullRequestModel.ps1')
-    . $script:CacheLibrary
+#Requires -Version 7.6
 
+Set-StrictMode -Version Latest
+$ErrorActionPreference = 'Stop'
+$PSNativeCommandUseErrorActionPreference = $true
+
+BeforeAll {
+
+    $script:RepoRoot = Split-Path -Parent $PSScriptRoot
+    $script:SkillRoot = Join-Path $script:RepoRoot 'skills\ss-review'
     $script:Now = [DateTimeOffset]::Parse('2026-08-03T12:00:00Z')
 
     function New-CacheInputs {
@@ -15,85 +17,256 @@ BeforeAll {
         )
 
         New-Item -ItemType Directory -Path $Path -Force | Out-Null
-        Set-Content -LiteralPath (Join-Path $Path 'current-context.md') -Value '# Current context'
+        Set-Content -LiteralPath (Join-Path $Path 'current-context.instructions.md') -Value '# Current context'
         $nested = Join-Path $Path 'ss-ai'
         New-Item -ItemType Directory -Path $nested | Out-Null
         Set-Content -LiteralPath (Join-Path $nested 'rust.instructions.md') -Value '# Rust'
     }
 
-    function New-FocusAreaArtifacts {
+    # Runs the named native transaction with its current source or preparation identity.
+    function Invoke-TestCacheProcess {
         param(
             [Parameter(Mandatory)]
-            [string] $Path
-        )
-
-        $raw = Join-Path $Path 'instruction-set-raw'
-        $focusAreas = Join-Path $Path 'focus-areas'
-        New-Item -ItemType Directory -Path $raw -Force | Out-Null
-        New-Item -ItemType Directory -Path $focusAreas -Force | Out-Null
-        Set-Content -LiteralPath (Join-Path $raw 'guidelines.md') -Value '# Expanded guidelines'
-        Set-Content -LiteralPath (Join-Path $Path 'instruction-set-categories.md') -Value '# Categories'
-        Set-Content -LiteralPath (Join-Path $focusAreas 'maintainability.md') -Value '# Maintainability'
-        Set-Content -LiteralPath (Join-Path $focusAreas 'intentionally-irrelevant.md') -Value '# Still reviewed'
-    }
-
-    function Invoke-CacheCliProcess {
-        param(
-            [Parameter(Mandatory)]
-            [string] $Script,
+            [ValidateSet('restore-focus-area-cache', 'save-focus-area-cache', 'validate-focus-area-artifacts')]
+            [string] $Command,
 
             [Parameter(Mandatory)]
             [AllowEmptyCollection()]
             [string[]] $ArgumentList
         )
 
-        $startInfo = [Diagnostics.ProcessStartInfo]::new()
-        $startInfo.FileName = (Get-Process -Id $PID).Path
-        $startInfo.UseShellExecute = $false
-        $startInfo.RedirectStandardOutput = $true
-        $startInfo.RedirectStandardError = $true
-        # -NonInteractive turns a missing mandatory parameter into an error rather than a prompt on
-        # the inherited console, which would otherwise stall the test run.
-        $cliArguments = @(
-            '-NoProfile'
-            '-NonInteractive'
-            '-File'
-            (Join-Path $script:CacheCliDirectory $Script)
+        $identityArguments = switch ($Command) {
+            'restore-focus-area-cache' { @('--snapshot-identity', $script:SnapshotIdentity) }
+            default { @('--preparation-identity', $script:PreparationIdentity) }
+        }
+        $skillArguments = if ($Command -ne 'validate-focus-area-artifacts') {
+            @('--skill-root', $script:SkillRoot)
+        } else {
+            @()
+        }
+        $result = Invoke-TestGenerationCommand -AllowFailure -Arguments (@($Command) + $ArgumentList + $identityArguments + $skillArguments)
+        if ($Command -eq 'restore-focus-area-cache' -and $result.ExitCode -eq 0) {
+            $script:PreparationIdentity = ($result.StandardOutput | ConvertFrom-Json).preparationIdentity
+        }
+        $result
+    }
+
+    # Keeps transaction setup concise while invoking the native store command.
+    function Save-TestCache {
+        param(
+            [string] $SessionStateDirectory, [string] $InputDirectory, [string] $RecipePath,
+            [string] $CacheDirectory, [string] $GeneratorProfile, [int] $FreshnessDays,
+            [DateTimeOffset] $NowUtc, [string] $InputState = 'Complete'
         )
-        foreach ($argument in $cliArguments + $ArgumentList) {
-            $startInfo.ArgumentList.Add($argument)
+        if ($InputState -eq 'Degraded') {
+            $restore = @{} + $PSBoundParameters
+            $restore.Remove('InputState')
+            Restore-TestCache @restore | Out-Null
+            Publish-TestGeneration -Degraded
         }
+        $process = Invoke-TestGenerationCommand -Arguments @(
+            'save-focus-area-cache', '--session-state', $SessionStateDirectory, '--input-directory', $InputDirectory,
+            '--skill-root', $script:SkillRoot, '--recipe-path', $RecipePath,
+            '--cache-directory', $CacheDirectory, '--generator-profile', $GeneratorProfile,
+            '--freshness-days', "$FreshnessDays", '--now-utc', $NowUtc.ToString('O'),
+            '--preparation-identity', $script:PreparationIdentity
+        )
+        $process.StandardError | Should -BeNullOrEmpty
+        $process.StandardOutput | ConvertFrom-Json
+    }
 
-        $process = [Diagnostics.Process]::Start($startInfo)
-        $standardOutput = $process.StandardOutput.ReadToEnd()
-        $standardError = $process.StandardError.ReadToEnd()
-        $process.WaitForExit()
+    # Keeps transaction setup concise while invoking the native restore command.
+    function Restore-TestCache {
+        param(
+            [string] $SessionStateDirectory, [string] $InputDirectory, [string] $RecipePath,
+            [string] $CacheDirectory, [string] $GeneratorProfile, [int] $FreshnessDays,
+            [DateTimeOffset] $NowUtc, [switch] $Refresh
+        )
+        $arguments = @(
+            'restore-focus-area-cache', '--session-state', $SessionStateDirectory, '--input-directory', $InputDirectory,
+            '--skill-root', $script:SkillRoot, '--recipe-path', $RecipePath,
+            '--cache-directory', $CacheDirectory, '--generator-profile', $GeneratorProfile,
+            '--freshness-days', "$FreshnessDays", '--now-utc', $NowUtc.ToString('O'),
+            '--snapshot-identity', $script:SnapshotIdentity
+        )
+        if ($Refresh) { $arguments += '--refresh' }
+        $process = Invoke-TestGenerationCommand -Arguments $arguments
+        $process.StandardError | Should -BeNullOrEmpty
+        $result = $process.StandardOutput | ConvertFrom-Json
+        $script:PreparationIdentity = $result.preparationIdentity
+        $result
+    }
 
-        [pscustomobject]@{
-            ExitCode = $process.ExitCode
-            StandardOutput = $standardOutput
-            StandardError = $standardError
+    # Snapshot through the same command that establishes the source identity used by restore.
+    function Invoke-TestSnapshot {
+        param([string] $RepositoryRoot)
+        $arguments = @(
+            'snapshot-instructions', '--session-state', $script:Session,
+            '--skill-root', $script:SkillRoot
+        )
+        if ($RepositoryRoot) {
+            $arguments += @('--repository-root', $RepositoryRoot, '--repository-instruction', 'AGENTS.md')
         }
+        $process = Invoke-TestGenerationCommand -Arguments $arguments
+        $result = $process.StandardOutput | ConvertFrom-Json
+        $script:Inputs = $result.sourceDirectory
+        $script:SnapshotIdentity = $result.snapshotIdentity
+        $script:SnapshotExternal = if (@($result.roots).Count) {
+            Join-Path $script:Inputs $result.roots[0].prefix
+        } else {
+            $null
+        }
+    }
+
+    # Runs native commands with isolated configured instruction sources.
+    function Invoke-TestGenerationCommand {
+        param([string[]] $Arguments, [switch] $AllowFailure)
+        $start = [Diagnostics.ProcessStartInfo]::new((Get-Command ss-ai -CommandType Application | Select-Object -First 1).Source)
+        $start.UseShellExecute = $false
+        $start.RedirectStandardOutput = $true
+        $start.RedirectStandardError = $true
+        $start.StandardOutputEncoding = [Text.UTF8Encoding]::new($false, $true)
+        $start.StandardErrorEncoding = [Text.UTF8Encoding]::new($false, $true)
+        $start.Environment['COPILOT_CUSTOM_INSTRUCTIONS_DIRS'] = $script:InputRoot
+        foreach ($argument in @('workflow') + $Arguments) { $start.ArgumentList.Add($argument) }
+        $process = [Diagnostics.Process]::Start($start)
+        try {
+            $stdout = $process.StandardOutput.ReadToEndAsync()
+            $stderr = $process.StandardError.ReadToEndAsync()
+            $process.WaitForExit()
+            $result = [pscustomobject]@{
+                ExitCode = $process.ExitCode
+                StandardOutput = $stdout.GetAwaiter().GetResult()
+                StandardError = $stderr.GetAwaiter().GetResult()
+            }
+            if (-not $AllowFailure -and $result.ExitCode -ne 0) { throw $result.StandardError }
+            $result
+        } finally { $process.Dispose() }
+    }
+
+    # Build complete coverage from the snapshot itself, then publish the rendered result.
+    function Publish-TestGeneration {
+        param([switch] $Degraded)
+        $begin = Invoke-TestGenerationCommand -Arguments @(
+            'begin-focus-area-generation', "--session-state=$script:Session",
+            "--preparation-identity=$script:PreparationIdentity"
+        )
+        $generation = $begin.StandardOutput | ConvertFrom-Json
+        $stage = $generation.sessionState
+        $null = Invoke-TestGenerationCommand -Arguments @(
+            'update-focus-area-expansion', '--session-state', $stage, '--operation', 'initialize'
+        )
+        if ($Degraded) {
+            $reference = @{
+                id = 'missing'; uri = 'https://example.invalid/missing'
+                referrers = @(@{
+                    parentId = $null
+                    source = @{ root = 'instruction-set-source'; path = 'skill/focus-areas.md'; startLine = 1; endLine = 1 }
+                    scope = 'General guidance.'; declarations = @()
+                })
+            }
+            $inputPath = Join-Path $stage 'reference-input.json'
+            $reference | ConvertTo-Json -Depth 20 | Set-Content -LiteralPath $inputPath
+            $null = Invoke-TestGenerationCommand -Arguments @(
+                'update-focus-area-expansion', '--session-state', $stage, '--operation', 'register', '--input-path', $inputPath
+            )
+            @{ referenceId = 'missing'; outputs = @(); error = 'Unavailable' } |
+                ConvertTo-Json -Depth 20 | Set-Content -LiteralPath $inputPath
+            $null = Invoke-TestGenerationCommand -Arguments @(
+                'update-focus-area-expansion', '--session-state', $stage, '--operation', 'fail', '--input-path', $inputPath
+            )
+        }
+        $null = Invoke-TestGenerationCommand -Arguments @(
+            'update-focus-area-expansion', '--session-state', $stage, '--operation', 'finalize'
+        )
+
+        $raw = Join-Path $stage 'instruction-set-raw'
+        $files = @(Get-ChildItem -LiteralPath $raw -File -Recurse -Force | Sort-Object FullName)
+        $chapters = @()
+        for ($index = 0; $index -lt $files.Count; $index++) {
+            $path = [IO.Path]::GetRelativePath($raw, $files[$index].FullName).Replace('\', '/')
+            $lines = @(Get-Content -LiteralPath $files[$index].FullName).Count
+            if ($script:ScopeFixture -and $path.EndsWith('/scoped.instructions.md')) {
+                foreach ($part in @(
+                    @{ id = 'scoped-parameters'; category = 'maintainability'; start = 1; end = 8; scope = 'Agent workflows matching either **/*.ps1 or **/*.psm1.'; declarations = @(1, 4) },
+                    @{ id = 'scoped-published'; category = 'intentionally-irrelevant'; start = 9; end = $lines; scope = 'Published agent-workflow scripts matching either **/*.ps1 or **/*.psm1.'; declarations = @(1, 4, 12, 12) }
+                )) {
+                    $declarations = @()
+                    for ($declaration = 0; $declaration -lt $part.declarations.Count; $declaration += 2) {
+                        $declarations += @{ root = 'instruction-set-raw'; path = $path; startLine = $part.declarations[$declaration]; endLine = $part.declarations[$declaration + 1] }
+                    }
+                    $chapters += @{
+                        id = $part.id; categoryId = $part.category
+                        content = @{ root = 'instruction-set-raw'; path = $path; startLine = $part.start; endLine = $part.end }
+                        sources = @(@{ root = 'instruction-set-source'; path = $path; startLine = $part.start; endLine = $part.end })
+                        applicability = @(@{ effectiveScope = $part.scope; declarations = $declarations; origins = @(); uncertainties = @() })
+                    }
+                }
+                continue
+            }
+            if ($files.Count -eq 1) {
+                $middle = [int][Math]::Floor($lines / 2)
+                foreach ($part in @(
+                    @{ id = 'chapter-first'; category = 'maintainability'; start = 1; end = $middle },
+                    @{ id = 'chapter-second'; category = 'intentionally-irrelevant'; start = ($middle + 1); end = $lines }
+                )) {
+                    $chapters += @{
+                        id = $part.id; categoryId = $part.category
+                        content = @{ root = 'instruction-set-raw'; path = $path; startLine = $part.start; endLine = $part.end }
+                        sources = @(@{ root = 'instruction-set-source'; path = $path; startLine = $part.start; endLine = $part.end })
+                        applicability = @(@{ effectiveScope = 'No explicit restriction; interpret the guideline in context.'; declarations = @(); origins = @(); uncertainties = @() })
+                    }
+                }
+                continue
+            }
+            $span = @{ root = 'instruction-set-raw'; path = $path; startLine = 1; endLine = $lines }
+            $source = @{ root = 'instruction-set-source'; path = $path; startLine = 1; endLine = $lines }
+            $chapters += @{
+                id = "chapter-$index"; categoryId = if ($index -eq 0) { 'maintainability' } else { 'intentionally-irrelevant' }
+                content = $span; sources = @($source)
+                applicability = @(@{ effectiveScope = 'No explicit restriction; interpret the guideline in context.'; declarations = @(); origins = @(); uncertainties = @() })
+            }
+        }
+        $map = @{
+            schemaVersion = 1
+            categories = @(@{ id = 'maintainability'; title = 'Maintainability' }, @{ id = 'intentionally-irrelevant'; title = 'Still reviewed' })
+            chapters = $chapters
+        }
+        $mapPath = Join-Path $stage 'focus-area-map.json'
+        $map | ConvertTo-Json -Depth 30 | Set-Content -LiteralPath $mapPath
+        $null = Invoke-TestGenerationCommand -Arguments @(
+            'assemble-focus-areas', '--session-state', $stage, '--map-path', $mapPath
+        )
+        $published = Invoke-TestGenerationCommand -Arguments @(
+            'publish-focus-area-generation', "--session-state=$script:Session",
+            "--generation-id=$($generation.generationId)"
+        )
+        ($published.StandardOutput | ConvertFrom-Json).status | Should -Be 'Published'
     }
 }
 
 Describe 'ss-review focus-area cache' {
     BeforeEach {
         $script:CaseRoot = Join-Path $TestDrive ([guid]::NewGuid())
-        $script:Inputs = Join-Path $script:CaseRoot 'inputs'
+        $script:InputRoot = Join-Path $script:CaseRoot 'inputs'
         $script:Session = Join-Path $script:CaseRoot 'session'
         $script:Cache = Join-Path $script:CaseRoot 'cache'
         $script:Recipe = Join-Path $script:CaseRoot 'prepare-focus-areas.md'
+        $script:ScopeFixture = $false
         New-Item -ItemType Directory -Path $script:CaseRoot | Out-Null
-        New-CacheInputs -Path $script:Inputs
-        New-FocusAreaArtifacts -Path $script:Session
+        New-CacheInputs -Path $script:InputRoot
+        New-Item -ItemType Directory -Path $script:Session | Out-Null
         Set-Content -LiteralPath $script:Recipe -Value '# Recipe'
-        New-Item -ItemType Directory -Path (Join-Path $script:Session 'instruction-set-source') | Out-Null
-        Set-Content -LiteralPath (Join-Path $script:Session 'focus-area-expansion-status.json') -Value '{"schemaVersion":1,"state":"Complete","references":[]}'
+        Invoke-TestSnapshot
+        $initial = Restore-TestCache -SessionStateDirectory $script:Session -InputDirectory $script:Inputs `
+            -RecipePath $script:Recipe -CacheDirectory $script:Cache -GeneratorProfile 'gpt-5-mini' `
+            -FreshnessDays 7 -NowUtc $script:Now
+        $script:InitialKey = $initial.key
+        Publish-TestGeneration
     }
 
     It 'stores and restores every focus area without relevance filtering' {
-        $stored = Save-FocusAreaCache `
+        $stored = Save-TestCache `
             -SessionStateDirectory $script:Session `
             -InputDirectory $script:Inputs `
             -RecipePath $script:Recipe `
@@ -110,7 +283,7 @@ Describe 'ss-review focus-area cache' {
         Remove-Item -LiteralPath (Join-Path $script:Session 'instruction-set-categories.md')
         Remove-Item -LiteralPath (Join-Path $script:Session 'focus-areas') -Recurse
 
-        $restored = Restore-FocusAreaCache `
+        $restored = Restore-TestCache `
             -SessionStateDirectory $script:Session `
             -InputDirectory $script:Inputs `
             -RecipePath $script:Recipe `
@@ -121,12 +294,12 @@ Describe 'ss-review focus-area cache' {
 
         $restored.status | Should -Be 'Hit'
         $restored.focusAreaCount | Should -Be 2
-        Test-Path -LiteralPath (Join-Path $script:Session 'focus-areas\intentionally-irrelevant.md') |
+        Test-Path -LiteralPath (Join-Path $script:Session 'focus-areas\focus-intentionally-irrelevant.md') |
             Should -BeTrue
     }
 
     It 'misses when an input changes' {
-        Save-FocusAreaCache `
+        Save-TestCache `
             -SessionStateDirectory $script:Session `
             -InputDirectory $script:Inputs `
             -RecipePath $script:Recipe `
@@ -136,9 +309,10 @@ Describe 'ss-review focus-area cache' {
             -NowUtc $script:Now `
             -InputState Complete | Out-Null
 
-        Add-Content -LiteralPath (Join-Path $script:Inputs 'current-context.md') -Value 'Changed'
+        Add-Content -LiteralPath (Join-Path $script:InputRoot 'current-context.instructions.md') -Value 'Changed'
+        Invoke-TestSnapshot
 
-        $result = Restore-FocusAreaCache `
+        $result = Restore-TestCache `
             -SessionStateDirectory $script:Session `
             -InputDirectory $script:Inputs `
             -RecipePath $script:Recipe `
@@ -151,33 +325,162 @@ Describe 'ss-review focus-area cache' {
         $result.reason | Should -Be 'NotFound'
     }
 
-    It 'keys every schema, format and assembly-tool dependency' {
-        $script:FocusAreaGenerationFiles | Should -Contain 'data-guides\focus-areas.md'
-        $originalRoot = $script:FocusAreaGenerationRoot
-        $isolatedRoot = Join-Path $script:CaseRoot 'generation'
-        foreach ($relativePath in $script:FocusAreaGenerationFiles) {
-            $destination = Join-Path $isolatedRoot $relativePath
-            New-Item -ItemType Directory -Path (Split-Path -Parent $destination) -Force | Out-Null
-            Copy-Item -LiteralPath (Join-Path $originalRoot $relativePath) -Destination $destination
+    It 'rejects store when the snapshot source changes after restore' {
+        Add-Content -LiteralPath (Join-Path $script:SnapshotExternal 'current-context.instructions.md') -Value 'Changed after restore'
+        {
+            Save-TestCache -SessionStateDirectory $script:Session -InputDirectory $script:Inputs `
+                -RecipePath $script:Recipe -CacheDirectory $script:Cache -GeneratorProfile 'gpt-5-mini' `
+                -FreshnessDays 7 -NowUtc $script:Now -InputState Complete
+        } | Should -Throw '*staleGeneration*'
+        Test-Path -LiteralPath (Join-Path $script:Cache $script:InitialKey) | Should -BeFalse
+    }
+
+    It 'does not publish artifacts when a separate input copy changes after restore' {
+        $inputCopy = Join-Path $script:CaseRoot 'input-copy'
+        Copy-Item -LiteralPath $script:Inputs -Destination $inputCopy -Recurse -Force
+        $relative = [IO.Path]::GetRelativePath($script:Inputs, $script:SnapshotExternal)
+        Add-Content -LiteralPath (Join-Path $inputCopy "$relative/current-context.instructions.md") -Value 'Changed after restore'
+        $result = Save-TestCache -SessionStateDirectory $script:Session -InputDirectory $inputCopy `
+            -RecipePath $script:Recipe -CacheDirectory $script:Cache -GeneratorProfile 'gpt-5-mini' `
+            -FreshnessDays 7 -NowUtc $script:Now -InputState Complete
+        $result.status | Should -Be 'Bypassed'
+        $result.reason | Should -Be 'InputsChanged'
+        Test-Path -LiteralPath (Join-Path $script:Cache $result.key) | Should -BeFalse
+    }
+
+    It 'bypasses store when the published artifacts are modified' {
+        Add-Content -LiteralPath (Join-Path $script:Session 'instruction-set-categories.md') -Value 'Changed after publication'
+        $result = Save-TestCache -SessionStateDirectory $script:Session -InputDirectory $script:Inputs `
+            -RecipePath $script:Recipe -CacheDirectory $script:Cache -GeneratorProfile 'gpt-5-mini' `
+            -FreshnessDays 7 -NowUtc $script:Now -InputState Complete
+        $result.status | Should -Be 'Bypassed'
+        $result.reason | Should -Be 'GenerationNotPublished'
+        Test-Path -LiteralPath (Join-Path $script:Cache $script:InitialKey) | Should -BeFalse
+    }
+
+    It 'rejects publication from a stale generation and cannot store older artifacts under a new key' {
+        $arguments = @{
+            SessionStateDirectory = $script:Session; InputDirectory = $script:Inputs
+            RecipePath = $script:Recipe; CacheDirectory = $script:Cache
+            GeneratorProfile = 'gpt-5-mini'; FreshnessDays = 7; NowUtc = $script:Now
         }
-        $script:FocusAreaGenerationRoot = $isolatedRoot
+        Restore-TestCache @arguments | Out-Null
+        $begin = Invoke-TestGenerationCommand -Arguments @(
+            'begin-focus-area-generation', "--session-state=$script:Session",
+            "--preparation-identity=$script:PreparationIdentity"
+        )
+        $generation = $begin.StandardOutput | ConvertFrom-Json
+        Add-Content -LiteralPath (Join-Path $script:InputRoot 'current-context.instructions.md') -Value 'New snapshot'
+        Invoke-TestSnapshot
+        $current = Restore-TestCache @arguments
+        $stale = Invoke-TestGenerationCommand -AllowFailure -Arguments @(
+            'publish-focus-area-generation', "--session-state=$script:Session",
+            "--generation-id=$($generation.generationId)"
+        )
+        $stale.ExitCode | Should -Not -Be 0
+        $stale.StandardError | Should -Match '(?i)stale|not active'
+        $saved = Save-TestCache @arguments -InputState Complete
+        $saved.status | Should -Be 'Bypassed'
+        $saved.reason | Should -Be 'GenerationNotPublished'
+        Test-Path -LiteralPath (Join-Path $script:Cache $current.key) | Should -BeFalse
+    }
+
+    It 'bypasses a store without a restore snapshot' {
+        Remove-Item -LiteralPath (Join-Path $script:Session 'focus-area-cache-identity.json')
+        $result = Save-TestCache -SessionStateDirectory $script:Session -InputDirectory $script:Inputs `
+            -RecipePath $script:Recipe -CacheDirectory $script:Cache -GeneratorProfile 'gpt-5-mini' `
+            -FreshnessDays 7 -NowUtc $script:Now -InputState Complete
+        $result.status | Should -Be 'Bypassed'
+        $result.reason | Should -Be 'SnapshotUnavailable'
+    }
+
+    It 'keys the active schema, format and native command guidance' {
+        # These assets define generation inputs; native build identity covers executable code.
+        $generationFiles = @(
+            'pwsh-calls\copy-instruction-sources.md', 'focus-area-format.md',
+            'schemas\focus-area-map.schema.json',
+            'pwsh-calls\validate-focus-area-map.md', 'pwsh-calls\assemble-focus-areas.md',
+            'workflow-data.md', 'data-guides\focus-areas.md', 'schemas\workflow-data.schema.json',
+            'pwsh-calls\prepare-worker-assignment.md', 'pwsh-calls\begin-focus-area-generation.md',
+            'pwsh-calls\publish-focus-area-generation.md', 'pwsh-calls\update-focus-area-expansion.md',
+            'pwsh-calls\update-focus-area-map.md'
+        )
+        $originalSkill = $script:SkillRoot
+        $isolatedRoot = Join-Path $script:CaseRoot 'skill'
+        Copy-Item -LiteralPath $originalSkill -Destination $isolatedRoot -Recurse
+        $script:SkillRoot = $isolatedRoot
         try {
             $arguments = @{
+                SessionStateDirectory = $script:Session
                 InputDirectory = $script:Inputs
                 RecipePath = $script:Recipe
+                CacheDirectory = $script:Cache
+                GeneratorProfile = 'test'
+                FreshnessDays = 7
+                NowUtc = $script:Now
+                Refresh = $true
+            }
+            $before = (Restore-TestCache @arguments).key
+            foreach ($relativePath in $generationFiles) {
+                # The changed bytes must invalidate the cache without changing the source snapshot.
+                Add-Content -LiteralPath (Join-Path $isolatedRoot $relativePath) -Value "`n"
+                $after = (Restore-TestCache @arguments).key
+                $after | Should -Not -BeExactly $before -Because $relativePath
+                $before = $after
+            }
+            $unrelatedDirectory = Join-Path $isolatedRoot 'scripts'
+            [void] [IO.Directory]::CreateDirectory($unrelatedDirectory)
+            [IO.File]::WriteAllText((Join-Path $unrelatedDirectory 'unrelated.ps1'), '# Not a generation input')
+            (Restore-TestCache @arguments).key | Should -BeExactly $before
+        } finally {
+            $script:SkillRoot = $originalSkill
+        }
+    }
+
+    It 'reuses an entry when executable packaging changes without changing the native build' {
+        $source = (Get-Command ss-ai -CommandType Application -ErrorAction Stop | Select-Object -First 1).Source
+        $bin = Join-Path $script:CaseRoot 'bin'
+        [void] [IO.Directory]::CreateDirectory($bin)
+        $executable = Join-Path $bin ([IO.Path]::GetFileName($source))
+        [IO.File]::Copy($source, $executable)
+        $repackagedBin = Join-Path $script:CaseRoot 'repackaged-bin'
+        [void] [IO.Directory]::CreateDirectory($repackagedBin)
+        $repackagedExecutable = Join-Path $repackagedBin ([IO.Path]::GetFileName($source))
+        [IO.File]::Copy($source, $repackagedExecutable)
+        # Prepare both packages before execution so Windows image sharing cannot block mutation.
+        # Packaging bytes do not alter the fingerprint compiled into the executable.
+        $stream = [IO.File]::Open($repackagedExecutable, [IO.FileMode]::Append, [IO.FileAccess]::Write)
+        try { $stream.WriteByte(0) } finally { $stream.Dispose() }
+        if (-not $IsWindows) {
+            [IO.File]::SetUnixFileMode($executable, [IO.File]::GetUnixFileMode($source))
+            [IO.File]::SetUnixFileMode($repackagedExecutable, [IO.File]::GetUnixFileMode($source))
+        }
+        $originalPath = $env:PATH
+        try {
+            $env:PATH = $bin + [IO.Path]::PathSeparator + $originalPath
+            $arguments = @{
+                SessionStateDirectory = $script:Session
+                InputDirectory = $script:Inputs
+                RecipePath = $script:Recipe
+                CacheDirectory = $script:Cache
                 GeneratorProfile = 'test'
                 FreshnessDays = 7
                 NowUtc = $script:Now
             }
-            $before = (Get-FocusAreaCacheDescriptor @arguments).Key
-            foreach ($relativePath in $script:FocusAreaGenerationFiles) {
-                Add-Content -LiteralPath (Join-Path $isolatedRoot $relativePath) -Value 'Changed generation input'
-                $after = (Get-FocusAreaCacheDescriptor @arguments).Key
-                $after | Should -Not -BeExactly $before -Because $relativePath
-                $before = $after
-            }
+            Restore-TestCache @arguments | Out-Null
+            Publish-TestGeneration
+            $stored = Save-TestCache @arguments -InputState Complete
+            $stored.status | Should -Be 'Stored'
+            (Restore-TestCache @arguments).status | Should -Be 'Hit'
+            $manifestPath = Join-Path $script:Cache "$($stored.key)\manifest.json"
+            $manifest = Get-Content -LiteralPath $manifestPath -Raw | ConvertFrom-Json
+            @($manifest.inputs | Where-Object path -CEQ '__generation__/native-build').Count | Should -Be 1
+            $env:PATH = $repackagedBin + [IO.Path]::PathSeparator + $originalPath
+            $result = Restore-TestCache @arguments
+            $result.status | Should -Be 'Hit'
+            $result.key | Should -BeExactly $stored.key
         } finally {
-            $script:FocusAreaGenerationRoot = $originalRoot
+            $env:PATH = $originalPath
         }
     }
 
@@ -198,56 +501,10 @@ Scope: published scripts only.
 
 Document supported invocation.
 '@
-        $artifacts = @{
-            'instruction-set-raw\scoped.instructions.md' = $source
-            'instruction-set-raw\general.md' = "# General`n`nKeep names clear."
-            'instruction-set-categories.md' = @'
-# Parameters
-Source: instruction-set-source/scoped.instructions.md, "Named parameters"
-Scope declarations: applyTo: "**/*.ps1,**/*.psm1"; Scope: this instructions file applies only to agent workflows.
-Effective scope: Agent workflows matching either **/*.ps1 or **/*.psm1.
-
-# Documentation
-Source: instruction-set-source/scoped.instructions.md, "Published scripts"
-Scope declarations: applyTo: "**/*.ps1,**/*.psm1"; Scope: this instructions file applies only to agent workflows.; Scope: published scripts only.
-Effective scope: Published agent-workflow scripts matching either **/*.ps1 or **/*.psm1.
-Source: instruction-set-source/general.md, "General"
-Scope declarations: None.
-Effective scope: No explicit restriction; interpret the guideline in context.
-'@
-            'focus-areas\maintainability.md' = @'
-Effective scope: Agent workflows matching either **/*.ps1 or **/*.psm1.
-Scope declarations: applyTo: "**/*.ps1,**/*.psm1"; Scope: this instructions file applies only to agent workflows.
-
-# Named parameters
-Source: instruction-set-source/scoped.instructions.md, "Named parameters"
-
-Require named arguments.
-'@
-            'focus-areas\intentionally-irrelevant.md' = @'
-# Published scripts
-Effective scope: Published agent-workflow scripts matching either **/*.ps1 or **/*.psm1.
-Scope declarations: applyTo: "**/*.ps1,**/*.psm1"; Scope: this instructions file applies only to agent workflows.; Scope: published scripts only.
-Source: instruction-set-source/scoped.instructions.md, "Published scripts"
-
-Scope: published scripts only.
-
-Document supported invocation.
-
-# General
-Effective scope: No explicit restriction; interpret the guideline in context.
-Scope declarations: None.
-Source: instruction-set-source/general.md, "General"
-
-Keep names clear.
-'@
-        }
-        Set-Content -LiteralPath (Join-Path $script:Inputs 'scoped.instructions.md') -Value $source -NoNewline
-        Set-Content -LiteralPath (Join-Path $script:Inputs 'general.md') `
-            -Value $artifacts['instruction-set-raw\general.md'] -NoNewline
-        foreach ($entry in $artifacts.GetEnumerator()) {
-            Set-Content -LiteralPath (Join-Path $script:Session $entry.Key) -Value $entry.Value -NoNewline
-        }
+        Set-Content -LiteralPath (Join-Path $script:InputRoot 'scoped.instructions.md') -Value $source -NoNewline
+        Set-Content -LiteralPath (Join-Path $script:InputRoot 'general.instructions.md') -Value "# General`n`nKeep names clear." -NoNewline
+        Invoke-TestSnapshot
+        $script:ScopeFixture = $true
         $cacheArguments = @{
             SessionStateDirectory = $script:Session
             InputDirectory = $script:Inputs
@@ -258,11 +515,25 @@ Keep names clear.
             NowUtc = $script:Now
         }
 
-        (Save-FocusAreaCache @cacheArguments -InputState Complete).status | Should -Be 'Stored'
+        Restore-TestCache @cacheArguments | Out-Null
+        Publish-TestGeneration
+        $artifacts = @{}
+        foreach ($relativePath in @(
+                'instruction-set-categories.md',
+                'focus-areas\focus-maintainability.md',
+                'focus-areas\focus-intentionally-irrelevant.md')) {
+            $artifacts[$relativePath] = [IO.File]::ReadAllText((Join-Path $script:Session $relativePath))
+        }
+        $rawPath = Join-Path $script:Session ([IO.Path]::GetRelativePath($script:Session, $script:SnapshotExternal).Replace('instruction-set-source', 'instruction-set-raw'))
+        $artifacts[[IO.Path]::GetRelativePath($script:Session, (Join-Path $rawPath 'scoped.instructions.md'))] = $source
+        $artifacts['focus-areas\focus-maintainability.md'] | Should -Match 'Agent workflows matching either'
+        $artifacts['focus-areas\focus-intentionally-irrelevant.md'] | Should -Match 'Published agent-workflow scripts'
+        $artifacts['instruction-set-categories.md'] | Should -Match 'scoped\.instructions\.md'
+        (Save-TestCache @cacheArguments -InputState Complete).status | Should -Be 'Stored'
         foreach ($relativePath in $artifacts.Keys) {
             Remove-Item -LiteralPath (Join-Path $script:Session $relativePath)
         }
-        (Restore-FocusAreaCache @cacheArguments).status | Should -Be 'Hit'
+        (Restore-TestCache @cacheArguments).status | Should -Be 'Hit'
 
         foreach ($entry in $artifacts.GetEnumerator()) {
             [IO.File]::ReadAllText((Join-Path $script:Session $entry.Key)) |
@@ -271,16 +542,21 @@ Keep names clear.
     }
 
     It 'keys additions, removals, and relative paths' {
-        $base = Get-FocusAreaCacheDescriptor `
+        $base = Restore-TestCache `
+            -SessionStateDirectory $script:Session `
+            -CacheDirectory $script:Cache -Refresh `
             -InputDirectory $script:Inputs `
             -RecipePath $script:Recipe `
             -GeneratorProfile 'gpt-5-mini' `
             -FreshnessDays 7 `
             -NowUtc $script:Now
 
-        $addedPath = Join-Path $script:Inputs 'added.md'
+        $addedPath = Join-Path $script:InputRoot 'added.instructions.md'
         Set-Content -LiteralPath $addedPath -Value '# Added'
-        $added = Get-FocusAreaCacheDescriptor `
+        Invoke-TestSnapshot
+        $added = Restore-TestCache `
+            -SessionStateDirectory $script:Session `
+            -CacheDirectory $script:Cache -Refresh `
             -InputDirectory $script:Inputs `
             -RecipePath $script:Recipe `
             -GeneratorProfile 'gpt-5-mini' `
@@ -289,7 +565,10 @@ Keep names clear.
         $added.Key | Should -Not -Be $base.Key
 
         Remove-Item -LiteralPath $addedPath
-        $removed = Get-FocusAreaCacheDescriptor `
+        Invoke-TestSnapshot
+        $removed = Restore-TestCache `
+            -SessionStateDirectory $script:Session `
+            -CacheDirectory $script:Cache -Refresh `
             -InputDirectory $script:Inputs `
             -RecipePath $script:Recipe `
             -GeneratorProfile 'gpt-5-mini' `
@@ -298,9 +577,12 @@ Keep names clear.
         $removed.Key | Should -Be $base.Key
 
         Move-Item `
-            -LiteralPath (Join-Path $script:Inputs 'current-context.md') `
-            -Destination (Join-Path $script:Inputs 'renamed-context.md')
-        $renamed = Get-FocusAreaCacheDescriptor `
+            -LiteralPath (Join-Path $script:InputRoot 'current-context.instructions.md') `
+            -Destination (Join-Path $script:InputRoot 'renamed-context.instructions.md')
+        Invoke-TestSnapshot
+        $renamed = Restore-TestCache `
+            -SessionStateDirectory $script:Session `
+            -CacheDirectory $script:Cache -Refresh `
             -InputDirectory $script:Inputs `
             -RecipePath $script:Recipe `
             -GeneratorProfile 'gpt-5-mini' `
@@ -310,21 +592,30 @@ Keep names clear.
     }
 
     It 'orders input records ordinally rather than linguistically' {
-        $ordinalRoot = Join-Path $script:CaseRoot 'ordinal'
-        New-Item -ItemType Directory -Path $ordinalRoot | Out-Null
-        foreach ($name in @('ab.md', 'a_b.md', 'a-b.md')) {
-            Set-Content -LiteralPath (Join-Path $ordinalRoot $name) -Value "# $name"
+        foreach ($name in @('ab.instructions.md', 'a_b.instructions.md', 'a-b.instructions.md')) {
+            Set-Content -LiteralPath (Join-Path $script:InputRoot $name) -Value "# $name"
         }
+        Invoke-TestSnapshot
 
-        $records = @(Get-FileRecords -RootPath $ordinalRoot)
+        $arguments = @{
+            SessionStateDirectory = $script:Session; InputDirectory = $script:Inputs
+            RecipePath = $script:Recipe; CacheDirectory = $script:Cache
+            GeneratorProfile = 'gpt-5-mini'; FreshnessDays = 7; NowUtc = $script:Now
+        }
+        Restore-TestCache @arguments | Out-Null
+        Publish-TestGeneration
+        $stored = Save-TestCache @arguments -InputState Complete
+        $manifest = Get-Content -Raw -LiteralPath (Join-Path $script:Cache "$($stored.key)\manifest.json") | ConvertFrom-Json
+        $records = @($manifest.inputs | Where-Object { $_.path -match '/(?:ab|a_b|a-b)\.instructions\.md$' })
 
         # Linguistic ordering would place 'a_b.md' before 'a-b.md'; ordinal ordering compares the
         # separator characters directly.
-        $records.path | Should -Be @('a-b.md', 'a_b.md', 'ab.md')
+        @($records.path | ForEach-Object { Split-Path -Leaf $_ }) |
+            Should -Be @('a-b.instructions.md', 'a_b.instructions.md', 'ab.instructions.md')
     }
 
     It 'misses when the generation recipe changes' {
-        Save-FocusAreaCache `
+        Save-TestCache `
             -SessionStateDirectory $script:Session `
             -InputDirectory $script:Inputs `
             -RecipePath $script:Recipe `
@@ -336,7 +627,7 @@ Keep names clear.
 
         Set-Content -LiteralPath $script:Recipe -Value '# Different recipe'
 
-        $result = Restore-FocusAreaCache `
+        $result = Restore-TestCache `
             -SessionStateDirectory $script:Session `
             -InputDirectory $script:Inputs `
             -RecipePath $script:Recipe `
@@ -349,7 +640,7 @@ Keep names clear.
     }
 
     It 'periodically refreshes unchanged external-reference inputs' {
-        Save-FocusAreaCache `
+        Save-TestCache `
             -SessionStateDirectory $script:Session `
             -InputDirectory $script:Inputs `
             -RecipePath $script:Recipe `
@@ -359,7 +650,7 @@ Keep names clear.
             -NowUtc $script:Now `
             -InputState Complete | Out-Null
 
-        $result = Restore-FocusAreaCache `
+        $result = Restore-TestCache `
             -SessionStateDirectory $script:Session `
             -InputDirectory $script:Inputs `
             -RecipePath $script:Recipe `
@@ -372,7 +663,7 @@ Keep names clear.
     }
 
     It 'bypasses restore without changing the deterministic store key when refresh is requested' {
-        $stored = Save-FocusAreaCache `
+        $stored = Save-TestCache `
             -SessionStateDirectory $script:Session `
             -InputDirectory $script:Inputs `
             -RecipePath $script:Recipe `
@@ -382,7 +673,7 @@ Keep names clear.
             -NowUtc $script:Now `
             -InputState Complete
 
-        $result = Restore-FocusAreaCache `
+        $result = Restore-TestCache `
             -SessionStateDirectory $script:Session `
             -InputDirectory $script:Inputs `
             -RecipePath $script:Recipe `
@@ -398,7 +689,7 @@ Keep names clear.
     }
 
     It 'removes stale destination focus areas on restore' {
-        Save-FocusAreaCache `
+        Save-TestCache `
             -SessionStateDirectory $script:Session `
             -InputDirectory $script:Inputs `
             -RecipePath $script:Recipe `
@@ -410,7 +701,7 @@ Keep names clear.
 
         Set-Content -LiteralPath (Join-Path $script:Session 'focus-areas\stale.md') -Value '# Stale'
 
-        Restore-FocusAreaCache `
+        Restore-TestCache `
             -SessionStateDirectory $script:Session `
             -InputDirectory $script:Inputs `
             -RecipePath $script:Recipe `
@@ -422,149 +713,37 @@ Keep names clear.
         Test-Path -LiteralPath (Join-Path $script:Session 'focus-areas\stale.md') | Should -BeFalse
     }
 
-    It 'rejects a staged copy that no longer matches the cache manifest' {
-        Save-FocusAreaCache `
-            -SessionStateDirectory $script:Session `
-            -InputDirectory $script:Inputs `
-            -RecipePath $script:Recipe `
-            -CacheDirectory $script:Cache `
-            -GeneratorProfile 'gpt-5-mini' `
-            -FreshnessDays 7 `
-            -NowUtc $script:Now `
-            -InputState Complete | Out-Null
-        Set-Content `
-            -LiteralPath (Join-Path $script:Session 'instruction-set-categories.md') `
-            -Value '# Original session value'
-
-        Mock Copy-FocusAreaArtifacts {
-            param($SourceRoot, $DestinationRoot)
-
-            New-Item -ItemType Directory -Path $DestinationRoot -Force | Out-Null
-            foreach ($artifact in $script:FocusAreaArtifacts) {
-                Microsoft.PowerShell.Management\Copy-Item `
-                    -LiteralPath (Join-Path $SourceRoot $artifact.Path) `
-                    -Destination $DestinationRoot `
-                    -Recurse
-            }
-            Set-Content `
-                -LiteralPath (Join-Path $DestinationRoot 'focus-areas\maintainability.md') `
-                -Value '# Changed during copy'
+    It 'rejects a manifest-consistent invalid payload without replacing session artifacts' {
+        $arguments = @{
+            SessionStateDirectory = $script:Session; InputDirectory = $script:Inputs
+            RecipePath = $script:Recipe; CacheDirectory = $script:Cache
+            GeneratorProfile = 'gpt-5-mini'; FreshnessDays = 7; NowUtc = $script:Now
         }
+        $stored = Save-TestCache @arguments -InputState Complete
+        $entry = Join-Path $script:Cache $stored.key
+        $payload = Join-Path $entry 'payload\focus-areas\focus-maintainability.md'
+        [IO.File]::WriteAllText($payload, ' ')
+        $manifestPath = Join-Path $entry 'manifest.json'
+        $manifest = Get-Content -LiteralPath $manifestPath -Raw | ConvertFrom-Json
+        $record = $manifest.outputs | Where-Object path -CEQ 'focus-areas/focus-maintainability.md'
+        $record.length = (Get-Item -LiteralPath $payload).Length
+        $record.sha256 = (Get-FileHash -LiteralPath $payload -Algorithm SHA256).Hash.ToLowerInvariant()
+        $manifest | ConvertTo-Json -Depth 20 -Compress | Set-Content -LiteralPath $manifestPath
+        Set-Content -LiteralPath (Join-Path $script:Session 'instruction-set-categories.md') -Value '# Original session value'
 
-        $result = Restore-FocusAreaCache `
-            -SessionStateDirectory $script:Session `
-            -InputDirectory $script:Inputs `
-            -RecipePath $script:Recipe `
-            -CacheDirectory $script:Cache `
-            -GeneratorProfile 'gpt-5-mini' `
-            -FreshnessDays 7 `
-            -NowUtc $script:Now
-
+        $result = Restore-TestCache @arguments
         $result.status | Should -Be 'Miss'
         $result.reason | Should -Be 'InvalidEntry'
         Get-Content -LiteralPath (Join-Path $script:Session 'instruction-set-categories.md') -Raw |
             Should -BeLike '# Original session value*'
+        @(Get-ChildItem -LiteralPath $script:Session -Filter '.focus-area-cache-restore-*' -Force).Count | Should -Be 0
     }
 
-    It 'rolls back prior artifacts when installation fails' {
-        Save-FocusAreaCache `
-            -SessionStateDirectory $script:Session `
-            -InputDirectory $script:Inputs `
-            -RecipePath $script:Recipe `
-            -CacheDirectory $script:Cache `
-            -GeneratorProfile 'gpt-5-mini' `
-            -FreshnessDays 7 `
-            -NowUtc $script:Now `
-            -InputState Complete | Out-Null
-        Set-Content `
-            -LiteralPath (Join-Path $script:Session 'instruction-set-categories.md') `
-            -Value '# Original session value'
-
-        Mock Move-Item {
-            param($LiteralPath, $Destination)
-
-            if ((Split-Path -Leaf (Split-Path -Parent $LiteralPath)) -like '.focus-area-cache-restore-*' -and
-                (Split-Path -Leaf $LiteralPath) -ceq 'instruction-set-categories.md') {
-                throw 'Injected installation failure.'
-            }
-            & $script:MoveItemCommand `
-                -LiteralPath $LiteralPath `
-                -Destination $Destination
-        }
-
-        {
-            Restore-FocusAreaCache `
-                -SessionStateDirectory $script:Session `
-                -InputDirectory $script:Inputs `
-                -RecipePath $script:Recipe `
-                -CacheDirectory $script:Cache `
-                -GeneratorProfile 'gpt-5-mini' `
-                -FreshnessDays 7 `
-                -NowUtc $script:Now
-        } | Should -Throw '*Injected installation failure*'
-
-        Get-Content -LiteralPath (Join-Path $script:Session 'instruction-set-categories.md') -Raw |
-            Should -BeLike '# Original session value*'
-        @(Get-ChildItem -LiteralPath $script:Session -Filter '.focus-area-cache-backup-*' -Force).Count |
-            Should -Be 0
-    }
-
-    It 'retains the backup when rollback cannot restore every prior artifact' {
-        Save-FocusAreaCache `
-            -SessionStateDirectory $script:Session `
-            -InputDirectory $script:Inputs `
-            -RecipePath $script:Recipe `
-            -CacheDirectory $script:Cache `
-            -GeneratorProfile 'gpt-5-mini' `
-            -FreshnessDays 7 `
-            -NowUtc $script:Now `
-            -InputState Complete | Out-Null
-        Set-Content `
-            -LiteralPath (Join-Path $script:Session 'instruction-set-categories.md') `
-            -Value '# Original session value'
-
-        Mock Move-Item {
-            param($LiteralPath, $Destination)
-
-            if ((Split-Path -Leaf (Split-Path -Parent $LiteralPath)) -like '.focus-area-cache-restore-*' -and
-                (Split-Path -Leaf $LiteralPath) -ceq 'instruction-set-categories.md') {
-                throw 'Injected installation failure.'
-            }
-            if ((Split-Path -Leaf (Split-Path -Parent $LiteralPath)) -like '.focus-area-cache-backup-*' -and
-                (Split-Path -Leaf $LiteralPath) -ceq 'instruction-set-categories.md') {
-                throw 'Injected rollback failure.'
-            }
-            & $script:MoveItemCommand `
-                -LiteralPath $LiteralPath `
-                -Destination $Destination
-        }
-
-        {
-            Restore-FocusAreaCache `
-                -SessionStateDirectory $script:Session `
-                -InputDirectory $script:Inputs `
-                -RecipePath $script:Recipe `
-                -CacheDirectory $script:Cache `
-                -GeneratorProfile 'gpt-5-mini' `
-                -FreshnessDays 7 `
-                -NowUtc $script:Now
-        } | Should -Throw '*Rollback was incomplete*Backup retained*'
-
-        $backup = Get-ChildItem `
-            -LiteralPath $script:Session `
-            -Filter '.focus-area-cache-backup-*' `
-            -Directory -Force
-        @($backup).Count | Should -Be 1
-        Get-Content -LiteralPath (Join-Path $backup.FullName 'instruction-set-categories.md') -Raw |
-            Should -BeLike '# Original session value*'
-        Test-Path -LiteralPath (Join-Path $script:Session 'instruction-set-raw') |
-            Should -BeTrue
-        Test-Path -LiteralPath (Join-Path $script:Session 'focus-areas') |
-            Should -BeTrue
-    }
+    # Native staged mutation, failed installation, and retained-backup cases use deterministic
+    # fault injection in packages/ss-ai-review-workflow/src/focus_cache.rs (focus_cache::tests).
 
     It 'does not store degraded instruction inputs' {
-        $result = Save-FocusAreaCache `
+        $result = Save-TestCache `
             -SessionStateDirectory $script:Session `
             -InputDirectory $script:Inputs `
             -RecipePath $script:Recipe `
@@ -575,7 +754,7 @@ Keep names clear.
             -InputState Degraded
 
         $result.status | Should -Be 'Bypassed'
-        Test-Path -LiteralPath $script:Cache | Should -BeFalse
+        Test-Path -LiteralPath (Join-Path $script:Cache $result.key) | Should -BeFalse
     }
 
     It 'treats repeated stores as idempotent' {
@@ -590,8 +769,8 @@ Keep names clear.
             InputState = 'Complete'
         }
 
-        $first = Save-FocusAreaCache @parameters
-        $second = Save-FocusAreaCache @parameters
+        $first = Save-TestCache @parameters
+        $second = Save-TestCache @parameters
 
         $first.status | Should -Be 'Stored'
         $second.status | Should -Be 'Existing'
@@ -599,167 +778,113 @@ Keep names clear.
     }
 
     It 'prunes superseded payload entries while preserving the current entry' {
-        $originalMaximumEntries = $script:FocusAreaCacheMaximumEntries
-        $script:FocusAreaCacheMaximumEntries = 2
-
-        try {
-            $storedKeys = @(
-                foreach ($index in 1..3) {
-                    Set-Content `
-                        -LiteralPath (Join-Path $script:Inputs 'current-context.md') `
-                        -Value "# Current context $index"
-                    (
-                        Save-FocusAreaCache `
-                            -SessionStateDirectory $script:Session `
-                            -InputDirectory $script:Inputs `
-                            -RecipePath $script:Recipe `
-                            -CacheDirectory $script:Cache `
-                            -GeneratorProfile 'gpt-5-mini' `
-                            -FreshnessDays 7 `
-                            -NowUtc $script:Now.AddDays($index) `
-                            -InputState Complete
-                    ).key
-                }
-            )
-
-            Test-Path -LiteralPath (Join-Path $script:Cache $storedKeys[0]) |
-                Should -BeFalse
-            Test-Path -LiteralPath (Join-Path $script:Cache $storedKeys[1]) |
-                Should -BeTrue
-            Test-Path -LiteralPath (Join-Path $script:Cache $storedKeys[2]) |
-                Should -BeTrue
-        } finally {
-            $script:FocusAreaCacheMaximumEntries = $originalMaximumEntries
+        $arguments = @{
+            SessionStateDirectory = $script:Session; InputDirectory = $script:Inputs
+            RecipePath = $script:Recipe; CacheDirectory = $script:Cache
+            GeneratorProfile = 'gpt-5-mini'; FreshnessDays = 7; NowUtc = $script:Now
         }
+        $current = Save-TestCache @arguments -InputState Complete
+        $manifestPath = Join-Path $script:Cache "$($current.key)\manifest.json"
+        $template = Get-Content -LiteralPath $manifestPath -Raw
+        # Populate the actual retention limit with distinct, recent entries, ordered by creation.
+        foreach ($index in 1..64) {
+            $key = '{0:x64}' -f $index
+            $entry = Join-Path $script:Cache $key
+            New-Item -ItemType Directory -Path $entry | Out-Null
+            $manifest = $template | ConvertFrom-Json
+            $manifest.key = $key
+            $manifest.createdAtUnix = $script:Now.ToUnixTimeSeconds() - (65 - $index)
+            $manifest | ConvertTo-Json -Depth 20 -Compress |
+                Set-Content -LiteralPath (Join-Path $entry 'manifest.json')
+        }
+        (Save-TestCache @arguments -InputState Complete).status | Should -Be 'Existing'
+        Test-Path -LiteralPath (Join-Path $script:Cache ('{0:x64}' -f 1)) | Should -BeFalse
+        Test-Path -LiteralPath (Join-Path $script:Cache ('{0:x64}' -f 64)) | Should -BeTrue
+        Test-Path -LiteralPath (Join-Path $script:Cache $current.key) | Should -BeTrue
     }
 
     It 'removes abandoned staging directories after their retention window' {
         New-Item -ItemType Directory -Path $script:Cache -Force | Out-Null
         $staleKey = 'a' * 64
 
-        # Built exactly as Save-FocusAreaCache builds it, so this test fails if the name and the
-        # pattern that recognizes it ever diverge.
-        $stagingPath = Join-Path $script:Cache ".$staleKey.$([guid]::NewGuid()).tmp"
+        # A native staging name contains the writer process ID and an allocation counter.
+        $stagingPath = Join-Path $script:Cache ".$staleKey.1-1.tmp"
         $staging = New-Item -ItemType Directory -Path $stagingPath
         $staging.LastWriteTimeUtc = $script:Now.UtcDateTime.AddDays(-2)
 
-        Invoke-FocusAreaCacheMaintenance `
-            -CacheDirectory $script:Cache `
-            -NowUtc $script:Now
+        Save-TestCache -SessionStateDirectory $script:Session -InputDirectory $script:Inputs `
+            -RecipePath $script:Recipe -CacheDirectory $script:Cache -GeneratorProfile 'gpt-5-mini' `
+            -FreshnessDays 7 -NowUtc $script:Now -InputState Complete | Out-Null
 
         Test-Path -LiteralPath $stagingPath | Should -BeFalse
     }
 
     It 'retains a staging directory that is still within its retention window' {
         New-Item -ItemType Directory -Path $script:Cache -Force | Out-Null
-        $stagingPath = Join-Path $script:Cache ".$('a' * 64).$([guid]::NewGuid()).tmp"
+        $stagingPath = Join-Path $script:Cache ".$('a' * 64).1-1.tmp"
         $staging = New-Item -ItemType Directory -Path $stagingPath
         $staging.LastWriteTimeUtc = $script:Now.UtcDateTime.AddHours(-1)
 
-        Invoke-FocusAreaCacheMaintenance `
-            -CacheDirectory $script:Cache `
-            -NowUtc $script:Now
+        Save-TestCache -SessionStateDirectory $script:Session -InputDirectory $script:Inputs `
+            -RecipePath $script:Recipe -CacheDirectory $script:Cache -GeneratorProfile 'gpt-5-mini' `
+            -FreshnessDays 7 -NowUtc $script:Now -InputState Complete | Out-Null
 
         Test-Path -LiteralPath $stagingPath | Should -BeTrue
     }
 
-    It 'waits for another operation before storing under the cache key' {
-        $descriptor = Get-FocusAreaCacheDescriptor `
-            -InputDirectory $script:Inputs `
-            -RecipePath $script:Recipe `
-            -GeneratorProfile 'gpt-5-mini' `
-            -FreshnessDays 7 `
-            -NowUtc $script:Now
-        $lockPath = Get-FocusAreaCacheLockPath `
-            -CacheDirectory $script:Cache `
-            -Key $descriptor.Key
-        $script:HeldCacheLock = (Enter-FocusAreaCacheLock -LockPath $lockPath).Lock
-        Mock Start-Sleep {
-            $script:HeldCacheLock.Dispose()
-            Write-PullRequestOutputFile -Path (Join-Path $script:Session 'focus-areas\additional.md') -Content '# Additional focus area'
+    It 'forwards the preparation identity when storing the cache entry' {
+        $arguments = @{
+            SessionStateDirectory = $script:Session; InputDirectory = $script:Inputs
+            RecipePath = $script:Recipe; CacheDirectory = $script:Cache
+            GeneratorProfile = 'gpt-5-mini'; FreshnessDays = 7; NowUtc = $script:Now
         }
-
-        try {
-            $result = Save-FocusAreaCache `
-                -SessionStateDirectory $script:Session `
-                -InputDirectory $script:Inputs `
-                -RecipePath $script:Recipe `
-                -CacheDirectory $script:Cache `
-                -GeneratorProfile 'gpt-5-mini' `
-                -FreshnessDays 7 `
-                -NowUtc $script:Now `
-                -InputState Complete
-
-            $result.status | Should -Be 'Stored'
-            $result.reason | Should -BeNullOrEmpty
-            $result.focusAreaCount | Should -Be @(Get-ChildItem -LiteralPath (Join-Path $script:Session 'focus-areas') -Filter '*.md' -File).Count
-            Should -Invoke Start-Sleep -Times 1 -Exactly
-        } finally {
-            $script:HeldCacheLock.Dispose()
-        }
+        $null = Restore-TestCache @arguments
+        Publish-TestGeneration
+        $result = Save-TestCache @arguments -InputState Complete
+        $result.status | Should -Be 'Stored'
+        $result.reason | Should -BeNullOrEmpty
+        $result.focusAreaCount | Should -Be @(Get-ChildItem -LiteralPath (Join-Path $script:Session 'focus-areas') -Filter '*.md' -File).Count
     }
 
     It 'reports an unusable cache location distinctly from contention' {
-        $descriptor = Get-FocusAreaCacheDescriptor `
-            -InputDirectory $script:Inputs `
-            -RecipePath $script:Recipe `
-            -GeneratorProfile 'gpt-5-mini' `
-            -FreshnessDays 7 `
-            -NowUtc $script:Now
-        $lockPath = Get-FocusAreaCacheLockPath `
-            -CacheDirectory $script:Cache `
-            -Key $descriptor.Key
-        New-Item -ItemType Directory -Path (Split-Path -Parent $lockPath) -Force | Out-Null
-        New-Item -ItemType File -Path $lockPath -Force | Out-Null
-        $lockFile = Get-Item -LiteralPath $lockPath
-        $lockFile.IsReadOnly = $true
-
-        try {
-            $result = Save-FocusAreaCache `
-                -SessionStateDirectory $script:Session `
-                -InputDirectory $script:Inputs `
-                -RecipePath $script:Recipe `
-                -CacheDirectory $script:Cache `
-                -GeneratorProfile 'gpt-5-mini' `
-                -FreshnessDays 7 `
-                -NowUtc $script:Now `
-                -InputState Complete
-
-            $result.status | Should -Be 'Bypassed'
-            $result.reason | Should -Be 'CacheUnavailable'
-        } finally {
-            $lockFile.IsReadOnly = $false
-        }
+        $cacheFile = Join-Path $script:CaseRoot 'not-a-directory'
+        Set-Content -LiteralPath $cacheFile -Value 'not a directory'
+        $result = Save-TestCache `
+            -SessionStateDirectory $script:Session -InputDirectory $script:Inputs `
+            -RecipePath $script:Recipe -CacheDirectory $cacheFile -GeneratorProfile 'gpt-5-mini' `
+            -FreshnessDays 7 -NowUtc $script:Now -InputState Complete
+        $result.status | Should -Be 'Bypassed'
+        $result.reason | Should -Be 'CacheUnavailable'
     }
 
     It 'compares manifest records ordinally rather than linguistically' {
         # Soft hyphens, zero-width spaces and joiners are ignorable to PowerShell's -ceq, so a
         # linguistic comparison would accept a payload whose bytes differ from the manifest.
+        $needsGeneration = $false
         foreach ($ignorable in @(0x00AD, 0x200B, 0x200D)) {
-            $expected = @([pscustomobject]@{ path = 'focus-areas/a.md'; sha256 = 'aa'; length = 1 })
-            $actual = @(
-                [pscustomobject]@{
-                    path = "focus-areas/a$([char]$ignorable).md"
-                    sha256 = 'aa'
-                    length = 1
+            foreach ($field in @('path', 'sha256')) {
+                $arguments = @{
+                    SessionStateDirectory = $script:Session; InputDirectory = $script:Inputs
+                    RecipePath = $script:Recipe; CacheDirectory = $script:Cache
+                    GeneratorProfile = 'gpt-5-mini'; FreshnessDays = 7; NowUtc = $script:Now
                 }
-            )
-            Test-FileRecordEquality -Expected $expected -Actual $actual | Should -BeFalse
-
-            $expected = @([pscustomobject]@{ path = 'focus-areas/a.md'; sha256 = 'aa'; length = 1 })
-            $actual = @(
-                [pscustomobject]@{
-                    path = 'focus-areas/a.md'
-                    sha256 = "a$([char]$ignorable)a"
-                    length = 1
-                }
-            )
-            Test-FileRecordEquality -Expected $expected -Actual $actual | Should -BeFalse
+                if ($needsGeneration) { Publish-TestGeneration }
+                $stored = Save-TestCache @arguments -InputState Complete
+                $manifestPath = Join-Path $script:Cache "$($stored.key)\manifest.json"
+                $manifest = Get-Content -LiteralPath $manifestPath -Raw | ConvertFrom-Json
+                $record = $manifest.outputs | Where-Object path -CEQ 'focus-areas/focus-maintainability.md'
+                $record.$field = $record.$field.Insert(1, [string][char]$ignorable)
+                $manifest | ConvertTo-Json -Depth 20 -Compress | Set-Content -LiteralPath $manifestPath
+                $result = Restore-TestCache @arguments
+                $result.status | Should -Be 'Miss'
+                $result.reason | Should -Be 'InvalidEntry'
+                $needsGeneration = $true
+            }
         }
     }
 
     It 'treats an altered payload as a cache miss' {
-        $stored = Save-FocusAreaCache `
+        $stored = Save-TestCache `
             -SessionStateDirectory $script:Session `
             -InputDirectory $script:Inputs `
             -RecipePath $script:Recipe `
@@ -773,7 +898,7 @@ Keep names clear.
             Join-Path $script:Cache "$($stored.key)\payload\instruction-set-categories.md"
         ) -Value '# Corrupted'
 
-        $result = Restore-FocusAreaCache `
+        $result = Restore-TestCache `
             -SessionStateDirectory $script:Session `
             -InputDirectory $script:Inputs `
             -RecipePath $script:Recipe `
@@ -786,46 +911,50 @@ Keep names clear.
         $result.reason | Should -Be 'InvalidEntry'
     }
 
-    It 'uses the focus-area assembly model by default for both cache CLIs' {
-        # The expected profile follows final assembly in prepare-focus-areas.md.
-        $expected = Get-FocusAreaCacheDescriptor `
+    It 'uses the explicit focus-area assembly model for both cache commands' {
+        # Both operations must bind the same selected generation profile.
+        $expected = Restore-TestCache `
+            -SessionStateDirectory $script:Session `
+            -CacheDirectory $script:Cache `
             -InputDirectory $script:Inputs `
             -RecipePath $script:Recipe `
             -GeneratorProfile 'gpt-6-luna' `
             -FreshnessDays 7 `
             -NowUtc $script:Now
+        Publish-TestGeneration
         $arguments = @(
-            '-SessionStateDirectory', $script:Session,
-            '-InputDirectory', $script:Inputs,
-            '-RecipePath', $script:Recipe,
-            '-CacheDirectory', $script:Cache,
-            '-FreshnessDays', '7',
-            '-NowUtc', $script:Now.ToString('O')
+            '--session-state', $script:Session,
+            '--input-directory', $script:Inputs,
+            '--recipe-path', $script:Recipe,
+            '--cache-directory', $script:Cache,
+            '--generator-profile', 'gpt-6-luna',
+            '--freshness-days', '7',
+            '--now-utc', $script:Now.ToString('O')
         )
 
-        $storeResult = Invoke-CacheCliProcess `
-            -Script 'Save-FocusAreaCache.ps1' `
+        $storeResult = Invoke-TestCacheProcess `
+            -Command 'save-focus-area-cache' `
             -ArgumentList $arguments
 
         $storeResult.ExitCode | Should -Be 0
         $storeResult.StandardError | Should -BeNullOrEmpty
         $stored = $storeResult.StandardOutput | ConvertFrom-Json
         $stored.status | Should -Be 'Stored'
-        $stored.key | Should -Be $expected.Key
+        $stored.key | Should -Be $expected.key
 
-        $restoreResult = Invoke-CacheCliProcess `
-            -Script 'Restore-FocusAreaCache.ps1' `
+        $restoreResult = Invoke-TestCacheProcess `
+            -Command 'restore-focus-area-cache' `
             -ArgumentList $arguments
 
         $restoreResult.ExitCode | Should -Be 0
         $restoreResult.StandardError | Should -BeNullOrEmpty
         $restored = $restoreResult.StandardOutput | ConvertFrom-Json
         $restored.status | Should -Be 'Hit'
-        $restored.key | Should -Be $expected.Key
+        $restored.key | Should -Be $expected.key
     }
 
     It 'emits exactly one JSON document when a corrupt cache entry is restored through the CLI' {
-        $stored = Save-FocusAreaCache `
+        $stored = Save-TestCache `
             -SessionStateDirectory $script:Session `
             -InputDirectory $script:Inputs `
             -RecipePath $script:Recipe `
@@ -838,14 +967,14 @@ Keep names clear.
             -LiteralPath (Join-Path $script:Cache "$($stored.key)\manifest.json") `
             -Value '{not-json'
 
-        $processResult = Invoke-CacheCliProcess -Script 'Restore-FocusAreaCache.ps1' -ArgumentList @(
-            '-SessionStateDirectory', $script:Session,
-            '-InputDirectory', $script:Inputs,
-            '-RecipePath', $script:Recipe,
-            '-CacheDirectory', $script:Cache,
-            '-GeneratorProfile', 'gpt-5-mini',
-            '-FreshnessDays', '7',
-            '-NowUtc', $script:Now.ToString('O')
+        $processResult = Invoke-TestCacheProcess -Command 'restore-focus-area-cache' -ArgumentList @(
+            '--session-state', $script:Session,
+            '--input-directory', $script:Inputs,
+            '--recipe-path', $script:Recipe,
+            '--cache-directory', $script:Cache,
+            '--generator-profile', 'gpt-5-mini',
+            '--freshness-days', '7',
+            '--now-utc', $script:Now.ToString('O')
         )
 
         $processResult.ExitCode | Should -Be 0
@@ -865,36 +994,37 @@ Keep names clear.
         @{ Count = 0 }
         @{ Count = 2 }
     ) {
+        Get-ChildItem -LiteralPath $script:InputRoot -Force | Remove-Item -Recurse -Force
         for ($index = 0; $index -lt $Count; $index++) {
-            $path = Join-Path $script:Inputs "external\configured\.github\instructions\custom-$index.instructions.md"
+            $path = Join-Path $script:InputRoot ".github\instructions\custom-$index.instructions.md"
             [void][IO.Directory]::CreateDirectory((Split-Path -Parent $path))
             [IO.File]::WriteAllText($path, '# Custom guidance')
         }
-        foreach ($relative in @('skill\focus-areas.md', 'review-repository\AGENTS.md')) {
-            $path = Join-Path $script:Inputs $relative
-            [void][IO.Directory]::CreateDirectory((Split-Path -Parent $path))
-            [IO.File]::WriteAllText($path, '# Not user-scoped')
-        }
+        $repository = Join-Path $script:CaseRoot 'review-repository'
+        New-Item -ItemType Directory -Path $repository | Out-Null
+        [IO.File]::WriteAllText((Join-Path $repository 'AGENTS.md'), '# Repository guidance')
+        Invoke-TestSnapshot -RepositoryRoot $repository
         $arguments = @(
-            '-SessionStateDirectory', $script:Session,
-            '-InputDirectory', $script:Inputs,
-            '-RecipePath', $script:Recipe,
-            '-CacheDirectory', $script:Cache,
-            '-GeneratorProfile', 'gpt-5-mini',
-            '-FreshnessDays', '7',
-            '-NowUtc', $script:Now.ToString('O')
+            '--session-state', $script:Session,
+            '--input-directory', $script:Inputs,
+            '--recipe-path', $script:Recipe,
+            '--cache-directory', $script:Cache,
+            '--generator-profile', 'gpt-5-mini',
+            '--freshness-days', '7',
+            '--now-utc', $script:Now.ToString('O')
         )
-        $first = Invoke-CacheCliProcess -Script 'Restore-FocusAreaCache.ps1' -ArgumentList $arguments
+        $first = Invoke-TestCacheProcess -Command 'restore-focus-area-cache' -ArgumentList $arguments
         $first.ExitCode | Should -Be 0 -Because $first.StandardError
         ($first.StandardOutput | ConvertFrom-Json).status | Should -Be 'Miss'
         ($first.StandardOutput | ConvertFrom-Json).userInstructionFileCount | Should -Be $Count
 
-        $store = Invoke-CacheCliProcess -Script 'Save-FocusAreaCache.ps1' -ArgumentList $arguments
+        Publish-TestGeneration
+        $store = Invoke-TestCacheProcess -Command 'save-focus-area-cache' -ArgumentList $arguments
         $store.ExitCode | Should -Be 0 -Because $store.StandardError
         $diagnosticsPath = Join-Path $script:Session 'focus-area-cache-diagnostics.json'
         (Get-Content -LiteralPath $diagnosticsPath -Raw | ConvertFrom-Json).userInstructionFileCount | Should -Be $Count
 
-        $hit = Invoke-CacheCliProcess -Script 'Restore-FocusAreaCache.ps1' -ArgumentList $arguments
+        $hit = Invoke-TestCacheProcess -Command 'restore-focus-area-cache' -ArgumentList $arguments
         $hit.ExitCode | Should -Be 0 -Because $hit.StandardError
         ($hit.StandardOutput | ConvertFrom-Json).status | Should -Be 'Hit'
         ($hit.StandardOutput | ConvertFrom-Json).userInstructionFileCount | Should -Be $Count
@@ -903,8 +1033,8 @@ Keep names clear.
         $diagnostics.userInstructionFileCount | Should -Be $Count
 
         Get-ChildItem -LiteralPath (Join-Path $script:Session 'focus-areas') -Filter '*.md' -File | Remove-Item
-        $invalid = Invoke-CacheCliProcess -Script 'Test-FocusAreaArtifacts.ps1' -ArgumentList @(
-            '-SessionStateDirectory', $script:Session
+        $invalid = Invoke-TestCacheProcess -Command 'validate-focus-area-artifacts' -ArgumentList @(
+            '--session-state', $script:Session
         )
         $invalid.ExitCode | Should -Not -Be 0
         $diagnostics = Get-Content -LiteralPath $diagnosticsPath -Raw | ConvertFrom-Json
@@ -915,14 +1045,14 @@ Keep names clear.
 
     It 'requires a finalized expansion manifest for CLI store operations' {
         Set-Content -LiteralPath (Join-Path $script:Session 'focus-area-expansion-status.json') -Value '{"schemaVersion":1,"state":"Unknown","references":[]}'
-        $processResult = Invoke-CacheCliProcess -Script 'Save-FocusAreaCache.ps1' -ArgumentList @(
-            '-SessionStateDirectory', $script:Session,
-            '-InputDirectory', $script:Inputs,
-            '-RecipePath', $script:Recipe,
-            '-CacheDirectory', $script:Cache,
-            '-GeneratorProfile', 'gpt-5-mini',
-            '-FreshnessDays', '7',
-            '-NowUtc', $script:Now.ToString('O')
+        $processResult = Invoke-TestCacheProcess -Command 'save-focus-area-cache' -ArgumentList @(
+            '--session-state', $script:Session,
+            '--input-directory', $script:Inputs,
+            '--recipe-path', $script:Recipe,
+            '--cache-directory', $script:Cache,
+            '--generator-profile', 'gpt-5-mini',
+            '--freshness-days', '7',
+            '--now-utc', $script:Now.ToString('O')
         )
 
         $processResult.ExitCode | Should -Not -Be 0
@@ -930,29 +1060,26 @@ Keep names clear.
     }
 
     It 'records cache and degraded expansion diagnostics across CLI operations' {
-        Set-Content -LiteralPath (Join-Path $script:Session 'instruction-set-source\source.md') -Value 'Read the unavailable guidance.'
-        Set-Content -LiteralPath (Join-Path $script:Session 'focus-area-expansion-status.json') -Value @'
-{"schemaVersion":1,"state":"Degraded","references":[{"id":"missing","uri":"https://example.invalid/missing","referrers":[{"parentId":null,"source":{"root":"instruction-set-source","path":"source.md","startLine":1,"endLine":1},"scope":"General guidance.","declarations":[]}],"state":"Failed","outputs":[],"error":"Unavailable"}]}
-'@
-        $restoreResult = Invoke-CacheCliProcess -Script 'Restore-FocusAreaCache.ps1' -ArgumentList @(
-            '-SessionStateDirectory', $script:Session,
-            '-InputDirectory', $script:Inputs,
-            '-RecipePath', $script:Recipe,
-            '-CacheDirectory', $script:Cache,
-            '-GeneratorProfile', 'gpt-5-mini',
-            '-FreshnessDays', '7',
-            '-NowUtc', $script:Now.ToString('O')
+        $restoreResult = Invoke-TestCacheProcess -Command 'restore-focus-area-cache' -ArgumentList @(
+            '--session-state', $script:Session,
+            '--input-directory', $script:Inputs,
+            '--recipe-path', $script:Recipe,
+            '--cache-directory', $script:Cache,
+            '--generator-profile', 'gpt-5-mini',
+            '--freshness-days', '7',
+            '--now-utc', $script:Now.ToString('O')
         )
         $restoreResult.ExitCode | Should -Be 0
 
-        $storeResult = Invoke-CacheCliProcess -Script 'Save-FocusAreaCache.ps1' -ArgumentList @(
-            '-SessionStateDirectory', $script:Session,
-            '-InputDirectory', $script:Inputs,
-            '-RecipePath', $script:Recipe,
-            '-CacheDirectory', $script:Cache,
-            '-GeneratorProfile', 'gpt-5-mini',
-            '-FreshnessDays', '7',
-            '-NowUtc', $script:Now.ToString('O')
+        Publish-TestGeneration -Degraded
+        $storeResult = Invoke-TestCacheProcess -Command 'save-focus-area-cache' -ArgumentList @(
+            '--session-state', $script:Session,
+            '--input-directory', $script:Inputs,
+            '--recipe-path', $script:Recipe,
+            '--cache-directory', $script:Cache,
+            '--generator-profile', 'gpt-5-mini',
+            '--freshness-days', '7',
+            '--now-utc', $script:Now.ToString('O')
         )
         $storeResult.ExitCode | Should -Be 0
 
@@ -972,14 +1099,14 @@ Keep names clear.
             -LiteralPath (Join-Path $script:Session 'focus-area-cache-diagnostics.json') `
             -Value '{"cache":"Miss","inputState":"Degraded","store":"Bypassed"}'
 
-        $restoreResult = Invoke-CacheCliProcess -Script 'Restore-FocusAreaCache.ps1' -ArgumentList @(
-            '-SessionStateDirectory', $script:Session,
-            '-InputDirectory', $script:Inputs,
-            '-RecipePath', $script:Recipe,
-            '-CacheDirectory', $script:Cache,
-            '-GeneratorProfile', 'gpt-5-mini',
-            '-FreshnessDays', '7',
-            '-NowUtc', $script:Now.ToString('O')
+        $restoreResult = Invoke-TestCacheProcess -Command 'restore-focus-area-cache' -ArgumentList @(
+            '--session-state', $script:Session,
+            '--input-directory', $script:Inputs,
+            '--recipe-path', $script:Recipe,
+            '--cache-directory', $script:Cache,
+            '--generator-profile', 'gpt-5-mini',
+            '--freshness-days', '7',
+            '--now-utc', $script:Now.ToString('O')
         )
 
         $restoreResult.ExitCode | Should -Be 0
@@ -993,7 +1120,7 @@ Keep names clear.
     }
 
     It 'records a cache miss when restored artifact validation fails' {
-        Save-FocusAreaCache `
+        Save-TestCache `
             -SessionStateDirectory $script:Session `
             -InputDirectory $script:Inputs `
             -RecipePath $script:Recipe `
@@ -1003,14 +1130,14 @@ Keep names clear.
             -NowUtc $script:Now `
             -InputState Complete | Out-Null
 
-        $restoreResult = Invoke-CacheCliProcess -Script 'Restore-FocusAreaCache.ps1' -ArgumentList @(
-            '-SessionStateDirectory', $script:Session,
-            '-InputDirectory', $script:Inputs,
-            '-RecipePath', $script:Recipe,
-            '-CacheDirectory', $script:Cache,
-            '-GeneratorProfile', 'gpt-5-mini',
-            '-FreshnessDays', '7',
-            '-NowUtc', $script:Now.ToString('O')
+        $restoreResult = Invoke-TestCacheProcess -Command 'restore-focus-area-cache' -ArgumentList @(
+            '--session-state', $script:Session,
+            '--input-directory', $script:Inputs,
+            '--recipe-path', $script:Recipe,
+            '--cache-directory', $script:Cache,
+            '--generator-profile', 'gpt-5-mini',
+            '--freshness-days', '7',
+            '--now-utc', $script:Now.ToString('O')
         )
         $restoreResult.ExitCode | Should -Be 0
         Get-ChildItem `
@@ -1018,8 +1145,8 @@ Keep names clear.
             -Filter '*.md' |
             Remove-Item
 
-        $validateResult = Invoke-CacheCliProcess -Script 'Test-FocusAreaArtifacts.ps1' -ArgumentList @(
-            '-SessionStateDirectory', $script:Session
+        $validateResult = Invoke-TestCacheProcess -Command 'validate-focus-area-artifacts' -ArgumentList @(
+            '--session-state', $script:Session
         )
 
         $validateResult.ExitCode | Should -Not -Be 0
@@ -1029,52 +1156,69 @@ Keep names clear.
             ConvertFrom-Json
         $diagnostics.cache | Should -Be 'Miss'
         $diagnostics.reason | Should -Be 'ValidationFailed'
-        $diagnostics.userInstructionFileCount | Should -Be 0
+        $diagnostics.userInstructionFileCount | Should -Be 2
         $diagnostics.PSObject.Properties.Name | Should -Not -Contain 'inputState'
     }
 
-    It 'documents every cache command as non-interactive' {
-        # A missing mandatory parameter prompts rather than failing when stdin is an open pipe,
-        # which an agent shell provides, so a documented command without -NonInteractive stalls the
-        # review indefinitely instead of reporting the mistake.
-        $skillRoot = Join-Path $script:RepoRoot 'skills\ss-review'
+    It 'rejects missing native cache arguments without interactive prompting' {
+        foreach ($command in @('restore-focus-area-cache', 'save-focus-area-cache')) {
+            $result = Invoke-TestGenerationCommand -Arguments @($command) -AllowFailure
+            $result.ExitCode | Should -Not -Be 0
+            $result.StandardOutput | Should -BeNullOrEmpty
+            $result.StandardError | Should -Not -BeNullOrEmpty
+        }
 
-        # Match the executable rather than the start of the line so that an invocation prefixed by
-        # the call operator, spelled pwsh.exe, or written inline in prose is still held to the rule.
-        # Requiring a following switch keeps prose mentions of the host itself out of the results.
+        # Any remaining PowerShell examples still need noninteractive execution.
+        $skillRoot = Join-Path $script:RepoRoot 'skills\ss-review'
         $invocations = @(
             Get-ChildItem -LiteralPath $skillRoot -Recurse -Filter '*.md' -File |
                 Select-String -Pattern '(?<![\w.-])pwsh(\.exe)?\s+-'
         )
 
-        $invocations | Should -Not -BeNullOrEmpty
         foreach ($invocation in $invocations) {
-            # A trailing comment is prose rather than an argument, so it cannot satisfy the rule.
-            # A word boundary rather than trailing whitespace accepts the switch as the final
-            # argument while still rejecting a longer switch that merely starts the same way.
             ($invocation.Line -split '\s#')[0] |
                 Should -Match '\s-NonInteractive\b' -Because "$($invocation.Filename) invokes pwsh"
         }
+
+    }
+
+    It 'returns a single JSON result for valid focus-area artifacts' {
+        $process = Invoke-TestGenerationCommand -Arguments @(
+            'validate-focus-area-artifacts', '--session-state', $script:Session,
+            '--preparation-identity', $script:PreparationIdentity
+        )
+        $process.StandardError | Should -BeNullOrEmpty
+        $lines = @($process.StandardOutput.Trim() -split '\r?\n')
+        $lines.Count | Should -Be 1
+        $result = $lines[0] | ConvertFrom-Json
+        $result.status | Should -Be 'Valid'
+        $result.focusAreaCount | Should -Be 2
     }
 
     It 'rejects empty focus-area files' {
         [IO.File]::WriteAllBytes(
-            (Join-Path $script:Session 'focus-areas\maintainability.md'),
+            (Join-Path $script:Session 'focus-areas\focus-maintainability.md'),
             [byte[]]::new(0)
         )
 
-        {
-            Test-FocusAreaArtifacts -SessionStateDirectory $script:Session
-        } | Should -Throw '*Focus-area file is empty*'
+        $result = Invoke-TestGenerationCommand -AllowFailure -Arguments @(
+            'validate-focus-area-artifacts', '--session-state', $script:Session,
+            '--preparation-identity', $script:PreparationIdentity
+        )
+        $result.ExitCode | Should -Not -Be 0
+        $result.StandardError | Should -Match '(?i)empty'
     }
 
     It 'rejects whitespace-only focus-area files' {
         Set-Content `
-            -LiteralPath (Join-Path $script:Session 'focus-areas\maintainability.md') `
+            -LiteralPath (Join-Path $script:Session 'focus-areas\focus-maintainability.md') `
             -Value " `t`r`n"
 
-        {
-            Test-FocusAreaArtifacts -SessionStateDirectory $script:Session
-        } | Should -Throw '*Focus-area file is empty*'
+        $result = Invoke-TestGenerationCommand -AllowFailure -Arguments @(
+            'validate-focus-area-artifacts', '--session-state', $script:Session,
+            '--preparation-identity', $script:PreparationIdentity
+        )
+        $result.ExitCode | Should -Not -Be 0
+        $result.StandardError | Should -Match '(?i)empty'
     }
 }

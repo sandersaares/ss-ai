@@ -222,6 +222,11 @@ of deciding whether a finding falls within those ranges.
 
 ## Local review context
 
+Capture creation reads provider evidence into an immutable document and a
+separate authorship sidecar. A refresh validates its comparison before provider
+access and reuses classifications only when their evidence still matches.
+Creation reports bounded counts and does not change remote review state.
+
 Local context commands read captured pull request evidence without contacting
 the provider. They select bounded pages of metadata, discussion, search
 results, or changes between captures. Saved requests bind their selectors and
@@ -237,12 +242,46 @@ consolidation plans without contacting a provider. Artifact completion remains
 explicit, including for a review with no findings. Identifiers remain stable
 through updates and are not reused after removal. The review workflow keeps
 coverage validation and audit decisions separate from these local operations.
+Finding prose diagnostics identify the field, control character, or title
+limit that needs correction.
 
 Local audit commands maintain append-only finding decisions and verbatim
 feedback, and bind merge decisions to the reviewed pull request and source.
 Approved projections require settled decisions and retain the evidence binding
 needed for freshness checks. Shared Markdown rendering supplies the same finding
 prose to audit and publication without granting approval or contacting a provider.
+Individual decision input accepts mixed case and surrounding whitespace while
+stored decisions use the canonical vocabulary.
+
+## Tracker publication
+
+Tracker publication files approved findings in an independent GitHub or Azure
+DevOps destination and verifies each item before creating the next. An Azure
+body rewrite can pause publication for explicit acceptance bound to that item
+and its exact approved and stored bodies. Continuation retains the destination,
+metadata, and remaining plan. Azure area paths identify the same destination
+regardless of casing; continuation preserves their recorded spelling.
+Creation receipts retain known item identities before content readback.
+Readback failures preserve these coordinates for reconciliation without
+authorizing creation replay. Azure collection identity uses the URL origin and
+decoded, case-insensitive path segments, including when validating parent work
+item links.
+
+## Review reports
+
+Report commands check and install prerequisites and render a Markdown document
+as an HTML reading view using assets from the active review skill. Readiness
+requires an HTML and Mermaid rendering probe, not just tool discovery. Installation
+is explicit and separate from checking and rendering. Report rendering does not
+grant approval or publish review content; the review workflow retains its
+Markdown fallback and publication decisions.
+
+## Worker inputs
+
+Local worker commands prepare phase-specific assignments from the active skill
+assets without granting orchestration or human decision authority. Workers read
+registered Markdown through bounded, integrity-checked pages with explicit
+continuation. Canonical pull request captures remain selective query inputs.
 
 ## Functional areas
 

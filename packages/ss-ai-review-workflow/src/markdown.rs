@@ -212,7 +212,7 @@ pub fn render_files_json(bytes: &[u8], clock: &dyn Clock) -> Result<Value, AppEr
 }
 
 /// Validates and prepares every rendering before publishing any file.
-fn render_files(request: &Value, clock: &dyn Clock) -> Result<Value, AppError> {
+pub(crate) fn render_files(request: &Value, clock: &dyn Clock) -> Result<Value, AppError> {
     let prepare = || -> Result<_, String> {
         let fields = object(request, "request")?;
         let allowed = [
@@ -612,6 +612,15 @@ fn tracker_item(finding: &Value, context: Option<&Value>) -> Result<Value, Strin
     tracker_item_with_urls(finding, context, None)
 }
 
+/// Validates and renders a borrowed finding for tracker planning.
+pub(crate) fn render_tracker_item(
+    finding: &Value,
+    context: Option<&Value>,
+) -> Result<Value, String> {
+    validate_finding(finding)?;
+    tracker_item_with_urls(finding, context, None)
+}
+
 /// Uses resolved links when the caller already has provenance.
 fn tracker_item_with_urls(
     finding: &Value,
@@ -713,9 +722,13 @@ fn summary(request: &Value) -> Result<Value, String> {
             .ok_or("followUpCount must be a nonnegative 32-bit integer")?,
     };
     let platform = required_text(request, "platform")?;
-    if !matches!(platform, "gitHub" | "azureDevOps") {
+    let platform = if platform.eq_ignore_ascii_case("gitHub") {
+        "gitHub"
+    } else if platform.eq_ignore_ascii_case("azureDevOps") {
+        "azureDevOps"
+    } else {
         return Err("platform must be gitHub or azureDevOps".into());
-    }
+    };
     let lead = if count == 0 {
         "This review raises no findings.".to_owned()
     } else {
@@ -781,10 +794,12 @@ fn findings(request: &Value) -> Result<Vec<&Value>, String> {
 }
 
 /// Enforces the supported destination vocabulary.
-fn destination(request: &Value) -> Result<&str, String> {
+fn destination(request: &Value) -> Result<&'static str, String> {
     let destination = required_text(request, "destination")?;
-    if matches!(destination, "pullRequest" | "tracker") {
-        Ok(destination)
+    if destination.eq_ignore_ascii_case("pullRequest") {
+        Ok("pullRequest")
+    } else if destination.eq_ignore_ascii_case("tracker") {
+        Ok("tracker")
     } else {
         Err("destination must be pullRequest or tracker".into())
     }
@@ -792,7 +807,12 @@ fn destination(request: &Value) -> Result<&str, String> {
 
 /// Checks the captured fields that can affect tracker provenance.
 fn context(request: &Value) -> Result<Option<&Value>, String> {
-    match request.get("context") {
+    validate_tracker_context(request.get("context"))
+}
+
+/// Checks a borrowed capture before rendering tracker items from it.
+pub(crate) fn validate_tracker_context(context: Option<&Value>) -> Result<Option<&Value>, String> {
+    match context {
         None | Some(Value::Null) => Ok(None),
         Some(context) => {
             object(context, "context")?;

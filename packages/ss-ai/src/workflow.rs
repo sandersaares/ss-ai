@@ -7,12 +7,18 @@ use std::path::{PathBuf, absolute};
 use std::time::Duration;
 
 use clap::error::ErrorKind;
-use clap::{Parser, Subcommand, ValueEnum};
+use clap::{Args, Parser, Subcommand, ValueEnum};
 use jiff::Timestamp;
 use ohno::AppError;
 use serde_json::json;
-use ss_ai_review_workflow::{anchors, approved, audit, findings, markdown, workflow_plan};
-use ss_ai_runtime::{Clock, Process, caused_by, fail, read_bytes};
+use ss_ai_review_workflow::focus_area_map::MapOperation as NativeMapOperation;
+use ss_ai_review_workflow::focus_area_source::decode_text;
+use ss_ai_review_workflow::{
+    anchors, approved, audit, findings, focus_area_expansion, focus_area_generation,
+    focus_area_map, focus_cache, instruction_sources, markdown, markdown_preparation,
+    overview_validation, report_html, report_tools, review_work, worker_input, workflow_plan,
+};
+use ss_ai_runtime::{Clock, LockMode, Process, caused_by, fail, read_bytes};
 
 /// Exposes local workflow operations without provider access.
 #[derive(Debug, Parser)]
@@ -22,9 +28,296 @@ struct WorkflowCli {
     command: WorkflowCommand,
 }
 
-/// Selects an operation and its file-based inputs.
-#[derive(Subcommand)]
+/// Keeps clap's generated command construction within a bounded stack frame.
+#[derive(Debug, Subcommand)]
 enum WorkflowCommand {
+    #[command(flatten)]
+    FocusCache(FocusCacheCommand),
+    #[command(flatten)]
+    FocusPreparation(FocusPreparationCommand),
+    #[command(flatten)]
+    Review(ReviewCommand),
+    #[command(flatten)]
+    Worker(WorkerCommand),
+    #[command(flatten)]
+    Audit(AuditCommand),
+    #[command(flatten)]
+    Finding(FindingCommand),
+    #[command(flatten)]
+    Report(ReportCommand),
+}
+
+/// Routes report rendering and explicit prerequisite setup.
+#[derive(Debug, Subcommand)]
+enum ReportCommand {
+    /// Render a standalone report from canonical Markdown.
+    RenderReviewHtml {
+        #[arg(long)]
+        path: PathBuf,
+        #[arg(long)]
+        output_path: PathBuf,
+        #[arg(long)]
+        skill_root: PathBuf,
+        #[arg(long)]
+        tools_directory: PathBuf,
+        #[arg(long)]
+        title_path: PathBuf,
+    },
+    /// Check report prerequisites and exercise the renderer when present.
+    TestReviewReportTools {
+        #[arg(long)]
+        skill_root: PathBuf,
+        #[arg(long)]
+        tools_directory: PathBuf,
+    },
+    /// Install report prerequisites after the caller obtains consent.
+    InstallReviewReportTools {
+        #[arg(long)]
+        skill_root: PathBuf,
+        #[arg(long)]
+        tools_directory: PathBuf,
+        #[arg(long)]
+        install_browser_dependencies: bool,
+    },
+}
+
+/// Selects focus-area cache and generation transactions.
+#[derive(Debug, Subcommand)]
+enum FocusCacheCommand {
+    /// Restore a complete focus-area set or report a cache miss.
+    RestoreFocusAreaCache {
+        #[command(flatten)]
+        options: CacheArguments,
+        #[arg(long)]
+        snapshot_identity: String,
+        #[arg(long)]
+        refresh: bool,
+    },
+    /// Begin an isolated preparation bound to a successful restore.
+    BeginFocusAreaGeneration {
+        #[arg(long)]
+        session_state: PathBuf,
+        #[arg(long)]
+        preparation_identity: String,
+    },
+    /// Publish an active, verified preparation and its receipt.
+    PublishFocusAreaGeneration {
+        #[arg(long)]
+        session_state: PathBuf,
+        #[arg(long)]
+        generation_id: String,
+    },
+    /// Save a finalized, validated focus-area set for reuse.
+    SaveFocusAreaCache {
+        #[command(flatten)]
+        options: CacheArguments,
+        #[arg(long)]
+        preparation_identity: String,
+    },
+    /// Validate the complete focus-area artifact set.
+    ValidateFocusAreaArtifacts {
+        #[arg(long)]
+        session_state: PathBuf,
+        #[arg(long)]
+        preparation_identity: String,
+    },
+}
+
+/// Selects focus-area preparation and instruction snapshot operations.
+#[derive(Debug, Subcommand)]
+enum FocusPreparationCommand {
+    /// Maintain the reference-expansion manifest.
+    UpdateFocusAreaExpansion {
+        #[arg(long)]
+        session_state: PathBuf,
+        #[arg(long, value_enum)]
+        operation: ExpansionOperation,
+        #[arg(long)]
+        input_path: Option<PathBuf>,
+        #[arg(long)]
+        reference_id: Option<String>,
+    },
+    /// Merge or regroup authored focus-area map contributions.
+    UpdateFocusAreaMap {
+        #[arg(long)]
+        session_state: PathBuf,
+        #[arg(long)]
+        path: PathBuf,
+        #[arg(long, value_enum)]
+        operation: MapOperation,
+        #[arg(long)]
+        input_path: Option<PathBuf>,
+        #[arg(long)]
+        category_id: Option<String>,
+        #[arg(long)]
+        new_category_id: Option<String>,
+        #[arg(long)]
+        title: Option<String>,
+    },
+    /// Validate a partial or complete focus-area map.
+    ValidateFocusAreaMap {
+        #[arg(long)]
+        session_state: PathBuf,
+        #[arg(long)]
+        map_path: PathBuf,
+        #[arg(long)]
+        complete: bool,
+    },
+    /// Publish focus-area documents from a complete map.
+    AssembleFocusAreas {
+        #[arg(long)]
+        session_state: PathBuf,
+        #[arg(long)]
+        map_path: PathBuf,
+    },
+    /// Snapshot built-in and user-configured instruction sources.
+    SnapshotInstructions {
+        #[arg(long)]
+        session_state: PathBuf,
+        #[arg(long)]
+        skill_root: PathBuf,
+        #[arg(long)]
+        repository_root: Option<PathBuf>,
+        #[arg(long)]
+        repository_instruction: Vec<PathBuf>,
+    },
+}
+
+/// Selects review preparation and coverage operations.
+#[derive(Debug, Subcommand)]
+enum ReviewCommand {
+    /// Validate and publish review inventory or file groups.
+    SetReviewInput {
+        #[arg(long)]
+        kind: ReviewInputKind,
+        #[arg(long)]
+        input_path: PathBuf,
+        #[arg(long)]
+        path: PathBuf,
+        #[arg(long)]
+        inventory_path: Option<PathBuf>,
+        #[arg(long)]
+        replace: bool,
+    },
+    /// Prepare immutable review work and its private journals.
+    CreateReviewWork {
+        #[arg(long)]
+        inventory_path: PathBuf,
+        #[arg(long)]
+        file_groups_path: PathBuf,
+        #[arg(long)]
+        focus_area_directory: PathBuf,
+        #[arg(long)]
+        output_directory: PathBuf,
+        #[arg(long)]
+        repository_root: Option<PathBuf>,
+        #[arg(long)]
+        artifact_directory: Option<PathBuf>,
+        #[arg(long)]
+        session_state: Option<PathBuf>,
+        #[arg(long)]
+        preparation_identity: Option<String>,
+    },
+    /// Create or explicitly resume a file-group journal.
+    InitializeReviewQueue {
+        #[arg(long)]
+        inventory_path: PathBuf,
+        #[arg(long)]
+        file_groups_path: PathBuf,
+        #[arg(long)]
+        queue_path: PathBuf,
+        #[arg(long)]
+        resume: bool,
+    },
+    /// Dispatch the next focus area or claim a file group.
+    NextReviewItem {
+        #[arg(long)]
+        queue_path: PathBuf,
+    },
+    /// Complete a claimed file group.
+    CompleteReviewGroup {
+        #[arg(long)]
+        queue_path: PathBuf,
+        #[arg(long)]
+        group_id: String,
+    },
+    /// Record one file assessment.
+    SetReviewAssessment {
+        #[arg(long)]
+        queue_path: PathBuf,
+        #[arg(long)]
+        inventory_path: PathBuf,
+        #[arg(long)]
+        file_groups_path: PathBuf,
+        #[arg(long)]
+        assessment_path: PathBuf,
+    },
+    /// Commit a complete assessment batch and receipt.
+    CompleteReviewBatch {
+        #[arg(long)]
+        queue_path: PathBuf,
+        #[arg(long)]
+        inventory_path: PathBuf,
+        #[arg(long)]
+        file_groups_path: PathBuf,
+        #[arg(long)]
+        artifact_path: PathBuf,
+        #[arg(long)]
+        batch_path: PathBuf,
+    },
+    /// Block a failed reviewer until explicit resume.
+    FailReviewWorker {
+        #[arg(long)]
+        queue_path: PathBuf,
+        #[arg(long)]
+        reason: String,
+    },
+    /// Validate findings and coverage against the immutable manifest.
+    ValidateReviewWork {
+        #[arg(long)]
+        manifest_path: PathBuf,
+        #[arg(long)]
+        artifact_directory: PathBuf,
+    },
+}
+
+/// Selects worker input and rendering operations.
+#[derive(Subcommand)]
+enum WorkerCommand {
+    /// Prepare a bounded worker assignment from installed skill assets.
+    WorkerAssignment {
+        #[arg(long)]
+        phase: String,
+        #[arg(long)]
+        session_state: PathBuf,
+        #[arg(long)]
+        scope_path: PathBuf,
+        #[arg(long)]
+        output_directory: PathBuf,
+        #[arg(long)]
+        skill_root: PathBuf,
+        #[arg(long)]
+        manifest_path: Option<PathBuf>,
+        #[arg(long)]
+        reviewer_id: Option<String>,
+        #[arg(long)]
+        context_path: Option<PathBuf>,
+        #[arg(long)]
+        resume: bool,
+        #[arg(long)]
+        repository_instructions: bool,
+        #[arg(long)]
+        include_pre_existing: bool,
+    },
+    /// Read one bounded page of an assigned document.
+    WorkerDocument {
+        #[arg(long)]
+        assignment_path: PathBuf,
+        #[arg(long)]
+        document_id: String,
+        #[arg(long, default_value_t = 0)]
+        offset: usize,
+    },
     /// Render shared finding prose from a file-based request.
     Render {
         #[arg(long)]
@@ -35,17 +328,78 @@ enum WorkflowCommand {
         #[arg(long)]
         request_path: PathBuf,
     },
+    /// Validate the prepared overview and its captured pull request link.
+    ValidateOverview {
+        #[arg(long)]
+        path: PathBuf,
+        #[arg(long)]
+        context_path: Option<PathBuf>,
+    },
+    /// Render a validated finding artifact or approved set for audit and delivery.
+    PrepareMarkdown {
+        #[arg(long)]
+        path: PathBuf,
+        #[arg(long)]
+        output_directory: PathBuf,
+        #[arg(long)]
+        combined_path: Option<PathBuf>,
+        #[arg(long)]
+        audit_document_path: Option<PathBuf>,
+        #[arg(long)]
+        finding_id: Vec<String>,
+        #[arg(long, default_value = "pullRequest")]
+        destination: String,
+        #[arg(long)]
+        context_path: Option<PathBuf>,
+        #[arg(long)]
+        overview_path: Option<PathBuf>,
+    },
     /// Resolve an anchor against captured diff evidence.
     ResolveAnchor {
         #[arg(long)]
         request_path: PathBuf,
     },
-    /// Append an audit decision batch.
+}
+
+impl Debug for WorkerCommand {
+    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
+        let variant = match self {
+            Self::WorkerAssignment { .. } => "WorkerAssignment",
+            Self::WorkerDocument { .. } => "WorkerDocument",
+            Self::Render { .. } => "Render",
+            Self::RenderMarkdownFiles { .. } => "RenderMarkdownFiles",
+            Self::ValidateOverview { .. } => "ValidateOverview",
+            Self::PrepareMarkdown { .. } => "PrepareMarkdown",
+            Self::ResolveAnchor { .. } => "ResolveAnchor",
+        };
+        let mut debug = f.debug_struct(type_name::<Self>());
+        debug.field("variant", &variant);
+        if let Self::WorkerAssignment { phase, .. } = self {
+            debug.field("phase", phase);
+        }
+        debug.finish_non_exhaustive()
+    }
+}
+
+/// Selects audit and approved-set operations.
+#[derive(Subcommand)]
+enum AuditCommand {
+    /// Append an audit decision or decision batch.
     AuditAddDecisions {
         #[arg(long)]
         path: PathBuf,
-        #[arg(long)]
-        plan_path: PathBuf,
+        #[arg(
+            long,
+            required_unless_present = "item_path",
+            conflicts_with = "item_path"
+        )]
+        plan_path: Option<PathBuf>,
+        #[arg(
+            long,
+            required_unless_present = "plan_path",
+            conflicts_with = "plan_path"
+        )]
+        item_path: Option<PathBuf>,
         #[arg(long)]
         audit_feedback_path: Option<PathBuf>,
         #[arg(long)]
@@ -120,6 +474,11 @@ enum WorkflowCommand {
         #[command(subcommand)]
         command: ApprovedCommand,
     },
+}
+
+/// Selects plan and finding artifact operations.
+#[derive(Subcommand)]
+enum FindingCommand {
     /// Create an empty workflow plan.
     PlanInitialize {
         #[arg(long, value_enum)]
@@ -186,6 +545,8 @@ enum WorkflowCommand {
         path: PathBuf,
         #[arg(long)]
         reviewer_id: Vec<String>,
+        #[arg(long)]
+        fail_on_invalid: bool,
     },
     /// Build an index of all reviewer findings.
     FindingIndex {
@@ -225,6 +586,90 @@ enum WorkflowCommand {
     },
 }
 
+/// Inputs shared by focus-area cache transactions.
+#[derive(Debug, Args)]
+struct CacheArguments {
+    #[arg(long)]
+    session_state: PathBuf,
+    #[arg(long)]
+    input_directory: PathBuf,
+    #[arg(long)]
+    skill_root: PathBuf,
+    #[arg(long)]
+    recipe_path: PathBuf,
+    #[arg(long)]
+    cache_directory: PathBuf,
+    #[arg(long)]
+    generator_profile: String,
+    #[arg(long)]
+    freshness_days: u32,
+    #[arg(long)]
+    now_utc: Option<Timestamp>,
+}
+
+/// Keeps an explicitly supplied time fixed while retaining the caller's wait policy.
+struct CacheClock<'a> {
+    base: &'a dyn Clock,
+    now: Option<Timestamp>,
+}
+
+impl Clock for CacheClock<'_> {
+    fn now(&self) -> Timestamp {
+        self.now.unwrap_or_else(|| self.base.now())
+    }
+
+    fn wait(&self, duration: Duration) -> Result<(), AppError> {
+        self.base.wait(duration)
+    }
+}
+
+/// Selects which transaction consumes the cache inputs.
+enum CacheAction {
+    Restore {
+        refresh: bool,
+        snapshot_identity: String,
+    },
+    Save {
+        preparation_identity: String,
+    },
+}
+
+/// Resolves all filesystem inputs once before the complete cache transaction.
+fn run_focus_cache(
+    args: CacheArguments,
+    action: CacheAction,
+    clock: &dyn Clock,
+) -> Result<String, AppError> {
+    let session = absolute(args.session_state)?;
+    let input = absolute(args.input_directory)?;
+    let skill = absolute(args.skill_root)?;
+    let recipe = absolute(args.recipe_path)?;
+    let cache = absolute(args.cache_directory)?;
+    let options = focus_cache::CacheOptions {
+        session: &session,
+        input_directory: &input,
+        skill_root: &skill,
+        recipe: &recipe,
+        cache_directory: &cache,
+        generator_profile: &args.generator_profile,
+        freshness_days: args.freshness_days,
+    };
+    let clock = CacheClock {
+        base: clock,
+        now: args.now_utc,
+    };
+    let result = match action {
+        CacheAction::Restore {
+            refresh,
+            snapshot_identity,
+        } => focus_cache::restore(&options, refresh, &snapshot_identity, &clock)?,
+        CacheAction::Save {
+            preparation_identity,
+        } => focus_cache::store(&options, &preparation_identity, &clock)?,
+    };
+    Ok(serde_json::to_string(&result)?)
+}
+
 /// Selects a complete approved-set operation.
 #[derive(Debug, Subcommand)]
 enum ApprovedCommand {
@@ -255,28 +700,14 @@ enum ApprovedCommand {
     },
 }
 
-impl Debug for WorkflowCommand {
+impl Debug for AuditCommand {
     fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
         let mut debug = f.debug_struct(type_name::<Self>());
         match self {
-            Self::Render { request_path } => {
-                debug
-                    .field("operation", &"Render")
-                    .field("request_path", request_path);
-            }
-            Self::RenderMarkdownFiles { request_path } => {
-                debug
-                    .field("operation", &"RenderMarkdownFiles")
-                    .field("request_path", request_path);
-            }
-            Self::ResolveAnchor { request_path } => {
-                debug
-                    .field("operation", &"ResolveAnchor")
-                    .field("request_path", request_path);
-            }
             Self::AuditAddDecisions {
                 path,
                 plan_path,
+                item_path,
                 audit_feedback_path,
                 policy_classification,
                 recorded_utc,
@@ -285,6 +716,7 @@ impl Debug for WorkflowCommand {
                     .field("operation", &"AuditAddDecisions")
                     .field("path", path)
                     .field("plan_path", plan_path)
+                    .field("item_path", item_path)
                     .field("audit_feedback_path", audit_feedback_path)
                     .field("policy_classification", policy_classification)
                     .field("recorded_utc", recorded_utc);
@@ -365,6 +797,15 @@ impl Debug for WorkflowCommand {
                     .field("operation", &"Approved")
                     .field("command", command);
             }
+        }
+        debug.finish()
+    }
+}
+
+impl Debug for FindingCommand {
+    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
+        let mut debug = f.debug_struct(type_name::<Self>());
+        match self {
             Self::PlanInitialize { kind, path } => {
                 debug
                     .field("operation", &"PlanInitialize")
@@ -431,11 +872,16 @@ impl Debug for WorkflowCommand {
                     .field("path", path)
                     .field("index_path", index_path);
             }
-            Self::ValidateFindings { path, reviewer_id } => {
+            Self::ValidateFindings {
+                path,
+                reviewer_id,
+                fail_on_invalid,
+            } => {
                 debug
                     .field("operation", &"ValidateFindings")
                     .field("path", path)
-                    .field("reviewer_id_count", &reviewer_id.len());
+                    .field("reviewer_id_count", &reviewer_id.len())
+                    .field("fail_on_invalid", fail_on_invalid);
             }
             Self::FindingIndex {
                 reviewer_directory,
@@ -525,6 +971,122 @@ impl PlanKind {
     }
 }
 
+/// Selects the review preparation input schema.
+#[derive(Clone, Copy, Debug, ValueEnum)]
+enum ReviewInputKind {
+    /// Complete changed-file inventory.
+    Inventory,
+    /// File groups covering the inventory.
+    Groups,
+}
+
+/// Selects an expansion manifest transaction.
+#[derive(Clone, Copy, Debug, ValueEnum)]
+enum ExpansionOperation {
+    Initialize,
+    Register,
+    Complete,
+    Fail,
+    Finalize,
+    Read,
+}
+
+/// Selects a focus-area map transaction.
+#[derive(Clone, Copy, Debug, ValueEnum)]
+enum MapOperation {
+    Append,
+    Replace,
+    Regroup,
+}
+
+/// Keeps the tools lock across discovery and each complete native report operation.
+fn run_report(
+    command: ReportCommand,
+    process: &dyn Process,
+    clock: &dyn Clock,
+) -> Result<String, AppError> {
+    match command {
+        ReportCommand::RenderReviewHtml {
+            path,
+            output_path,
+            skill_root,
+            tools_directory,
+            title_path,
+        } => {
+            let skill_root = absolute(skill_root)?;
+            let tools_directory = absolute(tools_directory)?;
+            // A file preserves Unicode and multiline prose without exposing it in process arguments.
+            let title = read_bytes(&absolute(title_path)?, clock)?
+                .ok_or_else(|| fail("invalidInput", "Report title file is missing"))?;
+            let title = String::from_utf8(title)
+                .map_err(|error| caused_by("invalidInput", "Report title is not UTF-8", error))?;
+            let guard = report_tools::tools_lock(&tools_directory, LockMode::Shared, clock)?;
+            let tools = report_tools::discover(&skill_root, &tools_directory, process, &guard)?;
+            let result = report_html::write_report(
+                &path,
+                &output_path,
+                &skill_root,
+                &title,
+                &tools,
+                &guard,
+                process,
+                clock,
+            )?;
+            Ok(serde_json::to_string(&json!({
+                "sourcePath": result.source_path,
+                "sourceHash": result.source_hash,
+                "htmlPath": result.html_path,
+                "htmlUri": result.html_uri,
+                "htmlHash": result.html_hash,
+                "diagramCount": result.diagram_count
+            }))?)
+        }
+        ReportCommand::TestReviewReportTools {
+            skill_root,
+            tools_directory,
+        } => {
+            let skill_root = absolute(skill_root)?;
+            let tools_directory = absolute(tools_directory)?;
+            let tools = report_tools::readiness(
+                &skill_root,
+                &tools_directory,
+                process,
+                clock,
+                |tools, guard| {
+                    report_html::probe(&tools_directory, &skill_root, tools, guard, process, clock)
+                },
+            )?;
+            Ok(serde_json::to_string(&tools)?)
+        }
+        ReportCommand::InstallReviewReportTools {
+            skill_root,
+            tools_directory,
+            install_browser_dependencies,
+        } => {
+            let skill_root = absolute(skill_root)?;
+            let tools_directory = absolute(tools_directory)?;
+            let tools = report_tools::install(
+                &skill_root,
+                &tools_directory,
+                process,
+                clock,
+                install_browser_dependencies,
+                |tools, guard| {
+                    report_html::probe(&tools_directory, &skill_root, tools, guard, process, clock)
+                },
+            )?;
+            Ok(serde_json::to_string(&tools)?)
+        }
+    }
+}
+
+/// Loads an authored input before handing it to the native transaction.
+fn focus_input(path: Option<PathBuf>, clock: &dyn Clock) -> Result<Vec<u8>, AppError> {
+    let path = path.ok_or_else(|| fail("invalidInput", "Operation requires an input path"))?;
+    read_bytes(&absolute(path)?, clock)?
+        .ok_or_else(|| fail("invalidInput", "Focus-area input is missing"))
+}
+
 /// Runs a local workflow command using the supplied external boundaries.
 pub fn run<I, T>(arguments: I, process: &dyn Process, clock: &dyn Clock) -> Result<String, AppError>
 where
@@ -548,53 +1110,465 @@ where
         }
     };
     match cli.command {
-        WorkflowCommand::Render { request_path } => {
+        WorkflowCommand::Report(command) => run_report(command, process, clock),
+        WorkflowCommand::FocusCache(FocusCacheCommand::RestoreFocusAreaCache {
+            options,
+            snapshot_identity,
+            refresh,
+        }) => run_focus_cache(
+            options,
+            CacheAction::Restore {
+                refresh,
+                snapshot_identity,
+            },
+            clock,
+        ),
+        WorkflowCommand::FocusCache(FocusCacheCommand::BeginFocusAreaGeneration {
+            session_state,
+            preparation_identity,
+        }) => Ok(serde_json::to_string(&focus_area_generation::begin(
+            &absolute(session_state)?,
+            &preparation_identity,
+            clock,
+        )?)?),
+        WorkflowCommand::FocusCache(FocusCacheCommand::PublishFocusAreaGeneration {
+            session_state,
+            generation_id,
+        }) => Ok(serde_json::to_string(&focus_area_generation::publish(
+            &absolute(session_state)?,
+            &generation_id,
+            clock,
+        )?)?),
+        WorkflowCommand::FocusCache(FocusCacheCommand::SaveFocusAreaCache {
+            options,
+            preparation_identity,
+        }) => run_focus_cache(
+            options,
+            CacheAction::Save {
+                preparation_identity,
+            },
+            clock,
+        ),
+        WorkflowCommand::FocusCache(FocusCacheCommand::ValidateFocusAreaArtifacts {
+            session_state,
+            preparation_identity,
+        }) => Ok(serde_json::to_string(&focus_cache::validate_artifacts(
+            &absolute(session_state)?,
+            &preparation_identity,
+            clock,
+        )?)?),
+        WorkflowCommand::FocusPreparation(FocusPreparationCommand::UpdateFocusAreaExpansion {
+            session_state,
+            operation,
+            input_path,
+            reference_id,
+        }) => {
+            let operation = match operation {
+                ExpansionOperation::Initialize => focus_area_expansion::Operation::Initialize,
+                ExpansionOperation::Register => {
+                    let input = focus_input(input_path, clock)?;
+                    let input = serde_json::from_str::<focus_area_expansion::ReferenceInput>(
+                        &decode_text(&input)?,
+                    )
+                    .map_err(|error| caused_by("invalidInput", "Invalid reference input", error))?;
+                    focus_area_expansion::Operation::Register(input)
+                }
+                ExpansionOperation::Complete | ExpansionOperation::Fail => {
+                    let input = focus_input(input_path, clock)?;
+                    let input = serde_json::from_str::<focus_area_expansion::ReferenceResult>(
+                        &decode_text(&input)?,
+                    )
+                    .map_err(|error| {
+                        caused_by("invalidInput", "Invalid reference result", error)
+                    })?;
+                    if matches!(operation, ExpansionOperation::Complete) {
+                        focus_area_expansion::Operation::Complete(input)
+                    } else {
+                        focus_area_expansion::Operation::Fail(input)
+                    }
+                }
+                ExpansionOperation::Finalize => focus_area_expansion::Operation::Finalize,
+                ExpansionOperation::Read => {
+                    focus_area_expansion::Operation::Read(reference_id.clone())
+                }
+            };
+            Ok(serde_json::to_string(
+                &focus_area_expansion::update_with_reference(
+                    &absolute(session_state)?,
+                    operation,
+                    reference_id.as_deref(),
+                    clock,
+                )?,
+            )?)
+        }
+        WorkflowCommand::FocusPreparation(FocusPreparationCommand::UpdateFocusAreaMap {
+            session_state,
+            path,
+            operation,
+            input_path,
+            category_id,
+            new_category_id,
+            title,
+        }) => {
+            let operation = match operation {
+                MapOperation::Append => NativeMapOperation::Append(focus_input(input_path, clock)?),
+                MapOperation::Replace => {
+                    NativeMapOperation::Replace(focus_input(input_path, clock)?)
+                }
+                MapOperation::Regroup => NativeMapOperation::Regroup {
+                    category_id: category_id
+                        .ok_or_else(|| fail("invalidInput", "Regroup requires category ID"))?,
+                    new_category_id: new_category_id
+                        .ok_or_else(|| fail("invalidInput", "Regroup requires new category ID"))?,
+                    title: title.ok_or_else(|| fail("invalidInput", "Regroup requires title"))?,
+                },
+            };
+            Ok(serde_json::to_string(&focus_area_map::update(
+                &absolute(session_state)?,
+                &absolute(path)?,
+                operation,
+                clock,
+            )?)?)
+        }
+        WorkflowCommand::FocusPreparation(FocusPreparationCommand::ValidateFocusAreaMap {
+            session_state,
+            map_path,
+            complete,
+        }) => Ok(serde_json::to_string(&focus_area_map::validate(
+            &absolute(session_state)?,
+            &absolute(map_path)?,
+            clock,
+            complete,
+        )?)?),
+        WorkflowCommand::FocusPreparation(FocusPreparationCommand::AssembleFocusAreas {
+            session_state,
+            map_path,
+        }) => Ok(serde_json::to_string(&focus_area_map::assemble(
+            &absolute(session_state)?,
+            &absolute(map_path)?,
+            clock,
+        )?)?),
+        WorkflowCommand::FocusPreparation(FocusPreparationCommand::SnapshotInstructions {
+            session_state,
+            skill_root,
+            repository_root,
+            repository_instruction,
+        }) => {
+            let directory_list = match std::env::var("COPILOT_CUSTOM_INSTRUCTIONS_DIRS") {
+                Ok(value) => Some(value),
+                Err(std::env::VarError::NotPresent) => None,
+                Err(error) => {
+                    return Err(caused_by(
+                        "invalidInput",
+                        "Instruction directories must be valid Unicode",
+                        error,
+                    )
+                    .into());
+                }
+            };
+            let repository_root = repository_root.map(absolute).transpose()?;
+            // Validate incomplete selections inside the snapshot transaction.
+            let missing_root = PathBuf::new();
+            let repository_sources =
+                if repository_root.is_some() || !repository_instruction.is_empty() {
+                    Some(instruction_sources::RepositoryInstructionSources {
+                        root: repository_root.as_deref().unwrap_or(&missing_root),
+                        paths: &repository_instruction,
+                    })
+                } else {
+                    None
+                };
+            let result = instruction_sources::snapshot_instruction_sources(
+                &instruction_sources::InstructionSourceOptions {
+                    session_state: &absolute(session_state)?,
+                    skill_root: &absolute(skill_root)?,
+                    directory_list: directory_list.as_deref(),
+                    base_directory: &std::env::current_dir()?,
+                    repository_sources,
+                },
+                clock,
+            )?;
+            Ok(serde_json::to_string(&result)?)
+        }
+        WorkflowCommand::Review(ReviewCommand::SetReviewInput {
+            kind,
+            input_path,
+            path,
+            inventory_path,
+            replace,
+        }) => {
+            let input_path = absolute(input_path)?;
+            let path = absolute(path)?;
+            let result = match kind {
+                ReviewInputKind::Inventory => {
+                    review_work::set_input_inventory(&input_path, &path, replace, clock)?
+                }
+                ReviewInputKind::Groups => {
+                    let inventory = inventory_path
+                        .ok_or_else(|| fail("invalidInput", "Groups require an inventory path"))?;
+                    review_work::set_input_groups(
+                        &absolute(inventory)?,
+                        &input_path,
+                        &path,
+                        replace,
+                        clock,
+                    )?
+                }
+            };
+            Ok(serde_json::to_string(&result)?)
+        }
+        WorkflowCommand::Review(ReviewCommand::CreateReviewWork {
+            inventory_path,
+            file_groups_path,
+            focus_area_directory,
+            output_directory,
+            repository_root,
+            artifact_directory,
+            session_state,
+            preparation_identity,
+        }) => {
+            let repository_root = repository_root.map(absolute).transpose()?;
+            let artifact_directory = artifact_directory.map(absolute).transpose()?;
+            let inventory = absolute(inventory_path)?;
+            let groups = absolute(file_groups_path)?;
+            let focus_areas = absolute(focus_area_directory)?;
+            let output = absolute(output_directory)?;
+            let session_state = session_state.map(absolute).transpose()?;
+            let result = match (session_state.as_deref(), preparation_identity.as_deref()) {
+                (Some(session), Some(identity)) => review_work::create_with_preparation(
+                    &inventory,
+                    &groups,
+                    &focus_areas,
+                    &output,
+                    repository_root.as_deref(),
+                    artifact_directory.as_deref(),
+                    &review_work::PreparationBinding { session, identity },
+                    clock,
+                )?,
+                (None, None) => review_work::create(
+                    &inventory,
+                    &groups,
+                    &focus_areas,
+                    &output,
+                    repository_root.as_deref(),
+                    artifact_directory.as_deref(),
+                    clock,
+                )?,
+                _ => {
+                    return Err(fail(
+                        "invalidInput",
+                        "Review session and preparation identity must be supplied together",
+                    ));
+                }
+            };
+            Ok(serde_json::to_string(&result)?)
+        }
+        WorkflowCommand::Review(ReviewCommand::InitializeReviewQueue {
+            inventory_path,
+            file_groups_path,
+            queue_path,
+            resume,
+        }) => Ok(serde_json::to_string(&review_work::initialize_queue(
+            &absolute(inventory_path)?,
+            &absolute(file_groups_path)?,
+            &absolute(queue_path)?,
+            resume,
+            clock,
+        )?)?),
+        WorkflowCommand::Review(ReviewCommand::NextReviewItem { queue_path }) => Ok(
+            serde_json::to_string(&review_work::next(&absolute(queue_path)?, clock)?)?,
+        ),
+        WorkflowCommand::Review(ReviewCommand::CompleteReviewGroup {
+            queue_path,
+            group_id,
+        }) => Ok(serde_json::to_string(&review_work::complete_group(
+            &absolute(queue_path)?,
+            &group_id,
+            clock,
+        )?)?),
+        WorkflowCommand::Review(ReviewCommand::SetReviewAssessment {
+            queue_path,
+            inventory_path,
+            file_groups_path,
+            assessment_path,
+        }) => Ok(serde_json::to_string(
+            &review_work::set_assessment_from_file(
+                &absolute(queue_path)?,
+                &absolute(inventory_path)?,
+                &absolute(file_groups_path)?,
+                &absolute(assessment_path)?,
+                clock,
+            )?,
+        )?),
+        WorkflowCommand::Review(ReviewCommand::CompleteReviewBatch {
+            queue_path,
+            inventory_path,
+            file_groups_path,
+            artifact_path,
+            batch_path,
+        }) => Ok(serde_json::to_string(
+            &review_work::complete_batch_from_file(
+                &absolute(queue_path)?,
+                &absolute(inventory_path)?,
+                &absolute(file_groups_path)?,
+                &absolute(artifact_path)?,
+                &absolute(batch_path)?,
+                clock,
+            )?,
+        )?),
+        WorkflowCommand::Review(ReviewCommand::FailReviewWorker { queue_path, reason }) => {
+            Ok(serde_json::to_string(&review_work::set_failure(
+                &absolute(queue_path)?,
+                &reason,
+                clock,
+            )?)?)
+        }
+        WorkflowCommand::Review(ReviewCommand::ValidateReviewWork {
+            manifest_path,
+            artifact_directory,
+        }) => Ok(serde_json::to_string(&review_work::validate(
+            &absolute(manifest_path)?,
+            &absolute(artifact_directory)?,
+            clock,
+        )?)?),
+        WorkflowCommand::Worker(WorkerCommand::WorkerAssignment {
+            phase,
+            session_state,
+            scope_path,
+            output_directory,
+            skill_root,
+            manifest_path,
+            reviewer_id,
+            context_path,
+            resume,
+            repository_instructions,
+            include_pre_existing,
+        }) => {
+            let skill_root = absolute(skill_root)?;
+            let manifest_path = manifest_path.map(absolute).transpose()?;
+            let context_path = context_path.map(absolute).transpose()?;
+            let result = worker_input::create_assignment(
+                &worker_input::AssignmentOptions {
+                    phase: &phase,
+                    session_state: &absolute(session_state)?,
+                    scope_path: &absolute(scope_path)?,
+                    output_directory: &absolute(output_directory)?,
+                    skill_root: &skill_root,
+                    manifest_path: manifest_path.as_deref(),
+                    reviewer_id: reviewer_id.as_deref(),
+                    context_path: context_path.as_deref(),
+                    resume,
+                    repository_instructions,
+                    include_pre_existing,
+                },
+                clock,
+            )?;
+            Ok(serde_json::to_string(&result)?)
+        }
+        WorkflowCommand::Worker(WorkerCommand::WorkerDocument {
+            assignment_path,
+            document_id,
+            offset,
+        }) => Ok(serde_json::to_string(&worker_input::read_document(
+            &absolute(assignment_path)?,
+            &document_id,
+            offset,
+            clock,
+        )?)?),
+        WorkflowCommand::Worker(WorkerCommand::Render { request_path }) => {
             let bytes = read_bytes(&absolute(request_path)?, clock)?
                 .ok_or_else(|| fail("invalidInput", "Rendering request is missing"))?;
             Ok(serde_json::to_string(&markdown::render_json(&bytes)?)?)
         }
-        WorkflowCommand::RenderMarkdownFiles { request_path } => {
+        WorkflowCommand::Worker(WorkerCommand::RenderMarkdownFiles { request_path }) => {
             let bytes = read_bytes(&absolute(request_path)?, clock)?
                 .ok_or_else(|| fail("invalidInput", "Rendering request is missing"))?;
             Ok(serde_json::to_string(&markdown::render_files_json(
                 &bytes, clock,
             )?)?)
         }
-        WorkflowCommand::ResolveAnchor { request_path } => Ok(serde_json::to_string(
-            &anchors::resolve_request_path(&absolute(request_path)?, clock)?,
-        )?),
-        WorkflowCommand::AuditAddDecisions {
-            path,
-            plan_path,
-            audit_feedback_path,
-            policy_classification,
-            recorded_utc,
-        } => {
-            let audit_feedback_path = audit_feedback_path.map(absolute).transpose()?;
-            Ok(serde_json::to_string(&audit::add_decisions(
-                &absolute(path)?,
-                &absolute(plan_path)?,
-                audit_feedback_path.as_deref(),
-                policy_classification,
-                &recorded_utc,
+        WorkflowCommand::Worker(WorkerCommand::ValidateOverview { path, context_path }) => {
+            Ok(serde_json::to_string(&overview_validation::validate(
+                &path,
+                context_path.as_deref(),
+                &ss_ai_review::validate_overview_structure,
                 clock,
             )?)?)
         }
-        WorkflowCommand::AuditPollClassification {
+        WorkflowCommand::Worker(WorkerCommand::PrepareMarkdown {
+            path,
+            output_directory,
+            combined_path,
+            audit_document_path,
+            finding_id,
+            destination,
+            context_path,
+            overview_path,
+        }) => Ok(serde_json::to_string(&markdown_preparation::prepare(
+            &markdown_preparation::Options {
+                path: &path,
+                output_directory: &output_directory,
+                combined_path: combined_path.as_deref(),
+                audit_document_path: audit_document_path.as_deref(),
+                finding_ids: &finding_id,
+                destination: &destination,
+                context_path: context_path.as_deref(),
+                overview_path: overview_path.as_deref(),
+            },
+            clock,
+        )?)?),
+        WorkflowCommand::Worker(WorkerCommand::ResolveAnchor { request_path }) => {
+            Ok(serde_json::to_string(&anchors::resolve_request_path(
+                &absolute(request_path)?,
+                clock,
+            )?)?)
+        }
+        WorkflowCommand::Audit(AuditCommand::AuditAddDecisions {
+            path,
+            plan_path,
+            item_path,
+            audit_feedback_path,
+            policy_classification,
+            recorded_utc,
+        }) => {
+            let audit_feedback_path = audit_feedback_path.map(absolute).transpose()?;
+            let path = absolute(path)?;
+            let result = match (plan_path, item_path) {
+                (Some(plan), None) => audit::add_decisions(
+                    &path,
+                    &absolute(plan)?,
+                    audit_feedback_path.as_deref(),
+                    policy_classification,
+                    &recorded_utc,
+                    clock,
+                )?,
+                (None, Some(item)) => audit::add_decision(
+                    &path,
+                    &absolute(item)?,
+                    audit_feedback_path.as_deref(),
+                    policy_classification,
+                    &recorded_utc,
+                    clock,
+                )?,
+                _ => return Err(fail("invalidInput", "Specify one decision input")),
+            };
+            Ok(serde_json::to_string(&result)?)
+        }
+        WorkflowCommand::Audit(AuditCommand::AuditPollClassification {
             artifact_path,
             decisions_path,
-        } => Ok(serde_json::to_string(&audit::poll_classification(
+        }) => Ok(serde_json::to_string(&audit::poll_classification(
             &absolute(artifact_path)?,
             &absolute(decisions_path)?,
             clock,
         )?)?),
-        WorkflowCommand::AuditAddFeedback {
+        WorkflowCommand::Audit(AuditCommand::AuditAddFeedback {
             path,
             findings_path,
             response_id,
             finding_id,
             text_path,
-        } => {
+        }) => {
             audit::add_feedback(
                 &absolute(path)?,
                 &absolute(findings_path)?,
@@ -607,26 +1581,26 @@ where
                 "status": "Recorded", "findingId": finding_id, "responseId": response_id
             }))?)
         }
-        WorkflowCommand::AuditGetFeedback { path, finding_id } => Ok(serde_json::to_string(
-            &audit::get_feedback(&absolute(path)?, &finding_id, clock)?,
-        )?),
-        WorkflowCommand::AuditTestMergeApproval {
+        WorkflowCommand::Audit(AuditCommand::AuditGetFeedback { path, finding_id }) => Ok(
+            serde_json::to_string(&audit::get_feedback(&absolute(path)?, &finding_id, clock)?)?,
+        ),
+        WorkflowCommand::Audit(AuditCommand::AuditTestMergeApproval {
             path,
             pull_request_url,
             source_commit,
-        } => Ok(serde_json::to_string(&audit::test_merge_approval(
+        }) => Ok(serde_json::to_string(&audit::test_merge_approval(
             &absolute(path)?,
             &pull_request_url,
             &source_commit,
             clock,
         )?)?),
-        WorkflowCommand::AuditSetMergeApproval {
+        WorkflowCommand::Audit(AuditCommand::AuditSetMergeApproval {
             path,
             context_path,
             approve,
             carry_forward,
             previous_context_path,
-        } => {
+        }) => {
             let context_path = absolute(context_path)?;
             let previous_context_path = previous_context_path.map(absolute).transpose()?;
             let result = audit::set_merge_approval(
@@ -639,13 +1613,13 @@ where
             )?;
             Ok(serde_json::to_string(&result)?)
         }
-        WorkflowCommand::AuditSetMergeApprovalValues {
+        WorkflowCommand::Audit(AuditCommand::AuditSetMergeApprovalValues {
             path,
             context_path,
             approve,
             carry_forward,
             previous_context_path,
-        } => {
+        }) => {
             let previous_context_path = previous_context_path.map(absolute).transpose()?;
             let result = audit::set_merge_approval_from_files(
                 &absolute(path)?,
@@ -657,7 +1631,7 @@ where
             )?;
             Ok(serde_json::to_string(&result)?)
         }
-        WorkflowCommand::Approved { command } => match command {
+        WorkflowCommand::Audit(AuditCommand::Approved { command }) => match command {
             ApprovedCommand::Build {
                 path,
                 decisions_path,
@@ -687,19 +1661,19 @@ where
                 Ok(serde_json::to_string(&json!({"status": "Valid"}))?)
             }
         },
-        WorkflowCommand::PlanInitialize { kind, path } => {
+        WorkflowCommand::Finding(FindingCommand::PlanInitialize { kind, path }) => {
             let path = absolute(path)?;
             workflow_plan::initialize(kind.native(), &path, clock)?;
             Ok(serde_json::to_string(&json!({
                 "status": "Created", "path": path, "kind": kind.name()
             }))?)
         }
-        WorkflowCommand::PlanAppend {
+        WorkflowCommand::Finding(FindingCommand::PlanAppend {
             kind,
             path,
             item_path,
             replace_index,
-        } => {
+        }) => {
             let path = absolute(path)?;
             let item_path = absolute(item_path)?;
             workflow_plan::append(kind.native(), &path, &item_path, replace_index, clock)?;
@@ -707,14 +1681,14 @@ where
                 "status": "Recorded", "path": path, "kind": kind.name()
             }))?)
         }
-        WorkflowCommand::InitializeFinding {
+        WorkflowCommand::Finding(FindingCommand::InitializeFinding {
             output_directory,
             reviewer_id,
             focus_area,
             force,
             resume,
             queue_path,
-        } => {
+        }) => {
             let artifact_path = absolute(output_directory)?.join(format!("{reviewer_id}.json"));
             let (document, resumed_existing) = match queue_path {
                 Some(queue_path) => {
@@ -745,13 +1719,13 @@ where
                 "findingCount": count, "resumedExisting": resumed_existing
             }))?)
         }
-        WorkflowCommand::AddFinding {
+        WorkflowCommand::Finding(FindingCommand::AddFinding {
             artifact_path,
             finding_path,
             context_path,
             origin,
             source_id,
-        } => {
+        }) => {
             let artifact_path = absolute(artifact_path)?;
             let finding_path = absolute(finding_path)?;
             let context_path = context_path.map(absolute).transpose()?;
@@ -767,10 +1741,10 @@ where
                 "artifactPath": artifact_path, "findingId": finding_id
             }))?)
         }
-        WorkflowCommand::CompleteFinding {
+        WorkflowCommand::Finding(FindingCommand::CompleteFinding {
             artifact_path,
             queue_path,
-        } => {
+        }) => {
             let artifact_path = absolute(artifact_path)?;
             let document = findings::complete(&artifact_path, &absolute(queue_path)?, clock)?;
             let count = document
@@ -785,20 +1759,23 @@ where
                 "artifactPath": artifact_path, "findingCount": count, "status": status
             }))?)
         }
-        WorkflowCommand::ValidateCandidates { path, index_path } => {
+        WorkflowCommand::Finding(FindingCommand::ValidateCandidates { path, index_path }) => {
             let count =
                 findings::validate_candidates(&absolute(path)?, &absolute(index_path)?, clock)?;
             Ok(serde_json::to_string(
                 &json!({"status": "Valid", "clusterCount": count}),
             )?)
         }
-        WorkflowCommand::ValidateFindings { path, reviewer_id } => Ok(serde_json::to_string(
-            &findings::validate_artifacts(&absolute(path)?, &reviewer_id, clock)?,
-        )?),
-        WorkflowCommand::FindingIndex {
+        WorkflowCommand::Finding(FindingCommand::ValidateFindings {
+            path, reviewer_id, ..
+        }) => {
+            let result = findings::validate_artifacts(&absolute(path)?, &reviewer_id, clock)?;
+            Ok(serde_json::to_string(&result)?)
+        }
+        WorkflowCommand::Finding(FindingCommand::FindingIndex {
             reviewer_directory,
             output_path,
-        } => {
+        }) => {
             let result = findings::build_index_result(
                 &absolute(reviewer_directory)?,
                 &absolute(output_path)?,
@@ -809,11 +1786,11 @@ where
                 "findingCount": result.finding_count
             }))?)
         }
-        WorkflowCommand::ConsolidateFindings {
+        WorkflowCommand::Finding(FindingCommand::ConsolidateFindings {
             reviewer_directory,
             output_path,
             plan_path,
-        } => {
+        }) => {
             let plan_path = plan_path.map(absolute).transpose()?;
             let result = findings::consolidate_result(
                 &absolute(reviewer_directory)?,
@@ -826,12 +1803,12 @@ where
                 "mergedCount": result.merged_count, "carriedOverCount": result.carried_over_count
             }))?)
         }
-        WorkflowCommand::UpdateFinding {
+        WorkflowCommand::Finding(FindingCommand::UpdateFinding {
             artifact_path,
             finding_id,
             finding_path,
             plan_path,
-        } => {
+        }) => {
             let artifact_path = absolute(artifact_path)?;
             let updates = match (finding_id, finding_path, plan_path) {
                 (Some(id), Some(path), None) => vec![(id, absolute(path)?)],
@@ -868,11 +1845,11 @@ where
                 &json!({"artifactPath": artifact_path, "updated": ids}),
             )?)
         }
-        WorkflowCommand::RemoveFinding {
+        WorkflowCommand::Finding(FindingCommand::RemoveFinding {
             artifact_path,
             plan_path,
             now_utc,
-        } => {
+        }) => {
             let artifact_path = absolute(artifact_path)?;
             let plan = workflow_plan::read(
                 workflow_plan::PlanKind::Removals,

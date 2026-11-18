@@ -1,12 +1,5 @@
-```powershell
-pwsh -NoProfile -NonInteractive -File "{{SKILL_ROOT}}/scripts/Publish-ReviewTrackerItems.ps1" `
-  -Url "{{TRACKER_URL}}" `
-  -ApprovedFindingsPath "{{SESSION_STATE}}/approved-findings.json" `
-  -ContextPath "{{CONTEXT_PATH}}" `
-  -DiagnosticsPath "{{SESSION_STATE}}/focus-area-cache-diagnostics.json" `
-  -OutputDirectory "{{SESSION_STATE}}" `
-  -WorkItemType "{{WORK_ITEM_TYPE}}" `
-  -AreaPath "{{AREA_PATH}}"
+```text
+ss-ai review publish-tracker-items --url "{{TRACKER_URL}}" --approved-findings-path "{{SESSION_STATE}}/approved-findings.json" --context-path "{{CONTEXT_PATH}}" --diagnostics-path "{{SESSION_STATE}}/focus-area-cache-diagnostics.json" --output-directory "{{SESSION_STATE}}" --work-item-type "{{WORK_ITEM_TYPE}}" --area-path "{{AREA_PATH}}"
 ```
 
 Placeholders to replace:
@@ -21,29 +14,26 @@ Placeholders to replace:
 | `AREA_PATH` | Azure DevOps only, and required there. The area the work items are filed under, rooted at the project name. Omit the parameter entirely for GitHub. |
 | `TENANT` | Optional Azure tenant for the destination. Use the invocation or proactor tenant when the tracker is in the reviewed organization; confirm the tenant if the user chooses a different organization. |
 
-For Azure DevOps, append `-Tenant "{{TENANT}}"` when a tenant was supplied.
+For Azure DevOps, append `--tenant "{{TENANT}}"` when a tenant was supplied.
 
-Omit `-ContextPath` only for an approved review with no pull request binding; the items are then filed without their links back to the code and the discussion.
+Omit `--context-path` only for an approved review with no pull request binding; the items are then filed without their links back to the code and the discussion.
 
-Otherwise the artifact must carry a non-null `reviewedContextHash` and this script requires the matching checked capture before any tracker write, including on continuation. A mismatch requires freshness revalidation and rebuilding the approved set, not substituting an unchecked capture. This requirement is independent of the tracker destination. Use `query-pr-context.md` for any agent lookup of the capture's provenance, URL, or discussion; do not open the capture or replace this path with a query projection. Handle the publication status and errors as phase 9 describes.
+Otherwise the artifact must carry a non-null `reviewedContextHash` and this command requires the matching checked capture before any tracker write, including on continuation. A mismatch requires freshness revalidation and rebuilding the approved set, not substituting an unchecked capture. This requirement is independent of the tracker destination. Use `query-pr-context.md` for any agent lookup of the capture's provenance, URL, or discussion; do not open the capture or replace this path with a query projection. Handle the publication status and errors as phase 9 describes.
 
 Add these only when they apply:
 
 | Parameter | When |
 |-----------|------|
-| `-ParentWorkItemId` | Azure DevOps only. Links every created work item under the named parent. |
-| `-DescriptionField` | Azure DevOps only. Names the large text field the body is written to. The default is `System.Description`, and a type that also carries `Microsoft.VSTS.TCM.ReproSteps` is refused without it, because the Agile and Scrum bug forms show the repro steps and never the description. Ask the user which field their form uses. |
-| `-Platform`, `-Organization`, `-Project`, `-Repository` | Names the tracker where the URL does not, or corrects what it names. `-Platform` with these and no `-Url` names a tracker outright. |
+| `--parent-work-item-id` | Azure DevOps only. Links every created work item under the named parent. |
+| `--description-field` | Azure DevOps only. Names the large text field the body is written to. The default is `System.Description`, and a type that also carries `Microsoft.VSTS.TCM.ReproSteps` is refused without it, because the Agile and Scrum bug forms show the repro steps and never the description. Ask the user which field their form uses. |
+| `--platform`, `--organization`, `--project`, `--repository` | Names the tracker where the URL does not, or corrects what it names. `--platform` with these and no `--url` names a tracker outright. |
 
 ## Continuing a paused run
 
 A run that paused at `needsAdjudication` records the rewrite awaiting a decision under `adjudication` in `tracker-publication-result.json`. Once a person has accepted it, run this same command again with the paused run's own arguments and add:
 
-```powershell
-  -AcceptStoredRewrite `
-  -AcceptWorkItemId "{{ACCEPT_WORK_ITEM_ID}}" `
-  -AcceptExpectedBodyHash "{{ACCEPT_EXPECTED_BODY_HASH}}" `
-  -AcceptStoredBodyHash "{{ACCEPT_STORED_BODY_HASH}}"
+```text
+--accept-stored-rewrite --accept-work-item-id "{{ACCEPT_WORK_ITEM_ID}}" --accept-expected-body-hash "{{ACCEPT_EXPECTED_BODY_HASH}}" --accept-stored-body-hash "{{ACCEPT_STORED_BODY_HASH}}"
 ```
 
 | Placeholder | Description |

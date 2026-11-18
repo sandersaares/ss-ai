@@ -1,0 +1,872 @@
+//! Exercises worker assignment publication and bounded shared reads.
+#![allow(
+    clippy::indexing_slicing,
+    clippy::assertions_on_result_states,
+    reason = "The fixtures use fixed record shapes and assert failures"
+)]
+
+use std::cell::Cell;
+use std::collections::BTreeSet;
+use std::fs;
+use std::path::{Path, PathBuf};
+use std::process::Command;
+use std::sync::mpsc::{self, Receiver, Sender};
+use std::thread;
+use std::time::Duration;
+
+use jiff::Timestamp;
+use ohno::AppError;
+use serde_json::{Value, json};
+use ss_ai_review_context::read_diagnostics;
+use ss_ai_review_workflow::worker_input::{AssignmentOptions, create_assignment, read_document};
+use ss_ai_runtime::{Clock, FileTransaction, classification, fail};
+
+/// Keeps each test's files in an isolated checkout-local directory.
+struct Workspace(PathBuf);
+
+impl Workspace {
+    fn new(name: &str) -> Self {
+        let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join(format!(".worker-input-test-{}-{name}", std::process::id()));
+        #[expect(
+            clippy::create_dir,
+            reason = "Each fixture must fail rather than reuse an existing directory"
+        )]
+        fs::create_dir(&path).unwrap();
+        Self(path)
+    }
+
+    fn put(&self, name: &str, content: impl AsRef<[u8]>) -> PathBuf {
+        let path = self.0.join(name);
+        fs::write(&path, content).unwrap();
+        path
+    }
+}
+
+impl Drop for Workspace {
+    fn drop(&mut self) {
+        fs::remove_dir_all(&self.0).unwrap();
+    }
+}
+
+/// Allows contention retries without real-time sleeps.
+struct TestClock;
+
+impl Clock for TestClock {
+    fn now(&self) -> Timestamp {
+        panic!("Worker input must not use the wall clock")
+    }
+
+    fn wait(&self, _: Duration) -> Result<(), AppError> {
+        thread::yield_now();
+        Ok(())
+    }
+}
+
+/// Reports contention and completion through the same ordered channel.
+enum ReadEvent {
+    Waiting(&'static str),
+    Complete(&'static str, Result<Value, (&'static str, String)>),
+}
+
+/// Stops each concurrent reader at its first observed lock conflict.
+struct ContendedClock {
+    id: &'static str,
+    events: Sender<ReadEvent>,
+    release: Receiver<()>,
+    reported: Cell<bool>,
+}
+
+impl Clock for ContendedClock {
+    fn now(&self) -> Timestamp {
+        panic!("Worker input must not use the wall clock")
+    }
+
+    fn wait(&self, _: Duration) -> Result<(), AppError> {
+        if self.reported.replace(true) {
+            return Err(fail("contention", "Unexpected repeated lock contention"));
+        }
+        self.events
+            .send(ReadEvent::Waiting(self.id))
+            .map_err(|error| fail("io", error.to_string()))?;
+        self.release
+            .recv()
+            .map_err(|error| fail("io", error.to_string()))?;
+        Ok(())
+    }
+}
+
+/// Uses the actual skill tree while keeping every output in the test workspace.
+fn create(workspace: &Workspace, phase: &str, scope: &Path) -> Value {
+    let skill = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../skills/ss-review");
+    create_assignment(
+        &AssignmentOptions {
+            phase,
+            session_state: &workspace.0,
+            scope_path: scope,
+            output_directory: &workspace.0.join("attempt O'Brien"),
+            skill_root: &skill,
+            manifest_path: None,
+            reviewer_id: None,
+            context_path: None,
+            resume: false,
+            repository_instructions: false,
+            include_pre_existing: false,
+        },
+        &TestClock,
+    )
+    .unwrap()
+}
+
+/// Exhausts pages with an operation bound and checks encoded output size.
+fn collect(path: &Path, id: &str) -> String {
+    let mut result = String::new();
+    let mut offset = 0;
+    for _ in 0..100 {
+        let page = read_document(path, id, offset, &TestClock).unwrap();
+        let output = format!("{}\n", serde_json::to_string(&page).unwrap());
+        assert!(output.len() <= 16 * 1024);
+        assert_eq!(page["contentOffset"], offset);
+        result.push_str(page["content"].as_str().unwrap());
+        if page["complete"] == true {
+            assert!(page["nextOffset"].is_null());
+            return result;
+        }
+        let next = usize::try_from(page["nextOffset"].as_u64().unwrap()).unwrap();
+        assert!(next > offset);
+        offset = next;
+    }
+    panic!("Document exceeded bounded fixture page count")
+}
+
+#[test]
+fn exact_unicode_pages_and_native_dispatch() {
+    let workspace = Workspace::new("unicode");
+    let expected = format!(
+        "{}{}{}",
+        "quoted \"\\\n🙂".repeat(2200),
+        "x".repeat(25000),
+        "😀"
+    );
+    let scope = workspace.put("scope.md", &expected);
+    let result = create(&workspace, "fileGroups", &scope);
+    let assignment_path = Path::new(result["assignmentPath"].as_str().unwrap());
+    let dispatch = result["dispatchPrompt"].as_str().unwrap();
+    let path = assignment_path.to_str().unwrap();
+    let powershell = format!(
+        "ss-ai workflow worker-document --assignment-path '{}' --document-id '{{{{DOCUMENT_ID}}}}' --offset 0",
+        path.replace('\'', "''")
+    );
+    let bash = format!(
+        "ss-ai workflow worker-document --assignment-path '{}' --document-id '{{{{DOCUMENT_ID}}}}' --offset 0",
+        path.replace('\'', "'\\''")
+    );
+    assert!(dispatch.lines().any(|line| line == powershell));
+    assert!(dispatch.lines().any(|line| line == bash));
+    assert!(dispatch.contains("$PSNativeCommandUseErrorActionPreference = $true"));
+    assert!(dispatch.contains("```bash\nset -e\n"));
+    assert!(
+        dispatch.find("Apply this recovery policy").unwrap()
+            < dispatch.find("ss-ai workflow worker-document").unwrap()
+    );
+    assert!(
+        dispatch.find("[Console]::OutputEncoding").unwrap()
+            < dispatch.find("ss-ai workflow worker-document").unwrap()
+    );
+    assert_eq!(collect(assignment_path, "scope"), expected);
+    let data = collect(assignment_path, "workflowData");
+    let skill = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../skills/ss-review");
+    let expected_data = format!(
+        "{}\n\n{}",
+        fs::read_to_string(skill.join("workflow-data.md")).unwrap(),
+        fs::read_to_string(skill.join("data-guides/file-groups.md")).unwrap()
+    )
+    .replace("\r\n", "\n");
+    assert_eq!(data, expected_data);
+    let prompt = collect(assignment_path, "prompt");
+    assert!(prompt.contains("Primary orchestration, publication, and every human decision gate"));
+    assert!(!prompt.contains("{{SKILL_ROOT}}"));
+}
+
+#[test]
+fn each_phase_registers_only_its_required_workflow_guidance() {
+    let workspace = Workspace::new("phase-guidance");
+    let scope = workspace.put("scope.md", "Review the assigned scope.");
+    workspace.put("references.md", "references");
+    workspace.put("content-overview.md", "overview");
+    let focus = workspace.put("focus.md", "focus guidance");
+    let queue = workspace.put("queue.json", "prepared queue");
+    let artifact = workspace.put("artifact.json", "prepared findings");
+    let hash = "A".repeat(64);
+    let manifest = json!({
+        "schemaVersion": 1,
+        "inventoryPath": workspace.0.join("inventory.json"),
+        "fileGroupsPath": workspace.0.join("groups.json"),
+        "focusAreaQueuePath": workspace.0.join("focus-queue.json"),
+        "repositoryRoot": workspace.0,
+        "snapshot": {"inventorySha256": hash, "fileGroupsSha256": hash},
+        "reviewers": [{
+            "reviewerId": "focus-001", "focusArea": focus,
+            "fileGroupQueuePath": queue, "dispatch": "review",
+            "focusAreaSha256": hash, "artifactPath": artifact
+        }]
+    });
+    let manifest = workspace.put("manifest.json", serde_json::to_vec(&manifest).unwrap());
+    let skill = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../skills/ss-review");
+    let common = fs::read_to_string(skill.join("workflow-data.md")).unwrap();
+    let guides = [
+        "data-guides/file-groups.md",
+        "data-guides/focus-areas.md",
+        "data-guides/review-coverage.md",
+    ];
+
+    for (phase, guide, expected_ids) in [
+        ("references", None, &["prompt", "scope"][..]),
+        ("overview", None, &["prompt", "scope", "references"][..]),
+        (
+            "fileGroups",
+            Some(guides[0]),
+            &["prompt", "scope", "workflowData"][..],
+        ),
+        (
+            "focusAreas",
+            Some(guides[1]),
+            &["prompt", "scope", "workflowData"][..],
+        ),
+        (
+            "review",
+            Some(guides[2]),
+            &[
+                "prompt",
+                "scope",
+                "workflowData",
+                "references",
+                "focusArea",
+                "overview",
+            ][..],
+        ),
+    ] {
+        let is_review = phase == "review";
+        let result = create_assignment(
+            &AssignmentOptions {
+                phase,
+                session_state: &workspace.0,
+                scope_path: &scope,
+                output_directory: &workspace.0.join(format!("attempt-{phase}")),
+                skill_root: &skill,
+                manifest_path: is_review.then_some(manifest.as_path()),
+                reviewer_id: is_review.then_some("focus-001"),
+                context_path: None,
+                resume: false,
+                repository_instructions: false,
+                include_pre_existing: false,
+            },
+            &TestClock,
+        )
+        .unwrap();
+        let assignment = Path::new(result["assignmentPath"].as_str().unwrap());
+        let record: Value = serde_json::from_slice(&fs::read(assignment).unwrap()).unwrap();
+        let ids: BTreeSet<_> = record["documents"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|document| document["id"].as_str().unwrap())
+            .collect();
+        assert_eq!(ids, expected_ids.iter().copied().collect(), "{phase}");
+        if let Some(guide) = guide {
+            let selected = fs::read_to_string(skill.join(guide)).unwrap();
+            let expected = format!("{common}\n\n{selected}").replace("\r\n", "\n");
+            let data = collect(assignment, "workflowData");
+            assert_eq!(data, expected, "{phase}");
+            for other in guides.into_iter().filter(|other| *other != guide) {
+                let irrelevant = fs::read_to_string(skill.join(other))
+                    .unwrap()
+                    .replace("\r\n", "\n");
+                assert!(!data.contains(&irrelevant), "{phase} included {other}");
+            }
+        } else {
+            assert!(read_document(assignment, "workflowData", 0, &TestClock).is_err());
+        }
+    }
+}
+
+#[cfg(unix)]
+#[test]
+#[cfg_attr(miri, ignore = "requires an isolated native subprocess")]
+fn bash_dispatch_stops_after_reader_failure() {
+    let workspace = Workspace::new("bash-reader-failure");
+    let scope = workspace.put("scope.md", "scope");
+    let result = create(&workspace, "fileGroups", &scope);
+    let dispatch = result["dispatchPrompt"].as_str().unwrap();
+    let block = dispatch
+        .split_once("```bash\n")
+        .unwrap()
+        .1
+        .split_once("\n```")
+        .unwrap()
+        .0;
+    let script = format!("ss-ai() {{ return 1; }}\n{block}\nprintf 'dependent command ran'");
+    let output = Command::new("bash").arg("-c").arg(script).output().unwrap();
+    assert!(!output.status.success());
+    assert!(output.stdout.is_empty());
+}
+
+#[test]
+fn pull_request_assignment_registers_native_query_recipe() {
+    let workspace = Workspace::new("query-recipe");
+    let scope = workspace.put("scope.md", "Review the pull request.");
+    let capture = workspace.put(
+        "capture.json",
+        include_bytes!("../../../tests/fixtures/ss-review-query-capture.json"),
+    );
+    let skill = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../skills/ss-review");
+    let result = create_assignment(
+        &AssignmentOptions {
+            phase: "references",
+            session_state: &workspace.0,
+            scope_path: &scope,
+            output_directory: &workspace.0.join("attempt"),
+            skill_root: &skill,
+            manifest_path: None,
+            reviewer_id: None,
+            context_path: Some(&capture),
+            resume: false,
+            repository_instructions: false,
+            include_pre_existing: false,
+        },
+        &TestClock,
+    )
+    .unwrap();
+    let assignment = Path::new(result["assignmentPath"].as_str().unwrap());
+    let recipe = collect(assignment, "queryRecipe");
+    assert!(recipe.contains("ss-ai context prepare"));
+    assert!(recipe.contains("ss-ai context read-saved"));
+    assert!(!recipe.contains(".ps1"));
+    assert!(
+        result["dispatchPrompt"]
+            .as_str()
+            .unwrap()
+            .contains("Calling shell contract")
+    );
+}
+
+#[test]
+fn focus_preparation_assignment_preserves_repository_source_mapping() {
+    let workspace = Workspace::new("repository-mapping");
+    let scope = workspace.put("scope.md", "Review the repository.");
+    let skill = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../skills/ss-review");
+    let result = create_assignment(
+        &AssignmentOptions {
+            phase: "focusAreas",
+            session_state: &workspace.0,
+            scope_path: &scope,
+            output_directory: &workspace.0.join("attempt"),
+            skill_root: &skill,
+            manifest_path: None,
+            reviewer_id: None,
+            context_path: None,
+            resume: false,
+            repository_instructions: true,
+            include_pre_existing: false,
+        },
+        &TestClock,
+    )
+    .unwrap();
+    let assignment = Path::new(result["assignmentPath"].as_str().unwrap());
+    let prompt = collect(assignment, "prompt");
+    assert!(prompt.contains("Repository instruction authorization: authorized."));
+    assert!(prompt.contains("`repositoryRoot` entry"));
+    assert!(prompt.contains("`roots` alone does not include selected repository instructions"));
+    assert!(prompt.contains(
+        "Pass the applicable source-root mapping (`roots` entry or `repositoryRoot`) to the worker"
+    ));
+    assert!(
+        prompt.contains("Return the source-root mappings, including `repositoryRoot` when present")
+    );
+    assert!(prompt.contains("the source-root mappings including `repositoryRoot` when present"));
+}
+
+/// Computes the largest fitting page directly, independently of the search.
+#[expect(
+    clippy::arithmetic_side_effects,
+    clippy::string_slice,
+    reason = "The bounded fixture uses character boundaries and small positive counts"
+)]
+fn assert_largest_page(path: &Path, text: &str, offset: usize) {
+    // PowerShell emits its host newline when relaying the native result.
+    let newline_len = if cfg!(windows) { "\r\n" } else { "\n" }.len();
+    let assignment: Value = serde_json::from_slice(&fs::read(path).unwrap()).unwrap();
+    let document = assignment["documents"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|document| document["id"] == "scope")
+        .unwrap();
+    let length = text.encode_utf16().count();
+    let start = text
+        .char_indices()
+        .scan(0, |units, (index, character)| {
+            let current = *units;
+            *units += character.len_utf16();
+            Some((current, index))
+        })
+        .find(|(units, _)| *units == offset)
+        .unwrap()
+        .1;
+    let mut next = offset;
+    let mut expected = None;
+    let mut encoded_content = 0;
+    for (index, character) in text[start..].char_indices() {
+        next += character.len_utf16();
+        let end = start + index + character.len_utf8();
+        let complete = next == length;
+        encoded_content += serde_json::to_string(&character).unwrap().len() - 2;
+        let envelope = json!({
+            "documentId": "scope", "sha256": document["sha256"],
+            "contentOffset": offset, "content": "",
+            "contentLength": length,
+            "nextOffset": if complete { None } else { Some(next) }, "complete": complete
+        });
+        if serde_json::to_vec(&envelope).unwrap().len() + encoded_content + newline_len <= 16 * 1024
+        {
+            expected = Some((end, next, complete));
+        }
+        // The raw suffix already exceeds the entire output budget.
+        if end - start > 16 * 1024 {
+            break;
+        }
+    }
+    let page = read_document(path, "scope", offset, &TestClock).unwrap();
+    let (end, next, complete) = expected.unwrap();
+    assert_eq!(page["documentId"], "scope");
+    assert_eq!(page["sha256"], document["sha256"]);
+    assert_eq!(page["contentOffset"], offset);
+    assert_eq!(page["content"], &text[start..end]);
+    assert_eq!(page["contentLength"], length);
+    assert_eq!(
+        page["nextOffset"],
+        json!(if complete { None } else { Some(next) })
+    );
+    assert_eq!(page["complete"], complete);
+    assert!(serde_json::to_vec(&page).unwrap().len() + newline_len <= 16 * 1024);
+}
+
+#[test]
+fn bounded_pages_match_the_largest_encoded_candidate() {
+    let workspace = Workspace::new("largest-pages");
+    let text = format!(
+        "{}🙂{}{}",
+        "a".repeat(17_000),
+        "\"\\\n".repeat(10_000),
+        "z".repeat(1_000_000)
+    );
+    let scope = workspace.put("scope.md", &text);
+    let result = create(&workspace, "references", &scope);
+    let assignment = Path::new(result["assignmentPath"].as_str().unwrap());
+    // Sample the supplementary character, escaped-to-ASCII transition, and
+    // final character; their UTF-16 offsets also exercise encoded-byte sizing.
+    for offset in [
+        0,
+        16_999,
+        17_000,
+        17_002,
+        47_002,
+        text.encode_utf16().count() - 1,
+    ] {
+        assert_largest_page(assignment, &text, offset);
+    }
+    assert!(read_document(assignment, "scope", 17_001, &TestClock).is_err());
+    assert!(read_document(assignment, "scope", text.encode_utf16().count(), &TestClock).is_err());
+    assert!(read_document(assignment, "scope", usize::MAX, &TestClock).is_err());
+}
+
+#[test]
+#[expect(
+    clippy::string_slice,
+    reason = "The boundary fixture contains only ASCII characters"
+)]
+fn exact_output_limit_includes_the_final_newline() {
+    let workspace = Workspace::new("exact-limit");
+    // Match the platform newline used by the PowerShell compatibility executable.
+    let newline_len = if cfg!(windows) { "\r\n" } else { "\n" }.len();
+    // Find the complete ASCII page whose JSON envelope leaves exactly the budget.
+    let envelope = json!({
+        "documentId": "scope", "sha256": "A".repeat(64), "contentOffset": 0,
+        "content": "", "contentLength": 0, "nextOffset": null, "complete": true
+    });
+    let base = serde_json::to_vec(&envelope).unwrap().len();
+    let length = (1..16 * 1024)
+        .find(|length| base + length + length.to_string().len() - 1 + newline_len == 16 * 1024)
+        .unwrap();
+    let text = "a".repeat(length);
+    let scope = workspace.put("scope.md", &text);
+    let result = create(&workspace, "references", &scope);
+    let assignment = Path::new(result["assignmentPath"].as_str().unwrap());
+    let page = read_document(assignment, "scope", 0, &TestClock).unwrap();
+    assert_eq!(
+        serde_json::to_vec(&page).unwrap().len() + newline_len,
+        16 * 1024
+    );
+    assert_eq!(page["content"], text);
+    assert_eq!(page["complete"], true);
+    // The continuation metadata can make the penultimate page larger than completion.
+    let mut previous = page;
+    previous["content"] = json!(&text[..length - 1]);
+    previous["nextOffset"] = json!(length - 1);
+    previous["complete"] = json!(false);
+    assert!(serde_json::to_vec(&previous).unwrap().len() + newline_len > 16 * 1024);
+}
+
+#[test]
+fn invalid_document_counts_are_rejected_without_changing_the_wire_format() {
+    let workspace = Workspace::new("metadata");
+    let scope = workspace.put("scope.md", "one\ntwo");
+    let result = create(&workspace, "references", &scope);
+    let assignment = Path::new(result["assignmentPath"].as_str().unwrap());
+    let record: Value = serde_json::from_slice(&fs::read(assignment).unwrap()).unwrap();
+    assert_eq!(record["documents"][1]["sizeBytes"], 7);
+    assert_eq!(record["documents"][1]["lineCount"], 2);
+    for key in ["sizeBytes", "lineCount"] {
+        for invalid in [json!(0), json!(-1), json!(null), json!("1")] {
+            let mut modified = record.clone();
+            modified["documents"][1][key] = invalid;
+            fs::write(assignment, serde_json::to_vec(&modified).unwrap()).unwrap();
+            assert!(
+                read_document(assignment, "scope", 0, &TestClock).is_err(),
+                "{key}"
+            );
+        }
+    }
+    fs::write(assignment, serde_json::to_vec(&record).unwrap()).unwrap();
+    assert_eq!(collect(assignment, "scope"), "one\ntwo");
+}
+
+#[test]
+fn invalid_offsets_changed_bytes_and_attempt_reuse_fail() {
+    let workspace = Workspace::new("invalid");
+    let scope = workspace.put("scope.md", "a😀z");
+    let result = create(&workspace, "references", &scope);
+    let assignment = Path::new(result["assignmentPath"].as_str().unwrap());
+    assert!(read_document(assignment, "scope", 2, &TestClock).is_err());
+    assert!(read_document(assignment, "scope", 4, &TestClock).is_err());
+    fs::write(&scope, "a😀x").unwrap();
+    assert!(read_document(assignment, "scope", 0, &TestClock).is_err());
+    let counts = read_diagnostics(
+        &workspace.0.join("attempt O'Brien/input-diagnostics.json"),
+        &TestClock,
+    )
+    .unwrap();
+    assert_eq!(counts["counts"]["documentReadCalls"], 3);
+    assert_eq!(counts["counts"]["firstReadFailures"], 1);
+    let old = fs::read(assignment).unwrap();
+    let skill = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../skills/ss-review");
+    let options = AssignmentOptions {
+        phase: "references",
+        session_state: &workspace.0,
+        scope_path: &scope,
+        output_directory: &workspace.0.join("attempt O'Brien"),
+        skill_root: &skill,
+        manifest_path: None,
+        reviewer_id: None,
+        context_path: None,
+        resume: false,
+        repository_instructions: false,
+        include_pre_existing: false,
+    };
+    assert!(create_assignment(&options, &TestClock).is_err());
+    assert_eq!(old, fs::read(assignment).unwrap());
+    let counts = read_diagnostics(
+        &workspace.0.join("attempt O'Brien/input-diagnostics.json"),
+        &TestClock,
+    )
+    .unwrap();
+    assert_eq!(counts["counts"]["repeatedSetupCalls"], 1);
+}
+
+#[test]
+#[cfg_attr(miri, ignore = "requires a separate process and real file locks")]
+#[cfg_attr(mutants, ignore = "the handshake requires all readers to progress")]
+fn concurrent_reads_preserve_diagnostics() {
+    // Other tests launch processes; isolate lock owners from their fork/exec windows.
+    let output = Command::new(std::env::current_exe().unwrap())
+        .args([
+            "--exact",
+            "concurrent_reads_child",
+            "--ignored",
+            "--nocapture",
+        ])
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(String::from_utf8_lossy(&output.stdout).contains("1 passed"));
+}
+
+#[test]
+#[ignore = "launched by the isolated concurrent read test"]
+#[cfg_attr(miri, ignore = "requires real file locks")]
+#[cfg_attr(mutants, ignore = "the handshake requires all readers to progress")]
+fn concurrent_reads_child() {
+    let workspace = Workspace::new("concurrent");
+    let scope = workspace.put("scope.md", "shared scope");
+    let result = create(&workspace, "fileGroups", &scope);
+    let path = PathBuf::from(result["assignmentPath"].as_str().unwrap());
+    let ids = ["scope", "prompt", "workflowData", "missing"];
+    let diagnostics = workspace.0.join("attempt O'Brien/input-diagnostics.json");
+    let lock = FileTransaction::open(&diagnostics, &TestClock).unwrap();
+    let (events, received) = mpsc::channel();
+    let mut releases = Vec::new();
+    let mut waiting = Vec::new();
+    let mut completed = Vec::new();
+    thread::scope(|scope| {
+        for id in ids {
+            let (release, gate) = mpsc::channel();
+            releases.push((id, release));
+            let events = events.clone();
+            let path = &path;
+            scope.spawn(move || {
+                let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    let clock = ContendedClock {
+                        id,
+                        events: events.clone(),
+                        release: gate,
+                        reported: Cell::new(false),
+                    };
+                    read_document(path, id, 0, &clock)
+                        .map_err(|error| (classification(&error), error.to_string()))
+                }))
+                .unwrap_or_else(|_| Err(("panic", "Reader panicked".to_owned())));
+                events.send(ReadEvent::Complete(id, result)).unwrap();
+            });
+        }
+        drop(events);
+        for _ in ids {
+            match received.recv().unwrap() {
+                ReadEvent::Waiting(id) => waiting.push(id),
+                ReadEvent::Complete(id, result) => completed.push((id, result)),
+            }
+        }
+        drop(lock);
+
+        // All readers overlap while blocked on the same lock. Permit each retry
+        // after the preceding reader finishes so the fake clock cannot exhaust
+        // retries while another reader is descheduled inside its transaction.
+        for (id, release) in releases {
+            if waiting.contains(&id) && release.send(()).is_ok() {
+                match received.recv().unwrap() {
+                    ReadEvent::Complete(id, result) => completed.push((id, result)),
+                    ReadEvent::Waiting(id) => panic!("Unexpected second wait from {id}"),
+                }
+            }
+        }
+    });
+    waiting.sort_unstable();
+    assert_eq!(waiting, ["missing", "prompt", "scope", "workflowData"]);
+    assert_eq!(completed.len(), ids.len());
+    for (id, result) in completed {
+        if id == "missing" {
+            let (category, message) = result.unwrap_err();
+            assert_eq!(category, "invalidInput");
+            assert!(message.contains("Expected one shared document 'missing'"));
+        } else {
+            result.unwrap();
+        }
+    }
+    let counts = read_diagnostics(&diagnostics, &TestClock).unwrap();
+    assert_eq!(counts["counts"]["documentReadCalls"], ids.len());
+    assert_eq!(counts["counts"]["firstReadFailures"], 1);
+}
+
+#[test]
+fn invalid_utf8_is_rejected_before_publication() {
+    let workspace = Workspace::new("invalid-utf8");
+    let scope = workspace.put("scope.md", [0xff]);
+    let skill = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../skills/ss-review");
+    let options = AssignmentOptions {
+        phase: "references",
+        session_state: &workspace.0,
+        scope_path: &scope,
+        output_directory: &workspace.0.join("attempt"),
+        skill_root: &skill,
+        manifest_path: None,
+        reviewer_id: None,
+        context_path: None,
+        resume: false,
+        repository_instructions: false,
+        include_pre_existing: false,
+    };
+    assert!(create_assignment(&options, &TestClock).is_err());
+    assert!(!workspace.0.join("attempt/assignment.json").exists());
+}
+
+#[test]
+fn guidance_removes_only_one_utf8_bom_and_rejects_malformed_bytes() {
+    let workspace = Workspace::new("guidance-bom");
+    let scope = workspace.put("scope.md", "scope");
+    let skill = workspace.0.join("skill");
+    fs::create_dir_all(&skill).unwrap();
+    fs::write(skill.join("prepare-references.md"), "template").unwrap();
+    for (name, bytes, expected) in [
+        ("plain", &b"policy"[..], Some("policy")),
+        ("bom", &b"\xef\xbb\xbfpolicy"[..], Some("policy")),
+        (
+            "double",
+            &b"\xef\xbb\xbf\xef\xbb\xbfpolicy"[..],
+            Some("\u{feff}policy"),
+        ),
+        ("invalid", &b"\xef\xbb\xbf\xff"[..], None),
+    ] {
+        fs::write(skill.join("error-recovery.md"), bytes).unwrap();
+        let output = workspace.0.join(name);
+        let result = create_assignment(
+            &AssignmentOptions {
+                phase: "references",
+                session_state: &workspace.0,
+                scope_path: &scope,
+                output_directory: &output,
+                skill_root: &skill,
+                manifest_path: None,
+                reviewer_id: None,
+                context_path: None,
+                resume: false,
+                repository_instructions: false,
+                include_pre_existing: false,
+            },
+            &TestClock,
+        );
+        if let Some(expected) = expected {
+            let result = result.unwrap();
+            let dispatch = result["dispatchPrompt"].as_str().unwrap();
+            assert!(dispatch.contains(&format!("\n{expected}\n")));
+        } else {
+            assert!(result.is_err());
+            assert!(!output.join("assignment.json").exists());
+        }
+    }
+}
+
+#[test]
+fn review_resumes_prepared_work_and_rejects_excluded_dispatch() {
+    let workspace = Workspace::new("review");
+    let scope = workspace.put("scope.md", "scope");
+    workspace.put("references.md", "references");
+    workspace.put("content-overview.md", "overview");
+    let focus = workspace.put("focus.md", "focus guidance");
+    let queue = workspace.put("queue.json", "prepared queue");
+    let artifact = workspace.put("artifact.json", "prepared findings");
+    let hash = "A".repeat(64);
+    let mut manifest = json!({
+        "schemaVersion": 1,
+        "inventoryPath": workspace.0.join("inventory.json"),
+        "fileGroupsPath": workspace.0.join("groups.json"),
+        "focusAreaQueuePath": workspace.0.join("focus-queue.json"),
+        "repositoryRoot": workspace.0,
+        "snapshot": {"inventorySha256": hash, "fileGroupsSha256": hash},
+        "reviewers": [{
+            "reviewerId": "focus-001", "focusArea": focus,
+            "fileGroupQueuePath": queue, "dispatch": "review",
+            "focusAreaSha256": hash, "artifactPath": artifact
+        }]
+    });
+    let manifest_path = workspace.put("manifest.json", serde_json::to_vec(&manifest).unwrap());
+    let skill = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../skills/ss-review");
+    let attempt = workspace.0.join("review-attempt");
+    let options = AssignmentOptions {
+        phase: "review",
+        session_state: &workspace.0,
+        scope_path: &scope,
+        output_directory: &attempt,
+        skill_root: &skill,
+        manifest_path: Some(&manifest_path),
+        reviewer_id: Some("focus-001"),
+        context_path: None,
+        resume: false,
+        repository_instructions: false,
+        include_pre_existing: false,
+    };
+    let result = create_assignment(&options, &TestClock).unwrap();
+    let assignment = Path::new(result["assignmentPath"].as_str().unwrap());
+    let record: Value = serde_json::from_slice(&fs::read(assignment).unwrap()).unwrap();
+    assert_eq!(record["resume"], true);
+    let prompt = collect(assignment, "prompt");
+    assert!(prompt.lines().any(|line| line == "RESUME_FLAG: --resume"));
+    assert!(!prompt.contains("RESUME_FLAG: -Resume"));
+    assert_eq!(fs::read(&queue).unwrap(), b"prepared queue");
+    assert_eq!(fs::read(&artifact).unwrap(), b"prepared findings");
+
+    manifest["reviewers"][0]["dispatch"] = json!("excluded");
+    fs::write(&manifest_path, serde_json::to_vec(&manifest).unwrap()).unwrap();
+    let excluded_attempt = workspace.0.join("excluded-attempt");
+    let excluded = AssignmentOptions {
+        output_directory: &excluded_attempt,
+        ..options
+    };
+    assert!(create_assignment(&excluded, &TestClock).is_err());
+    assert!(!excluded_attempt.join("assignment.json").exists());
+    assert_eq!(fs::read(queue).unwrap(), b"prepared queue");
+    assert_eq!(fs::read(artifact).unwrap(), b"prepared findings");
+}
+
+#[test]
+fn malformed_assignment_roles_are_not_read() {
+    let workspace = Workspace::new("roles");
+    let scope = workspace.put("scope.md", "scope");
+    let result = create(&workspace, "fileGroups", &scope);
+    let assignment = Path::new(result["assignmentPath"].as_str().unwrap());
+    let mut record: Value = serde_json::from_slice(&fs::read(assignment).unwrap()).unwrap();
+    record["documents"]
+        .as_array_mut()
+        .unwrap()
+        .retain(|document| document["id"] != "workflowData");
+    fs::write(assignment, serde_json::to_vec(&record).unwrap()).unwrap();
+    assert!(read_document(assignment, "scope", 0, &TestClock).is_err());
+}
+
+#[test]
+fn missing_nullable_context_is_not_a_valid_assignment() {
+    let workspace = Workspace::new("missing-context");
+    let scope = workspace.put("scope.md", "scope");
+    let result = create(&workspace, "references", &scope);
+    let assignment = Path::new(result["assignmentPath"].as_str().unwrap());
+    let mut record: Value = serde_json::from_slice(&fs::read(assignment).unwrap()).unwrap();
+    record.as_object_mut().unwrap().remove("contextPath");
+    fs::write(assignment, serde_json::to_vec(&record).unwrap()).unwrap();
+    assert!(read_document(assignment, "scope", 0, &TestClock).is_err());
+}
+
+#[test]
+fn malformed_diagnostics_prevent_reading() {
+    let workspace = Workspace::new("bad-diagnostics");
+    let scope = workspace.put("scope.md", "scope");
+    let result = create(&workspace, "references", &scope);
+    let assignment = Path::new(result["assignmentPath"].as_str().unwrap());
+    let diagnostics = workspace.0.join("attempt O'Brien/input-diagnostics.json");
+    fs::write(&diagnostics, "{}").unwrap();
+    assert!(read_document(assignment, "scope", 0, &TestClock).is_err());
+    assert_eq!(fs::read(&diagnostics).unwrap(), b"{}");
+}
+
+#[test]
+fn skill_root_must_be_explicit_and_absolute() {
+    let workspace = Workspace::new("skill-root");
+    let scope = workspace.put("scope.md", "scope");
+    let options = AssignmentOptions {
+        phase: "references",
+        session_state: &workspace.0,
+        scope_path: &scope,
+        output_directory: &workspace.0.join("attempt"),
+        skill_root: Path::new("skills/ss-review"),
+        manifest_path: None,
+        reviewer_id: None,
+        context_path: None,
+        resume: false,
+        repository_instructions: false,
+        include_pre_existing: false,
+    };
+    assert!(create_assignment(&options, &TestClock).is_err());
+    assert!(!workspace.0.join("attempt/assignment.json").exists());
+}

@@ -1,0 +1,141 @@
+{
+  "target": {
+    "platform": "azureDevOps",
+    "collectionUrl": "https://example.visualstudio.com",
+    "organization": "example",
+    "project": "Example Project",
+    "repository": "example repo",
+    "pullRequestId": 4242,
+    "webUrl": "https://example.visualstudio.com/Example%20Project/_git/example%20repo/pullrequest/4242"
+  },
+  "authenticatedIdentity": {
+    "platform": "azureDevOps",
+    "id": "runner",
+    "displayName": "Runner",
+    "uniqueName": "runner@example.com",
+    "descriptor": "aad.runner",
+    "accountType": null,
+    "kind": "person",
+    "evidence": [
+      "descriptor:aad"
+    ]
+  },
+  "pullRequest": {
+    "id": 4242,
+    "title": "Unicode capture",
+    "description": "Review café — “design” 🤖",
+    "isDraft": false,
+    "author": {
+      "platform": "azureDevOps",
+      "id": "author",
+      "displayName": "Author",
+      "uniqueName": "author@example.com",
+      "descriptor": "aad.author",
+      "accountType": null,
+      "kind": "person",
+      "evidence": [
+        "descriptor:aad"
+      ]
+    },
+    "createdUtc": "2026-08-03T11:44:10.0000000Z",
+    "sourceRef": "refs/heads/topic",
+    "targetRef": "refs/heads/main",
+    "reviewedSourceCommit": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "reviewedMergeBaseCommit": "cccccccccccccccccccccccccccccccccccccccc",
+    "mergeState": {
+      "status": "succeeded",
+      "mergeId": null,
+      "lastMergeSourceCommit": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "lastMergeTargetCommit": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+      "lastMergeCommit": "dddddddddddddddddddddddddddddddddddddddd"
+    }
+  },
+  "reviewers": [],
+  "revisions": [
+    {
+      "id": 2,
+      "createdUtc": "2026-08-04T11:41:20.0000000Z",
+      "reason": "push",
+      "sourceCommit": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "targetCommit": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+      "mergeBaseCommit": "cccccccccccccccccccccccccccccccccccccccc"
+    }
+  ],
+  "threads": [
+    {
+      "id": 101,
+      "url": "https://example.visualstudio.com/Example%20Project/_git/example%20repo/pullrequest/4242?discussionId=101",
+      "publishedUtc": "2026-08-03T12:00:00.0000000Z",
+      "lastUpdatedUtc": "2026-08-03T12:30:00.0000000Z",
+      "eventUtc": "2026-08-03T12:00:00.0000000Z",
+      "rawStatus": "active",
+      "resolution": "active",
+      "kind": "text",
+      "isOutdated": false,
+      "context": {
+        "filePath": "src/café.rs",
+        "side": "right",
+        "startLine": 4,
+        "endLine": 5,
+        "originalStartLine": null,
+        "originalEndLine": null
+      },
+      "anchorKey": null,
+      "properties": {},
+      "openingCommentId": 1,
+      "decision": null,
+      "comments": [
+        {
+          "id": 1,
+          "url": "https://example.visualstudio.com/Example%20Project/_git/example%20repo/pullrequest/4242?discussionId=101",
+          "parentId": null,
+          "author": {
+            "platform": "azureDevOps",
+            "id": "human",
+            "displayName": "Reviewer",
+            "uniqueName": "reviewer@example.com",
+            "descriptor": "aad.human",
+            "accountType": null,
+            "kind": "person",
+            "evidence": [
+              "descriptor:aad"
+            ]
+          },
+          "content": "Edited 🤖",
+          "publishedUtc": "2026-08-03T12:00:00.0000000Z",
+          "lastEditedUtc": null,
+          "isEdited": false,
+          "authorship": "indeterminate",
+          "authorshipEvidence": [
+            "identity:descriptor:aad"
+          ]
+        },
+        {
+          "id": 2,
+          "url": "https://example.visualstudio.com/Example%20Project/_git/example%20repo/pullrequest/4242?discussionId=101",
+          "parentId": 1,
+          "author": {
+            "platform": "azureDevOps",
+            "id": "human",
+            "displayName": "Reviewer",
+            "uniqueName": "reviewer@example.com",
+            "descriptor": "aad.human",
+            "accountType": null,
+            "kind": "person",
+            "evidence": [
+              "descriptor:aad"
+            ]
+          },
+          "content": "2026-08-04T10:07:33.677Z",
+          "publishedUtc": "2026-08-03T12:15:00.0000000Z",
+          "lastEditedUtc": null,
+          "isEdited": false,
+          "authorship": "indeterminate",
+          "authorshipEvidence": [
+            "identity:descriptor:aad"
+          ]
+        }
+      ]
+    }
+  ]
+}

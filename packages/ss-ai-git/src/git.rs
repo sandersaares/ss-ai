@@ -17,6 +17,20 @@ pub struct Comparison {
 }
 
 impl Comparison {
+    /// Returns the exact old commit identifier supplied for this comparison.
+    #[inline]
+    #[must_use]
+    pub fn old_commit(&self) -> &str {
+        &self.old_commit
+    }
+
+    /// Returns the exact new commit identifier supplied for this comparison.
+    #[inline]
+    #[must_use]
+    pub fn new_commit(&self) -> &str {
+        &self.new_commit
+    }
+
     /// Returns the changed files in comparison order.
     #[inline]
     #[must_use]
@@ -160,9 +174,13 @@ mod tests {
             calls: RefCell::default(),
             failure: None,
         };
-        let old = "a".repeat(40);
+        let old = "A".repeat(40);
         let new = "b".repeat(40);
-        compare(&process, Path::new("fixture"), &old, &new).unwrap();
+        let comparison = compare(&process, Path::new("fixture"), &old, &new).unwrap();
+        let old_endpoint: &str = comparison.old_commit();
+        let new_endpoint: &str = comparison.new_commit();
+        assert_eq!(old_endpoint, old);
+        assert_eq!(new_endpoint, new);
         let calls = process.calls.borrow();
         let diff = calls.last().unwrap();
         for argument in [

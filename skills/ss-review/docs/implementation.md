@@ -61,7 +61,7 @@ assigned artifact, and reports unresolved
 questions to the primary session. It cannot advance the review globally or
 publish state remotely.
 
-Scripts enforce mechanical invariants that should not depend on language-model
+Native commands enforce mechanical invariants that should not depend on language-model
 judgment: schema validation, state transitions, deterministic rendering,
 comparison, target resolution, and publication. This allocation keeps judgment
 where context is available and keeps safety properties in executable code.
@@ -70,13 +70,13 @@ where context is available and keeps safety properties in executable code.
 
 The orchestrator records explicit self-review selection in its checkpoint and gates side effects before preparation starts. It skips reviewer registration, report-tool setup, and overview publication while retaining inventory and local overview preparation. Analysis and policy classification use the ordinary workers and artifacts. PR scopes retain the pre-audit evidence refresh; local scopes check for content movement before classification.
 
-After classification, `self-review.md` replaces audit and all later phases. It uses `ConvertTo-FindingMarkdown.ps1` directly on the consolidated artifact, not the approved set, because undecided findings are part of this local deliverable. The renderer's existing all-findings path supplies per-finding absolute paths and a combined report without publication anchor checks. Its `tracker` format preserves primary source locations because standalone documents are not attached to a diff; selecting this format performs no tracker publication. `auditFindingIds` partitions the emitted paths for session presentation without mutating decision records or introducing another persisted schema.
+After classification, `self-review.md` replaces audit and all later phases. It uses `ss-ai workflow prepare-markdown` directly on the consolidated artifact, not the approved set, because undecided findings are part of this local deliverable. The renderer's all-findings path supplies per-finding absolute paths and a combined report without publication anchor checks. Its `tracker` format preserves primary source locations because standalone documents are not attached to a diff; selecting this format performs no tracker publication. `auditFindingIds` partitions the emitted paths for session presentation without mutating decision records or introducing another persisted schema.
 
 The mode never creates synthetic human verdicts or merge decisions. It stops on unresolved questions instead of invoking interactive recovery. Learning is outside this route because it has no human audit feedback and must not create remote side effects.
 
 ## Worker input boundary
 
-`Copy-ReviewInstructionSources.ps1` snapshots the skill's built-in focus areas
+`ss-ai workflow snapshot-instructions` snapshots the skill's built-in focus areas
 and recursively discovers `AGENTS.md` and `*.instructions.md` under the roots
 in `COPILOT_CUSTOM_INSTRUCTIONS_DIRS`. The comma-separated list accepts spaces
 inside paths, trims surrounding whitespace, ignores empty entries, and resolves
@@ -86,8 +86,10 @@ path identities ordinally, preserving distinct Unicode spellings without assumin
 filesystem case sensitivity from the operating system.
 
 The snapshot uses `skill/focus-areas.md` and `external/<root-identity>/<relative-path>`.
-Each root identity hashes its absolute configured path, keeping equally named files
-from distinct roots separate and binding cache provenance to the instruction owner.
+Each root identity hashes its absolute configured path, its resolved directory,
+and each selected file's relative path and resolved parent and file locations.
+This keeps equally named files from distinct origins separate and changes the
+identity when a link is retargeted to different guidance.
 The command returns the root-to-prefix mapping for reference expansion and learning.
 Directory links are traversed with ancestry-cycle detection, including installed
 `.github/instructions` links. Discovery excludes the current review's session-state
@@ -108,11 +110,15 @@ lock, so concurrent readers can proceed while snapshot and cache replacement wai
 Authorized repository sources are added separately before lookup. The generation recipe,
 discovery implementation, exact source paths, and source bytes participate in
 the cache key, so incompatible instruction provenance produces a miss.
-Runtime scripts, report templates, and pinned npm manifests stay together in
-the skill tree so installed links and checkout-relative use share assets.
+Selected repository sources use `review-repository/<root-identity>/<relative-path>`
+and the same origin identity. The returned mapping retains the selected spelling
+for reference expansion.
+The shared native executable is discovered through `PATH`. Report templates
+and pinned npm manifests stay in the skill tree, selected through the active
+skill root for both installed links and checkout-relative use.
 
-`New-ReviewWorkerAssignment.ps1` is the common builder for bounded preparation
-and focus-area reviewer tasks. It renders phase instructions, states the
+`ss-ai workflow worker-assignment` builds bounded preparation
+and focus-area reviewer tasks using the active skill's assets. It renders phase instructions, states the
 delegation authorization without granting orchestration or user authority, and
 selects reviewer paths directly from the immutable work manifest. Prepared
 assignments use resume semantics on first dispatch to retain their findings and
@@ -120,7 +126,7 @@ scope exclusions; entirely excluded assignments have no worker. A replacement
 uses a new assignment with the same reviewer and resume semantics; assignment
 creation never resets a finding artifact or journal.
 
-`Get-ReviewWorkerDataGuidePath` selects a canonical guide by phase. Grouping,
+The builder selects a canonical guide by phase. Grouping,
 focus-area preparation, and review receive `workflow-data.md` followed by their
 respective guide from `data-guides/`. The builder snapshots that text with the
 shared writer's LF normalization into one attempt-local `workflowData` document
@@ -170,7 +176,7 @@ diagnostics or establish live-review performance from synthetic tests.
 
 Session state is shared unless a file is explicitly handed to one subagent.
 Logical workflow ownership does not imply that commands run one at a time.
-The common file helpers in `PullRequestModel.ps1` provide atomic publication,
+The native runtime file helpers provide atomic publication,
 replacement-compatible reads, and retained sibling locks. Readers keep the
 complete version they opened and permit replacement of its path. Writers stage
 complete content beside the destination, using replacement for existing files
@@ -235,6 +241,17 @@ assigns one writer per expanded target and merges every referring context,
 including later-discovered referrers and their effect on expanded descendants.
 Shared references retain distinct applicability contexts even when fetched only once.
 
+Source discovery publishes an identity for the exact snapshot, including any
+explicitly authorized repository instructions. Cache lookup checks that identity
+and returns a preparation identity. On a miss, the preparation command copies
+the snapshot into a generation-specific working directory before workers edit
+raw inputs. Workers keep using that directory, so an older attempt cannot write
+into a newer attempt's inputs. Publication checks the preparation and generation
+identities and source digest under the session operation lock, then stages the
+complete artifacts for replacement. A receipt binds the published bytes and
+cache key to that attempt; storage verifies the receipt rather than associating
+surviving artifacts with a later lookup.
+
 Categorization workers use the same versioned JSON map as final assembly.
 The schema and format reference live beside the preparation prompt. Source
 spans use named roots and inclusive line ranges, not heading lookup or copied
@@ -288,7 +305,7 @@ empty finding artifact. Its manifest assignment remains present with
 
 Workers assess the remaining files against every section. Exclusions require
 concrete scope evidence; the orchestrator checks these reasons as well as the
-completion journal. Scripts validate structure and recorded coverage, not the
+completion journal. Commands validate structure and recorded coverage, not the
 truth of a semantic analysis declaration.
 
 The review prompt starts change analysis from the diff and permits targeted
@@ -361,7 +378,7 @@ journal avoids a crash window between queue removal and recording ownership.
 Completion is declared only after assessing every file, analyzing the requested
 scope of non-excluded files with enough context, and persisting every finding and
 scope-exclusion reason. Diffs, targeted reads, and structured-data queries can
-satisfy this declaration without whole-file reads. The scripts check bookkeeping,
+satisfy this declaration without whole-file reads. The commands check bookkeeping,
 not the truth of that declaration.
 
 Workers keep a prose checkpoint with assignment rules,
@@ -404,18 +421,22 @@ their findings.
 per-file recovery path and normal batch persistence using the inventory size
 reported in issue #125. It generates a fresh fixture with deleted and rename-side
 entries, uses bounded groups, and verifies complete coverage after each run.
-Each persistence call launches a fresh PowerShell process; claims run in the
-driver. Initialization is outside the measured interval.
+The driver invokes the native workflow commands for claims and persistence.
+Initialization and final validation are outside the measured interval.
 
-The `coverageMeasurement` output separates persistence process launches,
-committed journal writes (including claims), schema-validation time, and worker
-elapsed time. Schema timing measures the actual `Assert-WorkflowData` calls;
-elapsed time also includes startup, semantic checks, serialization, and I/O.
-Do not interpret the difference as isolated process startup or as a prediction
-of model-review time. Run without concurrent test workloads when comparing
-elapsed values.
+The `coverageMeasurement` output records the native workflow processes the
+driver starts during the interval, the subset for persistence, and elapsed
+time. The elapsed time includes process startup, draft serialization,
+validation, and I/O. It does not isolate startup or predict model-review time.
+Run without concurrent test workloads when comparing elapsed values.
 
 ```powershell
+#Requires -Version 7.6
+
+Set-StrictMode -Version Latest
+$ErrorActionPreference = 'Stop'
+$PSNativeCommandUseErrorActionPreference = $true
+
 .\dev\ss-review\Measure-ReviewCoverage.ps1 -StateDirectory "{{MEASUREMENT_DIRECTORY}}"
 ```
 
@@ -426,17 +447,8 @@ elapsed values.
 The directory must be new. The command retains its fixture for inspection and
 emits the measurements only after both journals pass coverage validation.
 
-Reference measurement on Windows with PowerShell 7.6.6, using a 121-file
-inventory split at the permitted group bound:
-
-| Persistence path | Process launches | Journal writes | Schema validation | Worker elapsed |
-| --- | ---: | ---: | ---: | ---: |
-| Per-file | 128 | 135 | 36.06 s | 133.88 s |
-| Batch | 7 | 14 | 2.05 s | 8.08 s |
-
-Elapsed values depend on the host and its load. The structural guarantee is
-one persistence process and one journal replacement per completed batch, not
-per assessed file; each group also has its own claim write.
+Elapsed values depend on the host and its load. Batch persistence uses one
+process per completed group rather than one per assessed file.
 
 ## Machine-readable handoffs
 
@@ -450,10 +462,8 @@ unknown fields and absent required arrays. Prepared commands own atomic writes
 and lock read-modify-write operations; workers submit typed item drafts.
 Prose remains Markdown where no mechanical consumer requires fields.
 
-Validation uses PowerShell's bundled JSON Schema engine with flat diagnostic
-output. This preserves invalid-field paths below schema references;
-`Test-Json` in PowerShell 7.6 does not traverse every level of its hierarchical
-error output. Schema parsing and evaluation failures remain terminating errors.
+Native validation reports schema and record failures without silently coercing
+malformed input. Parsing and evaluation failures remain terminating errors.
 
 Expansion records connect each target to every referring context by parent ID
 and immutable source spans. Resolving parent chains on demand incorporates late
@@ -571,7 +581,7 @@ identifiers needing human audit; it does not consume work or rewrite files.
 The existing append-only log journals both outcomes: `auto-approved` is a final
 policy verdict, while `needs-audit` is a completed classification with no final
 approval or rejection. Polling skips both, as well as existing user verdicts.
-The worker's recording command uses `-PolicyClassification` to reject other
+The worker's recording command uses `--policy-classification` to reject other
 verdicts and user feedback before writing the log.
 
 Recording the outcome is the only progress operation. Decision-log writes stage
@@ -582,8 +592,8 @@ Replacements start only after their predecessor stops, with the same
 artifact and log paths. Work allocation remains with the designated classification
 worker; shared decision-log updates are serialized independently. The orchestrator verifies exhaustion through
 the polling command rather than trusting the worker's completion report.
-The native workflow operation owns each complete decision-log transaction;
-PowerShell command adapters preserve the existing file-based interfaces.
+The native workflow operation owns each complete decision-log transaction and
+accepts validated file-based plans.
 
 Approved-set construction and audit diagnostics treat `needs-audit` as
 undecided. The human audit uses the polling result's pending identifiers without
@@ -649,7 +659,7 @@ content as it stands do not manufacture a before state.
 For pull request reviews, the orchestrator supplies the current capture and
 the shared `pwsh-calls/query-pr-context.md` recipe. The overview selects URL and
 commit metadata as needed; the orchestrator verifies its link beneath the title
-with the recipe's `metadata -Field pullRequestUrl` query. Neither reads the
+with the recipe's `--query metadata --field pullRequestUrl` query. Neither reads the
 canonical capture directly.
 
 The overview distinguishes observed incompleteness from uncertainty and turns
@@ -668,9 +678,19 @@ The focus-area cache memoizes instruction expansion, not review results.
 
 Its key represents every input capable of changing the generated guidance:
 materialized instruction sources, their stable paths and contents, the
-generation recipe, common and focus-area data guides, format, schema, rendering tools and profile, the cache
-schema, and the external-reference freshness policy. Review files, discussion, and session identity are excluded
-because they do not define the guidance corpus.
+generation recipe, common and focus-area data guides, format, schema, rendering
+tools and profile, the installed native generation implementation's build
+fingerprint, the cache schema, and the external-reference freshness policy.
+Review files, discussion, and session identity are excluded because they do not
+define the guidance corpus.
+
+The build fingerprint covers the native CLI, workflow, context, runtime and Git
+source trees used by generation, their manifests, the workspace manifest and
+lockfile, the review schemas, and the fingerprint build script. Paths and file
+bytes are hashed in deterministic order together with the build target and
+profile. Directory tracking includes added and removed inputs. This binds reuse
+to the implementation even for dirty or same-version builds without depending
+on the installed executable's path.
 
 The default generator profile identifies the model that verifies the final
 focus-area scope semantics. The generation recipe also records the preparatory models.
@@ -736,11 +756,10 @@ queries, registration, authorship enrichment, and publication remain separate
 operations so a read-only command cannot gain a remote or mutating behavior
 through a mistaken option.
 
-Reviewer registration runs through the shared `ss-ai` executable on
-`PATH`, independently of these review-only PowerShell libraries. Its native
-transport and identity operations also serve proactor selection and confirmation.
-The remaining capture, analysis, and publication operations stay within this
-skill. See the utility's [implementation guide](../../../packages/ss-ai/docs/implementation.md)
+Capture, authorship enrichment, local queries, and reviewer registration run
+through the shared `ss-ai` executable on `PATH`. Its native transport and
+identity operations also serve proactor selection and confirmation. Publication
+remains separate. See the utility's [implementation guide](../../../packages/ss-ai/docs/implementation.md)
 for its transaction and provider boundaries.
 
 ## Target resolution
@@ -822,7 +841,7 @@ audited capture remains the evidence to which the user's answer refers.
 
 Freshness runs after synthesis before policy classification, then again after
 audit immediately before publication. Semantic revalidation remains orchestration:
-scripts prove identity and changed evidence, not whether a claim still stands.
+commands prove identity and changed evidence, not whether a claim still stands.
 Pre-audit retirement uses the ordinary removal plan; post-audit retirement uses
 append-only dropped decisions. Approved schema version 2 adds a required
 `reviewedContextHash` (null without PR context) for the checked source, merge
@@ -841,23 +860,16 @@ the publication decision.
 ## Bounded local query boundary
 
 The native `ss-ai context` commands read canonical captures and return bounded
-projections without contacting a provider or modifying evidence. The
-`Read-PullRequestContext.ps1` and `New-PullRequestQueryRequest.ps1` entry points
-adapt typed PowerShell arguments to these operations and propagate failures.
+projections without contacting a provider or modifying evidence.
 Publication and validation keep their full-document readers and path-based
 inputs; query projections are not replacement canonical artifacts.
 
-Workers create requests with typed arguments to `New-PullRequestQueryRequest.ps1`.
+Workers create requests with `ss-ai context prepare`.
 The native operation writes normalized selectors together with both capture
 identities and their paths. Saved requests use the same reading-snapshot identity
 as direct queries, including the authorship policy and applied semantic decisions.
-Literal search text may come from a UTF-8 file;
-typed file arrays bind inside a noninteractive PowerShell program rather than
-JSON inside a shell string. The query recipe distinguishes PowerShell callers
-from Bash callers. Bash-backed tools save the canonical PowerShell example to a
-private script with a file-writing tool and invoke it through `pwsh -NonInteractive -File`.
-This keeps query instructions in one program and prevents Bash from interpreting
-PowerShell syntax. Scalar `-File` invocations can run directly.
+Literal search text may come from a UTF-8 file; file selectors use repeated
+native arguments quoted for the executing shell.
 Creation validates the selected query against its
 capture before publishing the request.
 
@@ -879,11 +891,11 @@ The projection layer exposes these operations:
 
 | Query | Projection |
 | --- | --- |
-| `metadata` | One required allowlisted `-Field`. `reviewers` and `revisions` enumerate individual projected records; other fields expose only the selected value. |
+| `metadata` | One required allowlisted `--field`. `reviewers` and `revisions` enumerate individual projected records; other fields expose only the selected value. |
 | `threads` | Descriptors with IDs, including `openingCommentId`, URLs, canonical kind and resolution, outdated status, anchor, decision, opening-comment excerpt, and comment count; no full bodies. |
-| `comments` | Chronological comments for a selected thread, an exact thread/comment pair, an authorship class, or an explicit file/global selection. Verbatim content and attribution support semantic interpretation. `-IndexOnly` omits bodies and excerpts for allocation and discovery. |
-| `search` | Case-insensitive literal `-Text` matches against complete comment bodies and the description when scope permits; one bounded match excerpt per matching comment. |
-| `changes` | Delta entries comparing required `-ComparePath` with `-Path`, with baseline/current/both references for targeted evidence retrieval. |
+| `comments` | Chronological comments for a selected thread, an exact thread/comment pair, an authorship class, or an explicit file/global selection. Verbatim content and attribution support semantic interpretation. `--index-only` omits bodies and excerpts for allocation and discovery. |
+| `search` | Case-insensitive literal `--text` matches against complete comment bodies and the description when scope permits; one bounded match excerpt per matching comment. Saved requests also accept `--text-path` for text read from a file. |
+| `changes` | Delta entries comparing required `--compare-path` with `--path`, with baseline/current/both references for targeted evidence retrieval. |
 
 Search uses Unicode simple case folding without normalization or
 multi-character expansion. Match offsets refer to the original text in UTF-16
@@ -898,10 +910,10 @@ String-valued fields use `content` slices; non-string and null fields use
 `value`, as does each enumerated reviewer or revision.
 
 Thread, comment, and search selection share file, scope, canonical-kind, and
-resolution filters. Saved requests use a nonempty typed `-Files` array of
-repository-relative paths. The direct query interface also accepts mutually
-exclusive `-FilesJson` and `-FilesPath`. File selection implies file
-filtering; `-Scope global` cannot be combined with it. Scope defaults to
+resolution filters. Saved requests use repeated `--file` arguments for a nonempty
+selection of repository-relative paths. The direct `ss-ai context read` interface
+instead accepts mutually exclusive `--files-json` and `--files-path` inputs.
+File selection implies file filtering; `--scope global` cannot be combined with it. Scope defaults to
 `all`; file and global scopes select anchored and unanchored discussion
 respectively. Path matching normalizes the leading provider slash and slash
 separator, then uses ordinal case-sensitive comparison. Known prior names
@@ -909,7 +921,7 @@ must be supplied explicitly; the query infers no rename history.
 
 All resolution states and outdated threads are included by default. Comments
 require an explicit thread ID, authorship, file, or global selection;
-`-CommentId` also requires `-ThreadId`. Kind or resolution alone cannot enable
+`--comment-id` also requires `--thread-id`. Kind or resolution alone cannot enable
 bulk comment reading. These are selection safeguards, not semantic judgments
 about which discussion a finding must account for.
 
@@ -963,9 +975,9 @@ without comparison; otherwise it contains `threadsAddedCount`,
 `evidenceChanged`, source/merge-base movement flags, and the compared commits. Detailed changes
 are available through the paged `changes` query, not summary arrays.
 
-`Set-CommentAuthorship.ps1` emits only `contextPath`, `applied`, `unchanged`,
+`ss-ai context set-authorship` emits only `contextPath`, `applied`, `unchanged`,
 `indeterminate`, and `isComplete`. Its caller discovers unresolved records with
-`comments -Authorship indeterminate`, not a printed ID list. These summaries
+`--query comments --authorship indeterminate`, not a printed ID list. These summaries
 keep orchestration diagnostics independent of discussion volume.
 
 ## Verbatim fidelity
@@ -1034,7 +1046,7 @@ include the effective overlay and policy, so a completed batch invalidates old
 filtered cursors.
 
 The orchestrator can allocate classification batches from a body-free
-`comments -Authorship indeterminate -IndexOnly` query. Classifiers retrieve
+`--query comments --authorship indeterminate --index-only` query. Classifiers retrieve
 the selected comments by their exact thread/comment ID pairs; index metadata
 alone is never classification evidence.
 
@@ -1054,11 +1066,10 @@ from the captured commit pair and fails if either commit is unavailable.
 
 Service-specific change identities remain adapter data where a platform needs
 them to place comments. The installed `ss-ai git diff` operation owns
-exact Git comparison and path/hunk parsing. The PowerShell adapter maps the
-result into the reviewed-commit model. The native workflow resolver selects
-the finding's changed file and checks its side-specific hunk membership.
-Parser fixtures invoke the same native parser; isolated Rust
-integration tests exercise the real Git process boundary.
+exact Git comparison and path/hunk parsing. Final review publication uses the
+native comparison directly to resolve finding anchors and hunk membership.
+Parser fixtures invoke the same native parser; isolated Rust integration tests
+exercise the real Git process boundary.
 
 ## Finding rendering
 
@@ -1069,8 +1080,8 @@ Pull request comments, tracker items, audit views, and combined documents share
 the same substantive block builder. Destination renderers add only their
 required wrappers. This makes "approved prose equals published prose" an
 architectural property rather than a convention between separate formatters.
-The native workflow renderer supplies this shared prose to the remaining
-PowerShell publication commands through adapters.
+The native workflow renderer supplies this shared prose to final review
+publication and tracker publication.
 
 Each prose section label is separated from its unchanged content by a blank line.
 This lets lists, code fences, and other Markdown blocks begin at the start of a
@@ -1084,28 +1095,38 @@ speaker marker so no adapter can omit or duplicate it.
 ## Publication
 
 Initial overview publication and final finding publication are independent
-operations. The following finding-publication journal does not gate or replay an
-overview attempt.
+operations. The final review's journal does not gate or replay an overview
+attempt. `ss-ai review publish-final-review` owns the native transaction.
+Command composition combines provider operations with validated workflow
+records, shared rendering, and the immutable local Git comparison.
 
 Remote publication is implemented as a guarded sequence:
 
-1. **Plan** resolves targets, approved artifacts, destinations, and rendered
-   bodies. Ordinary planning is read-only. Explicitly discarding a pre-existing
-   GitHub draft is the sole authorized remote mutation at this point and occurs
-   before the journal exists.
-2. **Preflight** checks every locally knowable invariant and asks the adapter
-   whether remote publication can begin.
-3. **Journal** persists the intended operations before the first non-idempotent
-   write.
+1. **Local preparation** validates the approved findings, checked capture,
+   diagnostics and any merge-decision record, resolves anchors against the
+   reviewed commit pair, and renders and validates the plan and summary. A
+   retained sibling lock covers the prior-result check and the publication
+   transaction.
+2. **Live preflight** checks provider state, file identities, authenticated
+   identity and freshly captured evidence before any remote write. Explicitly
+   authorized discard of a pre-existing GitHub draft follows these checks and
+   occurs before the journal exists. An attempted or uncertain discard needs
+   human reconciliation even when no result file exists.
+3. **Journal** persists the intended operations before the review transaction
+   starts, and records each effect's intent before dispatch and outcome after it
+   returns.
 4. **Execute** performs each operation without automatically retrying an
    ambiguous write.
 5. **Verify findings** reads back the finding state attributable to the run
-   before completion.
+   before completion. It checks each finding's body and thread, and checks the
+   file, diff side and line range of anchored comments against the plan.
 6. **Complete** publishes the summary and optional merge verdict only after
-   finding verification succeeds.
-7. **Verify completion** reads back the completed review, including its summary
-   body. The optional merge verdict is sent during completion but is not
-   separately read back.
+   finding verification succeeds. Azure DevOps records an approving vote as a
+   separate journaled effect before the summary.
+7. **Verify completion** reads back the completed review, its summary and
+   findings. GitHub verification checks the expected submitted review state.
+   For an Azure DevOps approval, readback checks the reviewer identity,
+   approving vote and required status against the recorded approval receipt.
 8. **Reopen follow-ups** returns replied-to threads that were not active in the
    original capture to an unresolved state.
 
@@ -1119,7 +1140,16 @@ no draft review, so findings become visible individually and the summary is the
 completion marker. These strategies differ at the adapter boundary while
 sharing the same plan, preflight, journal, and verification model.
 
-Before casting an Azure DevOps approval vote, the adapter reads the reviewer
+GitHub readback uses the thread and comment IDs returned by each successful
+finding write. It queries only those threads and confirms that each review
+comment appears in its receipted thread, avoiding reads of unrelated discussion.
+
+On Azure DevOps, the journal records finding writes and their receipts
+sequentially. Readback verifies each actual comment and the relative order of
+comments within the same thread. Independent threads do not provide a
+review-scoped global comment order, so readback does not establish one.
+
+Before casting an Azure DevOps approval vote, the provider operation reads the reviewer
 collection and locates the running account using the identity matching shared
 with registration. The single-reviewer `PUT` explicitly carries the entry's
 `isRequired` value alongside the vote, because omission makes the reviewer
@@ -1127,8 +1157,8 @@ optional. An absent entry uses the optional default.
 
 Thread reopening is follow-up state rather than proof that findings were
 published. A run whose findings verify but whose thread-state cleanup fails is
-reported as published with outstanding follow-up, preventing a retry from
-duplicating the review.
+reported as published with outstanding follow-up. The command emits its result
+and exits nonzero; the caller must not retry and duplicate the review.
 
 Markdown delivery terminates after deterministic rendering and local
 persistence. With no remote state to reconcile, it needs no publication journal,
@@ -1150,6 +1180,9 @@ Tracker publication uses the same approved findings and deterministic rendering
 but a different transaction model. A tracker item is visible immediately and
 cannot participate in a review-level draft.
 
+`ss-ai review publish-tracker-items` owns local preparation, provider preflight,
+and the retained journal transaction.
+
 All items are rendered and validated before creation begins. Creation then
 proceeds one item at a time, with read-back verification before the next item.
 The journal records each durable item identity and blocks replay after any
@@ -1166,6 +1199,20 @@ A paused body-adjudication state is the only resumable path. Continuation is
 bound to the exact item, approved body, stored body, destination metadata, and
 remaining publication plan. This allows the existing run to continue without
 turning general failure recovery into a duplicate-producing retry mechanism.
+Azure DevOps destination and item URL comparisons use case-insensitive
+identities; verification preserves the original item URL recorded by the journal.
+Continuation also treats Azure area paths as case-insensitive identities and
+preserves their recorded spelling.
+The accepted decision is persisted before a later creation intent. If persisting
+that intent fails, the same decision can continue; once the intent is durable,
+the possible provider write requires reconciliation.
+Native tracker journals use a distinct schema identity and require complete
+native adjudication evidence rather than accepting older record shapes.
+Creation receipts retain validated item coordinates independently of response
+content. The transaction persists these coordinates before readback validates
+the stored prose; failed readback retains reconciliation evidence without
+authorizing creation replay. Azure collection identity compares the origin and
+decoded, case-insensitive path segments.
 
 The review summary is returned to the orchestrator rather than filed as work,
 because it describes the delivery and does not represent an independently
@@ -1192,7 +1239,8 @@ prose. This matches the encoding applied to Markdown work-item fields by
 
 An uncertain transformation is a user decision, not a similarity heuristic
 disguised as approval. The journal records enough exact and summarized evidence
-for that decision, and content hashes ensure the accepted bodies have not
+for that decision. Excerpt offsets use the same normalized, HTML-decoded text
+used by comparison, and content hashes ensure the accepted bodies have not
 changed before continuation.
 
 ## Tracker adapters
@@ -1215,22 +1263,35 @@ acceptable. Those responsibilities remain in the shared model.
 
 ## Initial overview publication
 
-`Publish-ContentOverview.ps1` freezes the preparation overview in session state
-and uses platform adapters separate from review submission. `overview-snapshot.json`
+The native overview publication operation freezes the preparation overview in
+session state and uses platform adapters separate from review submission.
+The recipe supplies its inputs directly to that operation.
+`overview-snapshot.json`
 binds its immutable Markdown to the PR, inspected commits, run identifier, and
-content hash. A separately frozen HTML artifact and its ZIP container serve ADO. The mutable local
-overview and audit documents may subsequently describe newer content.
+content hash. The native boundary carries that validated identity in a frozen
+snapshot type instead of passing arbitrary JSON to provider adapters. ADO
+publication requires a separately prepared state with the rendered HTML and ZIP
+paths and hashes; both states serialize through the existing journal record
+shape. The mutable local overview and audit documents may subsequently describe
+newer content.
+
+Manifest reuse compares filesystem-resolved artifact directories with the
+generation root or its immediate retry directory and retains the recorded path
+spellings. A missing recorded artifact directory is incomplete frozen state,
+not an I/O failure; reuse rejects it without creating the directory.
 
 `overview-publication-result.json` records intent before each non-idempotent
 write and retains returned IDs before verification. Upload is verified before the
 linking comment is created. Known successful attempts are reused; an attempt
 that wrote or may have written remote state is not automatically replayed.
+Transports retry service-confirmed rate-limit refusals until accepted, without
+replaying ambiguous writes.
 The initial comment is not edited and later overview generation does not publish.
-`Publish-ContentOverview.ps1` passes its optional `-CommentPrefix` through the shared
-publication function to `New-OverviewComment`. The builder uses the verified artifact
-URL on either platform and prepends a nonempty prefix verbatim, separated from the
-linked sentence by a blank line. The default prefix is empty so callers explicitly
-select attribution according to their active instructions rather than a hard-coded policy.
+The caller supplies attribution in a UTF-8 file and passes its path to the native operation. The native transaction
+uses the verified artifact URL on either platform and prepends a nonempty prefix
+verbatim, separated from the linked sentence by a blank line. The default prefix
+is empty so callers explicitly select attribution according to their active
+instructions rather than a hard-coded policy.
 Creation and verification use the same complete comment body. Resuming a successful
 publication reuses its receipt even if the caller supplies a different prefix.
 
@@ -1290,7 +1351,7 @@ installations. A complete dependency tree is reused while browser setup can stil
 repair a missing browser download. Checkout-local dependencies are neither used
 nor deleted, and the skill directory requires no write access.
 
-The PowerShell tool check reports missing Pandoc, Node.js, Mermaid CLI, and
+The native tool check reports missing Pandoc, Node.js, Mermaid CLI, and
 Mermaid's browser explicitly, retaining browser-discovery diagnostics. Its JSON
 record always contains `pandoc` and `mermaid` paths, nullable `node` and `browser`
 paths, a `missing` array of tool identifiers, and a `diagnostics` array of strings.
@@ -1304,7 +1365,7 @@ exclusive installation lock throughout the render. Temporary probe files are
 removed on both success and failure.
 
 The primary session obtains installation consent;
-noninteractive scripts never ask, install implicitly, or launch an authentication
+noninteractive commands never ask, install implicitly, or launch an authentication
 prompt. An explicit installer uses a pinned npm lockfile and the browser installer
 from that dependency set. npm engine checking is strict so an unsupported Node.js
 runtime fails installation instead of merely warning. On Windows x64, the installer
@@ -1317,7 +1378,8 @@ request. Browser-install failures also point to the guide's targeted incomplete-
 procedure. Cache deletion remains a separately approved user action with exclusive
 cache access; the installer never infers deletion targets from error text.
 
-On Ubuntu, `-InstallBrowserDependencies` explicitly opts into system package
+On Ubuntu, the caller passes `--install-browser-dependencies` to the native
+installer to explicitly opt into system package
 installation. Under the same tools lock, the installer reads `deb.deps` beside
 the resolved Chrome executable and passes its dependency relations to
 `apt-get satisfy`, following Puppeteer's dependency-installation mechanism.
@@ -1347,8 +1409,13 @@ user's decision is retained for the run to prevent repeated installation prompts
 
 ## HTML report rendering
 
-`ConvertTo-ReviewHtml.ps1` reads canonical Markdown and uses Pandoc's GFM syntax
-tree, transformed in PowerShell. Source raw nodes become visible text/code, while
+The caller supplies the active skill root, shared tools directory and a UTF-8 title file
+to `ss-ai workflow render-review-html`. The output
+directory must be writable; the native process keeps the caller's working directory.
+The native renderer passes the title as a Pandoc `MetaString` in the JSON document
+on standard input, keeping title prose out of renderer command-line arguments.
+The native renderer reads canonical Markdown and uses Pandoc's GFM syntax
+tree. Source raw nodes become visible text/code, while
 only the renderer's Mermaid transformation inserts controlled raw HTML.
 Repository-relative finding references remain visible as labels and destinations
 rather than linking relative to the session directory. External images and

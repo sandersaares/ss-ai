@@ -3,7 +3,7 @@
 Paths in this guide are relative to the skill root.
 
 `schemas/comment-authorship.schema.json` defines each capture's semantic sidecar.
-`Get-PullRequestContext.ps1` creates it, `Set-CommentAuthorship.ps1` records
+`ss-ai context create` creates it, `ss-ai context set-authorship` records
 validated decision batches, and all capture readers validate and consume it.
 Use `pwsh-calls/classify-comment-authorship.md`; never manually edit the sidecar.
 The required fields are `schemaVersion`, `policyVersion`, `captureHash`, and

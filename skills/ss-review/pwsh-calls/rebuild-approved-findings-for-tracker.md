@@ -1,8 +1,5 @@
-```powershell
-pwsh -NoProfile -NonInteractive -File "{{SKILL_ROOT}}/scripts/New-ApprovedFindings.ps1" `
-  -Path "{{SESSION_STATE}}/findings.json" `
-  -DecisionsPath "{{SESSION_STATE}}/audit-decisions.json" `
-  -OutputPath "{{SESSION_STATE}}/approved-findings.json"
+```text
+ss-ai workflow approved build --path "{{SESSION_STATE}}/findings.json" --decisions-path "{{SESSION_STATE}}/audit-decisions.json" --output-path "{{SESSION_STATE}}/approved-findings.json"
 ```
 
 Placeholders to replace:
@@ -13,4 +10,4 @@ Placeholders to replace:
 | `SESSION_STATE` | Session state directory for this review. |
 | `CONTEXT_PATH` | Absolute path to the latest checked capture, when reviewing a pull request. |
 
-For a pull request, append `-ContextPath "{{CONTEXT_PATH}}"` to retain the checked evidence binding and follow-up validation. Omit only `-RepositoryPath`: tracker findings do not need anchors in the PR diff. With no pull request, omit both parameters. Inspect the emitted approval diagnostics and apply [error recovery](../error-recovery.md) to validation errors before continuing; never supply a missing human decision.
+For a pull request, append `--context-path "{{CONTEXT_PATH}}"` to retain the checked evidence binding and follow-up validation. Omit `--repository-path`: tracker findings do not need anchors in the PR diff. With no pull request, omit both parameters. Inspect the emitted approval diagnostics and apply [error recovery](../error-recovery.md) to validation errors before continuing; never supply a missing human decision.

@@ -1,7 +1,5 @@
-```powershell
-pwsh -NoProfile -NonInteractive -File "{{SKILL_ROOT}}/scripts/Test-FindingArtifact.ps1" `
-  -Path "{{SESSION_STATE}}/findings" `
-  -ManifestPath "{{MANIFEST_PATH}}"
+```text
+ss-ai workflow validate-review-work --artifact-directory "{{SESSION_STATE}}/findings" --manifest-path "{{MANIFEST_PATH}}"
 ```
 
 Placeholders to replace:

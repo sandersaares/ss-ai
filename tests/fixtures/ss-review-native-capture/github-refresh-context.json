@@ -1,0 +1,112 @@
+{
+  "target": {
+    "platform": "gitHub",
+    "collectionUrl": null,
+    "organization": "octo",
+    "project": null,
+    "repository": "widget",
+    "pullRequestId": 7,
+    "webUrl": "https://github.com/octo/widget/pull/7"
+  },
+  "authenticatedIdentity": {
+    "platform": "gitHub",
+    "id": "701",
+    "displayName": "runner",
+    "uniqueName": "runner",
+    "descriptor": "U_runner",
+    "accountType": "User",
+    "kind": "person",
+    "evidence": [
+      "accountType:User"
+    ]
+  },
+  "pullRequest": {
+    "id": 7,
+    "title": "Unicode capture",
+    "description": "Review café — “design” 🤖",
+    "isDraft": false,
+    "author": {
+      "platform": "gitHub",
+      "id": "601",
+      "displayName": "author",
+      "uniqueName": "author",
+      "descriptor": "U_author",
+      "accountType": "User",
+      "kind": "person",
+      "evidence": [
+        "accountType:User"
+      ]
+    },
+    "createdUtc": "2026-08-01T08:00:00.0000000Z",
+    "sourceRef": "topic",
+    "targetRef": "main",
+    "reviewedSourceCommit": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "reviewedMergeBaseCommit": "cccccccccccccccccccccccccccccccccccccccc",
+    "mergeState": {
+      "status": "clean",
+      "isMergeable": true,
+      "mergeCommit": "dddddddddddddddddddddddddddddddddddddddd"
+    }
+  },
+  "reviewers": [],
+  "revisions": [],
+  "threads": [
+    {
+      "id": "PRRT_1",
+      "url": "https://github.com/octo/widget/pull/7#discussion_PRRC_1",
+      "publishedUtc": "2026-08-03T12:00:00.0000000Z",
+      "lastUpdatedUtc": "2026-08-03T12:00:00.0000000Z",
+      "eventUtc": "2026-08-03T12:00:00.0000000Z",
+      "rawStatus": "unresolved",
+      "resolution": "active",
+      "kind": "text",
+      "isOutdated": false,
+      "context": {
+        "filePath": "src/café.rs",
+        "side": "right",
+        "startLine": 4,
+        "endLine": 5,
+        "originalStartLine": 4,
+        "originalEndLine": 5
+      },
+      "anchorKey": "PRRT_1",
+      "properties": {
+        "isCollapsed": false,
+        "subjectType": "LINE",
+        "diffSide": "RIGHT",
+        "startDiffSide": "RIGHT",
+        "resolvedBy": null,
+        "minimizedComments": []
+      },
+      "openingCommentId": "PRRC_1",
+      "decision": null,
+      "comments": [
+        {
+          "id": "PRRC_1",
+          "url": "https://github.com/octo/widget/pull/7#discussion_PRRC_1",
+          "parentId": null,
+          "author": {
+            "platform": "gitHub",
+            "id": "501",
+            "displayName": "reviewer",
+            "uniqueName": "reviewer",
+            "descriptor": "U_reviewer",
+            "accountType": "User",
+            "kind": "person",
+            "evidence": [
+              "accountType:User"
+            ]
+          },
+          "content": "Edited 🤖",
+          "publishedUtc": "2026-08-03T12:00:00.0000000Z",
+          "lastEditedUtc": null,
+          "isEdited": false,
+          "authorship": "indeterminate",
+          "authorshipEvidence": [
+            "identity:accountType:User"
+          ]
+        }
+      ]
+    }
+  ]
+}

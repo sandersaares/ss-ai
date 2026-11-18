@@ -24,6 +24,7 @@ ss-ai-runtime = { workspace = true }
 
 [dev-dependencies]
 jiff = { workspace = true }
+static_assertions = { workspace = true }
 
 [lints]
 workspace = true

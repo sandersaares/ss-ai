@@ -39,11 +39,32 @@ permitted.
 
 HTTP replies retain status, normalized headers, and raw bytes until transport
 classifies them. GitHub failures use captured CLI diagnostics and explicit
-rate-limit evidence. Neither path treats an uncertain write as permission to
-try again. Notice and review-selection recovery follow their own workflows.
+rate-limit evidence. GraphQL mutation errors retain bounded, credential-scrubbed
+provider details for recovery. Neither path treats an uncertain write as permission to
+try again; journal reconciliation belongs to the calling workflow.
+GraphQL mutation responses with execution data, conflicting errors, or an
+unreadable nonempty body remain ambiguous even when an HTTP status or diagnostic
+reports a rate-limit refusal.
+When an Azure retry-authorized write receives HTTP 429 and the wait is
+interrupted, its journal retains the refusal because no next attempt began.
+
+GitHub initial overview writes retry a rate-limit refusal only when a failed
+response includes an HTTP refusal status and no partial-write evidence. An
+unreadable nonempty body is uncertain. An interrupted wait retains the refusal
+in the journal; a later uncertain response requires reconciliation instead of
+replay.
 
 Approval publication uses explicit single-attempt methods for both providers,
 including ADO's reviewer PUT. The approval request is the final remote action:
 a successful response finishes the operation, and request errors are reported
 without automatic resend in that attempt. These methods do not wait and replay
 a rate-limit refusal. ADO's vote request has no source-commit precondition.
+
+Final review publication also performs live capture and evidence checks before
+remote writes. An explicitly authorized pre-existing GitHub draft discard is
+the exception to the review journal: it follows preflight but precedes the
+journal. The subsequent transaction persists each effect's intent and outcome,
+distinguishes refusals from ambiguous writes, and requires reconciliation rather
+than replay after a possible effect. Azure DevOps approval is a separate
+journaled reviewer update that preserves `isRequired`; its findings are already
+visible before the summary is posted.

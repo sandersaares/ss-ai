@@ -1,0 +1,1629 @@
+//! Offline command-boundary checks for final review publication.
+#![allow(
+    clippy::indexing_slicing,
+    clippy::assertions_on_result_states,
+    reason = "The fixtures use known record shapes and assert rejected commands"
+)]
+
+use std::cell::{Cell, RefCell};
+use std::collections::BTreeMap;
+use std::env;
+use std::ffi::OsString;
+use std::fs;
+use std::io;
+#[cfg(unix)]
+use std::io::{BufRead, BufReader, Read, Write};
+#[cfg(unix)]
+use std::net::{TcpListener, TcpStream};
+#[cfg(unix)]
+use std::os::unix::fs::PermissionsExt;
+use std::path::{Path, PathBuf};
+use std::process::Command;
+#[cfg(unix)]
+use std::thread;
+use std::time::Duration;
+
+use jiff::Timestamp;
+use ohno::AppError;
+use serde_json::{Value, from_slice, from_str, json, to_vec};
+use sha2::{Digest, Sha256};
+use ss_ai::{Clock, Http, HttpResponse, Process, ProcessOutput, SystemClock, run};
+use ss_ai_review_context::evidence_hash;
+use tempfile::{Builder, TempDir};
+
+const URL: &str = "https://github.com/owner/repo/pull/42";
+
+/// Allows local Git comparisons but records and refuses all provider access.
+#[derive(Default)]
+struct Offline {
+    provider_called: Cell<bool>,
+}
+
+impl Process for Offline {
+    fn execute(&self, program: &str, arguments: &[String], _: &[u8]) -> io::Result<ProcessOutput> {
+        if program != "git" {
+            self.provider_called.set(true);
+            return Err(io::Error::other("offline provider boundary"));
+        }
+        let output = if arguments.iter().any(|arg| arg == "cat-file") {
+            "commit\n"
+        } else if arguments.iter().any(|arg| arg == "diff") {
+            "diff --git a/src/lib.rs b/src/lib.rs\n--- a/src/lib.rs\n+++ b/src/lib.rs\n@@ -1,2 +1,2 @@\n-old\n+new\n context\n"
+        } else {
+            ".git\n"
+        };
+        Ok(ProcessOutput::new(true, output.as_bytes().to_vec(), vec![]))
+    }
+}
+
+impl Http for Offline {
+    fn send(&self, _: &str, _: &str, _: &str, _: Option<&[u8]>) -> Result<HttpResponse, AppError> {
+        self.provider_called.set(true);
+        Err(io::Error::other("offline provider boundary").into())
+    }
+}
+
+/// Keeps inputs and publication state isolated, including Unicode and spaces.
+struct Fixture {
+    directory: TempDir,
+}
+
+impl Fixture {
+    fn new() -> Self {
+        let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../target");
+        fs::create_dir_all(&root).unwrap();
+        let directory = Builder::new()
+            .prefix("final review 雪 ")
+            .tempdir_in(root)
+            .unwrap();
+        let fixture = Self { directory };
+        fs::create_dir_all(fixture.path("repository 雪")).unwrap();
+        let capture = capture();
+        fixture.write("context 雪.json", &capture);
+        fixture.write("approved 雪.json", &approved(&capture, true));
+        fixture.write("diagnostics 雪.json", &json!({}));
+        fixture
+    }
+
+    fn path(&self, name: &str) -> PathBuf {
+        self.directory.path().join(name)
+    }
+
+    fn write(&self, name: &str, value: &Value) {
+        fs::write(self.path(name), to_vec(value).unwrap()).unwrap();
+    }
+
+    /// Uses paths relative to the process cwd without mutating global cwd.
+    fn args(&self) -> Vec<OsString> {
+        let cwd = env::current_dir().unwrap();
+        let mut args: Vec<OsString> = ["ss-ai", "review", "publish-final-review", "--url", URL]
+            .into_iter()
+            .map(Into::into)
+            .collect();
+        for (option, name) in [
+            ("--approved-findings-path", "approved 雪.json"),
+            ("--context-path", "context 雪.json"),
+            ("--diagnostics-path", "diagnostics 雪.json"),
+            ("--repository-path", "repository 雪"),
+            ("--output-directory", "output 雪"),
+        ] {
+            let path = self.path(name);
+            let path = path.strip_prefix(&cwd).unwrap_or(&path);
+            args.push(option.into());
+            args.push(path.as_os_str().to_owned());
+        }
+        args
+    }
+
+    fn merge_arg(&self, args: &mut Vec<OsString>) {
+        args.push("--merge-approval-path".into());
+        args.push(self.path("merge 雪.json").into_os_string());
+    }
+}
+
+/// Provides capture evidence and immutable revisions for binding approvals.
+fn capture() -> Value {
+    json!({
+        "schemaVersion": 3, "platform": "gitHub",
+        "repositoryUrl": "https://github.com/owner/repo",
+        "pullRequestUrl": URL,
+        "target": {"platform":"gitHub", "collectionUrl":null, "organization":"owner",
+            "project":null, "repository":"repo", "pullRequestId":42, "webUrl":URL},
+        "authenticatedIdentity": {"platform":"gitHub", "id":"123", "displayName":"Reviewer",
+            "uniqueName":"reviewer", "descriptor":null, "accountType":null,
+            "kind":"person", "evidence":[]},
+        "pullRequest": {"id":42, "title":"Review 雪", "description":null,
+            "reviewedSourceCommit":"b".repeat(40), "reviewedMergeBaseCommit":"a".repeat(40),
+            "isAuthoredBySelf":false},
+        "reviewers":[], "revisions":[], "threads":[]
+    })
+}
+
+/// Represents audited findings bound to exactly this capture.
+fn approved(context: &Value, with_finding: bool) -> Value {
+    let findings = if with_finding {
+        json!([{"schemaVersion":1, "id":"F", "sourceFindingIds":["F"], "origin":"reviewer",
+            "title":"Finding 雪", "description":"Problem", "reasoning":"Reason",
+            "consequence":"Impact", "recommendedAction":"Fix",
+            "anchor":{"kind":"file","path":"src/lib.rs"}}])
+    } else {
+        json!([])
+    };
+    json!({"schemaVersion":2, "target":context["target"],
+        "reviewedSourceCommit":context["pullRequest"]["reviewedSourceCommit"],
+        "reviewedMergeBaseCommit":context["pullRequest"]["reviewedMergeBaseCommit"],
+        "reviewedContextHash":evidence_hash(context).unwrap(), "findings":findings})
+}
+
+/// Builds an independent merge decision for the captured pull request.
+fn merge(approve: bool) -> Value {
+    json!({"schemaVersion":1, "pullRequestUrl":URL, "approveMerge":approve,
+        "approvedSourceCommit":"b".repeat(40)})
+}
+
+/// Rejects invalid local inputs before crossing either provider boundary.
+fn reject(args: &[OsString], case: &str) {
+    let offline = Offline::default();
+    let result = run(args, &offline, &offline, &SystemClock::default());
+    assert!(
+        result.is_err(),
+        "{case}: expected rejection, got {result:?}"
+    );
+    assert!(
+        !offline.provider_called.get(),
+        "{case}: contacted a provider"
+    );
+}
+
+/// Verifies that a complete fixture can reach the deliberately blocked provider.
+fn reaches_provider(args: &[OsString], case: &str) {
+    let offline = Offline::default();
+    let result = run(args, &offline, &offline, &SystemClock::default());
+    assert!(result.is_err(), "{case}: provider must refuse access");
+    assert!(offline.provider_called.get(), "{case}: {result:?}");
+}
+
+/// Exercises the installed entry point with the same stack budget as other CLI tests.
+fn command() -> Command {
+    #[cfg(target_os = "linux")]
+    {
+        let mut command = Command::new("/bin/sh");
+        command.args([
+            "-c",
+            "ulimit -c 0; ulimit -s 768; exec \"$@\"",
+            "sh",
+            env!("CARGO_BIN_EXE_ss-ai"),
+        ]);
+        command
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        Command::new(env!("CARGO_BIN_EXE_ss-ai"))
+    }
+}
+
+/// Records successful tool exchanges for the real executable's private launchers.
+struct ProcessRecording<'a> {
+    provider: &'a PublicationProvider,
+    root: PathBuf,
+    next: Cell<usize>,
+}
+
+impl Process for ProcessRecording<'_> {
+    fn execute(
+        &self,
+        program: &str,
+        arguments: &[String],
+        input: &[u8],
+    ) -> io::Result<ProcessOutput> {
+        let output = self.provider.execute(program, arguments, input)?;
+        assert!(output.success);
+        let index = self.next.get();
+        self.next.set(index.checked_add(1).unwrap());
+        // Fixed-width names preserve exchange order for repeated identical requests.
+        let exchange = self.root.join(format!("{index:08}"));
+        fs::create_dir_all(&exchange)?;
+        fs::write(exchange.join("arguments"), arguments.join("\0"))?;
+        fs::write(exchange.join("input"), input)?;
+        fs::write(exchange.join("stdout"), &output.stdout)?;
+        fs::write(exchange.join("stderr"), &output.stderr)?;
+        Ok(output)
+    }
+
+    fn isolated_git(&self, _: &Path, arguments: &[String]) -> io::Result<ProcessOutput> {
+        // NativeProcess supplies the directory separately rather than adding -C.
+        self.execute("git", arguments, &[])
+    }
+}
+
+/// Installs the immutable prepared helper without compiling or using ambient tools.
+fn install_replay_tools(directory: &Path) {
+    let record = env::var_os("SS_AI_RUST_TEST_PREREQUISITES")
+        .expect("Run scripts/Invoke-Tests.ps1 -Suite Rust -RustTest final_review_cli");
+    let record: Value = from_slice(&fs::read(record).unwrap()).unwrap();
+    assert_eq!(record["schemaVersion"], 4);
+    assert_eq!(record["status"], "complete");
+    let source = Path::new(record["provider"]["source"]["path"].as_str().unwrap());
+    let executable = Path::new(record["provider"]["executable"]["path"].as_str().unwrap());
+    assert!(source.is_absolute() && executable.is_absolute());
+    let bytes = fs::read(source).unwrap();
+    assert_eq!(bytes, include_bytes!("support/provider.rs"));
+    assert_eq!(
+        format!("{:X}", Sha256::digest(&bytes)),
+        record["provider"]["source"]["sha256"]
+    );
+    assert_eq!(
+        format!("{:X}", Sha256::digest(fs::read(executable).unwrap())),
+        record["provider"]["executable"]["sha256"]
+    );
+    fs::create_dir_all(directory).unwrap();
+    for program in ["git", "gh"] {
+        #[cfg(windows)]
+        {
+            fs::copy(executable, directory.join(format!("{program}.exe"))).unwrap();
+        }
+        #[cfg(not(windows))]
+        {
+            fs::copy(executable, directory.join(program)).unwrap();
+        }
+    }
+}
+
+#[test]
+#[cfg_attr(miri, ignore = "requires a native subprocess")]
+fn executable_emits_json_and_fails_after_published_follow_up_failure() {
+    let fixture = Fixture::new();
+    let mut provider = PublicationProvider::new("github", false);
+    provider.fail_github_reopen = true;
+    provider.responses["reviewThreads"]["data"]["repository"]["pullRequest"]["reviewThreads"]["nodes"]
+        [0]["isResolved"] = json!(true);
+    let mut args = publication_args(&fixture, "github");
+    args.extend(["--now-utc", "2026-08-04T12:00:00Z"].map(OsString::from));
+    let mut capture = recorded("github-expected");
+    capture["threads"][0]["resolution"] = json!("resolved");
+    capture["threads"][0]["rawStatus"] = json!("resolved");
+    fixture.write("context 雪.json", &capture);
+    let mut document = approved(&capture, true);
+    document["findings"][0]["followUp"] = json!({"threadId":"PRRT_1","commentId":"PRRC_1"});
+    fixture.write("approved 雪.json", &document);
+
+    // Generate exchanges through the ordinary publication pipeline, then replay
+    // the same inputs through main to cover its stdout and exit-status contract.
+    let recording = ProcessRecording {
+        provider: &provider,
+        root: fixture.path("exchanges"),
+        next: Cell::new(0),
+    };
+    let result: Value = from_str(&run(&args, &recording, &provider, &FixedClock).unwrap()).unwrap();
+    assert_eq!(result["status"], "publishedWithFollowUpFailure", "{result}");
+    assert_eq!(
+        *provider.writes.borrow(),
+        ["start", "reply", "complete", "reopen"]
+    );
+    fs::remove_file(fixture.path("output 雪/publication-result.json")).unwrap();
+    let tools = fixture.path("tools");
+    install_replay_tools(&tools);
+    let output = command()
+        .env("PATH", &tools)
+        .env("FIXTURE_PROCESS_REPLAY", &recording.root)
+        .args(&args[1..])
+        .output()
+        .unwrap();
+    assert!(
+        output.status.code().is_some_and(|code| code != 0),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let outcome: Value = from_slice(&output.stdout).unwrap();
+    assert_eq!(outcome["status"], "publishedWithFollowUpFailure");
+    assert_eq!(outcome["publishedFindingCount"], 1);
+    assert!(
+        fs::read_dir(&recording.root)
+            .unwrap()
+            .all(|exchange| exchange.unwrap().path().join("consumed").exists())
+    );
+}
+
+#[test]
+#[cfg_attr(miri, ignore = "requires a native subprocess")]
+fn executable_dispatches_on_a_bounded_stack() {
+    let fixture = Fixture::new();
+    let output = command()
+        .current_dir(fixture.directory.path())
+        .env("PATH", fixture.directory.path())
+        .args(["review", "publish-final-review", "--help"])
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let help = String::from_utf8(output.stdout).unwrap();
+    for option in [
+        "--url",
+        "--approved-findings-path",
+        "--context-path",
+        "--diagnostics-path",
+        "--repository-path",
+        "--output-directory",
+        "--merge-approval-path",
+        "--discard-pending-review",
+        "--publish-to-closed-pull-request",
+        "--tenant",
+    ] {
+        assert!(help.contains(option), "missing {option}: {help}");
+    }
+    fs::remove_file(fixture.path("approved 雪.json")).unwrap();
+    let output = command()
+        .current_dir(fixture.directory.path())
+        .env("PATH", fixture.directory.path())
+        .args([
+            "review",
+            "publish-final-review",
+            "--url",
+            URL,
+            "--approved-findings-path",
+            "approved 雪.json",
+            "--context-path",
+            "context 雪.json",
+            "--diagnostics-path",
+            "diagnostics 雪.json",
+            "--repository-path",
+            "repository 雪",
+            "--output-directory",
+            "output 雪",
+        ])
+        .output()
+        .unwrap();
+    assert!(!output.status.success());
+    assert!(output.status.code().is_some());
+    assert!(output.stdout.is_empty());
+    assert!(
+        String::from_utf8_lossy(&output.stderr)
+            .to_lowercase()
+            .contains("approved"),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+#[test]
+#[cfg_attr(miri, ignore = "requires a native subprocess")]
+#[cfg_attr(mutants, ignore = "mutated native subprocesses may block")]
+fn tracker_publication_dispatches_on_a_bounded_stack() {
+    let fixture = Fixture::new();
+    let output = command()
+        .current_dir(fixture.directory.path())
+        .env("PATH", fixture.directory.path())
+        .args(["review", "publish-tracker-items", "--help"])
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let help = String::from_utf8(output.stdout).unwrap();
+    for option in [
+        "--url",
+        "--platform",
+        "--organization",
+        "--project",
+        "--repository",
+        "--approved-findings-path",
+        "--context-path",
+        "--diagnostics-path",
+        "--output-directory",
+        "--work-item-type",
+        "--area-path",
+        "--description-field",
+        "--parent-work-item-id",
+        "--accept-stored-rewrite",
+        "--accept-work-item-id",
+        "--accept-expected-body-hash",
+        "--accept-stored-body-hash",
+        "--tenant",
+    ] {
+        assert!(help.contains(option), "missing {option}: {help}");
+    }
+}
+
+#[test]
+fn valid_records_reach_only_the_offline_provider() {
+    let fixture = Fixture::new();
+    reaches_provider(&fixture.args(), "finding without merge approval");
+    fixture.write("merge 雪.json", &merge(false));
+    let mut args = fixture.args();
+    fixture.merge_arg(&mut args);
+    args.extend(
+        [
+            "--discard-pending-review",
+            "--publish-to-closed-pull-request",
+            "--tenant",
+            "tenant",
+        ]
+        .into_iter()
+        .map(OsString::from),
+    );
+    reaches_provider(&args, "finding with a negative merge decision and options");
+    fixture.write("approved 雪.json", &approved(&capture(), false));
+    fixture.write("merge 雪.json", &merge(true));
+    let mut args = fixture.args();
+    fixture.merge_arg(&mut args);
+    reaches_provider(&args, "empty finding set with merge approval");
+}
+
+#[test]
+fn missing_and_malformed_local_inputs_never_reach_a_provider() {
+    for name in ["context 雪.json", "approved 雪.json", "diagnostics 雪.json"] {
+        let fixture = Fixture::new();
+        fs::remove_file(fixture.path(name)).unwrap();
+        reject(&fixture.args(), &format!("missing {name}"));
+        for bytes in [b"".as_slice(), b"{", b"null", b"1", b"[]"] {
+            fs::write(fixture.path(name), bytes).unwrap();
+            reject(&fixture.args(), &format!("malformed {name}: {bytes:?}"));
+        }
+    }
+    let fixture = Fixture::new();
+    let mut args = fixture.args();
+    fixture.merge_arg(&mut args);
+    reject(&args, "missing merge decision");
+    for bytes in [b"".as_slice(), b"{", b"null", b"true", b"[]", b"{}"] {
+        fs::write(fixture.path("merge 雪.json"), bytes).unwrap();
+        reject(&args, &format!("malformed merge decision: {bytes:?}"));
+    }
+    let mut decision = merge(true);
+    decision["approveMerge"] = json!("true");
+    fixture.write("merge 雪.json", &decision);
+    reject(&args, "merge decision with a non-boolean approval");
+}
+
+#[test]
+fn malformed_record_fields_never_reach_a_provider() {
+    let fixture = Fixture::new();
+    for findings in [json!(null), json!("finding"), json!({}), json!([{}])] {
+        let mut document = approved(&capture(), true);
+        document["findings"] = findings;
+        fixture.write("approved 雪.json", &document);
+        reject(&fixture.args(), "malformed findings");
+    }
+    fixture.write("approved 雪.json", &approved(&capture(), true));
+    fixture.write(
+        "diagnostics 雪.json",
+        &json!({"userInstructionFileCount":-1}),
+    );
+    reject(&fixture.args(), "malformed diagnostics field");
+    fixture.write("diagnostics 雪.json", &json!({}));
+    fs::write(fixture.path("context 雪.json.authorship.json"), b"{").unwrap();
+    reject(&fixture.args(), "malformed capture sidecar");
+}
+
+#[test]
+fn stale_records_and_mismatched_target_never_reach_a_provider() {
+    let fixture = Fixture::new();
+    let mut stale = approved(&capture(), true);
+    stale["reviewedContextHash"] = json!("0".repeat(64));
+    fixture.write("approved 雪.json", &stale);
+    reject(&fixture.args(), "stale capture hash");
+    stale = approved(&capture(), true);
+    stale["reviewedSourceCommit"] = json!("c".repeat(40));
+    fixture.write("approved 雪.json", &stale);
+    reject(&fixture.args(), "stale reviewed commit");
+    fixture.write("approved 雪.json", &approved(&capture(), true));
+    let mut args = fixture.args();
+    args[4] = "https://github.com/owner/other/pull/42".into();
+    reject(&args, "different requested pull request");
+
+    fixture.write("approved 雪.json", &approved(&capture(), false));
+    let mut args = fixture.args();
+    fixture.merge_arg(&mut args);
+    let mut stale_merge = merge(true);
+    stale_merge["approvedSourceCommit"] = json!("c".repeat(40));
+    fixture.write("merge 雪.json", &stale_merge);
+    reject(&args, "stale merge approval");
+    stale_merge = merge(true);
+    stale_merge["pullRequestUrl"] = json!("https://github.com/owner/repo/pull/43");
+    fixture.write("merge 雪.json", &stale_merge);
+    reject(&args, "merge approval for another pull request");
+
+    let mut own_capture = capture();
+    own_capture["pullRequest"]["isAuthoredBySelf"] = json!(true);
+    fixture.write("context 雪.json", &own_capture);
+    fixture.write("approved 雪.json", &approved(&own_capture, false));
+    fixture.write("merge 雪.json", &merge(true));
+    reject(&args, "self-authored pull request");
+}
+
+#[test]
+fn publication_options_do_not_authorize_an_empty_review() {
+    let fixture = Fixture::new();
+    fixture.write("approved 雪.json", &approved(&capture(), false));
+    for options in [
+        &[][..],
+        &["--discard-pending-review"][..],
+        &["--publish-to-closed-pull-request"][..],
+        &[
+            "--discard-pending-review",
+            "--publish-to-closed-pull-request",
+        ][..],
+    ] {
+        let mut args = fixture.args();
+        args.extend(options.iter().map(OsString::from));
+        reject(&args, &format!("no merge decision: {options:?}"));
+        fixture.write("merge 雪.json", &merge(false));
+        fixture.merge_arg(&mut args);
+        reject(&args, &format!("negative merge decision: {options:?}"));
+    }
+}
+
+/// Replays captured provider evidence and records publication effects in memory.
+struct PublicationProvider {
+    responses: Value,
+    github: bool,
+    finding: RefCell<Option<String>>,
+    ado_findings: RefCell<Vec<String>>,
+    ado_replies: RefCell<Vec<String>>,
+    summary: RefCell<Option<String>>,
+    writes: RefCell<Vec<String>>,
+    readbacks: RefCell<Vec<String>>,
+    approval_expected: Cell<bool>,
+    approval_written: Cell<bool>,
+    reverse_replies: Cell<bool>,
+    bad_ado_readback: Cell<Option<&'static str>>,
+    fail_reopen: Cell<bool>,
+    fail_summary: Cell<bool>,
+    journal_path: RefCell<Option<PathBuf>>,
+    journal_snapshots: RefCell<Vec<Value>>,
+    fail_final_readback: bool,
+    pending_review: Cell<bool>,
+    stale_live_commit: Cell<bool>,
+    pull_request_reads: Cell<usize>,
+    fail_github_reopen: bool,
+}
+
+impl PublicationProvider {
+    fn new(name: &str, fail_final_readback: bool) -> Self {
+        let fixture = recorded(name);
+        Self {
+            responses: fixture["responses"].clone(),
+            github: name == "github",
+            finding: RefCell::new(None),
+            ado_findings: RefCell::new(Vec::new()),
+            ado_replies: RefCell::new(Vec::new()),
+            summary: RefCell::new(None),
+            writes: RefCell::new(Vec::new()),
+            readbacks: RefCell::new(Vec::new()),
+            approval_expected: Cell::new(false),
+            approval_written: Cell::new(false),
+            reverse_replies: Cell::new(false),
+            bad_ado_readback: Cell::new(None),
+            fail_reopen: Cell::new(false),
+            fail_summary: Cell::new(false),
+            journal_path: RefCell::new(None),
+            journal_snapshots: RefCell::new(Vec::new()),
+            fail_final_readback,
+            pending_review: Cell::new(false),
+            stale_live_commit: Cell::new(false),
+            pull_request_reads: Cell::new(0),
+            fail_github_reopen: false,
+        }
+    }
+
+    /// Simulates an existing draft and records any explicit discard attempt.
+    fn github_pending_response(&self, query: &str) -> Option<Value> {
+        if query.contains("states:[PENDING]") {
+            let nodes = if self.pending_review.get() {
+                json!([{"id":"existing-review","state":"PENDING"}])
+            } else {
+                json!([])
+            };
+            return Some(
+                json!({"data":{"repository":{"pullRequest":{"reviews":{"nodes":nodes}}}}}),
+            );
+        }
+        if query.contains("deletePullRequestReview(") {
+            self.writes.borrow_mut().push("discard".into());
+            return Some(json!({"data":{"deletePullRequestReview":{
+                "pullRequestReview":{"id":"existing-review"}}}}));
+        }
+        None
+    }
+
+    /// Returns review-scoped comments before and after submission for both finding kinds.
+    fn github_review_response(&self) -> Value {
+        let summary = self.summary.borrow();
+        let submitted = summary.is_some();
+        self.readbacks
+            .borrow_mut()
+            .push(if submitted { "completed" } else { "draft" }.into());
+        let body = if submitted && self.fail_final_readback {
+            "different"
+        } else {
+            summary.as_deref().unwrap_or("")
+        };
+        json!({"data":{"node":{"id":"review",
+            "state":if !submitted {"PENDING"} else if self.approval_expected.get() {"APPROVED"} else {"COMMENTED"},
+            "url":"https://github.com/octo/widget/pull/7#review","body":body,
+            "comments":{"pageInfo":{"hasNextPage":false,"endCursor":null},
+            "nodes":[{"id":"comment","state":if submitted {"SUBMITTED"} else {"PENDING"},
+                "path":if self.fail_github_reopen {"src/café.rs"} else {"src/lib.rs"},
+                "line":if self.fail_github_reopen {5} else {2},
+                "startLine":if self.fail_github_reopen {4} else {1},"subjectType":"LINE",
+                "body":self.finding.borrow().as_ref().unwrap()}]}}}})
+    }
+
+    /// Recorded GitHub fixtures establish preflight evidence; writes supply later readbacks.
+    fn github_response(&self, route: &str, input: &[u8]) -> Value {
+        let responses = &self.responses;
+        if route == "graphql" {
+            let request: Value = from_slice(input).unwrap();
+            let query = request["query"].as_str().unwrap();
+            let variables = &request["variables"];
+            if let Some(response) = self.github_pending_response(query) {
+                return response;
+            }
+            if query.contains("unresolveReviewThread(") {
+                assert!(self.fail_github_reopen);
+                self.writes.borrow_mut().push("reopen".into());
+                return json!({"errors":[{"message":"Reopening refused"}]});
+            }
+            if query.contains("addPullRequestReviewThreadReply(") {
+                assert!(self.fail_github_reopen);
+                assert_eq!(variables["threadId"], "PRRT_1");
+                self.writes.borrow_mut().push("reply".into());
+                *self.finding.borrow_mut() = Some(variables["body"].as_str().unwrap().to_owned());
+                return json!({"data":{"addPullRequestReviewThreadReply":{"comment":{"id":"comment"}}}});
+            }
+            if query.contains("addPullRequestReviewThread(") {
+                self.writes.borrow_mut().push("finding".into());
+                assert_eq!(variables["path"], "src/lib.rs");
+                assert_eq!(variables["startLine"], 1);
+                assert_eq!(variables["line"], 2);
+                assert_eq!(variables["side"], "RIGHT");
+                *self.finding.borrow_mut() = Some(variables["body"].as_str().unwrap().to_owned());
+                return json!({"data":{"addPullRequestReviewThread":{"thread":{"id":"thread",
+                        "comments":{"nodes":[{"id":"comment"}]}}}}});
+            }
+            if query.contains("addPullRequestReview(") {
+                self.writes.borrow_mut().push("start".into());
+                assert_eq!(variables["commitOid"], "a".repeat(40));
+                return json!({"data":{"addPullRequestReview":{"pullRequestReview":{"id":"review","state":"PENDING"}}}});
+            }
+            if query.contains("submitPullRequestReview(") {
+                self.writes.borrow_mut().push("complete".into());
+                assert_eq!(
+                    variables["event"],
+                    if self.approval_expected.get() {
+                        "APPROVE"
+                    } else {
+                        "COMMENT"
+                    }
+                );
+                *self.summary.borrow_mut() = Some(variables["body"].as_str().unwrap().to_owned());
+                return json!({"data":{"submitPullRequestReview":{"pullRequestReview":{
+                        "id":"review","state":if self.approval_expected.get() {"APPROVED"} else {"COMMENTED"},
+                        "url":"https://github.com/octo/widget/pull/7#review"}}}});
+            }
+            if query.contains("node(id:$reviewId)") {
+                return self.github_review_response();
+            }
+            if query.contains("node(id:$threadId)") && self.finding.borrow().is_some() {
+                return json!({"data":{"node":{"id":if self.fail_github_reopen {"PRRT_1"} else {"thread"},
+                    "diffSide":"RIGHT","subjectType":"LINE",
+                    "comments":{"pageInfo":{"hasNextPage":false,"endCursor":null},
+                            "nodes":[{"id":"comment"}]}}}});
+            }
+            if query.contains("reviewThreads(") && self.finding.borrow().is_some() {
+                return json!({"data":{"repository":{"pullRequest":{"reviewThreads":{
+                    "pageInfo":{"hasNextPage":false,"endCursor":null},
+                    "nodes":[{"id":"thread","diffSide":"RIGHT","subjectType":"LINE",
+                            "comments":{"pageInfo":{"hasNextPage":false,"endCursor":null},
+                                "nodes":[{"id":"comment"}]}}]}}}}});
+            }
+            return if query.contains("reviewThreads(") {
+                responses["reviewThreads"].clone()
+            } else if query.contains("timelineItems(") {
+                responses["timeline"].clone()
+            } else if query.contains("reviews(") {
+                responses["reviewEdits"].clone()
+            } else if query.contains("comments(") {
+                responses["issueEdits"].clone()
+            } else {
+                panic!("unexpected GraphQL request: {query}")
+            };
+        }
+        match route {
+            "user" => responses["user"].clone(),
+            "repos/octo/widget/pulls/7" => {
+                let mut pr = responses["pullRequest"].clone();
+                pr["html_url"] = json!("https://github.com/octo/widget/pull/7");
+                let reads = self.pull_request_reads.get();
+                self.pull_request_reads.set(
+                    reads
+                        .checked_add(1)
+                        .expect("test pull request reads fit in usize"),
+                );
+                if self.stale_live_commit.get() && reads > 0 {
+                    pr["head"]["sha"] = json!("cccccccccccccccccccccccccccccccccccccccc");
+                }
+                pr
+            }
+            "repos/octo/widget/pulls/7/reviews?per_page=100" => json!([responses["reviews"]]),
+            "repos/octo/widget/issues/7/comments?per_page=100" => {
+                json!([responses["issueComments"]])
+            }
+            "repos/octo/widget/pulls/7/requested_reviewers?per_page=100" => {
+                json!([responses["requestedReviewers"]])
+            }
+            route if route.starts_with("repos/octo/widget/compare/") => {
+                responses["compare"].clone()
+            }
+            _ => panic!("unexpected GitHub route: {route}"),
+        }
+    }
+
+    /// Simulates reopening after the review's readback has completed.
+    fn ado_reopen(&self, body: Option<&[u8]>) -> HttpResponse {
+        let request: Value = from_slice(body.unwrap()).unwrap();
+        assert_eq!(request["status"], "active");
+        self.writes.borrow_mut().push("reopen".into());
+        if self.fail_reopen.get() {
+            return HttpResponse::new(400, BTreeMap::new(), b"refused".to_vec());
+        }
+        HttpResponse::new(
+            200,
+            BTreeMap::new(),
+            to_vec(&json!({"id":101,"status":"active"})).unwrap(),
+        )
+    }
+
+    /// Builds a thread-grouped response without imposing cross-thread ordering.
+    fn ado_threads(&self) -> Value {
+        let mut threads = self.responses["threads"]["value"]
+            .as_array()
+            .unwrap()
+            .clone();
+        let replies = self.ado_replies.borrow();
+        let mut comments = replies
+            .iter()
+            .enumerate()
+            .map(|(index, content)| json!({"id":index.checked_add(3).unwrap(),"content":content}))
+            .collect::<Vec<_>>();
+        if self.reverse_replies.get() {
+            comments.reverse();
+        }
+        threads[0]["comments"]
+            .as_array_mut()
+            .unwrap()
+            .extend(comments);
+        let findings = self.ado_findings.borrow();
+        if !findings.is_empty() {
+            self.readbacks.borrow_mut().push(
+                if self.summary.borrow().is_some() {
+                    "completed"
+                } else {
+                    "finding"
+                }
+                .into(),
+            );
+            // Existing threads precede new threads in this listing, even
+            // though the CLI publishes new threads before follow-ups.
+            let stage = if self.summary.borrow().is_some() {
+                "completed"
+            } else {
+                "finding"
+            };
+            if self.bad_ado_readback.get() != Some(stage) {
+                for (index, finding) in findings.iter().enumerate().rev() {
+                    threads.push(json!({"id":index.checked_add(201).unwrap(),
+                        "threadContext":{"filePath":"/src/lib.rs",
+                        "rightFileStart":{"line":1,"offset":1},"rightFileEnd":{"line":2,"offset":2}},
+                        "status":"active","comments":[{"id":1,"content":finding}]}));
+                }
+            }
+        }
+        if self.bad_ado_readback.get() != Some("summary")
+            && let Some(summary) = self.summary.borrow().as_ref()
+        {
+            threads.push(json!({"id":300,"status":"closed",
+                "comments":[{"id":1,"content":summary}]}));
+        }
+        json!({"count":threads.len(),"value":threads})
+    }
+}
+
+impl Process for PublicationProvider {
+    fn execute(
+        &self,
+        program: &str,
+        arguments: &[String],
+        input: &[u8],
+    ) -> io::Result<ProcessOutput> {
+        if program == "git" {
+            return Offline::default().execute(program, arguments, input);
+        }
+        if program == "az" {
+            assert!(!self.github);
+            assert_eq!(&arguments[..2], ["account", "get-access-token"]);
+            return Ok(ProcessOutput::new(true, b"fixture-token".to_vec(), vec![]));
+        }
+        assert!(self.github);
+        assert_eq!(program, "gh");
+        assert_eq!(arguments[0], "api");
+        let response = self.github_response(&arguments[1], input);
+        Ok(ProcessOutput::new(true, to_vec(&response).unwrap(), vec![]))
+    }
+}
+
+impl Http for PublicationProvider {
+    fn send(
+        &self,
+        method: &str,
+        url: &str,
+        token: &str,
+        body: Option<&[u8]>,
+    ) -> Result<HttpResponse, AppError> {
+        assert!(!self.github, "GitHub must not use ADO HTTP");
+        assert_eq!(token, "fixture-token");
+        if method != "GET"
+            && let Some(path) = self.journal_path.borrow().as_ref()
+        {
+            let record = from_slice(&fs::read(path).unwrap()).unwrap();
+            self.journal_snapshots.borrow_mut().push(record);
+        }
+        if method == "PATCH" && url.contains("/threads/101?") {
+            return Ok(self.ado_reopen(body));
+        }
+        let responses = &self.responses;
+        let response = if method == "PUT" && url.contains("/reviewers/runner?") {
+            assert!(self.approval_expected.get());
+            let request: Value = from_slice(body.unwrap()).unwrap();
+            assert_eq!(request, json!({"id":"runner","vote":10,"isRequired":false}));
+            self.writes.borrow_mut().push("approval".into());
+            self.approval_written.set(true);
+            request
+        } else if method == "POST" && url.contains("/threads/101/comments?") {
+            let request: Value = from_slice(body.unwrap()).unwrap();
+            assert_eq!(request["parentCommentId"], 1);
+            let content = request["content"].as_str().unwrap().to_owned();
+            let mut replies = self.ado_replies.borrow_mut();
+            let id = replies.len().checked_add(3).unwrap();
+            replies.push(content);
+            self.writes.borrow_mut().push("reply".into());
+            json!({"id":id})
+        } else if method == "POST" && url.contains("/threads?") {
+            let request: Value = from_slice(body.unwrap()).unwrap();
+            let content = request["comments"][0]["content"]
+                .as_str()
+                .unwrap()
+                .to_owned();
+            if request.get("threadContext").is_some() {
+                assert_eq!(request["threadContext"]["filePath"], "/src/lib.rs");
+                assert_eq!(request["threadContext"]["rightFileStart"]["line"], 1);
+                assert_eq!(request["threadContext"]["rightFileEnd"]["line"], 2);
+                assert_eq!(request["pullRequestThreadContext"]["changeTrackingId"], 17);
+                self.writes.borrow_mut().push("finding".into());
+                *self.finding.borrow_mut() = Some(content.clone());
+                let mut findings = self.ado_findings.borrow_mut();
+                let id = findings.len().checked_add(201).unwrap();
+                findings.push(content);
+                json!({"id":id,"comments":[{"id":1}]})
+            } else {
+                self.writes.borrow_mut().push("summary".into());
+                if self.fail_summary.get() {
+                    return Ok(HttpResponse::new(500, BTreeMap::new(), b"refused".to_vec()));
+                }
+                *self.summary.borrow_mut() = Some(content);
+                json!({"id":300,"comments":[{"id":1}]})
+            }
+        } else {
+            assert_eq!(method, "GET", "unexpected request: {url}");
+            assert!(body.is_none());
+            if url.contains("_apis/connectionData") {
+                responses["connectionData"].clone()
+            } else if url.contains("/reviewers/runner?") {
+                assert!(self.approval_written.get());
+                self.readbacks.borrow_mut().push("approval".into());
+                json!({"id":"runner","vote":10,"isRequired":false})
+            } else if url.contains("/iterations/2/changes?") {
+                json!({"changeEntries":[{"item":{"path":"/src/lib.rs"},"changeTrackingId":17}]})
+            } else if url.contains("/iterations?") {
+                responses["iterations"].clone()
+            } else if url.contains("/reviewers?") {
+                responses["reviewers"].clone()
+            } else if url.contains("/threads?") {
+                self.ado_threads()
+            } else if url.contains("/pullRequests/4242?") {
+                responses["pullRequest"].clone()
+            } else {
+                panic!("unexpected ADO URL: {url}")
+            }
+        };
+        Ok(HttpResponse::new(
+            200,
+            BTreeMap::new(),
+            to_vec(&response).unwrap(),
+        ))
+    }
+}
+
+/// Avoids wall-clock waits while exercising the same injected clock boundary.
+struct FixedClock;
+impl Clock for FixedClock {
+    fn now(&self) -> Timestamp {
+        "2026-08-04T12:00:00Z".parse().unwrap()
+    }
+    fn wait(&self, _: Duration) -> Result<(), AppError> {
+        panic!("unexpected retry wait")
+    }
+}
+
+/// Reads the same immutable provider captures used by the capture parity tests.
+fn recorded(name: &str) -> Value {
+    let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("../../tests/fixtures/ss-review-native-capture")
+        .join(format!("{name}.json"));
+    from_slice(&fs::read(path).unwrap()).unwrap()
+}
+
+/// Binds the finding to a recorded capture and its provider URL.
+fn publication_args(fixture: &Fixture, name: &str) -> Vec<OsString> {
+    let capture = recorded(&format!("{name}-expected"));
+    fixture.write("context 雪.json", &capture);
+    let mut document = approved(&capture, true);
+    document["findings"][0]["anchor"] =
+        json!({"kind":"line","path":"src/lib.rs","startLine":1,"endLine":2,"side":"right"});
+    fixture.write("approved 雪.json", &document);
+    let mut args = fixture.args();
+    args[4] = capture["pullRequestUrl"].as_str().unwrap().into();
+    args
+}
+
+/// Adds a commit-bound user decision to the recorded capture's command.
+fn authorize(fixture: &Fixture, args: &mut Vec<OsString>, name: &str) {
+    let capture = recorded(&format!("{name}-expected"));
+    fixture.write(
+        "merge 雪.json",
+        &json!({
+            "schemaVersion":1, "pullRequestUrl":capture["pullRequestUrl"],
+            "approveMerge":true,
+            "approvedSourceCommit":capture["pullRequest"]["reviewedSourceCommit"]
+        }),
+    );
+    fixture.merge_arg(args);
+}
+
+/// Interleaves new findings and follow-ups to exercise the publication order.
+fn multi_ado_args(fixture: &Fixture) -> Vec<OsString> {
+    let args = publication_args(fixture, "azure-devops");
+    let mut document: Value =
+        from_slice(&fs::read(fixture.path("approved 雪.json")).unwrap()).unwrap();
+    let first = document["findings"][0].clone();
+    let mut second = first.clone();
+    second["id"] = json!("F2");
+    second["sourceFindingIds"] = json!(["F2"]);
+    second["title"] = json!("Second new finding");
+    let reply = |id: &str| {
+        let mut finding = first.clone();
+        finding["id"] = json!(id);
+        finding["sourceFindingIds"] = json!([id]);
+        finding["title"] = json!(format!("Follow-up {id}"));
+        finding["followUp"] = json!({"threadId":"101","commentId":"1"});
+        finding
+    };
+    document["findings"] = json!([first, reply("R1"), second, reply("R2")]);
+    fixture.write("approved 雪.json", &document);
+    args
+}
+
+#[test]
+fn stale_live_commit_or_discussion_prevents_authorized_draft_discard() {
+    // Changes appear only in the live capture, after preflight accepts the audited revisions.
+    for changed_evidence in ["commit", "discussion"] {
+        let fixture = Fixture::new();
+        let mut provider = PublicationProvider::new("github", false);
+        provider.pending_review.set(true);
+        let mut args = publication_args(&fixture, "github");
+        args.push("--discard-pending-review".into());
+
+        match changed_evidence {
+            "commit" => provider.stale_live_commit.set(true),
+            "discussion" => {
+                provider.responses["reviewThreads"]["data"]["repository"]["pullRequest"]["reviewThreads"]
+                    ["nodes"][0]["comments"]["nodes"][0]["body"] = json!("Changed discussion");
+            }
+            _ => unreachable!(),
+        }
+
+        let error = run(&args, &provider, &provider, &FixedClock).unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("Pull request evidence changed before publication"),
+            "{error}"
+        );
+        assert!(provider.writes.borrow().is_empty());
+        assert!(!fixture.path("output 雪/publication-result.json").exists());
+    }
+}
+
+#[test]
+fn github_cli_publishes_and_reads_back_a_draft_finding_and_summary() {
+    let fixture = Fixture::new();
+    let provider = PublicationProvider::new("github", false);
+    let mut args = publication_args(&fixture, "github");
+    args.extend(
+        [
+            "--discard-pending-review",
+            "--publish-to-closed-pull-request",
+        ]
+        .map(OsString::from),
+    );
+    let result: Value = from_str(&run(&args, &provider, &provider, &FixedClock).unwrap()).unwrap();
+    assert_eq!(result["status"], "succeeded", "{result}");
+    assert_eq!(result["publishedFindingCount"], 1);
+    assert_eq!(*provider.writes.borrow(), ["start", "finding", "complete"]);
+    assert_eq!(*provider.readbacks.borrow(), ["draft", "completed"]);
+    assert!(
+        provider
+            .finding
+            .borrow()
+            .as_ref()
+            .unwrap()
+            .contains("Finding 雪")
+    );
+    assert!(!provider.summary.borrow().as_ref().unwrap().is_empty());
+}
+
+#[test]
+fn ado_cli_publishes_and_reads_back_a_finding_and_summary() {
+    let fixture = Fixture::new();
+    let provider = PublicationProvider::new("azure-devops", false);
+    let args = publication_args(&fixture, "azure-devops");
+    let result: Value = from_str(&run(&args, &provider, &provider, &FixedClock).unwrap()).unwrap();
+    assert_eq!(result["status"], "succeeded", "{result}");
+    assert_eq!(result["publishedFindingCount"], 1);
+    assert_eq!(*provider.writes.borrow(), ["finding", "summary"]);
+    assert_eq!(*provider.readbacks.borrow(), ["finding", "completed"]);
+    assert!(
+        provider
+            .finding
+            .borrow()
+            .as_ref()
+            .unwrap()
+            .contains("Finding 雪")
+    );
+    assert!(!provider.summary.borrow().as_ref().unwrap().is_empty());
+}
+
+#[test]
+fn ado_multiple_findings_verify_in_per_thread_order() {
+    let fixture = Fixture::new();
+    let provider = PublicationProvider::new("azure-devops", false);
+    let args = multi_ado_args(&fixture);
+    let result: Value = from_str(&run(&args, &provider, &provider, &FixedClock).unwrap()).unwrap();
+    assert_eq!(result["status"], "succeeded", "{result}");
+    assert_eq!(result["publishedFindingCount"], 4);
+    assert_eq!(
+        *provider.writes.borrow(),
+        ["finding", "finding", "reply", "reply", "summary"]
+    );
+    assert_eq!(*provider.readbacks.borrow(), ["finding", "completed"]);
+    let replies = provider.ado_replies.borrow();
+    assert!(replies[0].contains("Follow-up R1"));
+    assert!(replies[1].contains("Follow-up R2"));
+    let bytes = fs::read(fixture.path("output 雪/publication-result.json")).unwrap();
+    assert!(!bytes.starts_with(&[0xEF, 0xBB, 0xBF]));
+    let journal: Value = from_slice(&bytes).unwrap();
+    let operations = journal["operations"].as_array().unwrap();
+    for (finding, thread, comment) in [
+        ("F", "201", "1"),
+        ("F2", "202", "1"),
+        ("R1", "101", "3"),
+        ("R2", "101", "4"),
+    ] {
+        let operation = operations
+            .iter()
+            .find(|operation| operation["findingId"] == finding)
+            .unwrap();
+        assert_eq!(operation["outcome"], "succeeded");
+        assert_eq!(operation["threadId"], thread);
+        assert_eq!(operation["commentId"], comment);
+    }
+}
+
+#[test]
+fn ado_reordered_replies_fail_readback_and_cannot_be_replayed() {
+    let fixture = Fixture::new();
+    let provider = PublicationProvider::new("azure-devops", false);
+    provider.reverse_replies.set(true);
+    let args = multi_ado_args(&fixture);
+    let error = run(&args, &provider, &provider, &FixedClock).unwrap_err();
+    assert!(
+        error.to_string().to_lowercase().contains("order"),
+        "{error}"
+    );
+    assert_eq!(
+        *provider.writes.borrow(),
+        ["finding", "finding", "reply", "reply"]
+    );
+    let offline = Offline::default();
+    run(&args, &offline, &offline, &FixedClock).unwrap_err();
+    assert!(!offline.provider_called.get());
+}
+
+#[test]
+fn ado_missing_findings_or_summary_refuse_completion_and_replay() {
+    for stage in ["finding", "completed", "summary"] {
+        let fixture = Fixture::new();
+        let provider = PublicationProvider::new("azure-devops", false);
+        provider.bad_ado_readback.set(Some(stage));
+        let args = publication_args(&fixture, "azure-devops");
+        _ = run(&args, &provider, &provider, &FixedClock).unwrap_err();
+        assert_eq!(
+            *provider.writes.borrow(),
+            if stage == "finding" {
+                vec!["finding"]
+            } else {
+                vec!["finding", "summary"]
+            },
+            "{stage}"
+        );
+        let offline = Offline::default();
+        _ = run(&args, &offline, &offline, &FixedClock).unwrap_err();
+        assert!(!offline.provider_called.get(), "{stage}");
+    }
+}
+
+#[test]
+fn ado_journals_intent_before_each_write_and_preserves_partial_receipts() {
+    for fail_summary in [false, true] {
+        let fixture = Fixture::new();
+        let provider = PublicationProvider::new("azure-devops", false);
+        *provider.journal_path.borrow_mut() =
+            Some(fixture.path("output 雪/publication-result.json"));
+        provider.fail_summary.set(fail_summary);
+        let args = multi_ado_args(&fixture);
+        let result = run(&args, &provider, &provider, &FixedClock);
+        assert_eq!(result.is_err(), fail_summary);
+        assert_eq!(
+            *provider.writes.borrow(),
+            ["finding", "finding", "reply", "reply", "summary"]
+        );
+        let snapshots = provider.journal_snapshots.borrow();
+        assert_eq!(snapshots.len(), 5);
+        for snapshot in snapshots.iter() {
+            let index = usize::try_from(snapshot["inFlight"]["index"].as_u64().unwrap()).unwrap();
+            assert_eq!(snapshot["operations"][index]["outcome"], "ambiguous");
+        }
+        let journal: Value =
+            from_slice(&fs::read(fixture.path("output 雪/publication-result.json")).unwrap())
+                .unwrap();
+        let operations = journal["operations"].as_array().unwrap();
+        for finding in ["F", "F2", "R1", "R2"] {
+            let operation = operations
+                .iter()
+                .find(|operation| operation["findingId"] == finding)
+                .unwrap();
+            assert_eq!(operation["outcome"], "succeeded");
+            assert!(
+                operation["threadId"]
+                    .as_str()
+                    .is_some_and(|id| !id.is_empty())
+            );
+            assert!(
+                operation["commentId"]
+                    .as_str()
+                    .is_some_and(|id| !id.is_empty())
+            );
+        }
+        let complete = operations
+            .iter()
+            .find(|operation| operation["operation"] == "completeReview")
+            .unwrap();
+        assert_eq!(
+            complete["outcome"],
+            if fail_summary {
+                "ambiguous"
+            } else {
+                "succeeded"
+            }
+        );
+        let offline = Offline::default();
+        _ = run(&args, &offline, &offline, &FixedClock).unwrap_err();
+        assert!(!offline.provider_called.get());
+    }
+}
+
+#[test]
+fn ado_approval_without_findings_writes_only_vote_and_summary() {
+    let fixture = Fixture::new();
+    let provider = PublicationProvider::new("azure-devops", false);
+    provider.approval_expected.set(true);
+    let mut args = publication_args(&fixture, "azure-devops");
+    let mut document: Value =
+        from_slice(&fs::read(fixture.path("approved 雪.json")).unwrap()).unwrap();
+    document["findings"] = json!([]);
+    fixture.write("approved 雪.json", &document);
+    authorize(&fixture, &mut args, "azure-devops");
+    let result: Value = from_str(&run(&args, &provider, &provider, &FixedClock).unwrap()).unwrap();
+    assert_eq!(result["status"], "succeeded");
+    assert_eq!(result["publishedFindingCount"], 0);
+    assert_eq!(*provider.writes.borrow(), ["approval", "summary"]);
+    assert!(
+        provider
+            .readbacks
+            .borrow()
+            .iter()
+            .any(|entry| entry == "approval")
+    );
+    assert!(!provider.summary.borrow().as_ref().unwrap().is_empty());
+}
+
+#[test]
+fn ado_reopens_resolved_follow_up_only_after_verified_publication() {
+    for fail in [false, true] {
+        let fixture = Fixture::new();
+        let mut provider = PublicationProvider::new("azure-devops", false);
+        provider.responses["threads"]["value"][0]["status"] = json!("fixed");
+        provider.fail_reopen.set(fail);
+        let args = multi_ado_args(&fixture);
+        let mut context: Value =
+            from_slice(&fs::read(fixture.path("context 雪.json")).unwrap()).unwrap();
+        context["threads"][0]["resolution"] = json!("resolved");
+        context["threads"][0]["rawStatus"] = json!("fixed");
+        fixture.write("context 雪.json", &context);
+        let mut document: Value =
+            from_slice(&fs::read(fixture.path("approved 雪.json")).unwrap()).unwrap();
+        document["reviewedContextHash"] = json!(evidence_hash(&context).unwrap());
+        fixture.write("approved 雪.json", &document);
+        let result: Value =
+            from_str(&run(&args, &provider, &provider, &FixedClock).unwrap()).unwrap();
+        assert_eq!(
+            result["status"],
+            if fail {
+                "publishedWithFollowUpFailure"
+            } else {
+                "succeeded"
+            }
+        );
+        assert_eq!(
+            *provider.writes.borrow(),
+            [
+                "finding", "finding", "reply", "reply", "summary", "reopen", "reopen"
+            ]
+        );
+        let journal: Value =
+            from_slice(&fs::read(fixture.path("output 雪/publication-result.json")).unwrap())
+                .unwrap();
+        assert_eq!(journal["verification"]["isPublished"], true);
+        let reopens: Vec<_> = journal["operations"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|operation| operation["operation"] == "reopenThread")
+            .collect();
+        assert_eq!(reopens.len(), 2);
+        for reopen in reopens {
+            assert_eq!(reopen["threadId"], "101");
+            assert_eq!(reopen["outcome"], if fail { "failed" } else { "succeeded" });
+        }
+        let offline = Offline::default();
+        _ = run(&args, &offline, &offline, &FixedClock).unwrap_err();
+        assert!(!offline.provider_called.get());
+    }
+}
+
+#[test]
+fn cli_approval_is_read_back_for_both_providers() {
+    for name in ["github", "azure-devops"] {
+        let fixture = Fixture::new();
+        let provider = PublicationProvider::new(name, false);
+        provider.approval_expected.set(true);
+        let mut args = publication_args(&fixture, name);
+        authorize(&fixture, &mut args, name);
+        let result: Value =
+            from_str(&run(&args, &provider, &provider, &FixedClock).unwrap()).unwrap();
+        assert_eq!(result["status"], "succeeded", "{name}: {result}");
+        if name == "github" {
+            assert_eq!(*provider.writes.borrow(), ["start", "finding", "complete"]);
+            assert_eq!(*provider.readbacks.borrow(), ["draft", "completed"]);
+        } else {
+            assert_eq!(
+                *provider.writes.borrow(),
+                ["finding", "approval", "summary"]
+            );
+            assert!(
+                provider
+                    .readbacks
+                    .borrow()
+                    .iter()
+                    .any(|entry| entry == "approval")
+            );
+        }
+    }
+}
+
+#[test]
+fn accepted_github_submission_with_failed_readback_is_not_replayed() {
+    let fixture = Fixture::new();
+    let provider = PublicationProvider::new("github", true);
+    let args = publication_args(&fixture, "github");
+    let error = run(&args, &provider, &provider, &FixedClock).unwrap_err();
+    assert!(error.to_string().contains("summary"));
+    assert_eq!(*provider.writes.borrow(), ["start", "finding", "complete"]);
+    assert_eq!(*provider.readbacks.borrow(), ["draft", "completed"]);
+    let result: Value =
+        from_slice(&fs::read(fixture.path("output 雪/publication-result.json")).unwrap()).unwrap();
+    assert_eq!(result["status"], "failed");
+    assert!(
+        result["operations"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|operation| operation["operation"] == "completeReview"
+                && operation["outcome"] == "succeeded")
+    );
+    let offline = Offline::default();
+    assert!(run(&args, &offline, &offline, &FixedClock).is_err());
+    assert!(!offline.provider_called.get());
+    assert_eq!(*provider.writes.borrow(), ["start", "finding", "complete"]);
+}
+
+/// Serves the executable's provider processes from deterministic local evidence.
+#[cfg(unix)]
+struct PartialProvider {
+    provider: PublicationProvider,
+    reply: Option<String>,
+}
+
+#[cfg(unix)]
+impl PartialProvider {
+    fn new() -> Self {
+        let mut provider = PublicationProvider::new("github", false);
+        provider.responses["reviewThreads"]["data"]["repository"]["pullRequest"]["reviewThreads"]
+            ["nodes"][0]["isResolved"] = json!(true);
+        Self {
+            provider,
+            reply: None,
+        }
+    }
+
+    fn respond(&mut self, route: &str, input: &[u8]) -> Value {
+        if route == "graphql" {
+            let request: Value = from_slice(input).unwrap();
+            let query = request["query"].as_str().unwrap();
+            let variables = &request["variables"];
+            if query.contains("addPullRequestReviewThreadReply(") {
+                assert_eq!(variables["threadId"], "PRRT_1");
+                self.provider.writes.borrow_mut().push("reply".into());
+                self.reply = Some(variables["body"].as_str().unwrap().to_owned());
+                return json!({"data":{"addPullRequestReviewThreadReply":{"comment":{"id":"reply-comment"}}}});
+            }
+            if query.contains("unresolveReviewThread(") {
+                assert_eq!(variables["threadId"], "PRRT_1");
+                self.provider.writes.borrow_mut().push("reopen".into());
+                return json!({"errors":[{"message":"fixture reopen failure"}]});
+            }
+            if query.contains("node(id:$reviewId)") {
+                let summary = self.provider.summary.borrow();
+                let submitted = summary.is_some();
+                return json!({"data":{"node":{"id":"review",
+                    "state":if submitted {"COMMENTED"} else {"PENDING"},
+                    "url":"https://github.com/octo/widget/pull/7#review",
+                    "body":summary.as_deref().unwrap_or(""),
+                    "comments":{"pageInfo":{"hasNextPage":false,"endCursor":null},
+                    "nodes":[{"id":"reply-comment","state":if submitted {"SUBMITTED"} else {"PENDING"},
+                        "path":"src/café.rs","line":5,"startLine":4,"subjectType":"LINE",
+                        "body":self.reply.as_ref().unwrap()}]}}}});
+            }
+            if query.contains("node(id:$threadId)") && self.reply.is_some() {
+                return json!({"data":{"node":{"id":"PRRT_1","diffSide":"RIGHT","subjectType":"LINE",
+                    "comments":{"pageInfo":{"hasNextPage":false,"endCursor":null},
+                    "nodes":[{"id":"reply-comment"}]}}}});
+            }
+        }
+        self.provider.github_response(route, input)
+    }
+}
+
+/// Lets the test binary act as a provider launcher without installing a CLI.
+#[test]
+#[cfg(unix)]
+#[cfg_attr(miri, ignore = "requires a native subprocess")]
+fn partial_provider_process() {
+    let Some(address) = env::var_os("SS_PARTIAL_PROVIDER") else {
+        return;
+    };
+    let mut body = Vec::new();
+    io::stdin().read_to_end(&mut body).unwrap();
+    let request = json!({
+        "route":env::var("SS_PARTIAL_ROUTE").unwrap(),
+        "body":String::from_utf8(body).unwrap()
+    });
+    let mut stream = TcpStream::connect(address.to_str().unwrap()).unwrap();
+    stream.write_all(&to_vec(&request).unwrap()).unwrap();
+    stream.write_all(b"\n").unwrap();
+    let mut response = Vec::new();
+    stream.read_to_end(&mut response).unwrap();
+    fs::write(env::var_os("SS_PARTIAL_RESPONSE").unwrap(), response).unwrap();
+}
+
+/// Keeps the subprocess fixture and its durable journal in the checkout.
+#[cfg(unix)]
+struct PartialWorkspace(PathBuf);
+
+#[cfg(unix)]
+impl PartialWorkspace {
+    fn new() -> Self {
+        let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join(format!(".final-review-partial-{}", std::process::id()));
+        #[expect(clippy::create_dir, reason = "The fixture must not reuse prior state")]
+        fs::create_dir(&path).unwrap();
+        Self(path)
+    }
+
+    fn path(&self, name: &str) -> PathBuf {
+        self.0.join(name)
+    }
+
+    fn executable(&self, name: &str, contents: &str) {
+        let path = self.path(name);
+        fs::write(&path, contents).unwrap();
+        fs::set_permissions(path, fs::Permissions::from_mode(0o700)).unwrap();
+    }
+}
+
+#[cfg(unix)]
+impl Drop for PartialWorkspace {
+    fn drop(&mut self) {
+        fs::remove_dir_all(&self.0).unwrap();
+    }
+}
+
+/// Acknowledge and verify a review before the independent reopen fails.
+#[test]
+#[cfg(unix)]
+#[cfg_attr(miri, ignore = "requires native subprocesses and loopback sockets")]
+#[cfg_attr(
+    mutants,
+    ignore = "mutations can remove a subprocess or socket interaction and block the fixture"
+)]
+fn executable_partial_outcome_preserves_receipts_and_refuses_replay() {
+    let workspace = PartialWorkspace::new();
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let address = listener.local_addr().unwrap();
+    let requests = workspace.path("requests.log");
+    let server = thread::spawn({
+        let requests = requests.clone();
+        move || {
+            let mut provider = PartialProvider::new();
+            for connection in listener.incoming() {
+                let mut stream = connection.unwrap();
+                let mut request = String::new();
+                BufReader::new(&stream).read_line(&mut request).unwrap();
+                let request: Value = from_str(&request).unwrap();
+                if request["shutdown"] == true {
+                    break;
+                }
+                let route = request["route"].as_str().unwrap();
+                let input = request["body"].as_str().unwrap().as_bytes();
+                let mut log = fs::OpenOptions::new()
+                    .create(true)
+                    .append(true)
+                    .open(&requests)
+                    .unwrap();
+                writeln!(log, "{route}").unwrap();
+                let response = provider.respond(route, input);
+                stream.write_all(&to_vec(&response).unwrap()).unwrap();
+            }
+            provider.provider.writes.into_inner()
+        }
+    });
+    workspace.executable(
+        "gh",
+        "#!/bin/sh\nSS_PARTIAL_ROUTE=\"$2\"; export SS_PARTIAL_ROUTE\n\"$SS_PARTIAL_TEST\" --exact partial_provider_process --nocapture > /dev/null || exit $?\nexec /bin/cat \"$SS_PARTIAL_RESPONSE\"\n",
+    );
+    workspace.executable(
+        "git",
+        "#!/bin/sh\ncase \"$*\" in\n*cat-file*) printf 'commit\\n';;\n*diff*) printf 'diff --git a/src/lib.rs b/src/lib.rs\\n--- a/src/lib.rs\\n+++ b/src/lib.rs\\n@@ -1,2 +1,2 @@\\n-old\\n+new\\n context\\n';;\n*) printf '.git\\n';;\nesac\n",
+    );
+    fs::create_dir_all(workspace.path("repository")).unwrap();
+    let mut capture = recorded("github-expected");
+    capture["threads"][0]["resolution"] = json!("resolved");
+    capture["threads"][0]["rawStatus"] = json!("resolved");
+    let mut document = approved(&capture, true);
+    document["findings"][0]["followUp"] = json!({"threadId":"PRRT_1","commentId":"PRRC_1"});
+    for (name, value) in [
+        ("capture.json", capture),
+        ("approved.json", document),
+        ("diagnostics.json", json!({})),
+    ] {
+        fs::write(workspace.path(name), to_vec(&value).unwrap()).unwrap();
+    }
+    let launch = || {
+        let mut command = command();
+        command
+            .current_dir(&workspace.0)
+            .env("PATH", &workspace.0)
+            .env("SS_PARTIAL_PROVIDER", address.to_string())
+            .env("SS_PARTIAL_TEST", env::current_exe().unwrap())
+            .env("SS_PARTIAL_RESPONSE", workspace.path("response.json"))
+            .args([
+                "review",
+                "publish-final-review",
+                "--url",
+                "https://github.com/octo/widget/pull/7",
+                "--approved-findings-path",
+                "approved.json",
+                "--context-path",
+                "capture.json",
+                "--diagnostics-path",
+                "diagnostics.json",
+                "--repository-path",
+                "repository",
+                "--output-directory",
+                "output",
+                "--now-utc",
+                "2026-08-04T12:00:00Z",
+            ])
+            .output()
+            .unwrap()
+    };
+    let output = launch();
+    assert!(!output.status.success());
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    let outcome: Value = from_str(&stdout).unwrap_or_else(|error| {
+        panic!(
+            "No structured outcome: {error}; stderr={}",
+            String::from_utf8_lossy(&output.stderr)
+        )
+    });
+    let journal_path = workspace.path("output/publication-result.json");
+    let journal_bytes = fs::read(&journal_path).unwrap();
+    let journal: Value = from_slice(&journal_bytes).unwrap();
+    let message = outcome["message"].as_str().unwrap();
+    assert!(
+        message.starts_with("The review is published and verified; reconcile these threads without publishing again: thread 'PRRT_1': ambiguousWrite: GraphQL mutation returned incomplete evidence"),
+        "{message}"
+    );
+    assert_eq!(
+        outcome,
+        json!({
+            "schemaVersion":1, "status":"publishedWithFollowUpFailure",
+            "message":message,
+            "platform":"gitHub", "pullRequestUrl":"https://github.com/octo/widget/pull/7",
+            "reviewId":"review", "reviewUrl":"https://github.com/octo/widget/pull/7#review",
+            "resultPath":journal_path, "publishedFindingCount":1, "failedOperationCount":0,
+            "ambiguousOperationCount":1, "downgradedAnchorCount":0
+        })
+    );
+    assert_eq!(journal["message"], outcome["message"]);
+    let operations = journal["operations"].as_array().unwrap();
+    assert_eq!(operations[0]["receipt"]["reviewId"], "review");
+    assert_eq!(
+        operations[1]["receipt"],
+        json!({"threadId":"PRRT_1","commentId":"reply-comment"})
+    );
+    assert_eq!(operations[2]["outcome"], "succeeded");
+    assert_eq!(operations[3]["receipt"]["reviewId"], "review");
+    assert_eq!(operations[3]["outcome"], "succeeded");
+    assert_eq!(operations[4]["operation"], "reopenThread");
+    assert_eq!(operations[4]["outcome"], "ambiguous");
+    assert_eq!(journal["verification"]["isPublished"], true);
+    assert!(journal["inFlight"].is_null());
+
+    let requests_before = fs::read(&requests).unwrap();
+    let replay = launch();
+    assert!(!replay.status.success());
+    assert!(replay.stdout.is_empty());
+    assert_eq!(fs::read(&requests).unwrap(), requests_before);
+    assert_eq!(fs::read(&journal_path).unwrap(), journal_bytes);
+    let mut shutdown = TcpStream::connect(address).unwrap();
+    shutdown.write_all(b"{\"shutdown\":true}\n").unwrap();
+    assert_eq!(
+        server.join().unwrap(),
+        ["start", "reply", "complete", "reopen"]
+    );
+}

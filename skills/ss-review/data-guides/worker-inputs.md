@@ -16,7 +16,10 @@ guides. References and overview workers produce prose and receive no
 `workflowData` document.
 The prepared reader returns `sharedReadPage` slices with UTF-16 code-unit
 offsets and lengths. `complete: true` requires `nextOffset: null`; otherwise
-the next offset continues immediately after the returned text. Only assigned
+the next offset continues immediately after the returned text. The dispatch prompt supplies
+native reader examples for PowerShell and Bash, with the assignment path quoted for
+each shell. Select the block for the calling shell and replace `{{DOCUMENT_ID}}`.
+Only assigned
 Markdown documents belong to shared reading; PR captures never do. Use
 `pwsh-calls/prepare-worker-assignment.md` for creation and consumption.
 
@@ -29,9 +32,9 @@ A stored `queryPage` has explicit `complete` and nullable `nextCursor`;
 Before replay or continuation, the reader regenerates that page from the bound
 capture and selectors and requires exact agreement, including item structure,
 content, and continuation. The default read replays the validated page;
-`-Next` advances, and `-Restart` explicitly rebinds snapshots.
-Use `pwsh-calls/query-pr-context.md`, whose PowerShell entry points call the
-native context commands. Do not edit these records or substitute their paths
+`--next` advances, and `--restart` explicitly rebinds snapshots.
+Use `pwsh-calls/query-pr-context.md` for the native context commands.
+Do not edit these records or substitute their paths
 for canonical capture paths at validation/publication boundaries.
 
 `inputDiagnostics` contains required nonnegative counters, including explicit

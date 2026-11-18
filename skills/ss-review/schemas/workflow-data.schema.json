@@ -1,6 +1,6 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$comment": "Named definitions are selected by WorkflowData.ps1. Required envelopes distinguish unfinished/missing work from deliberately empty results.",
+  "$comment": "Named definitions describe workflow records. Required envelopes distinguish unfinished or missing work from deliberately empty results.",
   "$defs": {
     "inputHash": { "type": "string", "pattern": "^[A-F0-9]{64}$" },
     "inputDiagnostics": {
@@ -232,13 +232,12 @@
     },
     "coverageMeasurement": {
       "type": "object", "additionalProperties": false,
-      "required": ["schemaVersion", "mode", "processLaunches", "journalWrites", "schemaValidationMilliseconds", "elapsedMilliseconds"],
+      "required": ["schemaVersion", "mode", "processLaunches", "persistenceProcessLaunches", "elapsedMilliseconds"],
       "properties": {
-        "schemaVersion": { "const": 1 },
+        "schemaVersion": { "const": 2 },
         "mode": { "enum": ["PerFile", "Batch"] },
         "processLaunches": { "type": "integer", "minimum": 0 },
-        "journalWrites": { "type": "integer", "minimum": 0 },
-        "schemaValidationMilliseconds": { "type": "number", "minimum": 0 },
+        "persistenceProcessLaunches": { "type": "integer", "minimum": 0 },
         "elapsedMilliseconds": { "type": "number", "minimum": 0 }
       }
     },

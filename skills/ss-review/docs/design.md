@@ -370,7 +370,7 @@ unrelated revisions and intentional Puppeteer configuration. A failed approved
 installation produces recovery guidance rather than another generic installation prompt.
 
 Report tools recognize Node.js installations managed by nvm even when the
-noninteractive PowerShell session cannot find Node.js on `PATH`. They preserve
+invoking environment cannot find Node.js on `PATH`. They preserve
 an active runtime choice and otherwise use the configured nvm default on
 POSIX systems, without installing or switching Node.js versions.
 
@@ -526,6 +526,9 @@ Equivalent guidance inputs may reuse a complete generated focus-area set.
 Different inputs do not share one, and incomplete or degraded inputs are not
 promoted as reusable truth. A cache miss, damaged entry, or unavailable cache
 changes performance only; it never reduces coverage.
+Selected repository instruction sources retain their repository origin so
+identical instruction text from different repositories does not share expanded
+guidance.
 
 Preparation quality remains visible in the review diagnostics. This lets the
 user distinguish ordinary reuse from degraded instruction expansion without

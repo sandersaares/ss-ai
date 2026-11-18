@@ -1,8 +1,5 @@
-```powershell
-pwsh -NoProfile -NonInteractive -File "{{SKILL_ROOT}}/scripts/New-ConsolidatedFindings.ps1" `
-  -ReviewerArtifactDirectory "{{SESSION_STATE}}/findings" `
-  -MergePlanPath "{{SESSION_STATE}}/merge-plan.json" `
-  -OutputPath "{{SESSION_STATE}}/findings.json"
+```text
+ss-ai workflow consolidate-findings --reviewer-directory "{{SESSION_STATE}}/findings" --plan-path "{{SESSION_STATE}}/merge-plan.json" --output-path "{{SESSION_STATE}}/findings.json"
 ```
 
 Placeholders to replace:

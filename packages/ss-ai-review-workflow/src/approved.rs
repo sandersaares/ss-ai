@@ -9,9 +9,13 @@ use ss_ai_review_context::{evidence_hash, read_capture};
 use ss_ai_runtime::{Clock, FileTransaction, Process, fail, read_bytes};
 
 use crate::anchors::{canonical_path, resolve_anchor_in_diff};
-use crate::audit::{last_decision, read_decisions};
+use crate::audit::read_journal;
 use crate::findings::{read_artifact, validate_artifact};
-use crate::workflow_plan::parse_json;
+use crate::workflow_plan::{DecisionValue, parse_json};
+
+/// Identifies findings that still require an audit decision.
+#[ohno::error]
+struct IncompleteDecisionJournal;
 
 /// Builds and atomically publishes the current approved finding set.
 ///
@@ -56,11 +60,14 @@ pub fn build_approved(
         return Err(invalid("Approved findings require a consolidated artifact"));
     }
     // The audit module owns decision validation and last-decision semantics.
-    let decisions = read_decisions(decisions_path, clock)?;
+    let decisions = read_journal(decisions_path, clock)?;
     let mut undecided = Vec::new();
     for finding in array(&artifact, "findings")? {
         let id = required_text(finding, "id")?;
-        if matches!(last_decision(&decisions, id)?, None | Some("needs-audit")) {
+        if matches!(
+            decisions.last_decision(id),
+            None | Some(DecisionValue::NeedsAudit)
+        ) {
             undecided.push(format!("'{id}'"));
         }
     }
@@ -73,9 +80,7 @@ pub fn build_approved(
         } else {
             format!("{} or {last}", undecided.join(", "))
         };
-        return Err(invalid(format!(
-            "The audit recorded no decision for {names}. Every finding must be decided."
-        )));
+        return Err(incomplete_journal(&names));
     }
     let context = context_path
         .map(|path| read_capture(path, clock))
@@ -99,20 +104,22 @@ pub fn build_approved(
         (0_usize, 0_usize, 0_usize, 0_usize);
     for finding in array(&artifact, "findings")? {
         let id = required_text(finding, "id")?;
-        let decision = last_decision(&decisions, id)?
+        let decision = decisions
+            .last_decision(id)
             .ok_or_else(|| invalid(format!("Finding '{id}' is undecided")))?;
         match decision {
-            "needs-audit" => return Err(invalid(format!("Finding '{id}' needs audit"))),
-            "rejected" => {
+            DecisionValue::NeedsAudit => {
+                return Err(invalid(format!("Finding '{id}' needs audit")));
+            }
+            DecisionValue::Rejected => {
                 rejected = rejected.saturating_add(1);
                 continue;
             }
-            "dropped" => {
+            DecisionValue::Dropped => {
                 dropped = dropped.saturating_add(1);
                 continue;
             }
-            "approved" | "auto-approved" => {}
-            _ => return Err(invalid("Invalid decision")),
+            DecisionValue::Approved | DecisionValue::AutoApproved => {}
         }
         if let Some(context) = &context {
             // Trackers use capture provenance without reply restrictions; PR publication applies
@@ -136,7 +143,7 @@ pub fn build_approved(
                 continue;
             }
         }
-        if decision == "approved" {
+        if decision == DecisionValue::Approved {
             manual = manual.saturating_add(1);
         } else {
             automatic = automatic.saturating_add(1);
@@ -170,6 +177,17 @@ pub fn build_approved(
         "unanchored": unanchored.len(), "unanchoredFinding": unanchored, "findingId": ids,
         "reviewedSourceCommit": source, "reviewedMergeBaseCommit": base}),
     )
+}
+
+/// Retains the caller-facing diagnostic while identifying the missing decisions.
+fn incomplete_journal(names: &str) -> AppError {
+    IncompleteDecisionJournal::caused_by(
+        invalid(format!(
+            "The audit recorded no decision for {names}. Every finding must be decided."
+        ))
+        .into_std_error(),
+    )
+    .into()
 }
 
 /// Checks that an approved set is bound to the exact publication capture.
@@ -216,32 +234,21 @@ pub fn check_approved_request_path(path: &Path, clock: &dyn Clock) -> Result<(),
 }
 
 /// Applies the same freshness rules to file reads and already-read snapshots.
-fn check_approved_value(document: &Value, context: Option<&Value>) -> Result<(), AppError> {
-    let object = document
-        .as_object()
-        .ok_or_else(|| invalid("Invalid approved set"))?;
-    let fields = [
-        "schemaVersion",
-        "target",
-        "reviewedSourceCommit",
-        "reviewedMergeBaseCommit",
-        "reviewedContextHash",
-        "findings",
-    ];
-    if object.len() != fields.len()
-        || fields.iter().any(|field| !object.contains_key(*field))
-        || document.get("schemaVersion").and_then(Value::as_u64) != Some(2)
-    {
-        return Err(invalid("Invalid approved set schema"));
-    }
-    validate_artifact(
-        &json!({"schemaVersion": 1, "kind": "consolidated", "findings": array(document, "findings")?}),
-    )?;
+pub(crate) fn check_approved_value(
+    document: &Value,
+    context: Option<&Value>,
+) -> Result<(), AppError> {
+    check_approved_schema(document)?;
     match context {
         None => {
-            if fields[1..5]
-                .iter()
-                .any(|field| !document.get(*field).is_some_and(Value::is_null))
+            if [
+                "target",
+                "reviewedSourceCommit",
+                "reviewedMergeBaseCommit",
+                "reviewedContextHash",
+            ]
+            .iter()
+            .any(|field| !document.get(*field).is_some_and(Value::is_null))
             {
                 return Err(invalid("Capture-bound approved set requires its capture"));
             }
@@ -269,8 +276,33 @@ fn check_approved_value(document: &Value, context: Option<&Value>) -> Result<(),
     Ok(())
 }
 
+/// Checks the approved artifact independently of its capture binding.
+pub(crate) fn check_approved_schema(document: &Value) -> Result<(), AppError> {
+    let object = document
+        .as_object()
+        .ok_or_else(|| invalid("Invalid approved set"))?;
+    let fields = [
+        "schemaVersion",
+        "target",
+        "reviewedSourceCommit",
+        "reviewedMergeBaseCommit",
+        "reviewedContextHash",
+        "findings",
+    ];
+    if object.len() != fields.len()
+        || fields.iter().any(|field| !object.contains_key(*field))
+        || document.get("schemaVersion").and_then(Value::as_u64) != Some(2)
+    {
+        return Err(invalid("Invalid approved set schema"));
+    }
+    validate_artifact(
+        &json!({"schemaVersion": 1, "kind": "consolidated", "findings": array(document, "findings")?}),
+    )?;
+    Ok(())
+}
+
 /// Confirms a follow-up names a comment present in its captured thread.
-fn check_follow_up(context: &Value, finding: &Value) -> Result<(), AppError> {
+pub(crate) fn check_follow_up(context: &Value, finding: &Value) -> Result<(), AppError> {
     let Some(follow_up) = finding.get("followUp").filter(|value| !value.is_null()) else {
         return Ok(());
     };
@@ -307,7 +339,7 @@ fn check_follow_up(context: &Value, finding: &Value) -> Result<(), AppError> {
 }
 
 /// Provider identifiers may be strings or integral Azure identifiers.
-fn identifier_matches(value: Option<&Value>, expected: &str) -> bool {
+pub(crate) fn identifier_matches(value: Option<&Value>, expected: &str) -> bool {
     match value {
         Some(Value::String(value)) => value == expected,
         Some(Value::Number(value)) if value.as_i64().is_some() || value.as_u64().is_some() => {
@@ -366,4 +398,25 @@ fn array<'a>(value: &'a Value, key: &str) -> Result<&'a Vec<Value>, AppError> {
 /// Marks invalid input separately from I/O failures.
 fn invalid(message: impl Into<String>) -> AppError {
     fail("invalidInput", message.into())
+}
+
+#[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
+mod tests {
+    use ss_ai_runtime::classification;
+
+    use super::{IncompleteDecisionJournal, incomplete_journal};
+
+    #[test]
+    fn incomplete_journal_preserves_category_and_diagnostic() {
+        let error = incomplete_journal("'F-1' or 'F-2'");
+        assert!(error.find_source::<IncompleteDecisionJournal>().is_some());
+        assert_eq!(classification(&error), "invalidInput");
+        assert_eq!(
+            error.to_string().lines().next(),
+            Some(
+                "invalidInput: The audit recorded no decision for 'F-1' or 'F-2'. Every finding must be decided."
+            )
+        );
+    }
 }

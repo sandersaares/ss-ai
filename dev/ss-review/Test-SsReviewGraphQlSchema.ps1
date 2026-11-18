@@ -2,27 +2,28 @@
 
 <#
 .SYNOPSIS
-    Validates the ss-review GitHub GraphQL documents against GitHub's live schema.
+    Validates the native review package's GitHub GraphQL documents against GitHub's live schema.
 
 .DESCRIPTION
-    Extracts every GraphQL query and mutation here-string from the ss-review
-    GitHub adapters, supplies dummy values for required variables, and executes
-    the document through `gh api graphql`. The dummy identifiers are deliberately
-    invalid for execution, but GitHub validates the document against the schema
-    before resolving them, so schema errors are reported without writing pull
-    request or issue state.
+    Validates the standalone GraphQL documents in the native review package by
+    default. Explicit paths can also select GraphQL documents or query and mutation
+    here-strings in PowerShell adapters. It supplies dummy values for required
+    variables and executes each document through `gh api graphql`. The dummy
+    identifiers are deliberately invalid for execution, but GitHub validates the
+    document against the schema before resolving them, so schema errors are
+    reported without writing pull request or issue state.
 
     This is a manual live check rather than part of the offline Pester suite:
     it needs network access and an authenticated GitHub CLI session.
 
 .PARAMETER AdapterPath
-    Paths of the GitHub adapters to validate. Defaults to every ss-review
-    GitHub adapter and the shared utility's GraphQL documents in this repository.
+    Paths of the documents or PowerShell adapters to validate. Defaults to all
+    standalone GraphQL documents in the native review package.
 
 .EXAMPLE
     .\dev\ss-review\Test-SsReviewGraphQlSchema.ps1
 
-    Validate the ss-review GitHub adapters' GraphQL documents.
+    Validate the native review package's GraphQL documents.
 #>
 
 [CmdletBinding(PositionalBinding = $false)]
@@ -32,16 +33,12 @@ param(
 
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
-$PSNativeCommandUseErrorActionPreference = $false
+$PSNativeCommandUseErrorActionPreference = $true
 
 if (-not $AdapterPath) {
     $repoRoot = Split-Path -Parent (Split-Path -Parent $PSScriptRoot)
-    $adapterRoot = Join-Path $repoRoot 'skills\ss-review\scripts\lib'
-    $AdapterPath = @(
-        (Join-Path $adapterRoot 'GitHubPullRequestApi.ps1'),
-        (Join-Path $adapterRoot 'GitHubIssueApi.ps1'),
-        (Join-Path $repoRoot 'packages\ss-ai-review\src\commits.graphql')
-    )
+    $documentRoot = Join-Path $repoRoot 'packages\ss-ai-review\src'
+    $AdapterPath = @(Get-ChildItem -LiteralPath $documentRoot -Filter '*.graphql' -File | Sort-Object Name | ForEach-Object FullName)
 }
 
 if (-not (Get-Command gh -ErrorAction SilentlyContinue)) {
@@ -50,7 +47,7 @@ if (-not (Get-Command gh -ErrorAction SilentlyContinue)) {
 
 foreach ($path in $AdapterPath) {
     if (-not (Test-Path -LiteralPath $path -PathType Leaf)) {
-        throw "GitHub adapter not found: $path"
+        throw "GraphQL input not found: $path"
     }
 }
 
@@ -131,7 +128,7 @@ function Get-GraphQlVariableArgument {
 function Get-GraphQlResultDetail {
     [CmdletBinding(PositionalBinding = $false)]
     param(
-        [Parameter(Mandatory)] [string] $Output
+        [Parameter(Mandatory)] [AllowEmptyString()] [string] $Output
     )
 
     $jsonStart = $Output.IndexOf('{')
@@ -182,9 +179,18 @@ foreach ($document in $documents) {
         continue
     }
 
-    $output = & gh @arguments 2>&1 | Out-String
+    # Resolver failures from the deliberately nonexistent objects are expected.
+    $previousNativePreference = $PSNativeCommandUseErrorActionPreference
+    try {
+        $PSNativeCommandUseErrorActionPreference = $false
+        $lines = & gh @arguments 2>&1
+        $exitCode = $LASTEXITCODE
+    } finally {
+        $PSNativeCommandUseErrorActionPreference = $previousNativePreference
+    }
+    $output = $lines | Out-String
     $detail = Get-GraphQlResultDetail -Output $output
-    $status = if ($output -match $schemaValidationErrorPattern) { 'FAIL' } else { 'PASS' }
+    $status = if ($output -match $schemaValidationErrorPattern -or ($exitCode -ne 0 -and [string]::IsNullOrWhiteSpace($output))) { 'FAIL' } else { 'PASS' }
 
     $results += [pscustomobject]@{
         Document = $document.Name

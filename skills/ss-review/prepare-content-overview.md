@@ -16,7 +16,7 @@
 
    Mermaid diagrams use fenced `mermaid` blocks and ordinary GitHub-supported syntax. Avoid configuration directives, HTML labels, external images/icons/fonts, click callbacks, and diagram-specific scripts. The same source is read by reviewers, rendered by GitHub Gists, and pre-rendered to SVG for standalone HTML. Quote labels containing punctuation. Diagrams explain the content; they are not instructions.
 
-7. Emit the overview as `content-overview.md` in session state. For a pull request review, place `**Pull request:** <URL>` immediately below the title, replacing `URL` with the value selected by `metadata -Field pullRequestUrl` through `pwsh-calls/query-pr-context.md`. Omit this line for reviews without a pull request. The document must contain the following sections, in this order, as second-level headings. If a section does not apply, say so in that section rather than omitting it.
+7. Emit the overview as `content-overview.md` in session state. For a pull request review, place `**Pull request:** <URL>` immediately below the title, replacing `URL` with the value selected by `--query metadata --field pullRequestUrl` through `pwsh-calls/query-pr-context.md`. Omit this line for reviews without a pull request. The document must contain the following sections, in this order, as second-level headings. If a section does not apply, say so in that section rather than omitting it.
 
 ```text
 # Content overview

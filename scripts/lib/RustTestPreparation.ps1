@@ -123,6 +123,29 @@ function Get-RustTestIdentity {
             }
         }
 
+        # Native tests embed query fixtures and consume provider fixtures outside the package tree.
+        foreach ($fixture in @(
+            'tests/fixtures/ss-review-query-capture.json',
+            'tests/fixtures/ss-review-query-expected.json'
+        )) {
+            $path = Join-Path $RepositoryRoot $fixture
+            if (Test-Path -LiteralPath $path -PathType Leaf) {
+                Get-Item -LiteralPath $path
+            }
+        }
+        $providerFixtures = Join-Path $RepositoryRoot 'tests/fixtures/ss-review-native-capture'
+        if (Test-Path -LiteralPath $providerFixtures -PathType Container) {
+            Get-ChildItem -LiteralPath $providerFixtures -Recurse -File -Force |
+                Where-Object Extension -CEQ '.json'
+        }
+
+        # The focus-generation build fingerprint includes these external schemas.
+        $schemas = Join-Path $RepositoryRoot 'skills/ss-review/schemas'
+        if (Test-Path -LiteralPath $schemas -PathType Container) {
+            Get-ChildItem -LiteralPath $schemas -Recurse -File -Force |
+                Where-Object Extension -CEQ '.json'
+        }
+
         # Reapproval tests embed the shared policy outside the Cargo package tree.
         $policy = Join-Path $RepositoryRoot 'skills/ss-autoreapprove/significance.md'
         if (Test-Path -LiteralPath $policy -PathType Leaf) {
@@ -160,7 +183,7 @@ function Get-RustTestIdentity {
     $environment = @{}
     # Preserve null versus empty because both toolchain wrappers and flags affect compatibility.
     foreach ($name in @(
-        'RUSTFLAGS', 'CARGO_ENCODED_RUSTFLAGS', 'RUSTDOCFLAGS', 'CARGO_BUILD_TARGET',
+        'RUSTFLAGS', 'CARGO_ENCODED_RUSTFLAGS', 'RUSTDOCFLAGS', 'SS_AI_DENY_RUST_WARNINGS', 'CARGO_BUILD_TARGET',
         'CARGO_PROFILE_DEV_DEBUG', 'CARGO_PROFILE_TEST_DEBUG', 'CARGO_INCREMENTAL',
         'RUSTC', 'RUSTUP_TOOLCHAIN', 'RUSTC_WRAPPER', 'RUSTC_WORKSPACE_WRAPPER'
     )) {
@@ -245,11 +268,15 @@ function New-RustTestPreparation {
         $providerSource = Join-Path $RepositoryRoot 'packages/ss-ai/tests/support/provider.rs'
         $provider = Join-Path $owned $(if ($IsWindows) { 'provider.exe' } else { 'provider' })
         $providerFailure = $null
-        $requiresProvider = -not $TestTarget -or $TestTarget -contains 'native'
+        # final_review_cli replays provider subprocess calls through the prepared helper.
+        $requiresProvider = -not $TestTarget -or $TestTarget -contains 'native' -or
+            $TestTarget -contains 'capture_parity' -or $TestTarget -contains 'final_review_cli'
         if ($requiresProvider) {
             try {
                 Invoke-TestPhase -Name 'prepare provider (compilerInvocations=1)' -Action {
-                    & rustc --edition 2024 $providerSource -o $provider
+                    # rustc does not read Cargo's warning flags; keep local builds unchanged.
+                    $warningFlags = if ($env:SS_AI_DENY_RUST_WARNINGS -eq '1') { @('-D', 'warnings') } else { @() }
+                    & rustc --edition 2024 @warningFlags $providerSource -o $provider
                     if ($LASTEXITCODE -ne 0) {
                         throw 'Preparing the native provider failed.'
                     }
@@ -299,7 +326,7 @@ function New-RustTestPreparation {
 
         $record = @{
             # The consumer requires source and effective external configuration identity (DEVELOPMENT.md).
-            schemaVersion = 3
+            schemaVersion = 4
             status = $(if ($providerFailure) { 'providerFailed' } else { 'complete' })
             providerFailure = $providerFailure
             identity = $identity
@@ -370,7 +397,7 @@ function Read-RustTestPreparation {
         'ownedDirectory', 'targetDirectory', 'provider', 'executables'
     )
     if ($record -isnot [System.Collections.IDictionary] -or
-        $record.schemaVersion -isnot [long] -or $record.schemaVersion -ne 3 -or
+        $record.schemaVersion -isnot [long] -or $record.schemaVersion -ne 4 -or
         $record.status -isnot [string] -or
         ($record.status -cne 'complete' -and -not ($AllowProviderFailure -and $record.status -ceq 'providerFailed'))) {
         throw 'Incomplete or unsupported Rust prerequisites.'
@@ -384,7 +411,9 @@ function Read-RustTestPreparation {
         }
     }
 
-    $requiresProvider = -not $TestTarget -or $TestTarget -contains 'native'
+    # Keep prerequisite validation aligned with the targets that consume the helper.
+    $requiresProvider = -not $TestTarget -or $TestTarget -contains 'native' -or
+        $TestTarget -contains 'capture_parity' -or $TestTarget -contains 'final_review_cli'
     if ($record.status -ceq 'providerFailed') {
         if (-not $requiresProvider -or $null -ne $record.provider -or
             $record.providerFailure -isnot [string] -or [string]::IsNullOrWhiteSpace($record.providerFailure)) {
@@ -541,7 +570,7 @@ function Invoke-PreparedRustTests {
     $includeDoctests = $false
 
     if ($Preparation.status -ceq 'providerFailed') {
-        Write-Host "Blocked native tests: $($Preparation.providerFailure)"
+        Write-Host "Blocked provider-dependent tests: $($Preparation.providerFailure)"
         if (-not $TestTarget) {
             $metadata = & cargo metadata --no-deps --format-version 1 --locked | ConvertFrom-Json
             if ($LASTEXITCODE -ne 0) {
@@ -550,13 +579,15 @@ function Invoke-PreparedRustTests {
 
             $TestTarget = @($metadata.packages |
                 Where-Object id -In $metadata.workspace_members |
-                ForEach-Object targets | Where-Object { $_.kind -contains 'test' -and $_.name -ne 'native' } |
+                ForEach-Object targets | Where-Object {
+                    $_.kind -contains 'test' -and $_.name -notin @('native', 'capture_parity', 'final_review_cli')
+                } |
                 Select-Object -ExpandProperty name -Unique)
             $selection += @('--lib', '--bins')
             # Explicit target selectors omit doctests, so run those separately below.
             $includeDoctests = $true
         } else {
-            $TestTarget = @($TestTarget | Where-Object { $_ -ne 'native' })
+            $TestTarget = @($TestTarget | Where-Object { $_ -notin @('native', 'capture_parity', 'final_review_cli') })
             if (-not $TestTarget) {
                 throw 'All selected Rust tests are blocked by provider preparation failure.'
             }

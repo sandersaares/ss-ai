@@ -1,3 +1,9 @@
+#Requires -Version 7.6
+
+Set-StrictMode -Version Latest
+$ErrorActionPreference = 'Stop'
+$PSNativeCommandUseErrorActionPreference = $true
+
 BeforeAll {
     Set-StrictMode -Version Latest
     $ErrorActionPreference = 'Stop'
@@ -11,6 +17,7 @@ BeforeAll {
         }
 
         $script:ProviderBuilds++
+        $script:ProviderArguments = @($args)
         if ($script:FailProvider) {
             # Distinct native exit statuses keep provider and Cargo failures distinguishable.
             $global:LASTEXITCODE = 13
@@ -32,7 +39,7 @@ BeforeAll {
             return
         }
         if ($args[0] -eq 'metadata') {
-            return '{"workspace_members":["fixture"],"packages":[{"id":"fixture","targets":[{"name":"native","kind":["test"]},{"name":"git","kind":["test"]}]}]}'
+            return '{"workspace_members":["fixture"],"packages":[{"id":"fixture","targets":[{"name":"native","kind":["test"]},{"name":"capture_parity","kind":["test"]},{"name":"final_review_cli","kind":["test"]},{"name":"git","kind":["test"]}]}]}'
         }
 
         $target = $args[[array]::IndexOf($args, '--target-dir') + 1]
@@ -43,6 +50,12 @@ BeforeAll {
             # Move by a full day to remain distinct on coarse timestamp filesystems.
             $stamp = [IO.File]::GetLastWriteTimeUtc($script:TouchDuringBuild)
             [IO.File]::SetLastWriteTimeUtc($script:TouchDuringBuild, $stamp.AddDays(1))
+        }
+        if ($script:ChangeDuringBuild) {
+            # Keep the timestamp fixed so the content identity detects this change.
+            $stamp = [IO.File]::GetLastWriteTimeUtc($script:ChangeDuringBuild)
+            [IO.File]::WriteAllText($script:ChangeDuringBuild, 'changed schema')
+            [IO.File]::SetLastWriteTimeUtc($script:ChangeDuringBuild, $stamp)
         }
         @{
             reason = 'compiler-artifact'
@@ -73,10 +86,12 @@ Describe 'Rust preparation boundary' {
             cargo @ArgumentList
         }
         $script:ProviderBuilds = 0
+        $script:ProviderArguments = @()
         $script:CargoCalls = [Collections.Generic.List[object]]::new()
         $script:FailProvider = $false
         $script:FailCargo = $false
         $script:TouchDuringBuild = $null
+        $script:ChangeDuringBuild = $null
         $fixture = New-PreparationFixture
     }
 
@@ -235,7 +250,20 @@ Describe 'Rust preparation boundary' {
         @(Get-ChildItem -LiteralPath $fixture.root -Directory -Filter 'rust-tests-*') | Should -BeNullOrEmpty
     }
 
-    It 'reports provider failure explicitly, blocks native only, and still runs other tests and doctests' {
+    It 'never publishes a record after a schema changes during compilation' {
+        $schema = Join-Path $fixture.root 'skills/ss-review/schemas/focus-area-map.schema.json'
+        New-Item -ItemType Directory -Path (Split-Path -Parent $schema) -Force | Out-Null
+        [IO.File]::WriteAllText($schema, 'original schema')
+        $script:ChangeDuringBuild = $schema
+
+        { New-RustTestPreparation -RepositoryRoot $fixture.root -PrerequisitePath $fixture.record } |
+            Should -Throw '*sources changed during preparation*'
+
+        Test-Path -LiteralPath $fixture.record | Should -BeFalse
+        @(Get-ChildItem -LiteralPath $fixture.root -Directory -Filter 'rust-tests-*') | Should -BeNullOrEmpty
+    }
+
+    It 'reports provider failure explicitly, blocks provider-dependent tests, and still runs other tests and doctests' {
         $script:FailProvider = $true
         $prepared = New-RustTestPreparation -RepositoryRoot $fixture.root -PrerequisitePath $fixture.record
         $prepared.status | Should -Be 'providerFailed'
@@ -248,6 +276,8 @@ Describe 'Rust preparation boundary' {
         $script:CargoCalls[2] | Should -Contain 'git'
         $script:CargoCalls[2] | Should -Contain '--lib'
         $script:CargoCalls[2] | Should -Not -Contain 'native'
+        $script:CargoCalls[2] | Should -Not -Contain 'capture_parity'
+        $script:CargoCalls[2] | Should -Not -Contain 'final_review_cli'
         $script:CargoCalls[3] | Should -Contain '--doc'
     }
 
@@ -257,6 +287,34 @@ Describe 'Rust preparation boundary' {
         $prepared.status | Should -Be 'complete'
         $prepared.provider | Should -BeNullOrEmpty
         $script:ProviderBuilds | Should -Be 0
+    }
+
+    It 'prepares a provider for capture parity and final review CLI replay' {
+        $prepared = New-RustTestPreparation -RepositoryRoot $fixture.root -PrerequisitePath $fixture.record -TestTarget capture_parity
+        $script:ProviderBuilds | Should -Be 1
+        $null = Read-RustTestPreparation -RepositoryRoot $fixture.root -PrerequisitePath $fixture.record -TestTarget capture_parity
+
+        $cliFixture = New-PreparationFixture
+        $prepared = New-RustTestPreparation -RepositoryRoot $cliFixture.root -PrerequisitePath $cliFixture.record -TestTarget final_review_cli
+        $script:ProviderBuilds | Should -Be 2
+        Test-Path -LiteralPath $prepared.provider.executable.path | Should -BeTrue
+        $null = Read-RustTestPreparation -RepositoryRoot $cliFixture.root -PrerequisitePath $cliFixture.record -TestTarget final_review_cli
+    }
+
+    It 'excludes provider-dependent selected tests when provider preparation fails' {
+        $script:FailProvider = $true
+        $prepared = New-RustTestPreparation -RepositoryRoot $fixture.root -PrerequisitePath $fixture.record -TestTarget capture_parity
+        $prepared.status | Should -Be 'providerFailed'
+        $failed = @{ status = 'providerFailed'; providerFailure = 'fixture'; targetDirectory = 'unused' }
+        Mock Invoke-RustTestCargo {
+            $script:CargoCalls.Add(@($ArgumentList))
+            $global:LASTEXITCODE = 0
+        }
+        { Invoke-PreparedRustTests -Preparation $failed -PrerequisitePath $fixture.record -TestTarget capture_parity,final_review_cli,git } |
+            Should -Throw '*execution failed*'
+        $script:CargoCalls[-1] | Should -Contain 'git'
+        $script:CargoCalls[-1] | Should -Not -Contain 'capture_parity'
+        $script:CargoCalls[-1] | Should -Not -Contain 'final_review_cli'
     }
 
     It 'preserves selected targets and filters as separate Cargo arguments' {
@@ -338,6 +396,18 @@ Describe 'Rust preparation boundary' {
             'tests/fixtures/ss-review-query-capture.json',
             'tests/fixtures/ss-review-query-expected.json',
             'skills/ss-autoreapprove/significance.md',
+            'skills/ss-review/schemas/focus-area-map.schema.json',
+            'tests/fixtures/ss-review-query-capture.json',
+            'tests/fixtures/ss-review-query-expected.json',
+            'tests/fixtures/ss-review-native-capture/github.json',
+            'tests/fixtures/ss-review-native-capture/github-context.json',
+            'tests/fixtures/ss-review-native-capture/github-expected.json',
+            'tests/fixtures/ss-review-native-capture/azure-devops.json',
+            'tests/fixtures/ss-review-native-capture/azure-devops-context.json',
+            'tests/fixtures/ss-review-native-capture/azure-devops-expected.json',
+            'tests/fixtures/ss-review-native-capture/github-refresh-parity.json',
+            'tests/fixtures/ss-review-native-capture/azure-devops-refresh-expected.json',
+            'tests/fixtures/ss-review-native-capture/nested/fixture.json',
             'Cargo.toml', 'Cargo.lock', 'rust-toolchain.toml', '.cargo/config.toml'
         )) {
             foreach ($rewrite in @($false, $true)) {
@@ -378,6 +448,18 @@ Describe 'Rust preparation boundary' {
         @{ Asset = 'tests/fixtures/ss-review-query-capture.json' }
         @{ Asset = 'tests/fixtures/ss-review-query-expected.json' }
         @{ Asset = 'skills/ss-autoreapprove/significance.md' }
+        @{ Asset = 'skills/ss-review/schemas/focus-area-map.schema.json' }
+        @{ Asset = 'tests/fixtures/ss-review-query-capture.json' }
+        @{ Asset = 'tests/fixtures/ss-review-query-expected.json' }
+        @{ Asset = 'tests/fixtures/ss-review-native-capture/github.json' }
+        @{ Asset = 'tests/fixtures/ss-review-native-capture/github-context.json' }
+        @{ Asset = 'tests/fixtures/ss-review-native-capture/github-expected.json' }
+        @{ Asset = 'tests/fixtures/ss-review-native-capture/azure-devops.json' }
+        @{ Asset = 'tests/fixtures/ss-review-native-capture/azure-devops-context.json' }
+        @{ Asset = 'tests/fixtures/ss-review-native-capture/azure-devops-expected.json' }
+        @{ Asset = 'tests/fixtures/ss-review-native-capture/github-refresh-parity.json' }
+        @{ Asset = 'tests/fixtures/ss-review-native-capture/azure-devops-refresh-expected.json' }
+        @{ Asset = 'tests/fixtures/ss-review-native-capture/nested/fixture.json' }
     ) {
         $assetPath = Join-Path $fixture.root $Asset
         New-Item -ItemType Directory -Path (Split-Path -Parent $assetPath) -Force | Out-Null
@@ -401,11 +483,43 @@ Describe 'Rust preparation boundary' {
         }
     }
 
-    It 'ignores unrelated TOML files and generated fuzz corpus inputs' {
+    It 'rejects a schema <Change> after preparation for <Asset>' -ForEach @(
+        @{ Change = 'addition'; Asset = 'focus-area-map.schema.json'; Hidden = $false }
+        @{ Change = 'removal'; Asset = 'focus-area-map.schema.json'; Hidden = $false }
+        @{ Change = 'addition'; Asset = '.hidden.schema.json'; Hidden = $true }
+    ) {
+        $schema = Join-Path $fixture.root "skills/ss-review/schemas/$Asset"
+        New-Item -ItemType Directory -Path (Split-Path -Parent $schema) -Force | Out-Null
+        if ($Change -eq 'removal') { [IO.File]::WriteAllText($schema, 'schema') }
+        $null = New-RustTestPreparation -RepositoryRoot $fixture.root -PrerequisitePath $fixture.record
+        if ($Change -eq 'addition') {
+            [IO.File]::WriteAllText($schema, 'schema')
+            if ($Hidden -and $IsWindows) {
+                [IO.File]::SetAttributes($schema, [IO.File]::GetAttributes($schema) -bor [IO.FileAttributes]::Hidden)
+                if (-not ([IO.File]::GetAttributes($schema) -band [IO.FileAttributes]::Hidden)) {
+                    Set-ItResult -Skipped -Because 'The fixture filesystem does not support hidden attributes.'
+                    return
+                }
+            }
+        } else {
+            Remove-Item -LiteralPath $schema
+        }
+
+        { Read-RustTestPreparation -RepositoryRoot $fixture.root -PrerequisitePath $fixture.record } |
+            Should -Throw '*sourceSha256*'
+        $script:CargoCalls.Count | Should -Be 1
+    }
+
+    It 'ignores unrelated TOML files, generated fuzz corpus and non-schema skill assets' {
         $paths = @(
             'packages/ss-ai-cargo-fuzz/corpus/manifest/dependencies.toml',
             'packages/ss-ai-cargo-fuzz/seeds/unrelated.toml',
-            'packages/another/fuzz/seeds/malformed.toml'
+            'packages/another/fuzz/seeds/malformed.toml',
+            # The build fingerprint selects only the exact lowercase JSON extension.
+            'skills/ss-review/schemas/other.schema.JSON',
+            'skills/ss-review/schemas/other.txt',
+            'tests/fixtures/ss-review-native-capture/other.JSON',
+            'tests/fixtures/ss-review-native-capture/other.txt'
         )
         foreach ($path in $paths) {
             $assetPath = Join-Path $fixture.root $path
@@ -450,6 +564,7 @@ Describe 'Rust preparation boundary' {
         foreach ($change in @(
             { param($record) $record.schemaVersion = '1' }
             { param($record) $record.schemaVersion = 1 }
+            { param($record) $record.schemaVersion = 3 }
             { param($record) $record.identity.Remove('sourceFreshnessSha256') }
             { param($record) $record.identity.sourceFreshnessSha256 = @($record.identity.sourceFreshnessSha256) }
             { param($record) $record.testTargets = 'native' }
@@ -507,6 +622,27 @@ Describe 'Rust preparation boundary' {
         $null = New-RustTestPreparation -RepositoryRoot $fixture.root -PrerequisitePath $fixture.record -TestTarget native
         Test-Path -LiteralPath $lockPath | Should -BeTrue
         $null = Read-RustTestPreparation -RepositoryRoot $fixture.root -PrerequisitePath $fixture.record -TestTarget native
+    }
+
+    It 'applies the CI warning policy to direct provider compilation only when enabled' {
+        $original = $env:SS_AI_DENY_RUST_WARNINGS
+        try {
+            $env:SS_AI_DENY_RUST_WARNINGS = '1'
+            $null = New-RustTestPreparation -RepositoryRoot $fixture.root -PrerequisitePath $fixture.record -TestTarget native
+            $script:ProviderArguments | Should -Contain '-D'
+            $script:ProviderArguments | Should -Contain 'warnings'
+
+            # A prepared fixture must not be reused across compiler policies.
+            $env:SS_AI_DENY_RUST_WARNINGS = $null
+            { Read-RustTestPreparation -RepositoryRoot $fixture.root -PrerequisitePath $fixture.record -TestTarget native } |
+                Should -Throw '*environment*'
+            $another = New-PreparationFixture
+            $null = New-RustTestPreparation -RepositoryRoot $another.root -PrerequisitePath $another.record -TestTarget native
+            $script:ProviderArguments | Should -Not -Contain '-D'
+            $script:ProviderArguments | Should -Not -Contain 'warnings'
+        } finally {
+            $env:SS_AI_DENY_RUST_WARNINGS = $original
+        }
     }
 
     It 'prepares concurrently with shared record = <SharedRecord> without replacing active outputs' -ForEach @(

@@ -9,6 +9,10 @@ use std::process;
 /// Routes native process scenarios without an installed provider CLI or live credentials.
 fn main() {
     let args: Vec<_> = env::args().skip(1).collect();
+    if let Some(root) = env::var_os("FIXTURE_PROCESS_REPLAY") {
+        replay(Path::new(&root), &args);
+        return;
+    }
     match args.first().map(String::as_str) {
         Some("pipe") => {
             // Exceed ordinary pipe capacity before reading, catching sequential pipe deadlocks.
@@ -46,8 +50,42 @@ fn main() {
     }
 }
 
+/// Replays test-owned process exchanges without installed tools or network access.
+fn replay(root: &Path, args: &[String]) {
+    let mut input = Vec::new();
+    io::stdin().read_to_end(&mut input).unwrap();
+    let mut exchanges: Vec<_> = fs::read_dir(root)
+        .unwrap()
+        .map(|entry| entry.unwrap().path())
+        .collect();
+    // Repeated reads may have different replies before and after publication.
+    exchanges.sort();
+    for exchange in exchanges {
+        if exchange.join("consumed").exists()
+            || fs::read(exchange.join("arguments")).unwrap() != args.join("\0").as_bytes()
+            || fs::read(exchange.join("input")).unwrap() != input
+        {
+            continue;
+        }
+        fs::write(exchange.join("consumed"), []).unwrap();
+        io::stdout()
+            .write_all(&fs::read(exchange.join("stdout")).unwrap())
+            .unwrap();
+        io::stderr()
+            .write_all(&fs::read(exchange.join("stderr")).unwrap())
+            .unwrap();
+        return;
+    }
+    panic!("Unexpected replay request: {args:?}");
+}
+
 /// Keeps remote responses and mutable claim files inside the caller's private fixture.
 fn github(args: &[String]) {
+    if env::var_os("FIXTURE_CAPTURE").is_some() {
+        github_capture(args);
+        return;
+    }
+
     let path = &args[1];
     let method = &args[args.iter().position(|arg| arg == "--method").unwrap() + 1];
     let root = env::var_os("FIXTURE_ROOT").unwrap();
@@ -116,4 +154,49 @@ fn github(args: &[String]) {
         _ => panic!("Unexpected fixture operation: {method} {path}"),
     };
     print!("{response}");
+}
+
+/// Serves capture reads from caller-owned responses and rejects all provider writes.
+fn github_capture(args: &[String]) {
+    let path = &args[1];
+    let method = &args[args.iter().position(|arg| arg == "--method").unwrap() + 1];
+    let response = match (method.as_str(), path.as_str()) {
+        ("GET", "user") => "user",
+        ("GET", "repos/octo/widget/pulls/7") => "pullRequest",
+        ("GET", "repos/octo/widget/pulls/7/reviews?per_page=100") => "reviews",
+        ("GET", "repos/octo/widget/issues/7/comments?per_page=100") => "issueComments",
+        ("GET", "repos/octo/widget/pulls/7/requested_reviewers?per_page=100") => {
+            "requestedReviewers"
+        }
+        (
+            "GET",
+            "repos/octo/widget/compare/bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb...aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        ) => "compare",
+        ("POST", "graphql") => {
+            let mut input = String::new();
+            io::stdin().read_to_string(&mut input).unwrap();
+            assert!(input.contains("\"query\":\"query"));
+            assert!(!input.contains("mutation"));
+            if input.contains("reviewThreads(") {
+                "reviewThreads"
+            } else if input.contains("reviews(first:") {
+                "reviewEdits"
+            } else if input.contains("timelineItems(") {
+                "timeline"
+            } else if input.contains("comments(first:") {
+                "issueEdits"
+            } else {
+                panic!("Unexpected capture GraphQL query: {input}");
+            }
+        }
+        _ => panic!("Unexpected capture request: {method} {path}"),
+    };
+    let root = env::var_os("FIXTURE_ROOT").unwrap();
+    let bytes = fs::read(
+        Path::new(&root)
+            .join("responses")
+            .join(format!("{response}.json")),
+    )
+    .unwrap();
+    io::stdout().write_all(&bytes).unwrap();
 }

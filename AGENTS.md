@@ -11,6 +11,9 @@ Do not add or retain cross-version session readers, migrations, or recovery
 paths. Read-only recovery is not an exception. Reject incompatible schemas
 without changing stored state; use one utility version throughout a session.
 
+Backward compatibility is not a requirement; breaking changes do not require
+compatibility shims or migrations.
+
 ## PowerShell and script contracts
 
 Target current stable PowerShell; scripts use the 7.6 release line. Every

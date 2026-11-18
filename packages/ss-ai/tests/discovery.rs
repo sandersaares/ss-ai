@@ -11,7 +11,7 @@ use std::cell::{Cell, RefCell};
 use std::collections::BTreeMap;
 use std::ffi::OsString;
 use std::fs;
-use std::io;
+use std::io::Result as StdIoResult;
 use std::path::Path;
 use std::sync::mpsc;
 use std::thread;
@@ -63,7 +63,7 @@ impl Process for GitHub {
         program: &str,
         arguments: &[String],
         input: &[u8],
-    ) -> io::Result<ProcessOutput> {
+    ) -> StdIoResult<ProcessOutput> {
         assert_eq!(program, "gh");
         let path = &arguments[1];
         let method = &arguments[3];
@@ -185,7 +185,7 @@ fn result_arguments(root: &Path) -> Vec<OsString> {
 struct NoProcess;
 
 impl Process for NoProcess {
-    fn execute(&self, program: &str, _: &[String], _: &[u8]) -> io::Result<ProcessOutput> {
+    fn execute(&self, program: &str, _: &[String], _: &[u8]) -> StdIoResult<ProcessOutput> {
         panic!("Unexpected process: {program}")
     }
 }
@@ -561,7 +561,7 @@ impl Process for Interrupted {
         program: &str,
         arguments: &[String],
         input: &[u8],
-    ) -> io::Result<ProcessOutput> {
+    ) -> StdIoResult<ProcessOutput> {
         if arguments[1] == "graphql" {
             let request: Value = serde_json::from_slice(input).unwrap();
             assert_ne!(request["variables"]["num"], 2, "Simulated interruption");
@@ -674,7 +674,7 @@ impl Process for BrokenEvidence {
         program: &str,
         arguments: &[String],
         input: &[u8],
-    ) -> io::Result<ProcessOutput> {
+    ) -> StdIoResult<ProcessOutput> {
         let output = self.provider.execute(program, arguments, input)?;
         let mut value: Value = serde_json::from_slice(&output.stdout).unwrap();
         if arguments[1].contains("pulls?") {
@@ -762,7 +762,7 @@ fn malformed_pages_and_scope_failures_retain_explicit_diagnostics() {
 struct AzureToken;
 
 impl Process for AzureToken {
-    fn execute(&self, program: &str, arguments: &[String], _: &[u8]) -> io::Result<ProcessOutput> {
+    fn execute(&self, program: &str, arguments: &[String], _: &[u8]) -> StdIoResult<ProcessOutput> {
         assert_eq!(program, "az");
         assert!(
             arguments
@@ -1503,11 +1503,11 @@ impl Process for AzureObjectFailure {
         program: &str,
         arguments: &[String],
         input: &[u8],
-    ) -> io::Result<ProcessOutput> {
+    ) -> StdIoResult<ProcessOutput> {
         AzureToken.execute(program, arguments, input)
     }
 
-    fn isolated_git(&self, _: &Path, arguments: &[String]) -> io::Result<ProcessOutput> {
+    fn isolated_git(&self, _: &Path, arguments: &[String]) -> StdIoResult<ProcessOutput> {
         assert!(arguments.iter().any(|arg| arg == "init"));
         Ok(ProcessOutput::new(true, Vec::new(), Vec::new()))
     }
@@ -1518,7 +1518,7 @@ impl Process for AzureObjectFailure {
         arguments: &[String],
         url: &str,
         token: &str,
-    ) -> io::Result<ProcessOutput> {
+    ) -> StdIoResult<ProcessOutput> {
         assert_eq!(url, "https://dev.azure.com/org/project/_git/widgets");
         assert_eq!(token, "fixture-token");
         assert!(arguments.contains(&self.old));
@@ -1754,6 +1754,24 @@ fn ado_inspection_consumers_reject_corrupted_snapshots_and_changed_policy() {
     .unwrap_err();
 }
 
+/// Matches `gh --paginate --slurp`, including an empty response page.
+fn github_slurped_pages(values: &Value) -> Value {
+    let values = values.as_array().unwrap();
+    if values.is_empty() {
+        return json!([[]]);
+    }
+    Value::Array(values.iter().map(|value| json!([value])).collect())
+}
+
+#[test]
+fn github_approval_pages_include_an_empty_response_page() {
+    assert_eq!(github_slurped_pages(&json!([])), json!([[]]));
+    assert_eq!(
+        github_slurped_pages(&json!([{"id": 1}, {"id": 2}])),
+        json!([[{"id": 1}], [{"id": 2}]])
+    );
+}
+
 /// Native GitHub history uses complete REST pages and cursor-based timeline evidence.
 struct GitHubApproval {
     calls: RefCell<Vec<String>>,
@@ -1791,7 +1809,7 @@ impl Process for GitHubApproval {
         program: &str,
         arguments: &[String],
         input: &[u8],
-    ) -> io::Result<ProcessOutput> {
+    ) -> StdIoResult<ProcessOutput> {
         assert_eq!(program, "gh");
         let path = arguments[1].as_str();
         let method = arguments[3].as_str();
@@ -1800,16 +1818,6 @@ impl Process for GitHubApproval {
             "Inspection must not write remotely"
         );
         self.calls.borrow_mut().push(path.to_owned());
-        let pages = |values: &Value| {
-            Value::Array(
-                values
-                    .as_array()
-                    .unwrap()
-                    .iter()
-                    .map(|value| json!([value]))
-                    .collect(),
-            )
-        };
         let response = match path {
             "user" => {
                 self.identity_reads.set(self.identity_reads.get() + 1);
@@ -1842,7 +1850,7 @@ impl Process for GitHubApproval {
                 if self.fault == "restPage" {
                     json!([self.evidence["reviews"], null])
                 } else {
-                    pages(&self.evidence["reviews"])
+                    github_slurped_pages(&self.evidence["reviews"])
                 }
             }
             "repos/example/widgets/issues/1/comments?per_page=100" => {
@@ -1850,10 +1858,10 @@ impl Process for GitHubApproval {
                 if self.fault == "discussion" && self.pr_reads.get() > 1 {
                     comments[0]["body"] = json!("Changed discussion.");
                 }
-                pages(&comments)
+                github_slurped_pages(&comments)
             }
             "repos/example/widgets/pulls/1/comments?per_page=100" => {
-                pages(&self.evidence["reviewComments"])
+                github_slurped_pages(&self.evidence["reviewComments"])
             }
             "repos/example/widgets/rules/branches/fixture-target?per_page=100" => {
                 assert!(arguments.iter().any(|argument| argument == "--paginate"));
@@ -2316,7 +2324,7 @@ impl Process for PausedMetadata {
         program: &str,
         arguments: &[String],
         input: &[u8],
-    ) -> io::Result<ProcessOutput> {
+    ) -> StdIoResult<ProcessOutput> {
         if arguments[1].contains("pulls?") {
             self.signal.send(Signal::Enumerating).unwrap();
             self.release.recv().unwrap();

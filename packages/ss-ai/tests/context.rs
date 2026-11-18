@@ -1,6 +1,4 @@
-//! Real-process compatibility between native and PowerShell context readers.
-#![cfg_attr(coverage_nightly, feature(coverage_attribute))]
-#![cfg_attr(coverage_nightly, coverage(off))]
+//! Native context queries, persisted requests, and diagnostics.
 #![allow(
     clippy::indexing_slicing,
     clippy::arithmetic_side_effects,
@@ -9,19 +7,131 @@
 
 use std::cell::{Cell, RefCell};
 use std::collections::HashSet;
+use std::env;
 use std::fs;
-use std::io::{BufRead, BufReader, Write};
 use std::num::NonZeroU32;
 use std::path::{Path, PathBuf};
-use std::process::{Child, ChildStdin, ChildStdout, Command, Output, Stdio};
+use std::process::{Command, Output};
 use std::time::Duration;
 
 use jiff::Timestamp;
 use ohno::AppError;
 use serde_json::{Value, json};
+use sha2::{Digest, Sha256};
 use ss_ai_review_context::{increment_diagnostic, normalize_options, query};
-use ss_ai_runtime::Clock;
+use ss_ai_runtime::{Clock, FileTransaction};
 use uuid::Uuid;
+
+#[test]
+#[cfg_attr(miri, ignore = "requires a native subprocess")]
+fn authorship_classification_files_accept_bom_encodings() {
+    let text = r#"[{"threadId":"Té🤖","commentId":"Cé🤖","kind":"human"}]"#;
+    let utf16 = |little: bool| {
+        let mut bytes = if little {
+            vec![0xff, 0xfe]
+        } else {
+            vec![0xfe, 0xff]
+        };
+        for word in text.encode_utf16() {
+            bytes.extend(if little {
+                word.to_le_bytes()
+            } else {
+                word.to_be_bytes()
+            });
+        }
+        bytes
+    };
+    let utf32 = |little: bool| {
+        let mut bytes = if little {
+            vec![0xff, 0xfe, 0, 0]
+        } else {
+            vec![0, 0, 0xfe, 0xff]
+        };
+        for character in text.chars() {
+            let word = u32::from(character);
+            bytes.extend(if little {
+                word.to_le_bytes()
+            } else {
+                word.to_be_bytes()
+            });
+        }
+        bytes
+    };
+    let mut utf8_bom = vec![0xef, 0xbb, 0xbf];
+    utf8_bom.extend(text.as_bytes());
+    for bytes in [
+        text.as_bytes().to_vec(),
+        utf8_bom,
+        utf16(true),
+        utf16(false),
+        utf32(true),
+        utf32(false),
+    ] {
+        let fixture = Fixture::new();
+        let mut capture: Value =
+            serde_json::from_slice(&fs::read(&fixture.capture).unwrap()).unwrap();
+        capture["threads"][0]["id"] = json!("Té🤖");
+        capture["threads"][0]["openingCommentId"] = json!("Cé🤖");
+        capture["threads"][0]["comments"][0]["id"] = json!("Cé🤖");
+        fs::write(&fixture.capture, serde_json::to_vec(&capture).unwrap()).unwrap();
+        let path = Fixture::path(&fixture.capture);
+        let before = page(fixture.native(&[
+            "read",
+            "--path",
+            path,
+            "--query",
+            "comments",
+            "--thread-id",
+            "Té🤖",
+        ]));
+        let classification = fixture.root.join("classification.json");
+        fs::write(&classification, bytes).unwrap();
+        page(fixture.native(&[
+            "set-authorship",
+            "--path",
+            path,
+            "--snapshot-id",
+            before["snapshotId"].as_str().unwrap(),
+            "--classification-path",
+            Fixture::path(&classification),
+        ]));
+        let after = page(fixture.native(&[
+            "read",
+            "--path",
+            path,
+            "--query",
+            "comments",
+            "--thread-id",
+            "Té🤖",
+        ]));
+        assert_eq!(after["items"][0]["authorship"], "human");
+        assert_eq!(after["items"][0]["threadId"], "Té🤖");
+        assert_eq!(after["items"][0]["commentId"], "Cé🤖");
+    }
+}
+
+#[test]
+#[cfg_attr(miri, ignore = "requires a native subprocess")]
+fn malformed_classification_files_report_invalid_input_without_writing() {
+    let fixture = Fixture::new();
+    let classification = fixture.root.join("classification.json");
+    fs::write(&classification, [0xff, 0xfe, b'[', 0, b'{', 0]).unwrap();
+    let output = fixture.native(&[
+        "set-authorship",
+        "--path",
+        Fixture::path(&fixture.capture),
+        "--snapshot-id",
+        "unused",
+        "--classification-path",
+        Fixture::path(&classification),
+    ]);
+    assert!(!output.status.success());
+    assert!(output.stdout.is_empty());
+    let error = String::from_utf8(output.stderr).unwrap();
+    assert!(error.contains("invalidInput"), "{error}");
+    assert!(error.contains("Invalid classification JSON"), "{error}");
+    assert!(!PathBuf::from(format!("{}.authorship.json", fixture.capture.display())).exists());
+}
 
 /// Isolates every process transaction while keeping files in the checkout.
 struct Fixture {
@@ -34,7 +144,9 @@ struct Fixture {
 impl Fixture {
     /// Copies the immutable shared contract into an independent working directory.
     fn new() -> Self {
-        let root = repository().join(format!("target/context-test-{}", Uuid::new_v4()));
+        let root = repository()
+            .join("target")
+            .join(format!("context-test-{}", Uuid::new_v4()));
         fs::create_dir_all(&root).unwrap();
         let capture = root.join("capture space é.json");
         fs::copy(
@@ -64,95 +176,6 @@ impl Fixture {
             .output()
             .unwrap()
     }
-
-    /// Invokes the existing PowerShell executable as a separate process.
-    fn powershell(&self, script: &str, arguments: &[&str]) -> Output {
-        let scripts = repository().join("skills/ss-review/scripts");
-        let mut command = Command::new("pwsh");
-        command.args(["-NoProfile", "-NonInteractive"]);
-        if script == "Set-CommentAuthorship.ps1" {
-            command
-                .args(["-File"])
-                .arg(scripts.join(script))
-                .args(arguments);
-        } else {
-            // The executable adapters now forward to native code; invoke the
-            // retained PowerShell model directly to test a real language handoff.
-            command
-                .args(["-Command", Self::POWERSHELL_MODEL])
-                .env("CONTEXT_LIB", scripts.join("lib"))
-                .env("CONTEXT_OPERATION", script)
-                .env(
-                    "CONTEXT_ARGUMENTS",
-                    serde_json::to_string(arguments).unwrap(),
-                );
-        }
-        command.current_dir(&self.root).output().unwrap()
-    }
-
-    /// Runs the retained PowerShell producer and consumer in a separate process.
-    const POWERSHELL_MODEL: &str = "#Requires -Version 7.6
-
-    Set-StrictMode -Version Latest
-    $ErrorActionPreference = 'Stop'
-    $PSNativeCommandUseErrorActionPreference = $true
-    if ($PSVersionTable.PSVersion -lt [version]'7.6') { throw 'PowerShell 7.6 is required' }
-    . (Join-Path $env:CONTEXT_LIB 'JsonValue.ps1')
-    . (Join-Path $env:CONTEXT_LIB 'PullRequestModel.ps1')
-    . (Join-Path $env:CONTEXT_LIB 'PullRequestContextQuery.ps1')
-    . (Join-Path $env:CONTEXT_LIB 'WorkflowData.ps1')
-    . (Join-Path $env:CONTEXT_LIB 'ReviewInput.ps1')
-    . (Join-Path $env:CONTEXT_LIB 'PullRequestQueryRequest.ps1')
-    try {
-        $argsList = @(ConvertFrom-Json -InputObject $env:CONTEXT_ARGUMENTS)
-        $values = @{}
-        for ($i = 0; $i -lt $argsList.Count; $i++) {
-            $name = $argsList[$i].TrimStart('-')
-            if ($name -in @('Next', 'Restart')) { $values[$name] = $true }
-            else { $i++; $values[$name] = $argsList[$i] }
-        }
-        [Console]::OutputEncoding = [Text.UTF8Encoding]::new($false)
-        switch ($env:CONTEXT_OPERATION) {
-            'Read-PullRequestContext.ps1' {
-                if ($values.ContainsKey('RequestPath')) {
-                    $result = Read-SavedPullRequestQuery -RequestPath $values.RequestPath `
-                        -Next:($values.ContainsKey('Next')) -Restart:($values.ContainsKey('Restart'))
-                } else {
-                    $selectors = @{ Query = $values.Query }
-                    foreach ($name in @('Field', 'ThreadId', 'CommentId')) {
-                        if ($values.ContainsKey($name)) { $selectors[$name] = $values[$name] }
-                    }
-                    if ($values.ContainsKey('PageSize')) { $selectors.PageSize = [int]$values.PageSize }
-                    $options = New-PullRequestQueryOptions @selectors
-                    $document = Read-PullRequestContextDocument -Path $values.Path
-                    $cursor = if ($values.ContainsKey('Cursor')) { $values.Cursor } else { '' }
-                    $result = Read-PullRequestContextQuery -Document $document -Options $options -Cursor $cursor
-                }
-                [Console]::WriteLine($result)
-            }
-            'New-PullRequestQueryRequest.ps1' {
-                Add-ReviewInputDiagnostic -Path $values.DiagnosticsPath -Name setupCalls
-                $selectors = @{ Query = $values.Query }
-                foreach ($name in @('Field', 'ThreadId', 'CommentId')) {
-                    if ($values.ContainsKey($name)) { $selectors[$name] = $values[$name] }
-                }
-                if ($values.ContainsKey('PageSize')) { $selectors.PageSize = [int]$values.PageSize }
-                $options = New-PullRequestQueryOptions @selectors
-                $request = New-PullRequestQueryRequest -Path $values.Path -Options $options -DiagnosticsPath $values.DiagnosticsPath
-                Write-PullRequestOutputFileAtomically -Path $values.RequestPath -Content (ConvertTo-JsonText -Value $request)
-                [Console]::WriteLine((ConvertTo-Json -Compress -InputObject @{ requestId = $request.requestId; snapshotId = $request.snapshotId }))
-            }
-            'Get-ReviewInputDiagnostics.ps1' {
-                $record = Read-WorkflowData -Kind inputDiagnostics -Path $values.Path
-                [Console]::WriteLine((ConvertTo-Json -InputObject $record -Depth 10 -Compress))
-            }
-            default { throw 'Unsupported PowerShell model operation' }
-        }
-    } catch {
-        [Console]::Error.WriteLine($_.Exception.Message)
-        exit 1
-    }
-    ";
 
     /// Writes a capture whose escaped content requires continuation.
     fn long_capture(&self) -> String {
@@ -217,86 +240,23 @@ fn rejected(output: Output) {
     assert!(!stderr.is_empty());
 }
 
-/// Coordinates a real PowerShell diagnostic update with the native retry.
-struct DiagnosticWriter {
-    child: Child,
-    input: ChildStdin,
-    output: BufReader<ChildStdout>,
-}
+/// Fails immediately if the initial diagnostic lock unexpectedly contends.
+struct NoWait;
 
-impl DiagnosticWriter {
-    /// Holds the PowerShell diagnostic transaction just before publication.
-    fn start(fixture: &Fixture) -> Self {
-        let program = "#Requires -Version 7.6
-Set-StrictMode -Version Latest
-$ErrorActionPreference = 'Stop'
-$PSNativeCommandUseErrorActionPreference = $true
-if ($PSVersionTable.PSVersion -lt [version]'7.6') { throw 'PowerShell 7.6 is required' }
-. (Join-Path $env:CONTEXT_LIB 'JsonValue.ps1')
-. (Join-Path $env:CONTEXT_LIB 'PullRequestModel.ps1')
-. (Join-Path $env:CONTEXT_LIB 'WorkflowData.ps1')
-. (Join-Path $env:CONTEXT_LIB 'ReviewInput.ps1')
-$script:publish = (Get-Command Write-PullRequestOutputFileAtomically).ScriptBlock
-function Write-PullRequestOutputFileAtomically {
-    param([string] $Path, [string] $Content)
-    [Console]::WriteLine('held')
-    if ([Console]::ReadLine() -cne 'release') { throw 'Expected release signal' }
-    & $script:publish -Path $Path -Content $Content
-}
-Add-ReviewInputDiagnostic -Path $env:CONTEXT_DIAGNOSTICS -Name setupCalls
-[Console]::WriteLine('released')
-";
-        let mut child = Command::new("pwsh")
-            .args(["-NoProfile", "-NonInteractive", "-Command", program])
-            .env(
-                "CONTEXT_LIB",
-                repository().join("skills/ss-review/scripts/lib"),
-            )
-            .env("CONTEXT_DIAGNOSTICS", &fixture.diagnostics)
-            .current_dir(&fixture.root)
-            .stdin(Stdio::piped())
-            .stdout(Stdio::piped())
-            .spawn()
-            .unwrap();
-        let input = child.stdin.take().unwrap();
-        let output = BufReader::new(child.stdout.take().unwrap());
-        Self {
-            child,
-            input,
-            output,
-        }
+impl Clock for NoWait {
+    fn now(&self) -> Timestamp {
+        Timestamp::UNIX_EPOCH
     }
 
-    /// Waits for an explicit protocol message instead of measuring time.
-    fn expect(&mut self, expected: &str) {
-        let mut line = String::new();
-        assert_ne!(
-            self.output.read_line(&mut line).unwrap(),
-            0,
-            "writer exited"
-        );
-        assert_eq!(line.trim_end(), expected);
-    }
-
-    /// Permits publication after the native operation encounters contention.
-    fn release(&mut self) {
-        writeln!(self.input, "release").unwrap();
-        self.input.flush().unwrap();
-        self.expect("released");
+    fn wait(&self, _duration: Duration) -> Result<(), AppError> {
+        panic!("initial diagnostic lock must not wait")
     }
 }
 
-impl Drop for DiagnosticWriter {
-    fn drop(&mut self) {
-        // A failed assertion must not leave the handshake process running.
-        if let Err(_error) = self.child.kill() {}
-        if let Err(_error) = self.child.wait() {}
-    }
-}
-
-/// Advances the PowerShell writer only after the native lock reports contention.
+/// Publishes a concurrent update only after the operation reports contention.
 struct DiagnosticClock<'a> {
-    writer: RefCell<&'a mut DiagnosticWriter>,
+    lock: RefCell<Option<FileTransaction<'a>>>,
+    staged: Vec<u8>,
     waits: Cell<u32>,
 }
 
@@ -308,18 +268,47 @@ impl Clock for DiagnosticClock<'_> {
     fn wait(&self, _duration: Duration) -> Result<(), AppError> {
         assert_eq!(self.waits.get(), 0, "unexpected repeated contention");
         self.waits.set(1);
-        self.writer.borrow_mut().release();
+        let transaction = self.lock.borrow_mut().take().expect("lock is held");
+        transaction.write_bytes(&self.staged)?;
+        drop(transaction);
         Ok(())
     }
 }
 
 #[test]
-#[cfg_attr(miri, ignore = "requires a PowerShell process and real file locks")]
+#[cfg_attr(miri, ignore = "requires a native process and real file locks")]
 #[cfg_attr(
     mutants,
     ignore = "the handshake requires both participants to progress"
 )]
-fn concurrent_powershell_and_native_diagnostic_updates_are_not_lost() {
+fn concurrent_native_diagnostic_updates_are_not_lost() {
+    // Other tests launch processes; isolate the lock holder from their fork/exec windows.
+    let output = Command::new(env::current_exe().unwrap())
+        .args([
+            "--exact",
+            "diagnostic_update_child",
+            "--ignored",
+            "--nocapture",
+        ])
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(String::from_utf8_lossy(&output.stdout).contains("1 passed"));
+}
+
+#[test]
+#[ignore = "launched by the isolated diagnostic overlap test"]
+#[cfg_attr(miri, ignore = "requires a native process and real file locks")]
+#[cfg_attr(
+    mutants,
+    ignore = "the handshake requires both participants to progress"
+)]
+fn diagnostic_update_child() {
     let fixture = Fixture::new();
     page(fixture.native(&[
         "diagnostics",
@@ -328,40 +317,35 @@ fn concurrent_powershell_and_native_diagnostic_updates_are_not_lost() {
         "--record",
         "setupCalls",
     ]));
-    let mut writer = DiagnosticWriter::start(&fixture);
-    writer.expect("held");
+    let no_wait = NoWait;
+    let transaction = FileTransaction::open(&fixture.diagnostics, &no_wait).unwrap();
+    let mut staged: Value =
+        serde_json::from_slice(&transaction.read_bytes().unwrap().unwrap()).unwrap();
+    staged["counts"]["setupCalls"] = json!(2);
     let clock = DiagnosticClock {
-        writer: RefCell::new(&mut writer),
+        lock: RefCell::new(Some(transaction)),
+        staged: serde_json::to_vec(&staged).unwrap(),
         waits: Cell::new(0),
     };
     increment_diagnostic(&fixture.diagnostics, "setupCalls", NonZeroU32::MIN, &clock).unwrap();
     assert_eq!(clock.waits.get(), 1);
-    assert!(writer.child.wait().unwrap().success());
     let result =
         page(fixture.native(&["diagnostics", "--path", Fixture::path(&fixture.diagnostics)]));
     assert_eq!(result["counts"]["setupCalls"], 3);
 }
 
 #[test]
-#[cfg_attr(miri, ignore = "requires native and PowerShell subprocesses")]
-fn direct_queries_match_powershell_and_canonical_fixture() {
+#[cfg_attr(miri, ignore = "requires native subprocesses")]
+fn direct_queries_match_canonical_fixture() {
     let fixture = Fixture::new();
     let expected: Value = serde_json::from_slice(
         &fs::read(repository().join("tests/fixtures/ss-review-query-expected.json")).unwrap(),
     )
     .unwrap();
     let before = fs::read(&fixture.capture).unwrap();
-    for (query, native, powershell) in [
-        (
-            "metadata",
-            vec!["--field", "title"],
-            vec!["-Field", "title"],
-        ),
-        (
-            "comments",
-            vec!["--thread-id", "T", "--comment-id", "C"],
-            vec!["-ThreadId", "T", "-CommentId", "C"],
-        ),
+    for (query, native) in [
+        ("metadata", vec!["--field", "title"]),
+        ("comments", vec!["--thread-id", "T", "--comment-id", "C"]),
     ] {
         let mut args = vec![
             "read",
@@ -372,18 +356,39 @@ fn direct_queries_match_powershell_and_canonical_fixture() {
         ];
         args.extend(native);
         let native_output = fixture.native(&args);
-        let mut args = vec!["-Path", Fixture::path(&fixture.capture), "-Query", query];
-        args.extend(powershell);
-        let powershell_output = fixture.powershell("Read-PullRequestContext.ps1", &args);
-        // PowerShell uses the platform line ending; native stdout uses LF.
-        assert_eq!(
-            line_payload(&native_output.stdout),
-            line_payload(&powershell_output.stdout)
-        );
+        if query == "metadata" {
+            assert_eq!(
+                native_output.stdout,
+                concat!(
+                    "{\"schemaVersion\":1,\"query\":\"metadata\",",
+                    "\"snapshotId\":\"FEF75D9836BAC16552C0569D1172931FFAC8B38B8B61E2F540DE07DDD4A10AF5\",",
+                    "\"totalCount\":1,\"items\":[{\"field\":\"title\",\"content\":\"Widget\",",
+                    "\"contentOffset\":0,\"contentLength\":6,\"contentComplete\":true}],",
+                    "\"nextCursor\":null,\"complete\":true}\n"
+                ).as_bytes()
+            );
+        } else {
+            assert_eq!(
+                native_output.stdout,
+                concat!(
+                    "{\"schemaVersion\":1,\"query\":\"comments\",",
+                    "\"snapshotId\":\"FEF75D9836BAC16552C0569D1172931FFAC8B38B8B61E2F540DE07DDD4A10AF5\",",
+                    "\"totalCount\":1,\"items\":[{\"threadId\":\"T\",",
+                    "\"url\":\"https://example.invalid/thread/T\",\"openingCommentId\":\"C\",",
+                    "\"kind\":\"text\",\"resolution\":\"resolved\",\"isOutdated\":true,",
+                    "\"context\":{\"filePath\":\"src/widget.rs\",\"side\":\"right\",\"startLine\":4,\"endLine\":4},",
+                    "\"decision\":null,\"isAuthoredBySelf\":false,\"eventUtc\":\"2026-10-01T12:00:00Z\",",
+                    "\"lastUpdatedUtc\":null,\"commentId\":\"C\",\"commentUrl\":\"https://example.invalid/comment/C\",",
+                    "\"parentId\":null,\"author\":{\"id\":\"person\",\"displayName\":\"Reviewer\"},",
+                    "\"authorship\":\"indeterminate\",\"authorshipEvidence\":[],\"threadIsAuthoredBySelf\":false,",
+                    "\"publishedUtc\":\"2026-10-01T12:00:00Z\",\"lastEditedUtc\":null,",
+                    "\"content\":\"Quoted \\\"widget\\\"\\n🤖 evidence\",\"contentOffset\":0,",
+                    "\"contentLength\":27,\"contentComplete\":true}],\"nextCursor\":null,\"complete\":true}\n"
+                ).as_bytes()
+            );
+        }
         let native = page(native_output);
-        let powershell = page(powershell_output);
         assert_eq!(native, expected[query]);
-        assert_eq!(native, powershell);
     }
     assert_eq!(fs::read(&fixture.capture).unwrap(), before);
 }
@@ -396,16 +401,32 @@ fn line_payload_preserves_json_bytes_with_either_line_ending() {
 }
 
 #[test]
-#[cfg_attr(miri, ignore = "requires native and PowerShell subprocesses")]
-fn direct_pagination_preserves_utf16_offsets_across_languages() {
+#[cfg_attr(miri, ignore = "requires native subprocesses")]
+fn direct_pagination_preserves_utf16_offsets() {
     let fixture = Fixture::new();
     let text = fixture.long_capture();
     let before = fs::read(&fixture.capture).unwrap();
     let mut cursor = String::new();
     let mut seen = HashSet::new();
     let mut content = String::new();
+    // The output budget reserves the platform line ending, changing later fragments.
+    let expected_hashes = if cfg!(windows) {
+        [
+            "972AB8854BB3A478203B12F148115F8C15B31F317A1D442E4E3A147AC4500F7B",
+            "D022D6151737D940AB1D7B7A0A99BA7D82987053EA5737038ECA4AC0EAAFFA22",
+            "9140140D3025BE278CB91C6BB6FB28953D50269D6120249C2C4B644FC413FB14",
+            "731C573F4EA88F201E55E28A128AC2AF7A0E9D634D90105007745315178E10D6",
+        ]
+    } else {
+        [
+            "972AB8854BB3A478203B12F148115F8C15B31F317A1D442E4E3A147AC4500F7B",
+            "D022D6151737D940AB1D7B7A0A99BA7D82987053EA5737038ECA4AC0EAAFFA22",
+            "D9BC113931EBEFFEF0E4907EB4C9F5368F48F9157F2CB72A9CEA913C88BA8AF9",
+            "74B9B1FEE173352C0C924FEF7AE392EAEC175ECA32C55D4CA17C6FC6C3094237",
+        ]
+    };
     // The chosen fixture needs only a few pages; the bound catches stalled pagination.
-    for _ in 0..64 {
+    for page_index in 0..64 {
         let mut native = vec![
             "read",
             "--path",
@@ -417,23 +438,16 @@ fn direct_pagination_preserves_utf16_offsets_across_languages() {
             "--page-size",
             "1",
         ];
-        let mut powershell = vec![
-            "-Path",
-            Fixture::path(&fixture.capture),
-            "-Query",
-            "metadata",
-            "-Field",
-            "description",
-            "-PageSize",
-            "1",
-        ];
         if !cursor.is_empty() {
             native.extend(["--cursor", &cursor]);
-            powershell.extend(["-Cursor", &cursor]);
         }
-        let native = page(fixture.native(&native));
-        let powershell = page(fixture.powershell("Read-PullRequestContext.ps1", &powershell));
-        assert_eq!(native, powershell);
+        let output = fixture.native(&native);
+        assert_eq!(
+            format!("{:X}", Sha256::digest(line_payload(&output.stdout))),
+            expected_hashes[page_index],
+            "page {page_index}"
+        );
+        let native = page(output);
         let items = native["items"].as_array().unwrap();
         assert!(!items.is_empty());
         for item in items {
@@ -448,6 +462,7 @@ fn direct_pagination_preserves_utf16_offsets_across_languages() {
             content.push_str(item["content"].as_str().unwrap());
         }
         if native["complete"].as_bool().unwrap() {
+            assert_eq!(page_index + 1, expected_hashes.len());
             assert!(native["nextCursor"].is_null());
             assert_eq!(content, text);
             assert_eq!(fs::read(&fixture.capture).unwrap(), before);
@@ -460,124 +475,110 @@ fn direct_pagination_preserves_utf16_offsets_across_languages() {
 }
 
 #[test]
-#[cfg_attr(miri, ignore = "requires native and PowerShell subprocesses")]
-fn saved_requests_cross_both_process_boundaries_and_restart_explicitly() {
-    for native_producer in [false, true] {
-        let fixture = Fixture::new();
-        fixture.long_capture();
-        let capture = Fixture::path(&fixture.capture);
-        let request = Fixture::path(&fixture.request);
-        let diagnostics = Fixture::path(&fixture.diagnostics);
-        if native_producer {
-            page(fixture.native(&[
-                "prepare",
-                "--path",
-                capture,
-                "--request-path",
-                request,
-                "--diagnostics-path",
-                diagnostics,
-                "--query",
-                "metadata",
-                "--field",
-                "description",
-                "--page-size",
-                "1",
-            ]));
-        } else {
-            page(fixture.powershell(
-                "New-PullRequestQueryRequest.ps1",
-                &[
-                    "-Path",
-                    capture,
-                    "-RequestPath",
-                    request,
-                    "-DiagnosticsPath",
-                    diagnostics,
-                    "-Query",
-                    "metadata",
-                    "-Field",
-                    "description",
-                    "-PageSize",
-                    "1",
-                ],
-            ));
-        }
-        let native_read = || fixture.native(&["read-saved", "--request-path", request]);
-        let ps_read =
-            || fixture.powershell("Read-PullRequestContext.ps1", &["-RequestPath", request]);
-        let first = if native_producer {
-            page(ps_read())
-        } else {
-            page(native_read())
-        };
-        assert_eq!(page(native_read()), first);
-        assert_eq!(page(ps_read()), first);
-        assert!(!first["complete"].as_bool().unwrap());
-        let second = if native_producer {
-            page(fixture.native(&["read-saved", "--request-path", request, "--next"]))
-        } else {
-            page(fixture.powershell(
-                "Read-PullRequestContext.ps1",
-                &["-RequestPath", request, "-Next"],
-            ))
-        };
-        assert_ne!(first, second);
-        assert_eq!(page(native_read()), second);
-        assert_eq!(page(ps_read()), second);
+#[cfg_attr(miri, ignore = "requires native subprocesses")]
+fn saved_requests_resume_and_restart_explicitly() {
+    let fixture = Fixture::new();
+    fixture.long_capture();
+    let capture = Fixture::path(&fixture.capture);
+    let request = Fixture::path(&fixture.request);
+    let diagnostics = Fixture::path(&fixture.diagnostics);
+    let prepared = page(fixture.native(&[
+        "prepare",
+        "--path",
+        capture,
+        "--request-path",
+        request,
+        "--diagnostics-path",
+        diagnostics,
+        "--query",
+        "metadata",
+        "--field",
+        "description",
+        "--page-size",
+        "1",
+    ]));
+    let record: Value = serde_json::from_slice(&fs::read(&fixture.request).unwrap()).unwrap();
+    assert_eq!(
+        record,
+        json!({
+            "schemaVersion":1,"path":capture,"comparePath":null,
+            "snapshotId":prepared["snapshotId"],"baselineId":null,
+            "options":{"query":"metadata","field":"description","files":[],"scope":"all",
+                "kind":"","resolution":"","threadId":"","commentId":"","authorship":"",
+                "indexOnly":false,"text":"","pageSize":1},
+            "requestId":prepared["requestId"],"diagnosticsPath":diagnostics,
+            "lastPage":null,"lastPageCursor":null
+        })
+    );
+    let native_read = || fixture.native(&["read-saved", "--request-path", request]);
+    let first = page(native_read());
+    assert_eq!(page(native_read()), first);
+    assert!(!first["complete"].as_bool().unwrap());
+    let second = page(fixture.native(&["read-saved", "--request-path", request, "--next"]));
+    assert_ne!(first, second);
+    assert_eq!(page(native_read()), second);
 
-        let mut capture_data: Value =
-            serde_json::from_slice(&fs::read(&fixture.capture).unwrap()).unwrap();
-        capture_data["pullRequest"]["title"] = json!("changed");
-        fs::write(&fixture.capture, serde_json::to_vec(&capture_data).unwrap()).unwrap();
-        let saved = fs::read(&fixture.request).unwrap();
-        rejected(native_read());
-        rejected(ps_read());
-        assert_eq!(fs::read(&fixture.request).unwrap(), saved);
-        let restarted = if native_producer {
-            page(fixture.powershell(
-                "Read-PullRequestContext.ps1",
-                &["-RequestPath", request, "-Restart"],
-            ))
-        } else {
-            page(fixture.native(&["read-saved", "--request-path", request, "--restart"]))
-        };
-        assert_ne!(restarted["snapshotId"], first["snapshotId"]);
-        assert_eq!(page(native_read()), restarted);
-        assert_eq!(page(ps_read()), restarted);
-        let sidecar = page(fixture.native(&["diagnostics", "--path", diagnostics]));
-        assert_eq!(sidecar["counts"]["setupCalls"], 1);
-        assert_eq!(sidecar["counts"]["cursorRestarts"], 1);
-        assert_eq!(
-            page(fixture.powershell("Get-ReviewInputDiagnostics.ps1", &["-Path", diagnostics])),
-            sidecar
-        );
-    }
+    let mut capture_data: Value =
+        serde_json::from_slice(&fs::read(&fixture.capture).unwrap()).unwrap();
+    capture_data["pullRequest"]["title"] = json!("changed");
+    fs::write(&fixture.capture, serde_json::to_vec(&capture_data).unwrap()).unwrap();
+    let saved = fs::read(&fixture.request).unwrap();
+    rejected(native_read());
+    assert_eq!(fs::read(&fixture.request).unwrap(), saved);
+    let restarted = page(fixture.native(&["read-saved", "--request-path", request, "--restart"]));
+    assert_ne!(restarted["snapshotId"], first["snapshotId"]);
+    assert_eq!(page(native_read()), restarted);
+    let sidecar = page(fixture.native(&["diagnostics", "--path", diagnostics]));
+    assert_eq!(sidecar["counts"]["setupCalls"], 1);
+    assert_eq!(sidecar["counts"]["cursorRestarts"], 1);
 }
 
 #[test]
-#[cfg_attr(miri, ignore = "requires native and PowerShell subprocesses")]
+#[cfg_attr(miri, ignore = "requires native subprocesses")]
+fn conflicting_saved_actions_do_not_start_a_transaction() {
+    let fixture = Fixture::new();
+    let request = Fixture::path(&fixture.request);
+    let output = fixture.native(&[
+        "read-saved",
+        "--request-path",
+        request,
+        "--next",
+        "--restart",
+    ]);
+    assert!(!output.status.success());
+    assert!(output.stdout.is_empty());
+    let stderr = String::from_utf8(output.stderr).unwrap();
+    assert!(stderr.contains("invalidInput"), "{stderr}");
+    assert!(
+        stderr.contains("Next and Restart are mutually exclusive"),
+        "{stderr}"
+    );
+    assert!(!fixture.request.exists());
+    assert!(!fixture.root.join("request.json.lock").exists());
+    assert!(!fixture.diagnostics.exists());
+}
+
+#[test]
+#[cfg_attr(miri, ignore = "requires native subprocesses")]
 fn malformed_saved_requests_are_rejected_without_mutation() {
     for missing in [true, false] {
         let fixture = Fixture::new();
         let capture = Fixture::path(&fixture.capture);
         let request = Fixture::path(&fixture.request);
         let diagnostics = Fixture::path(&fixture.diagnostics);
-        page(fixture.powershell(
-            "New-PullRequestQueryRequest.ps1",
-            &[
-                "-Path",
-                capture,
-                "-RequestPath",
-                request,
-                "-DiagnosticsPath",
-                diagnostics,
-                "-Query",
-                "metadata",
-                "-Field",
-                "title",
-            ],
-        ));
+        page(fixture.native(&[
+            "prepare",
+            "--path",
+            capture,
+            "--request-path",
+            request,
+            "--diagnostics-path",
+            diagnostics,
+            "--query",
+            "metadata",
+            "--field",
+            "title",
+        ]));
         let mut record: Value =
             serde_json::from_slice(&fs::read(&fixture.request).unwrap()).unwrap();
         if missing {
@@ -591,7 +592,6 @@ fn malformed_saved_requests_are_rejected_without_mutation() {
         let captured = fs::read(&fixture.capture).unwrap();
         let sidecar = fs::read(&fixture.diagnostics).unwrap();
         rejected(fixture.native(&["read-saved", "--request-path", request]));
-        rejected(fixture.powershell("Read-PullRequestContext.ps1", &["-RequestPath", request]));
         assert_eq!(fs::read(&fixture.request).unwrap(), saved);
         assert_eq!(fs::read(&fixture.capture).unwrap(), captured);
         assert_eq!(fs::read(&fixture.diagnostics).unwrap(), sidecar);
@@ -765,8 +765,80 @@ fn unicode_search_crosses_the_process_boundary() {
 }
 
 #[test]
-#[cfg_attr(miri, ignore = "requires native and PowerShell subprocesses")]
-fn powershell_authorship_sidecar_invalidates_native_saved_snapshot() {
+#[cfg_attr(miri, ignore = "requires native subprocesses")]
+fn duplicate_classification_properties_are_rejected_without_writing() {
+    for existing in [false, true] {
+        let fixture = Fixture::new();
+        let capture = Fixture::path(&fixture.capture);
+        let capture_bytes = fs::read(&fixture.capture).unwrap();
+        let snapshot = page(fixture.native(&[
+            "read",
+            "--path",
+            capture,
+            "--query",
+            "comments",
+            "--thread-id",
+            "T",
+        ]));
+        let snapshot = snapshot["snapshotId"].as_str().unwrap();
+        let sidecar = PathBuf::from(format!("{capture}.authorship.json"));
+        let sidecar_bytes = if existing {
+            page(fixture.native(&[
+                "set-authorship",
+                "--path",
+                capture,
+                "--snapshot-id",
+                snapshot,
+                "--classification",
+                "[]",
+            ]));
+            Some(fs::read(&sidecar).unwrap())
+        } else {
+            None
+        };
+        for batch in [
+            r#"[{"threadId":"T","commentId":"C","kind":"human","kind":"agent"}]"#,
+            r#"[{"threadId":"T","commentId":"C","kind":"human","\u006bind":"agent"}]"#,
+            r#"[{"threadId":"other","threadId":"T","commentId":"C","kind":"human"}]"#,
+            r#"[{"threadId":"T","commentId":"C","kind":"human","Kind":"agent"}]"#,
+        ] {
+            let classification = fixture.root.join("classification.json");
+            fs::write(&classification, batch).unwrap();
+            for (option, value) in [
+                ("--classification", batch),
+                ("--classification-path", Fixture::path(&classification)),
+            ] {
+                let output = fixture.native(&[
+                    "set-authorship",
+                    "--path",
+                    capture,
+                    "--snapshot-id",
+                    snapshot,
+                    option,
+                    value,
+                ]);
+                assert!(!output.status.success());
+                assert!(output.stdout.is_empty());
+                let error = String::from_utf8(output.stderr).unwrap();
+                assert!(error.contains("invalidInput"), "{error}");
+                assert!(
+                    error.contains("Duplicate or ambiguous JSON property"),
+                    "{error}"
+                );
+                assert_eq!(fs::read(&fixture.capture).unwrap(), capture_bytes);
+                if let Some(bytes) = &sidecar_bytes {
+                    assert_eq!(&fs::read(&sidecar).unwrap(), bytes);
+                } else {
+                    assert!(!sidecar.exists());
+                }
+            }
+        }
+    }
+}
+
+#[test]
+#[cfg_attr(miri, ignore = "requires native subprocesses")]
+fn authorship_sidecar_invalidates_native_saved_snapshot() {
     let fixture = Fixture::new();
     let capture = Fixture::path(&fixture.capture);
     let request = Fixture::path(&fixture.request);
@@ -788,26 +860,25 @@ fn powershell_authorship_sidecar_invalidates_native_saved_snapshot() {
     ]));
     let snapshot = prepared["snapshotId"].as_str().unwrap();
     let raw = fs::read(&fixture.capture).unwrap();
-    page(fixture.powershell(
-        "Set-CommentAuthorship.ps1",
-        &[
-            "-Path",
-            capture,
-            "-SnapshotId",
-            snapshot,
-            "-Classification",
-            r#"[{"threadId":"T","commentId":"C","kind":"human"}]"#,
-        ],
-    ));
+    page(fixture.native(&[
+        "set-authorship",
+        "--path",
+        capture,
+        "--snapshot-id",
+        snapshot,
+        "--classification",
+        r#"[{"threadId":"T","commentId":"C","kind":"human"}]"#,
+    ]));
     let sidecar = PathBuf::from(format!("{capture}.authorship.json"));
     let sidecar_before = fs::read(&sidecar).unwrap();
     let saved = fs::read(&fixture.request).unwrap();
     rejected(fixture.native(&["read-saved", "--request-path", request]));
     assert_eq!(fs::read(&fixture.request).unwrap(), saved);
     let native = page(fixture.native(&["read-saved", "--request-path", request, "--restart"]));
-    let powershell =
-        page(fixture.powershell("Read-PullRequestContext.ps1", &["-RequestPath", request]));
-    assert_eq!(native, powershell);
+    assert_eq!(
+        native,
+        page(fixture.native(&["read-saved", "--request-path", request]))
+    );
     assert_eq!(native["items"][0]["authorship"], "human");
     assert_ne!(native["snapshotId"], snapshot);
     assert_eq!(fs::read(&fixture.capture).unwrap(), raw);
@@ -826,10 +897,6 @@ fn powershell_authorship_sidecar_invalidates_native_saved_snapshot() {
         "--thread-id",
         "T",
     ]));
-    rejected(fixture.powershell(
-        "Read-PullRequestContext.ps1",
-        &["-Path", capture, "-Query", "comments", "-ThreadId", "T"],
-    ));
     assert_eq!(fs::read(&sidecar).unwrap(), malformed);
     assert_eq!(fs::read(&fixture.capture).unwrap(), raw);
 }

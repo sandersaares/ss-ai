@@ -1,0 +1,212 @@
+{
+  "baselineRawHash": "3FDD4DD4A63C6064999F2121C7D3F7C9353C4A939EF187405F6E846A9C41B26E",
+  "baselineEvidenceHash": "B55EB73C0CFE7E8DED495F79210638D384CD06207047B1E6B1C484536D894D40",
+  "baselineSnapshot": "8F061F4D98D75C8E3E1C4FAA3F3CC7A628915BDDD02A72BEE9F75E7A102EE64C",
+  "classifiedSnapshot": "704CAA2413C7F6112F1A516314C83BB568B890685A3D46094741624E5D59D2A7",
+  "baselineDecisions": {
+    "schemaVersion": 1,
+    "policyVersion": "2",
+    "captureHash": "3FDD4DD4A63C6064999F2121C7D3F7C9353C4A939EF187405F6E846A9C41B26E",
+    "decisions": [
+      {
+        "threadId": "101",
+        "commentId": "1",
+        "kind": "human",
+        "inputHash": "D651823FD96F1708C0A985F69C186A66263DB73031CE61D6DCE9C8499D858010",
+        "origin": "classified"
+      },
+      {
+        "threadId": "101",
+        "commentId": "2",
+        "kind": "agent",
+        "inputHash": "579FCDD22678A9FD184B6C28B2FBA5B91803AAA59ED80B893AFB841019F69E9B",
+        "origin": "classified"
+      }
+    ]
+  },
+  "refreshRawHash": "979463B85F70D35BD2C3E60D7480C712D85488046293A60917384DBD149BE48F",
+  "refreshEvidenceHash": "78CA3E0FACD2AFBE1A43D1681D73FC3DC0761E3B2B7A5832ECEB2C71A17F517E",
+  "refreshSnapshot": "841EAE1836783A8F6D1B2366036860CFB0B96AFB39AF34E818160E5961A74055",
+  "refreshDecisions": {
+    "schemaVersion": 1,
+    "policyVersion": "2",
+    "captureHash": "979463B85F70D35BD2C3E60D7480C712D85488046293A60917384DBD149BE48F",
+    "decisions": [
+      {
+        "threadId": "101",
+        "commentId": "2",
+        "kind": "agent",
+        "inputHash": "579FCDD22678A9FD184B6C28B2FBA5B91803AAA59ED80B893AFB841019F69E9B",
+        "origin": "reused"
+      }
+    ]
+  },
+  "refreshEffective": {
+    "schemaVersion": 3,
+    "fetchedUtc": "2026-08-04T12:00:00.0000000Z",
+    "platform": "azureDevOps",
+    "repositoryUrl": "https://example.visualstudio.com/Example%20Project/_git/example%20repo",
+    "pullRequestUrl": "https://example.visualstudio.com/Example%20Project/_git/example%20repo/pullrequest/4242",
+    "target": {
+      "platform": "azureDevOps",
+      "collectionUrl": "https://example.visualstudio.com",
+      "organization": "example",
+      "project": "Example Project",
+      "repository": "example repo",
+      "pullRequestId": 4242,
+      "webUrl": "https://example.visualstudio.com/Example%20Project/_git/example%20repo/pullrequest/4242"
+    },
+    "authenticatedIdentity": {
+      "platform": "azureDevOps",
+      "id": "runner",
+      "displayName": "Runner",
+      "uniqueName": "runner@example.com",
+      "descriptor": "aad.runner",
+      "accountType": null,
+      "kind": "person",
+      "evidence": [
+        "descriptor:aad"
+      ]
+    },
+    "pullRequest": {
+      "id": 4242,
+      "title": "Unicode capture",
+      "description": "Review café — “design” 🤖",
+      "isDraft": false,
+      "author": {
+        "platform": "azureDevOps",
+        "id": "author",
+        "displayName": "Author",
+        "uniqueName": "author@example.com",
+        "descriptor": "aad.author",
+        "accountType": null,
+        "kind": "person",
+        "evidence": [
+          "descriptor:aad"
+        ]
+      },
+      "createdUtc": "2026-08-03T11:44:10.0000000Z",
+      "sourceRef": "refs/heads/topic",
+      "targetRef": "refs/heads/main",
+      "reviewedSourceCommit": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "reviewedMergeBaseCommit": "cccccccccccccccccccccccccccccccccccccccc",
+      "mergeState": {
+        "status": "succeeded",
+        "mergeId": null,
+        "lastMergeSourceCommit": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "lastMergeTargetCommit": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        "lastMergeCommit": "dddddddddddddddddddddddddddddddddddddddd"
+      },
+      "isAuthoredBySelf": false
+    },
+    "reviewers": [],
+    "revisions": [
+      {
+        "id": 2,
+        "createdUtc": "2026-08-04T11:41:20.0000000Z",
+        "reason": "push",
+        "sourceCommit": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "targetCommit": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        "mergeBaseCommit": "cccccccccccccccccccccccccccccccccccccccc"
+      }
+    ],
+    "threads": [
+      {
+        "id": 101,
+        "url": "https://example.visualstudio.com/Example%20Project/_git/example%20repo/pullrequest/4242?discussionId=101",
+        "publishedUtc": "2026-08-03T12:00:00.0000000Z",
+        "lastUpdatedUtc": "2026-08-03T12:30:00.0000000Z",
+        "eventUtc": "2026-08-03T12:00:00.0000000Z",
+        "rawStatus": "active",
+        "resolution": "active",
+        "kind": "text",
+        "isOutdated": false,
+        "context": {
+          "filePath": "src/café.rs",
+          "side": "right",
+          "startLine": 4,
+          "endLine": 5,
+          "originalStartLine": null,
+          "originalEndLine": null
+        },
+        "anchorKey": null,
+        "properties": {},
+        "openingCommentId": 1,
+        "decision": null,
+        "comments": [
+          {
+            "id": 1,
+            "url": "https://example.visualstudio.com/Example%20Project/_git/example%20repo/pullrequest/4242?discussionId=101",
+            "parentId": null,
+            "author": {
+              "platform": "azureDevOps",
+              "id": "human",
+              "displayName": "Reviewer",
+              "uniqueName": "reviewer@example.com",
+              "descriptor": "aad.human",
+              "accountType": null,
+              "kind": "person",
+              "evidence": [
+                "descriptor:aad"
+              ]
+            },
+            "content": "Edited 🤖",
+            "publishedUtc": "2026-08-03T12:00:00.0000000Z",
+            "lastEditedUtc": null,
+            "isEdited": false,
+            "authorship": "indeterminate",
+            "authorshipEvidence": [
+              "identity:descriptor:aad"
+            ],
+            "isAuthoredBySelf": false
+          },
+          {
+            "id": 2,
+            "url": "https://example.visualstudio.com/Example%20Project/_git/example%20repo/pullrequest/4242?discussionId=101",
+            "parentId": 1,
+            "author": {
+              "platform": "azureDevOps",
+              "id": "human",
+              "displayName": "Reviewer",
+              "uniqueName": "reviewer@example.com",
+              "descriptor": "aad.human",
+              "accountType": null,
+              "kind": "person",
+              "evidence": [
+                "descriptor:aad"
+              ]
+            },
+            "content": "2026-08-04T10:07:33.677Z",
+            "publishedUtc": "2026-08-03T12:15:00.0000000Z",
+            "lastEditedUtc": null,
+            "isEdited": false,
+            "authorship": "agent",
+            "authorshipEvidence": [
+              "identity:descriptor:aad",
+              "classification:reviewed"
+            ],
+            "isAuthoredBySelf": false
+          }
+        ],
+        "isAuthoredBySelf": false
+      }
+    ]
+  },
+  "reusedClassificationCount": 1,
+  "delta": {
+    "threadsAddedCount": 0,
+    "threadsRemovedCount": 0,
+    "commentsAddedCount": 0,
+    "commentsRemovedCount": 0,
+    "commentsEditedCount": 1,
+    "resolutionChangedCount": 0,
+    "reviewedSourceCommitChanged": false,
+    "previousReviewedSourceCommit": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "reviewedSourceCommit": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "reviewedMergeBaseCommitChanged": false,
+    "previousReviewedMergeBaseCommit": "cccccccccccccccccccccccccccccccccccccccc",
+    "reviewedMergeBaseCommit": "cccccccccccccccccccccccccccccccccccccccc",
+    "evidenceChanged": true,
+    "hasChanges": true
+  }
+}

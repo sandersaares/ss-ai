@@ -1,0 +1,59 @@
+{
+  "target": {
+    "platform": "azureDevOps",
+    "collectionUrl": "https://example.visualstudio.com",
+    "organization": "example",
+    "project": "Example Project",
+    "repository": "example repo",
+    "pullRequestId": 4242,
+    "webUrl": null
+  },
+  "responses": {
+    "connectionData": {
+      "authenticatedUser": {
+        "id": "runner",
+        "subjectDescriptor": "aad.runner",
+        "providerDisplayName": "Runner",
+        "properties": { "Account": { "$type": "System.String", "$value": "runner@example.com" } }
+      }
+    },
+    "pullRequest": {
+      "pullRequestId": 4242,
+      "status": "active",
+      "createdBy": { "id": "author", "displayName": "Author", "uniqueName": "author@example.com", "descriptor": "aad.author" },
+      "creationDate": "2026-08-03T11:44:10Z",
+      "title": "Unicode capture",
+      "description": "Review café — “design” 🤖",
+      "sourceRefName": "refs/heads/topic",
+      "targetRefName": "refs/heads/main",
+      "mergeStatus": "succeeded",
+      "isDraft": false,
+      "lastMergeSourceCommit": { "commitId": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" },
+      "lastMergeTargetCommit": { "commitId": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb" },
+      "lastMergeCommit": { "commitId": "dddddddddddddddddddddddddddddddddddddddd" }
+    },
+    "iterations": {
+      "count": 1,
+      "value": [
+        { "id": 2, "createdDate": "2026-08-04T11:41:20Z", "reason": "push", "sourceRefCommit": { "commitId": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" }, "targetRefCommit": { "commitId": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb" }, "commonRefCommit": { "commitId": "cccccccccccccccccccccccccccccccccccccccc" } }
+      ]
+    },
+    "reviewers": { "count": 0, "value": [] },
+    "threads": {
+      "count": 1,
+      "value": [
+        {
+          "id": 101,
+          "publishedDate": "2026-08-03T12:00:00Z",
+          "lastUpdatedDate": "2026-08-03T12:30:00Z",
+          "status": "active",
+          "threadContext": { "filePath": "/src/café.rs", "rightFileStart": { "line": 4, "offset": 1 }, "rightFileEnd": { "line": 5, "offset": 2 } },
+          "comments": [
+            { "id": 1, "parentCommentId": 0, "author": { "id": "human", "displayName": "Reviewer", "uniqueName": "reviewer@example.com", "descriptor": "aad.human" }, "content": "Alpha — “gamma” 🤖 café", "publishedDate": "2026-08-03T12:00:00Z", "commentType": "text" },
+            { "id": 2, "parentCommentId": 1, "author": { "id": "human", "displayName": "Reviewer", "uniqueName": "reviewer@example.com", "descriptor": "aad.human" }, "content": "2026-08-04T10:07:33.677Z", "publishedDate": "2026-08-03T12:15:00Z", "commentType": "text" }
+          ]
+        }
+      ]
+    }
+  }
+}

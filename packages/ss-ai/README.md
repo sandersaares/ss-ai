@@ -27,8 +27,9 @@ installation-only optimization.
 ## Commands
 
 Every input is named. Commands emit one UTF-8 JSON object on stdout after
-success, except `--help` and `--version`. Failures return a nonzero exit status,
-write diagnostics to stderr, and emit no successful JSON result.
+success, except `--help` and `--version`. Failures return a nonzero exit status.
+Most write diagnostics to stderr without a JSON result. Publication commands
+also emit durable partial outcomes when a transaction needs intervention.
 
 ```powershell
 ss-ai review select --repository-url "{{REPOSITORY_URL}}" `
@@ -121,6 +122,21 @@ automatic-reapproval assessment.
 
 ## Local review context
 
+`ss-ai context create` collects a pull request from its URL or explicit
+coordinates and writes an immutable capture and authorship sidecar under the
+requested output directory and prefix. A comparison path binds the refresh to
+the same pull request and reuses matching classification decisions. The JSON
+result contains bounded counts and change summaries. Creation does not publish
+comments or change approvals.
+
+`ss-ai context set-authorship` records a classification batch using either
+`--classification` or `--classification-path`. The reading snapshot is the
+`snapshotId` returned by the bounded reader for the effective capture read by
+the caller; pass that exact value as `--snapshot-id`. The
+[classification recipe](../../skills/ss-review/pwsh-calls/classify-comment-authorship.md)
+describes the batch and read-then-write process. Classification JSON must not
+contain duplicate or ASCII case-variant property names. The capture itself remains unchanged.
+
 ```powershell
 #Requires -Version 7.6
 
@@ -141,7 +157,7 @@ ss-ai context read-saved --request-path "{{REQUEST_PATH}}"
 
 Saved reads replay the last page unless `--next` explicitly advances it.
 `--restart` binds the same selectors to current evidence after a capture changes.
-The commands do not contact a provider. Their pages contain at most 16 KiB of
+The read and preparation commands do not contact a provider. Their pages contain at most 16 KiB of
 serialized UTF-8 output including the final newline; long text continues at
 UTF-16 code-unit offsets. Literal search compares Unicode single-character
 case equivalents without normalization or multi-character expansion. The skill's
@@ -174,6 +190,9 @@ ss-ai workflow plan-initialize --kind updates --path "{{PLAN_PATH}}"
 
 The `workflow --help` output lists the finding lifecycle, audit, projection,
 rendering, validation, index, candidate, consolidation, and plan commands.
+For generation-managed focus areas, `workflow create-review-work` requires
+`--session-state` and the exact `--preparation-identity` returned by restore.
+It validates readiness and captures focus-area snapshots for the review workers.
 Authored finding content, feedback, and plan items are supplied in UTF-8 files.
 Use the
 [finding structure](../../skills/ss-review/review.md#finding-structure) for
@@ -182,6 +201,243 @@ the reviewer's file-group journal. The review workflow separately checks
 manifest-based coverage. The [audit guide](../../skills/ss-review/data-guides/audit.md)
 describes decision and feedback records. Policy classification does not grant
 user or merge approval, and rendering does not publish or approve findings.
+
+`ss-ai workflow audit-add-decisions` accepts either `--plan-path` for a decision
+batch or `--item-path` for one decision object. An individual decision accepts
+surrounding whitespace and mixed case in its `decision` value; the journal
+stores the canonical lowercase value. Decision plans and journals use the
+canonical vocabulary. The policy classification restriction applies to either
+input.
+
+`ss-ai workflow validate-findings --path "{{DIRECTORY}}"` reports validation
+in `isValid`; repeat `--reviewer-id` for the expected reviewers. Add
+`--fail-on-invalid` to make an invalid result exit nonzero. The report is
+emitted on standard output; without that switch, an invalid report leaves the
+exit status successful.
+`ss-ai workflow validate-overview --path "{{OVERVIEW_PATH}}"` checks the
+overview structure; `--context-path` also checks its pull request link against
+the capture.
+
+`ss-ai workflow prepare-markdown` validates and renders an artifact or approved
+finding set supplied with `--path`, writing to `--output-directory`. Repeat
+`--finding-id` or supply comma-separated identifiers to select findings; omit
+it to render all. Optional
+`--combined-path` and `--audit-document-path` select additional outputs, and
+`--overview-path` prepends an overview to the audit document. Use
+`--destination tracker` with an optional `--context-path` for tracker prose.
+The result includes `auditDocumentUri` when an audit document is requested.
+
+## Final pull request review
+
+`ss-ai review publish-final-review` publishes the approved review through the
+native provider transaction. The
+[publication recipe](../../skills/ss-review/pwsh-calls/publish-pull-request-review.md)
+describes the workflow inputs and decision boundaries:
+
+```powershell
+#Requires -Version 7.6
+
+Set-StrictMode -Version Latest
+$ErrorActionPreference = 'Stop'
+$PSNativeCommandUseErrorActionPreference = $true
+
+ss-ai review publish-final-review --url "{{PR_URL}}" `
+  --approved-findings-path "{{APPROVED_FINDINGS_PATH}}" `
+  --context-path "{{CONTEXT_PATH}}" --diagnostics-path "{{DIAGNOSTICS_PATH}}" `
+  --repository-path "{{REPOSITORY_PATH}}" --output-directory "{{OUTPUT_DIRECTORY}}"
+```
+
+| Input | Meaning |
+| --- | --- |
+| `PR_URL` | Browser URL of the reviewed pull request. |
+| `APPROVED_FINDINGS_PATH` | Approved finding artifact bound to the reviewed evidence. |
+| `CONTEXT_PATH` | Latest checked capture bound to the approved findings. |
+| `DIAGNOSTICS_PATH` | Focus-area cache diagnostics for the summary. |
+| `REPOSITORY_PATH` | Local checkout containing the reviewed commits. |
+| `OUTPUT_DIRECTORY` | Session directory for `publication-result.json`. |
+
+Optional named arguments are `--merge-approval-path`, `--tenant`, `--now-utc`,
+`--discard-pending-review`, and `--publish-to-closed-pull-request`.
+Discard and closed-PR publication require the user's explicit
+decision; a merge-decision path is validated rather than converted to an
+approval switch by the caller.
+
+The command validates local records and anchors against the reviewed immutable
+diff, then checks live capture and evidence before writes. An explicitly
+authorized existing GitHub draft discard occurs before the journal. Otherwise,
+the retained publication lock and `publication-result.json` protect and record
+the transaction, including effect intent and outcomes. GitHub verifies and
+submits a draft; Azure DevOps publishes findings individually, records any
+authorized approval as a separate vote preserving `isRequired`, then posts the
+summary. Readback checks finding bodies and thread identities, and anchored
+comments against the planned file, diff side and line range. GitHub checks the
+draft and submitted review states; Azure DevOps checks an approval's reviewer
+identity, vote and required status against its receipt. Both read back the
+completed review before reopening follow-up threads. Azure DevOps journals
+finding writes and receipts sequentially; readback verifies each actual comment
+and relative order within a thread, not a global order across independent
+threads. An ambiguous write requires human reconciliation, not automatic retry.
+A follow-up failure emits `publishedWithFollowUpFailure` and exits nonzero; do
+not republish the review. Initial overview, tracker, and Markdown delivery
+retain their separate workflows and authority boundaries.
+
+## Tracker publication
+
+`ss-ai review publish-tracker-items` files approved findings as GitHub issues
+or Azure DevOps work items. The tracker destination is independent of the
+reviewed pull request. The
+[tracker recipe](../../skills/ss-review/pwsh-calls/file-tracker-items.md)
+describes the workflow inputs and decision boundaries.
+
+```powershell
+#Requires -Version 7.6
+
+Set-StrictMode -Version Latest
+$ErrorActionPreference = 'Stop'
+$PSNativeCommandUseErrorActionPreference = $true
+
+ss-ai review publish-tracker-items --url "{{TRACKER_URL}}" `
+  --approved-findings-path "{{APPROVED_FINDINGS_PATH}}" `
+  --context-path "{{CONTEXT_PATH}}" --diagnostics-path "{{DIAGNOSTICS_PATH}}" `
+  --output-directory "{{OUTPUT_DIRECTORY}}"
+```
+
+| Input | Meaning |
+| --- | --- |
+| `TRACKER_URL` | Browser URL of the destination repository or project. |
+| `APPROVED_FINDINGS_PATH` | Approved finding artifact. |
+| `CONTEXT_PATH` | Matching checked capture for a pull request review; omit for a local review. |
+| `DIAGNOSTICS_PATH` | Focus-area cache diagnostics for the summary. |
+| `OUTPUT_DIRECTORY` | Session directory for `tracker-publication-result.json`. |
+
+Azure DevOps requires `--work-item-type` and `--area-path`; it also accepts
+`--description-field`, `--parent-work-item-id`, and `--tenant`. Explicit
+`--platform`, `--organization`, `--project`, and `--repository` can name or
+adjust the destination. The command renders all items before contacting the
+tracker, journals each creation before dispatch, and verifies each item before
+creating the next. It returns the review summary to the caller rather than
+filing it as a work item.
+
+A partial or ambiguous creation requires reconciliation rather than a fresh
+retry. A body rewrite that needs a person's decision returns
+`needsAdjudication` with the item and body hashes. Only an explicit acceptance
+using `--accept-stored-rewrite`, `--accept-work-item-id`,
+`--accept-expected-body-hash`, and `--accept-stored-body-hash` can continue that
+same publication. The command returns its partial outcome and exits nonzero
+when publication does not complete.
+Continuation accepts case-only differences in Azure area paths.
+
+## Review report tools
+
+Report commands use the active `ss-review` skill directory for its locked
+dependencies and HTML template. Install the executable and skill together with
+the repository's root `Install.ps1`. The report-tool installer requires explicit
+user approval; it does not run as part of the readiness check or rendering.
+
+```powershell
+#Requires -Version 7.6
+
+Set-StrictMode -Version Latest
+$ErrorActionPreference = 'Stop'
+$PSNativeCommandUseErrorActionPreference = $true
+
+ss-ai workflow test-review-report-tools --skill-root "{{SKILL_ROOT}}" `
+  --tools-directory "{{TOOLS_DIRECTORY}}"
+```
+
+Only after explicit approval, install the dependencies:
+
+```powershell
+#Requires -Version 7.6
+
+Set-StrictMode -Version Latest
+$ErrorActionPreference = 'Stop'
+$PSNativeCommandUseErrorActionPreference = $true
+
+ss-ai workflow install-review-report-tools --skill-root "{{SKILL_ROOT}}" `
+  --tools-directory "{{TOOLS_DIRECTORY}}"
+```
+
+To render a document after readiness succeeds:
+
+```powershell
+#Requires -Version 7.6
+
+Set-StrictMode -Version Latest
+$ErrorActionPreference = 'Stop'
+$PSNativeCommandUseErrorActionPreference = $true
+
+ss-ai workflow render-review-html --path "{{MARKDOWN_PATH}}" `
+  --output-path "{{HTML_PATH}}" --skill-root "{{SKILL_ROOT}}" `
+  --tools-directory "{{TOOLS_DIRECTORY}}" --title-path "{{TITLE_PATH}}"
+```
+
+`SKILL_ROOT` is the absolute directory containing the active skill's `SKILL.md`.
+`MARKDOWN_PATH` identifies the canonical Markdown document, `HTML_PATH` its HTML
+reading view, `TITLE_PATH` identifies a UTF-8 file containing the title, and
+`TOOLS_DIRECTORY` identifies the private tool installation directory.
+The output directory must be writable. The native process keeps the caller's
+working directory.
+On Ubuntu, pass `--install-browser-dependencies` to the approved installer when
+browser system dependencies are needed. The check and installer exercise a real HTML/Mermaid
+probe. Check results include tool paths, `missing`, and `diagnostics`; rendering
+returns the source and HTML paths and hashes, HTML URI, and diagram count.
+The [platform setup guide](../../skills/ss-review/report-tool-setup.md) describes
+versions, consent, system dependencies, and recovery. The review workflow keeps
+Markdown as the fallback and controls presentation and publication.
+
+## Focus-area preparation
+
+The focus-area workflow records reference expansion and agent-authored maps
+without interpreting applicability on the agent's behalf. Snapshot commands
+return a `snapshotIdentity`; restore requires it and returns a distinct
+`preparationIdentity`. On a cache miss, `begin-focus-area-generation` requires
+that preparation identity and returns the isolated preparation `sessionState`
+and `generationId`. Supply this preparation path and authored input paths
+explicitly to the map and expansion commands. `update-focus-area-expansion`
+supports `initialize`, `register`, `complete`, `fail`, `read`, and `finalize`;
+register and outcome operations require a typed JSON input file. A read may
+select a reference using `--reference-id`. `update-focus-area-map` supports
+`append`, `replace`, and `regroup`, accepting a map input or category arguments.
+`validate-focus-area-map` checks a worker map; `--complete` also requires
+complete coverage. `assemble-focus-areas` validates finalized expansion and the complete map before
+rendering documents within the preparation directory. After semantic verification,
+`publish-focus-area-generation` requires the real session and generation ID,
+validates and publishes the active generation, and records its receipt.
+Artifact validation and cache storage require the original preparation identity;
+storage also requires the publication receipt. A cache hit needs no generation,
+but artifact validation still requires the restore identity. Each command emits
+a JSON result or fails without falling back to another implementation.
+The [focus-area guide](../../skills/ss-review/data-guides/focus-areas.md)
+defines the authored record formats.
+
+## Worker inputs
+
+`ss-ai workflow snapshot-instructions` snapshots the active skill's built-in
+guidance and user instructions using the session directory and `--skill-root`.
+The `COPILOT_CUSTOM_INSTRUCTIONS_DIRS` environment variable is a comma-separated
+list; relative directories resolve against the caller's working directory. The
+JSON result identifies the source directory, the discovered file count, and
+each original root's snapshot prefix. When repository instructions are
+authorized, callers can supply `--repository-root` with repeated
+`--repository-instruction` repository-relative paths to include them in the
+same coordinated snapshot. The result reports their original root and snapshot
+prefix separately in `repositoryRoot`; `roots` contains configured user roots.
+
+`ss-ai workflow worker-assignment` prepares an immutable assignment using the
+active skill directory supplied with `--skill-root`. Its result contains the
+assignment path and a dispatch prompt. The prompt includes recovery guidance
+and PowerShell and Bash calling-shell blocks for `workflow worker-document`.
+Use the block for the calling shell and replace the document ID for initial
+reads and reloads. Both blocks stop on a failed native command; the PowerShell
+block also configures UTF-8 decoding for the JSON output.
+
+The reader checks the registered bytes and emits an exact page, a UTF-16
+continuation offset, and an explicit completion flag. The complete encoded
+output, including its final newline, fits within 16 KiB. Canonical pull request
+captures use the local review context queries instead of the document reader.
+The [worker-input guide](../../skills/ss-review/data-guides/worker-inputs.md)
+describes the assignment and page records.
 
 ## Reapproval discovery
 

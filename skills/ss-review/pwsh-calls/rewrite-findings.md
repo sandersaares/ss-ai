@@ -1,7 +1,5 @@
-```powershell
-pwsh -NoProfile -NonInteractive -File "{{SKILL_ROOT}}/scripts/Update-Finding.ps1" `
-  -ArtifactPath "{{SESSION_STATE}}/findings.json" `
-  -PlanPath "{{PLAN_PATH}}"
+```text
+ss-ai workflow update-finding --artifact-path "{{SESSION_STATE}}/findings.json" --plan-path "{{PLAN_PATH}}"
 ```
 
 Placeholders to replace:

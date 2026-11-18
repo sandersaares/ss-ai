@@ -15,9 +15,9 @@ general machine setup or user-facing Copilot preferences.
 | [`ss-review-proactor`](skills/ss-review-proactor/SKILL.md) | Selects and claims a pull request before a review in the primary session; retains human decision gates. |
 | [`ss-autoreapprove`](skills/ss-autoreapprove/SKILL.md) | Renews invalidated approvals only under the installed significance policy; supports read-only dry runs. |
 
-Each skill lives under `skills/<name>/`, with `SKILL.md` as its entry point
-and runtime commands under `scripts/`. Instructions come from independently
-configured directories rather than from this repository.
+Each skill lives under `skills/<name>/`, with `SKILL.md` as its entry point.
+Instructions come from independently configured directories rather than from
+this repository.
 
 ## Requirements
 
@@ -88,20 +88,39 @@ Installation does not authenticate clients, enable schedules, or approve reviews
 
 ### Review reports and scheduled work
 
-Review HTML requires Pandoc, Node.js, and the skill's pinned Mermaid/browser
-dependencies. Inspect readiness without installing anything:
+Review HTML requires Pandoc, Node.js, and the active skill's pinned Mermaid/browser
+dependencies. After installing `ss-ai` and the skill with the root `Install.ps1`,
+inspect readiness without installing anything. Replace `SKILL_ROOT` with the
+absolute directory containing the active `SKILL.md` and `TOOLS_DIRECTORY`
+with a user-writable directory for report tools:
 
 ```powershell
-pwsh -NoProfile -File ./skills/ss-review/scripts/Test-ReviewReportTools.ps1
+#Requires -Version 7.6
+
+Set-StrictMode -Version Latest
+$ErrorActionPreference = 'Stop'
+$PSNativeCommandUseErrorActionPreference = $true
+
+ss-ai workflow test-review-report-tools --skill-root "{{SKILL_ROOT}}" `
+  --tools-directory "{{TOOLS_DIRECTORY}}"
 ```
 
 After explicitly approving dependency installation:
 
 ```powershell
-pwsh -NoProfile -File ./skills/ss-review/scripts/Install-ReviewReportTools.ps1
+#Requires -Version 7.6
+
+Set-StrictMode -Version Latest
+$ErrorActionPreference = 'Stop'
+$PSNativeCommandUseErrorActionPreference = $true
+
+ss-ai workflow install-review-report-tools --skill-root "{{SKILL_ROOT}}" `
+  --tools-directory "{{TOOLS_DIRECTORY}}"
 ```
 
-The setup and readiness commands exercise a real embedded Mermaid diagram.
+Use `%LOCALAPPDATA%/ss-review/tools` when `LOCALAPPDATA` is set, or
+`~/.local/share/ss-review/tools` otherwise. The setup and readiness commands
+exercise a real embedded Mermaid diagram.
 See the [platform setup guide](skills/ss-review/report-tool-setup.md) for
 Node/Pandoc versions and Ubuntu browser system dependencies. Without HTML
 readiness, the review reports that limitation and uses Markdown as specified

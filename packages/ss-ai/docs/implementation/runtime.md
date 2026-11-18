@@ -33,6 +33,16 @@ its injectable clock interface synchronous. This confines the asynchronous
 timer driver to the wait boundary rather than introducing a runtime requirement
 into the selection state machine or its fakes.
 
+## Shared files
+
+Retained sibling locks coordinate file and multi-file transactions with
+PowerShell consumers. Resource locks support shared readers, exclusive writers,
+and nonblocking acquisition for optional maintenance. Owners keep the lock
+through the complete operation and never remove its file. Contention retries
+are bounded and do not replay a transaction. Resource locks use the review
+workflow's short contention budget; file transactions retain the longer budget
+needed for provider operations.
+
 ## Errors and command output
 
 Errors preserve contextual causes through `ohno`. A classified failure carries

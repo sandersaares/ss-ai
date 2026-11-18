@@ -5,7 +5,7 @@ use std::path::Path;
 
 use ohno::AppError;
 
-use crate::{Clock, Http, Process, cargo, context, git, workflow};
+use crate::{Clock, Http, Process, cargo, context, final_review, git, overview, tracker, workflow};
 
 /// Runs a complete command with injected external boundaries.
 pub fn run(
@@ -46,6 +46,12 @@ fn dispatch(
         .get(1)
         .is_some_and(|argument| argument == "context")
     {
+        if arguments
+            .get(2)
+            .is_some_and(|argument| argument == "create")
+        {
+            return context::run_with_providers(local_arguments(arguments), clock, process, http);
+        }
         return context::run(local_arguments(arguments), clock);
     }
     if arguments
@@ -53,6 +59,33 @@ fn dispatch(
         .is_some_and(|argument| argument == "workflow")
     {
         return workflow::run(local_arguments(arguments), process, clock);
+    }
+    if arguments
+        .get(1)
+        .is_some_and(|argument| argument == "review")
+        && arguments
+            .get(2)
+            .is_some_and(|argument| argument == "publish-final-review")
+    {
+        return final_review::run(arguments, process, http, clock);
+    }
+    if arguments
+        .get(1)
+        .is_some_and(|argument| argument == "review")
+        && arguments
+            .get(2)
+            .is_some_and(|argument| argument == "publish-tracker-items")
+    {
+        return tracker::run(arguments, process, http, clock);
+    }
+    if arguments
+        .get(1)
+        .is_some_and(|argument| argument == "review")
+        && arguments
+            .get(2)
+            .is_some_and(|argument| argument == "publish-overview")
+    {
+        return overview::run(arguments, process, http, clock);
     }
     match directory {
         Some(directory) => ss_ai_review::run_in(arguments, process, http, clock, directory),

@@ -9,7 +9,7 @@ use ohno::AppError;
 use serde::de::{Error as _, MapAccess, SeqAccess, Visitor};
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Number, Value};
-use ss_ai_review_context::decode_file_text;
+use ss_ai_review_context::decode_workflow_text;
 use ss_ai_runtime::{Clock, FileTransaction, caused_by, fail, read_bytes};
 
 /// Selects the schema and list in a workflow plan.
@@ -214,6 +214,10 @@ impl Plan {
     }
 }
 
+/// Identifies an item that conflicts with an existing plan entry.
+#[ohno::error]
+struct ConflictingPlanItem;
+
 /// Refuses explicit null for optional strings, which the schema does not allow.
 fn present_string<'de, D: serde::Deserializer<'de>>(
     deserializer: D,
@@ -286,14 +290,14 @@ impl<'de> Deserialize<'de> for StrictValue {
 
 /// Parses JSON without discarding conflicting object keys.
 pub(crate) fn parse_json(bytes: &[u8]) -> Result<Value, AppError> {
-    let text = decode_file_text(bytes);
+    let text = decode_workflow_text(bytes)?;
     let StrictValue(value) = serde_json::from_str(&text)
         .map_err(|error| caused_by("invalidInput", "Invalid JSON", error))?;
     Ok(value)
 }
 
 /// Enforces the same schema for every input and output boundary.
-fn parse_item(kind: PlanKind, value: Value) -> Result<PlanItem, AppError> {
+pub(crate) fn parse_item(kind: PlanKind, value: Value) -> Result<PlanItem, AppError> {
     let invalid = |error| caused_by("invalidInput", "Invalid workflow item", error);
     let item = match kind {
         PlanKind::MergeCandidates => {
@@ -441,22 +445,7 @@ pub fn append(
         if replace_index.is_none() && existing == &item {
             return Ok(());
         }
-        let conflict = match (existing, &item) {
-            (PlanItem::Merge(a), PlanItem::Merge(b)) => a
-                .source_finding_ids
-                .iter()
-                .any(|id| b.source_finding_ids.contains(id)),
-            (PlanItem::Update(a), PlanItem::Update(b)) => a.finding_id == b.finding_id,
-            (PlanItem::Removal(a), PlanItem::Removal(b)) => a.finding_id == b.finding_id,
-            (PlanItem::Decision(a), PlanItem::Decision(b)) => a.finding_id == b.finding_id,
-            _ => false,
-        };
-        if conflict {
-            return Err(fail(
-                "invalidInput",
-                "Workflow item conflicts with an existing item",
-            ));
-        }
+        check_item_conflict(existing, &item)?;
     }
     if let Some(index) = replace_index {
         let slot = plan
@@ -468,6 +457,31 @@ pub fn append(
         plan.items.push(item);
     }
     write_plan(&transaction, &plan)
+}
+
+/// Distinguishes conflicting plan entries from other validation failures.
+fn check_item_conflict(existing: &PlanItem, item: &PlanItem) -> Result<(), AppError> {
+    let conflict = match (existing, item) {
+        (PlanItem::Merge(a), PlanItem::Merge(b)) => a
+            .source_finding_ids
+            .iter()
+            .any(|id| b.source_finding_ids.contains(id)),
+        (PlanItem::Update(a), PlanItem::Update(b)) => a.finding_id == b.finding_id,
+        (PlanItem::Removal(a), PlanItem::Removal(b)) => a.finding_id == b.finding_id,
+        (PlanItem::Decision(a), PlanItem::Decision(b)) => a.finding_id == b.finding_id,
+        _ => false,
+    };
+    if conflict {
+        return Err(ConflictingPlanItem::caused_by(
+            fail(
+                "invalidInput",
+                "Workflow item conflicts with an existing item",
+            )
+            .into_std_error(),
+        )
+        .into());
+    }
+    Ok(())
 }
 
 /// Makes references independent of subsequent plan relocation.
@@ -514,7 +528,31 @@ fn write_plan(transaction: &FileTransaction<'_>, plan: &Plan) -> Result<(), AppE
 #[cfg(test)]
 #[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
-    use super::{PlanItem, PlanKind, parse_plan};
+    use ss_ai_runtime::classification;
+
+    use super::{
+        ConflictingPlanItem, Merge, PlanItem, PlanKind, check_item_conflict, parse_json, parse_plan,
+    };
+
+    #[test]
+    fn overlapping_merge_items_report_a_conflict_cause() {
+        let existing = PlanItem::Merge(Merge {
+            source_finding_ids: vec!["F-1".into(), "F-2".into()],
+            finding_path: "first.md".into(),
+        });
+        let overlapping = PlanItem::Merge(Merge {
+            source_finding_ids: vec!["F-2".into(), "F-3".into()],
+            finding_path: "second.md".into(),
+        });
+        let distinct = PlanItem::Merge(Merge {
+            source_finding_ids: vec!["F-4".into(), "F-5".into()],
+            finding_path: "third.md".into(),
+        });
+        let error = check_item_conflict(&existing, &overlapping).unwrap_err();
+        assert_eq!(classification(&error), "invalidInput");
+        assert!(error.find_source::<ConflictingPlanItem>().is_some());
+        check_item_conflict(&existing, &distinct).unwrap();
+    }
 
     /// Builds the BOM-marked forms accepted by the shared PowerShell reader.
     fn encoded(text: &str) -> Vec<Vec<u8>> {
@@ -548,6 +586,42 @@ mod tests {
         }
         for bytes in encoded(duplicate) {
             parse_plan(PlanKind::Decisions, &bytes).unwrap_err();
+        }
+    }
+
+    /// Structured workflow records reject malformed text bytes instead of
+    /// applying the replacement decoding used for imported prose.
+    #[test]
+    fn structured_json_rejects_malformed_unicode_without_replacement() {
+        let encoded = encoded(r#"{"text":"Z"}"#);
+        let replacements: [(&[u8], &[u8]); 5] = [
+            (b"Z", &[0xff]),
+            (&[b'Z', 0], &[0x00, 0xd8]),
+            (&[0, b'Z'], &[0xd8, 0x00]),
+            (&[b'Z', 0, 0, 0], &[0x00, 0xd8, 0, 0]),
+            (&[0, 0, 0, b'Z'], &[0, 0, 0xd8, 0x00]),
+        ];
+        for (mut bytes, (needle, replacement)) in encoded.into_iter().zip(replacements) {
+            let offset = bytes
+                .windows(needle.len())
+                .position(|part| part == needle)
+                .unwrap();
+            bytes
+                .get_mut(offset..offset + needle.len())
+                .unwrap()
+                .copy_from_slice(replacement);
+            let error = parse_json(&bytes).unwrap_err();
+            assert_eq!(classification(&error), "invalidInput");
+        }
+        for bytes in [
+            b"{\"text\":\"\xff\"}".to_vec(),
+            vec![0xff, 0xfe, 0x7b],
+            vec![0xfe, 0xff, 0x7b],
+            vec![0xff, 0xfe, 0, 0, 0x7b],
+            vec![0, 0, 0xfe, 0xff, 0x7b],
+        ] {
+            let error = parse_json(&bytes).unwrap_err();
+            assert_eq!(classification(&error), "invalidInput");
         }
     }
 

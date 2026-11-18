@@ -24,6 +24,13 @@ const COUNTERS: [&str; 6] = [
     "cursorRestarts",
 ];
 
+/// Keeps malformed diagnostics distinguishable inside this crate.
+#[ohno::error]
+#[display("{message}")]
+pub(crate) struct MalformedDiagnostics {
+    message: String,
+}
+
 /// Reads one diagnostic record or sums records in a run directory.
 pub fn read_diagnostics(path: &Path, clock: &dyn Clock) -> Result<Value, AppError> {
     let path = absolute(path)?;
@@ -120,27 +127,43 @@ fn read_record(path: &Path, clock: &dyn Clock) -> Result<Value, AppError> {
 
 /// Rejects malformed or incomplete records rather than filling missing fields.
 fn parse(bytes: &[u8]) -> Result<Value, AppError> {
-    let record = parse_json(bytes)?;
-    validate(&record)?;
-    Ok(record)
+    let result = parse_json(bytes).and_then(|record| {
+        validate(&record)?;
+        Ok(record)
+    });
+    result.map_err(|error| {
+        MalformedDiagnostics::caused_by(error.to_string(), error.into_std_error()).into()
+    })
 }
 
 /// Reads workflow JSON using the Unicode encodings accepted by the shared reader.
-pub(crate) fn parse_json(bytes: &[u8]) -> Result<Value, AppError> {
-    let text = if let Some(bytes) = bytes.strip_prefix(&[0xef, 0xbb, 0xbf]) {
-        decode_utf8(bytes)?
+///
+/// # Errors
+///
+/// Rejects malformed text and duplicate or ambiguous property names.
+pub fn parse_json(bytes: &[u8]) -> Result<Value, AppError> {
+    parse_text(&decode_workflow_text(bytes)?)
+}
+
+/// Decodes structured workflow data without replacing malformed characters.
+///
+/// # Errors
+///
+/// Rejects malformed Unicode input.
+pub fn decode_workflow_text(bytes: &[u8]) -> Result<String, AppError> {
+    if let Some(bytes) = bytes.strip_prefix(&[0xef, 0xbb, 0xbf]) {
+        decode_utf8(bytes)
     } else if let Some(bytes) = bytes.strip_prefix(&[0xff, 0xfe, 0x00, 0x00]) {
-        decode_utf32(bytes, true)?
+        decode_utf32(bytes, true)
     } else if let Some(bytes) = bytes.strip_prefix(&[0x00, 0x00, 0xfe, 0xff]) {
-        decode_utf32(bytes, false)?
+        decode_utf32(bytes, false)
     } else if let Some(bytes) = bytes.strip_prefix(&[0xff, 0xfe]) {
-        decode_utf16(bytes, true)?
+        decode_utf16(bytes, true)
     } else if let Some(bytes) = bytes.strip_prefix(&[0xfe, 0xff]) {
-        decode_utf16(bytes, false)?
+        decode_utf16(bytes, false)
     } else {
-        decode_utf8(bytes)?
-    };
-    parse_text(&text)
+        decode_utf8(bytes)
+    }
 }
 
 /// Rejects invalid UTF-8 rather than changing data before validation.
@@ -239,4 +262,16 @@ fn add_counts(total: &mut Value, record: &Value) -> Result<(), AppError> {
         counts.insert(name.to_owned(), json!(sum));
     }
     Ok(())
+}
+
+#[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
+mod tests {
+    use super::{MalformedDiagnostics, parse};
+
+    #[test]
+    fn malformed_records_keep_the_typed_diagnostic_cause() {
+        let error = parse(br#"{"schemaVersion":1,"counts":{}}"#).unwrap_err();
+        assert!(error.find_source::<MalformedDiagnostics>().is_some());
+    }
 }

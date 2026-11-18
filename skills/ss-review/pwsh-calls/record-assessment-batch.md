@@ -1,8 +1,5 @@
-```powershell
-pwsh -NoProfile -NonInteractive -File "{{SKILL_ROOT}}\scripts\Set-ReviewAssessmentBatch.ps1" `
-  -QueuePath "{{FILE_GROUP_QUEUE}}" -InventoryPath "{{FILE_INVENTORY}}" `
-  -FileGroupsPath "{{FILE_GROUPS}}" -ArtifactPath "{{ARTIFACT_PATH}}" `
-  -BatchPath "{{BATCH_PATH}}"
+```text
+ss-ai workflow complete-review-batch --queue-path "{{FILE_GROUP_QUEUE}}" --inventory-path "{{FILE_INVENTORY}}" --file-groups-path "{{FILE_GROUPS}}" --artifact-path "{{ARTIFACT_PATH}}" --batch-path "{{BATCH_PATH}}"
 ```
 
 | Placeholder | Value |

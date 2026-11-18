@@ -9,13 +9,15 @@ The nonpublished workspace packages implement the utility-wide [design](design.m
 - `ss-ai-git` compares immutable Git objects and interprets unified diffs.
 - `ss-ai-assessment` validates source inventory and judgment coverage for
   automatic reapproval without provider effects.
-- `ss-ai-runtime` supplies process, clock, diagnostics, and atomic file transactions.
+- `ss-ai-runtime` supplies process, clock, diagnostics, BOM-aware text decoding,
+  and atomic file transactions.
 - `ss-ai-review` owns provider-backed review and reapproval operations.
 - `ss-ai-review-context` owns local captured evidence, bounded queries, saved
   requests, and input diagnostics.
 - `ss-ai-review-workflow` owns local finding artifacts, consolidation, audit
-  records, approved projections, shared Markdown rendering, and their workflow
-  plans.
+  records, approved projections, shared Markdown rendering, worker assignments,
+  bounded shared-document reads, instruction snapshots, focus-area preparation
+  and reuse, report tooling, HTML rendering, and their workflow plans.
 
 Dependencies flow from command composition toward focused operations and shared
 runtime boundaries, never back to the executable. Review selection, provider
@@ -24,11 +26,35 @@ decisions and transaction boundaries. Assessment owns the independent source
 and judgment model, while review retains provider-backed authority decisions.
 Local context operations do not require provider transport and do not make
 review or authorship judgments.
-Local finding operations use the same runtime transactions as PowerShell
-consumers, so hybrid runs preserve accepted updates and artifact history.
+Capture creation composes the review provider adapters with the context
+producer. The producer retains the destination lock across collection and
+publishes the sidecar before the immutable capture, so readers never observe
+a capture without its initial decisions. Semantic decisions use the same
+sidecar lock and remain separate from provider evidence.
+Classification JSON uses the context package's duplicate-preserving parser before
+materializing a batch, so conflicting properties cannot disappear before validation.
+Local finding operations use the shared runtime transactions to preserve
+accepted updates and artifact history.
+Individual audit decision input is normalized before the shared policy and
+journal checks. Persisted plans and journals retain strict canonical values,
+so normalization does not change the stored schema or approval authority.
+Report commands take the active skill root explicitly, keeping the locked
+dependencies and template tied to the skill that invokes them.
+Initial overview publication keeps provider effects and the publication journal
+in `ss-ai-review`. The command composition supplies local report rendering from
+`ss-ai-review-workflow`, so provider transactions do not depend on presentation
+tools and the package dependencies remain one-way.
 Audit and projection operations share the captured-evidence serializer and
-exact Git comparison with other review commands. PowerShell adapters keep the
-remaining publication commands compatible without duplicating finding prose.
+exact Git comparison with other review commands. Final review publication
+combines these local operations with provider effects and a retained journal
+lock in `ss-ai-review`.
+Tracker publication combines the native renderer with provider-specific
+preflight and per-item journaled creation and verification.
+Accepted Azure body rewrites become durable before the transaction records a
+new creation intent. If saving that intent fails, the same accepted decision
+can continue; after the intent is durable, the possible provider write requires
+reconciliation instead of automatic replay. Native tracker journals require
+the complete adjudication evidence produced by the native utility.
 The Cargo inventory has no provider or
 network dependency. The focused packages support targeted test builds and
 incremental reuse; a cold build of the complete executable still builds its
