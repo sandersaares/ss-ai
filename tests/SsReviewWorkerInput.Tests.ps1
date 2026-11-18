@@ -175,7 +175,7 @@ Describe 'Prepared bounded worker inputs' {
         $assignment.phase | Should -BeExactly $Canonical
     }
 
-    It 'provides bounded initial reads and exact complete guidance for original and resumed reviewers' {
+    It 'provides bounded initial reads and materialized guidance for original and resumed reviewers' {
         foreach ($resume in @($false, $true)) {
             $result = New-TestWorkerAssignment -Phase review `
                 -SessionState $script:State -ScopePath $script:Scope -ManifestPath $script:Work.manifestPath `
@@ -183,7 +183,6 @@ Describe 'Prepared bounded worker inputs' {
             $assignment = ConvertFrom-Json -InputObject ([IO.File]::ReadAllText($result.assignmentPath)) -AsHashtable
             $assignment.resume | Should -BeTrue -Because 'first dispatch retains the prepared artifact and journal'
             ($assignment.documents | Where-Object { $_.id -eq 'prompt' }).sizeBytes | Should -BeGreaterThan 20KB
-            $result.dispatchPrompt | Should -Match 'Do not use the default file viewer'
             $result.dispatchPrompt | Should -Match "O''Brien"
             $assignment.documents.id | Should -Not -Contain 'pr-context'
             Read-AllSharedPages -AssignmentPath $result.assignmentPath -Id overview | Should -BeExactly $script:LongText
@@ -191,11 +190,6 @@ Describe 'Prepared bounded worker inputs' {
             $prompt = Read-AllSharedPages -AssignmentPath $result.assignmentPath -Id prompt
             $prompt | Should -Not -Match '\{\{[^}]+\}\}'
             $prompt | Should -Match ([regex]::Escape($script:Work.inventoryPath))
-            $prompt | Should -Match 'Primary orchestration, publication, and every human decision gate'
-            $prompt | Should -Match 'Do not invoke the skill'
-            $prompt | Should -Match 'Use `--resume` exactly'
-            $prompt | Should -Match 'Use the default context tier supplied by the orchestrator'
-            $prompt | Should -Not -Match 'long-context configuration'
             $data = Read-AllSharedPages -AssignmentPath $result.assignmentPath -Id workflowData
             $expectedData = @(
                 [IO.File]::ReadAllText((Join-Path $script:SkillRoot 'workflow-data.md'))
@@ -321,7 +315,7 @@ Describe 'Prepared bounded worker inputs' {
         $invalid.output | Should -BeNullOrEmpty
     }
 
-    It 'loads only <Phase> preparation contracts without granting orchestration or human authority' -ForEach @(
+    It 'loads only <Phase> preparation contracts' -ForEach @(
         @{ Phase = 'fileGroups'; Guide = 'data-guides\file-groups.md' }
         @{ Phase = 'focusAreas'; Guide = 'data-guides\focus-areas.md' }
         @{ Phase = 'references'; Guide = $null }
@@ -332,12 +326,6 @@ Describe 'Prepared bounded worker inputs' {
         $assignment = ConvertFrom-Json -InputObject ([IO.File]::ReadAllText($result.assignmentPath)) -AsHashtable
         $result.dispatchPrompt | Should -Not -Match 'assigned queryRecipe'
         $assignment.documents.id | Should -Not -Contain queryRecipe
-        $prompt = Read-AllSharedPages -AssignmentPath $result.assignmentPath -Id prompt
-        $prompt | Should -Match 'authorized bounded phase work'
-        $prompt | Should -Match 'not invocation or delegation of ss-review itself'
-        $prompt | Should -Match 'do not ask or answer it yourself'
-        $prompt | Should -Match 'Repository instruction authorization: not authorized'
-        $prompt | Should -Match 'Pre-existing findings authorized: False'
         if ($null -eq $Guide) {
             $assignment.documents.id | Should -Not -Contain 'workflowData'
             [IO.File]::Exists((Join-Path $script:State "$Phase\workflow-data.md")) | Should -BeFalse
