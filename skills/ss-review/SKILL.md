@@ -50,7 +50,7 @@ Read and apply [error-recovery.md](error-recovery.md) to every command and worke
 
 # Subagent configuration
 
-Pass model selections as explicit spawn arguments: GPT 6.1 Sol uses `model: "gpt-6.1-sol"` and GPT 6 Luna uses `model: "gpt-6-luna"`. Apply this mapping to nested subagents as well.
+Pass model selections as explicit spawn arguments: GPT 6.2 Sol uses `model: "gpt-6.2-sol"` and GPT 6 Luna uses `model: "gpt-6-luna"`. Apply this mapping to nested subagents as well.
 
 Pass `reasoning_effort: "medium"` explicitly for every subagent, including nested workers and retries. Include this requirement in every delegated prompt so nested dispatches use the same setting.
 
@@ -135,7 +135,7 @@ Prepare every phase-1 step-5/step-6 preparation assignment and phase-2 reviewer 
 
 3. If `indeterminateCommentCount` is nonzero, classify every indeterminate comment before treating the capture as complete. The capture proves machine authorship only where an account type or an explicit marker settles it; agents also identify themselves by emoji and by other conventions that no fixed rule captures.
 
-   Dispatch a subagent (GPT 6.1 Sol) with the skill root, capture path, and `pwsh-calls/query-pr-context.md` and `pwsh-calls/classify-comment-authorship.md`. It queries `--query comments --authorship indeterminate` and judges only the verbatim text and attribution supplied for each comment, never fabricated metadata-only evidence or other comments as authorship inputs. Keep the effective capture and decision record immutable during a reading batch or complete pass; collect decisions and the query's `snapshotId` and apply them only after the reads finish. For large sets, use bounded batches. After applying a batch, start a fresh indeterminate query without the old cursor because classified records disappear from that filter. Nonoverlapping delegated ID batches may share an immutable snapshot; obtain those IDs using the recipe's body-free `--index-only` query, with one writer combining and applying their decisions after its readers finish.
+   Dispatch a subagent (GPT 6.2 Sol) with the skill root, capture path, and `pwsh-calls/query-pr-context.md` and `pwsh-calls/classify-comment-authorship.md`. It queries `--query comments --authorship indeterminate` and judges only the verbatim text and attribution supplied for each comment, never fabricated metadata-only evidence or other comments as authorship inputs. Keep the effective capture and decision record immutable during a reading batch or complete pass; collect decisions and the query's `snapshotId` and apply them only after the reads finish. For large sets, use bounded batches. After applying a batch, start a fresh indeterminate query without the old cursor because classified records disappear from that filter. Nonoverlapping delegated ID batches may share an immutable snapshot; obtain those IDs using the recipe's body-free `--index-only` query, with one writer combining and applying their decisions after its readers finish.
 
    Classification stdout contains only `contextPath`, `applied`, `unchanged`, `indeterminate`, and `isComplete`. If incomplete, query the remaining indeterminate comments afresh and classify those too. For query or classification errors, apply `error-recovery.md` and the query recipe's correction/restart rules; never recover with a raw capture read.
 
@@ -144,14 +144,14 @@ Prepare every phase-1 step-5/step-6 preparation assignment and phase-2 reviewer 
    Prepare a file-inventory draft in session state as an array of `{ "path": "absolute path", "sizeBytes": 123, "change": "modified" }` records covering every file under review. Use `new`, `modified`, or `deleted` for `change`; use the pre-change size for deleted files. For whole-directory review, mark existing files `modified`. Preserve deleted files even though their paths no longer exist; workers inspect their pre-change content and removal diff. Represent a rename with both its deleted old path and new path so neither side is omitted. Publish the draft as `file-inventory.json` using `pwsh-calls/write-review-input.md`, with `--replace` only for explicit freshness regeneration. Keep it flat and complete; the next step derives groups without relevance filtering.
 5. Dispatch the following concurrently and wait for all of them to complete:
 
-   * Instruct a subagent (GPT 6.1 Sol) to generate a `references.md` in session state using the prompt in `prepare-references.md`.
+   * Instruct a subagent (GPT 6.2 Sol) to generate a `references.md` in session state using the prompt in `prepare-references.md`.
    * Instruct a subagent (GPT 6 Luna) to generate `file-inventory-grouped.json` in session state using the prompt in `prepare-file-groups.md`. It groups the full inventory by directory structure within the file-count and byte bounds; it does not select a subset for review.
-   * Instruct a subagent (GPT 6.1 Sol) to publish or restore `focus-areas/*.md` files in session state using the prompt in `prepare-focus-areas.md`. Generation uses an isolated preparation directory and publishes only after scope verification.
+   * Instruct a subagent (GPT 6.2 Sol) to publish or restore `focus-areas/*.md` files in session state using the prompt in `prepare-focus-areas.md`. Generation uses an isolated preparation directory and publishes only after scope verification.
      If the skill invocation authorized use of in-repo instructions, forward this authorization to the subagent.
      The prompt may restore a complete cached artifact set if matching inputs were already processed recently.
      Retain the worker's exact returned `preparationIdentity` and source-root mappings with the review checkpoint, including the separate `repositoryRoot` mapping when present. Do not read or adopt a later identity from session files.
 
-6. Instruct a subagent (GPT 6.1 Sol) to generate a `content-overview.md` in session state using the prompt in `prepare-content-overview.md`.
+6. Instruct a subagent (GPT 6.2 Sol) to generate a `content-overview.md` in session state using the prompt in `prepare-content-overview.md`.
    This step depends on `file-inventory.json` and `references.md` from the preceding steps.
    For a pull request review, also supply the current checked capture path and `pwsh-calls/query-pr-context.md` so the overview can query only the URL and commit metadata it needs.
    The overview is derived from the content itself. Do not treat a pull request title or description as a source of truth for it.
@@ -167,7 +167,7 @@ Prepare every phase-1 step-5/step-6 preparation assignment and phase-2 reviewer 
 
 # Phase 2: review
 
-Use one subagent (GPT 6.1 Sol) per focus area with explicit `model: "gpt-6.1-sol"`, `reasoning_effort: "medium"`, and `context_tier: "default"`, including retries. Each worker assesses the entire inventory against its assigned focus area's effective scopes, reviewing the requested scope in each file unless every guideline section clearly excludes it.
+Use one subagent (GPT 6.2 Sol) per focus area with explicit `model: "gpt-6.2-sol"`, `reasoning_effort: "medium"`, and `context_tier: "default"`, including retries. Each worker assesses the entire inventory against its assigned focus area's effective scopes, reviewing the requested scope in each file unless every guideline section clearly excludes it.
 
 Include the compaction notes from `review.md` in every assignment. They guide automatic compaction; they do not require a worker to invoke compaction or stop at group boundaries. Preserve instructions and exact reload paths, not summaries of previously read file contents.
 
@@ -199,9 +199,9 @@ Reviewers work in isolation, so the same issue arrives many times over. Merging 
 
    The command emits a single JSON object on standard output reporting what it indexed. On error, apply `error-recovery.md` before continuing.
 
-2. Use one subagent (GPT 6.1 Sol) to propose candidates. Its only finding evidence is `finding-index.json`; supply the common data rules and `data-guides/finding-plans.md` for its output contract. It initializes `merge-candidates.json` with `pwsh-calls/write-workflow-data.md` using kind `mergeCandidates`, and appends typed `cluster` drafts. Each cluster holds distinct identifiers that plausibly describe the same issue. The signals are near-identical titles, descriptions or recommended actions; a shared anchor or impacted path; and related concerns across files or focus areas. Consider duplicates within a worker's output as well as across workers, including whole-claim subsumption. It reads no full finding bodies and decides no merges. Require `pwsh-calls/validate-finding-candidates.md` to succeed before dispatching adjudicators. An explicitly empty candidate plan is valid.
+2. Use one subagent (GPT 6.2 Sol) to propose candidates. Its only finding evidence is `finding-index.json`; supply the common data rules and `data-guides/finding-plans.md` for its output contract. It initializes `merge-candidates.json` with `pwsh-calls/write-workflow-data.md` using kind `mergeCandidates`, and appends typed `cluster` drafts. Each cluster holds distinct identifiers that plausibly describe the same issue. The signals are near-identical titles, descriptions or recommended actions; a shared anchor or impacted path; and related concerns across files or focus areas. Consider duplicates within a worker's output as well as across workers, including whole-claim subsumption. It reads no full finding bodies and decides no merges. Require `pwsh-calls/validate-finding-candidates.md` to succeed before dispatching adjudicators. An explicitly empty candidate plan is valid.
 
-3. Initialize `merge-plan.json` with `pwsh-calls/write-workflow-data.md` using kind `mergePlan`. Adjudicate the clusters in sequential batches of (at most) 16 subagents (GPT 6.1 Sol), one cluster per subagent. Each opens only its own cluster's findings and applies the test: duplicates share the same root cause and recommended action, not merely the same file, helper, or guideline. For genuine merges it writes a merged finding under `{{SESSION_STATE}}/merged/` and a `merge` draft with `sourceFindingIds` and `findingPath`; findings left alone require no merge entry. A merged finding preserves every source location in `impactedLocations`, where a path-only location covers the whole file. Append returned drafts with the prepared writer. Resolve overlapping proposed merges before appending; do not let workers mutate the shared plan. Keep an explicit empty plan when nothing merges.
+3. Initialize `merge-plan.json` with `pwsh-calls/write-workflow-data.md` using kind `mergePlan`. Adjudicate the clusters in sequential batches of (at most) 16 subagents (GPT 6.2 Sol), one cluster per subagent. Each opens only its own cluster's findings and applies the test: duplicates share the same root cause and recommended action, not merely the same file, helper, or guideline. For genuine merges it writes a merged finding under `{{SESSION_STATE}}/merged/` and a `merge` draft with `sourceFindingIds` and `findingPath`; findings left alone require no merge entry. A merged finding preserves every source location in `impactedLocations`, where a path-only location covers the whole file. Append returned drafts with the prepared writer. Resolve overlapping proposed merges before appending; do not let workers mutate the shared plan. Keep an explicit empty plan when nothing merges.
 
 4. Consolidate. Execute the command in `pwsh-calls/consolidate-findings.md`, replacing its placeholders.
 
@@ -209,11 +209,11 @@ Reviewers work in isolation, so the same issue arrives many times over. Merging 
 
 # Phase 4: qualitymaxxing
 
-Use a subagent (GPT 6.1 Sol) with `context_tier: "long_context"` to execute this phase, working on `findings.json` from session state and providing it the prompt in `qualitymaxx.md` as input. Supply the current capture path when one exists and `pwsh-calls/query-pr-context.md`; every PR evidence read follows that recipe. Use the larger context for cross-referencing findings and supporting evidence while retaining the batched processing prescribed by that prompt.
+Use a subagent (GPT 6.2 Sol) with `context_tier: "long_context"` to execute this phase, working on `findings.json` from session state and providing it the prompt in `qualitymaxx.md` as input. Supply the current capture path when one exists and `pwsh-calls/query-pr-context.md`; every PR evidence read follows that recipe. Use the larger context for cross-referencing findings and supporting evidence while retaining the batched processing prescribed by that prompt.
 
 # Phase 5: synthesis
 
-Use a subagent (GPT 6.1 Sol) with `context_tier: "long_context"` to execute this phase. Long context supports cross-referencing the consolidated findings for review-wide patterns.
+Use a subagent (GPT 6.2 Sol) with `context_tier: "long_context"` to execute this phase. Long context supports cross-referencing the consolidated findings for review-wide patterns.
 
 Supply `workflow-data.md` and `data-guides/finding-plans.md` for its structured output, not unrelated data guides.
 
@@ -251,7 +251,7 @@ Report reused classifications, newly classified comments (the classification com
 
 # Phase 6: auto-approval
 
-Dispatch one subagent (GPT 6.1 Sol) with explicit `model: "gpt-6.1-sol"`, `reasoning_effort: "medium"`, and `context_tier: "default"`; apply the same settings to any replacement worker. Supply the skill root, session state directory, and the prompt in `auto-approve.md`. The worker applies `auto-approval-rules.md`, polling one full finding at a time and recording either `auto-approved` or `needs-audit` before polling again. Do not load the whole findings artifact into its context.
+Dispatch one subagent (GPT 6.2 Sol) with explicit `model: "gpt-6.2-sol"`, `reasoning_effort: "medium"`, and `context_tier: "default"`; apply the same settings to any replacement worker. Supply the skill root, session state directory, and the prompt in `auto-approve.md`. The worker applies `auto-approval-rules.md`, polling one full finding at a time and recording either `auto-approved` or `needs-audit` before polling again. Do not load the whole findings artifact into its context.
 
 Keep `findings.json` unchanged while this phase runs and give the worker exclusive ownership of decision-log writes. It has policy-classification authority only: no user decisions, finding rewrites, merge approval, or publication. If interrupted, verify that it has stopped before dispatching a replacement with the same paths; the decision log preserves completed classifications without a separate queue.
 
