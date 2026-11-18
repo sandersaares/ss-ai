@@ -568,6 +568,7 @@ fn routine_thread(thread: &Value) -> Result<bool, AppError> {
                         | "DescriptionUpdate"
                         | "StatusUpdate"
                         | "MergeAttempt"
+                        | "TargetChanged"
                 )
             )
     }))
@@ -1169,9 +1170,11 @@ fn decide_history(
                 }
                 relevant
             }
-            // These structured activities do not change reviewer authority.
+            // These activities do not establish vote/reset authority. Target changes
+            // use current target and policy reads (docs/reapproval.md, "Material evidence").
             "RefUpdate" | "PolicyStatusUpdate" | "AutoCompleteUpdate" | "IsDraftUpdate"
-            | "TitleUpdate" | "DescriptionUpdate" | "StatusUpdate" | "MergeAttempt" => false,
+            | "TitleUpdate" | "DescriptionUpdate" | "StatusUpdate" | "MergeAttempt"
+            | "TargetChanged" => false,
             _ => {
                 return Err(fail(
                     "service",
@@ -1961,6 +1964,158 @@ mod tests {
         value["reviewers"] = json!([]);
         value["threads"][1]["identities"]["1"]["id"] = json!("other-account");
         assert_eq!(decide(value).unwrap(), Decision::NoPriorApproval);
+    }
+
+    /// Models provider target-change metadata without private identities or prose.
+    fn target_changed() -> Value {
+        json!({
+            "id": "target-change",
+            "publishedDate": "2026-01-01T12:00:00Z",
+            "isDeleted": false,
+            "properties": {
+                "CodeReviewThreadType": {"$type": "System.String", "$value": "TargetChanged"},
+                "CodeReviewTargetChangedByDisplayName": {"$type": "System.String", "$value": "Fixture actor"},
+                "CodeReviewTargetChangedByTfId": {"$type": "System.String", "$value": "fixture-actor"}
+            },
+            "comments": [{
+                "id": 1, "commentType": "system",
+                "content": "Fixture actor changed the target branch"
+            }]
+        })
+    }
+
+    #[test]
+    fn target_changed_preserves_approval_authority_and_source_anchor() {
+        let fixture = fixture();
+        let mut scenarios: Vec<Value> = fixture["stages"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(evidence)
+            .collect();
+        let mut fresh_iteration = evidence(&fixture["stages"][2]);
+        reviewer_policy(
+            &mut fresh_iteration,
+            json!({"requireVoteOnLastIteration": true}),
+        );
+        assert_eq!(
+            decide(fresh_iteration.clone()).unwrap().status(),
+            "assessmentRequired"
+        );
+        scenarios.push(fresh_iteration);
+        for mut value in scenarios {
+            let expected = decide(value.clone()).unwrap();
+            let baseline: Evidence = serde_json::from_value(value.clone()).unwrap();
+            value["threads"]
+                .as_array_mut()
+                .unwrap()
+                .push(target_changed());
+            assert_eq!(decide(value.clone()).unwrap(), expected);
+            let captured: Evidence = serde_json::from_value(value.clone()).unwrap();
+            assert!(super::equivalent(&baseline, &captured).unwrap());
+            assert_eq!(
+                decide(serde_json::to_value(super::compact(&captured).unwrap()).unwrap()).unwrap(),
+                expected
+            );
+            // Service time, not list order or target activity, selects the source anchor.
+            value["threads"].as_array_mut().unwrap().reverse();
+            assert_eq!(decide(value).unwrap(), expected);
+        }
+    }
+
+    #[test]
+    fn target_changed_cannot_supply_vote_reset_or_override_human_decisions() {
+        let mut value = evidence(&fixture()["stages"][2]);
+        reviewer_policy(&mut value, json!({"resetOnSourcePush": true}));
+        value["threads"]
+            .as_array_mut()
+            .unwrap()
+            .push(target_changed());
+        value["reviewers"][0]["vote"] = json!(0);
+        assert!(
+            decide(value.clone())
+                .unwrap_err()
+                .to_string()
+                .contains("missing authoritative vote-reset evidence")
+        );
+        for (vote, reason) in [(0, "approvalWithdrawn"), (-10, "negativeDecision")] {
+            let mut value = value.clone();
+            let mut decision = value["threads"][1].clone();
+            decision["id"] = json!("later-human-decision");
+            decision["publishedDate"] = json!("2026-01-01T18:00:00Z");
+            decision["properties"]["CodeReviewVoteResult"]["$value"] = json!(vote.to_string());
+            value["reviewers"][0]["vote"] = json!(vote);
+            value["threads"].as_array_mut().unwrap().push(decision);
+            assert_eq!(
+                decide(value).unwrap(),
+                Decision::Ineligible {
+                    reason: reason.to_owned()
+                }
+            );
+        }
+    }
+
+    #[test]
+    fn target_changed_retains_material_discussion_and_validates_history() {
+        let routine = target_changed();
+        assert!(
+            super::project_threads(std::slice::from_ref(&routine))
+                .unwrap()
+                .is_empty()
+        );
+        for extra in ["humanReply", "pending", "deleted"] {
+            let mut material = routine.clone();
+            match extra {
+                "humanReply" => material["comments"].as_array_mut().unwrap().push(json!({
+                    "id": 2, "commentType": "text", "content": "Target objection",
+                    "author": {"id": "human"}
+                })),
+                "pending" => material["status"] = json!("pending"),
+                "deleted" => material["comments"][0]["isDeleted"] = json!(true),
+                _ => unreachable!(),
+            }
+            let projected = super::project_threads(&[material]).unwrap();
+            assert_eq!(projected.len(), 1, "{extra}");
+            if extra == "humanReply" {
+                assert_eq!(projected[0]["comments"][1]["content"], "Target objection");
+            }
+        }
+        for (key, replacement) in [
+            ("publishedDate", json!("2027-01-01T00:00:00Z")),
+            ("publishedDate", Value::Null),
+            (
+                "properties",
+                json!({"CodeReviewThreadType": {"$type": "System.String", "$value": "UnknownTargetChange"}}),
+            ),
+        ] {
+            let mut value = evidence(&fixture()["stages"][2]);
+            let mut event = routine.clone();
+            event[key] = replacement;
+            value["threads"].as_array_mut().unwrap().push(event);
+            decide(value).unwrap_err();
+        }
+        let mut value = evidence(&fixture()["stages"][2]);
+        reviewer_policy(&mut value, json!({"requireVoteOnLastIteration": true}));
+        value["threads"].as_array_mut().unwrap().push(routine);
+        let captured: Evidence = serde_json::from_value(value.clone()).unwrap();
+        // Notification omission must not hide the current target or its effective policy.
+        let mut changed_target = value.clone();
+        changed_target["pullRequest"]["targetRefName"] = json!("refs/heads/another-target");
+        assert!(
+            !super::equivalent(&captured, &serde_json::from_value(changed_target).unwrap())
+                .unwrap()
+        );
+        value["policies"]
+            .as_array_mut()
+            .unwrap()
+            .last_mut()
+            .unwrap()["settings"]["requireVoteOnLastIteration"] = json!(false);
+        value["evaluations"]
+            .as_array_mut()
+            .unwrap()
+            .last_mut()
+            .unwrap()["configuration"]["settings"]["requireVoteOnLastIteration"] = json!(false);
+        assert!(!super::equivalent(&captured, &serde_json::from_value(value).unwrap()).unwrap());
     }
 
     /// Synthetic notifications model absent metadata without copying service prose.

@@ -39,6 +39,11 @@ ADO validates raw event structure and all policy semantics before excluding
 routine notifications or known merge-only policies. These boundaries prevent
 irrelevant service activity from causing staleness without concealing unknown
 authority semantics. See [material evidence](../reapproval.md#material-evidence).
+The recognized `TargetChanged` history type participates in service-time validation
+but does not alter chronological vote/reviewer replay. The routine-thread projection
+omits pure system-only target-change activity because PR target and policy reads
+carry its material state; it retains threads with human replies, pending review,
+or deleted history. Unknown history types remain explicit failures.
 
 GitHub approval capture joins REST PR source and target identity to a GraphQL
 observation of classic branch protection, then reads every page of the effective
