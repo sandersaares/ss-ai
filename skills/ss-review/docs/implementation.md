@@ -1277,7 +1277,8 @@ newer content.
 
 Manifest reuse compares filesystem-resolved artifact directories with the
 generation root or its immediate retry directory and retains the recorded path
-spellings.
+spellings. A missing recorded artifact directory is incomplete frozen state,
+not an I/O failure; reuse rejects it without creating the directory.
 
 `overview-publication-result.json` records intent before each non-idempotent
 write and retains returned IDs before verification. Upload is verified before the

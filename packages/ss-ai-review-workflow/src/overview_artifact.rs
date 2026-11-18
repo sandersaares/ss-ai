@@ -250,8 +250,8 @@ fn manifest_archive_path(output: &Path, manifest: &Manifest) -> Result<PathBuf, 
     // Renderer manifests use canonical paths; callers may reach the same root through an alias.
     let resolved_output = fs::canonicalize(output)
         .map_err(|error| caused_by("io", "Cannot resolve overview output directory", error))?;
-    let resolved_directory = fs::canonicalize(directory)
-        .map_err(|error| caused_by("io", "Cannot resolve overview HTML directory", error))?;
+    let resolved_directory =
+        resolve_artifact_directory(directory, "Cannot resolve overview HTML directory")?;
     validate_manifest_directory(&resolved_output, &resolved_directory, html)?;
     let archive = manifest
         .archive_path
@@ -260,8 +260,10 @@ fn manifest_archive_path(output: &Path, manifest: &Manifest) -> Result<PathBuf, 
     let archive_directory = archive
         .parent()
         .ok_or_else(|| unexpected_path("Overview archive path has no parent"))?;
-    let resolved_archive_directory = fs::canonicalize(archive_directory)
-        .map_err(|error| caused_by("io", "Cannot resolve overview archive directory", error))?;
+    let resolved_archive_directory = resolve_artifact_directory(
+        archive_directory,
+        "Cannot resolve overview archive directory",
+    )?;
     if archive.file_name().is_none_or(|name| name != "report.zip")
         || resolved_archive_directory != resolved_directory
     {
@@ -270,6 +272,17 @@ fn manifest_archive_path(output: &Path, manifest: &Manifest) -> Result<PathBuf, 
         ));
     }
     Ok(archive)
+}
+
+/// Resolves a recorded directory without treating missing frozen state as an I/O failure.
+fn resolve_artifact_directory(directory: &Path, message: &str) -> Result<PathBuf, AppError> {
+    match fs::canonicalize(directory) {
+        Ok(path) => Ok(path),
+        Err(error) if error.kind() == ErrorKind::NotFound => {
+            Err(missing("Frozen overview artifact directory is missing"))
+        }
+        Err(error) => Err(caused_by("io", message, error).into()),
+    }
 }
 
 /// Restricts resolved directory identities without changing recorded artifact paths.

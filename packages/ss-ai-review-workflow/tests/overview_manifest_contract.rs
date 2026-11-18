@@ -155,6 +155,15 @@ fn existing_manifest_reuses_both_layouts_and_rejects_modified_artifacts() {
             );
         }
 
+        let absent_directory = output.join(".overview-attempt-absent");
+        let mut changed = manifest.clone();
+        *changed.get_mut("archivePath").unwrap() = json!(absent_directory.join("report.zip"));
+        assert_eq!(
+            classification(&reuse(root, &changed).unwrap_err()),
+            "invalidInput"
+        );
+        assert!(!absent_directory.exists());
+
         let mut changed = manifest.clone();
         *changed.get_mut("archivePath").unwrap() = json!(root.join("outside.zip"));
         assert_eq!(
