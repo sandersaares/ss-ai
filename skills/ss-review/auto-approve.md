@@ -1,6 +1,6 @@
 # Assignment
 
-Classify the consolidated findings for policy approval. Use GPT 6.1 Sol with `model: "gpt-6.1-sol"`, `reasoning_effort: "medium"`, and `context_tier: "default"`. Do not delegate this work.
+Classify the consolidated findings for policy approval. Use GPT 6.2 Sol with `model: "gpt-6.2-sol"`, `reasoning_effort: "medium"`, and `context_tier: "default"`. Do not delegate this work.
 
 The orchestrator supplies the skill root and session state directory. Read `auto-approval-rules.md` from that skill root; it is the authority for classification. Do not invent additional approval categories.
 

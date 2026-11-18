@@ -136,7 +136,7 @@ comment bodies, authorship, threading, and source locations. Identical inline
 excerpts share one text entry without merging their comments or revision bindings.
 Approval history reconstruction stays in native evidence rather than consuming
 the assessor's context. The skill assigns each PR's semantic assessment to a fresh
-GPT 6.1 Sol worker with medium reasoning and regular context. The orchestrator
+GPT 6.2 Sol worker with medium reasoning and regular context. The orchestrator
 receives decisions rather than source or discussion evidence.
 Workers receive bounded batches of independently addressable evidence pages.
 Transport fragments do not require semantic notes. Workers group changes with

@@ -87,7 +87,7 @@ Workers can register several known ranges atomically and then read their
 individual references; registration alone does not count as delivery.
 There is no filename, size, or edit-category exemption.
 
-The orchestrator prepares the comparison and reserves a GPT 6.1 Sol assessment
+The orchestrator prepares the comparison and reserves a GPT 6.2 Sol assessment
 worker per eligible PR with explicit medium reasoning and regular context.
 Preparation returns only the snapshot binding, protocol, state, and preflight
 progress needed for scheduling. The worker obtains inventory pages, context
