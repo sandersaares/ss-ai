@@ -45,12 +45,13 @@ Describe 'Automatic reapproval repository scope instructions' {
 
     It 'isolates each semantic assessment in the specified model and context' {
         $script:Prompt | Should -Match 'one fresh subagent per eligible PR'
-        $script:Prompt | Should -Match 'model: "gpt-6\.1-sol"'
+        $script:Prompt | Should -Match 'model: "gpt-6\.2-sol"'
         $script:Prompt | Should -Match 'reasoning_effort: "medium"'
         $script:Prompt | Should -Match 'context_tier: "default"'
         $script:Prompt | Should -Match 'Never assess source changes in the\s+orchestrator or silently substitute another model'
         $script:Prompt | Should -Match 'verify its completion and digest using native `results`'
         $assignment = Get-Content -LiteralPath (Join-Path $skill 'assessment.md') -Raw
+        $assignment | Should -Match 'model: "gpt-6\.2-sol"'
         $assignment | Should -Match 'Do not invoke skills on your own, delegate, publish'
         $assignment | Should -Match 'following `nextOffset` as needed'
         $assignment | Should -Match 'Do not return\s+source text, discussion transcripts'

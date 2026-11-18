@@ -156,7 +156,7 @@ another model turn between them. The reservation persists even if dispatch or th
 never dispatch without it.
 
 Dispatch one fresh subagent per eligible PR with explicit spawn arguments
-`model: "gpt-6.1-sol"`, `reasoning_effort: "medium"`, and
+`model: "gpt-6.2-sol"`, `reasoning_effort: "medium"`, and
 `context_tier: "default"` (regular context), including replacements. This isolates
 the semantic evidence from the orchestrator and selects the assessment model
 independently of the orchestrator's model. Never assess source changes in the
