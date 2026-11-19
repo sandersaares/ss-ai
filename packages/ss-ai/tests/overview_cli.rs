@@ -13,12 +13,15 @@ use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::sync::mpsc::{self, Receiver, Sender};
+use std::thread;
 use std::time::Duration;
 
 use jiff::Timestamp;
 use ohno::AppError;
 use serde_json::{Value, from_slice, from_str, json, to_vec};
 use ss_ai::{Clock, Http, HttpResponse, Process, ProcessOutput, SystemClock, run};
+use ss_ai_runtime::FileTransaction;
 use tempfile::{Builder, TempDir};
 
 /// Models GitHub issue-comment writes and independent readback.
@@ -188,6 +191,76 @@ impl Clock for TestClock {
     }
 
     fn wait(&self, _: Duration) -> Result<(), AppError> {
+        Ok(())
+    }
+}
+
+/// Identifies controlled overlap points without relying on wall-clock timing.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum OverlapEvent {
+    CommentWrite,
+    PublisherWait,
+    SnapshotWait,
+}
+
+/// Pauses the first provider comment while the transaction retains both locks.
+struct PausedGitHub {
+    provider: GitHub,
+    events: Sender<OverlapEvent>,
+    release: Receiver<()>,
+    pause_once: Cell<bool>,
+}
+
+impl Process for PausedGitHub {
+    fn execute(
+        &self,
+        program: &str,
+        arguments: &[String],
+        input: &[u8],
+    ) -> io::Result<ProcessOutput> {
+        let is_comment = arguments
+            .get(1)
+            .is_some_and(|route| route == "repos/owner/repo/issues/42/comments")
+            && arguments
+                .windows(2)
+                .any(|pair| pair == ["--method", "POST"]);
+        if is_comment && self.pause_once.replace(false) {
+            self.events
+                .send(OverlapEvent::CommentWrite)
+                .map_err(io::Error::other)?;
+            self.release.recv().map_err(io::Error::other)?;
+        }
+        self.provider.execute(program, arguments, input)
+    }
+}
+
+impl Http for PausedGitHub {
+    fn send(&self, _: &str, _: &str, _: &str, _: Option<&[u8]>) -> Result<HttpResponse, AppError> {
+        panic!("GitHub overview publication must not use Azure HTTP")
+    }
+}
+
+/// Reports real file-lock contention and waits for caller-controlled release.
+struct OverlapClock {
+    event: OverlapEvent,
+    events: Sender<OverlapEvent>,
+    release: RefCell<Option<Receiver<()>>>,
+}
+
+impl Clock for OverlapClock {
+    fn now(&self) -> Timestamp {
+        Timestamp::UNIX_EPOCH
+    }
+
+    fn wait(&self, _: Duration) -> Result<(), AppError> {
+        if let Some(release) = self.release.borrow_mut().take() {
+            self.events
+                .send(self.event)
+                .map_err(|error| AppError::from(io::Error::other(error)))?;
+            release
+                .recv()
+                .map_err(|error| AppError::from(io::Error::other(error)))?;
+        }
         Ok(())
     }
 }
@@ -441,6 +514,91 @@ fn azure_retries_an_explicit_comment_throttle() {
             .count(),
         provider.comments.borrow().len() + 1
     );
+}
+
+#[test]
+fn overlapping_publishers_and_snapshot_writer_contend_without_reposting() {
+    for ambiguous in [false, true] {
+        let fixture = fixture();
+        let arguments = arguments(fixture.path(), false);
+        let output = fixture.path().join("output 雪");
+        let (events, observed) = mpsc::channel();
+        let (comment_release, comment_wait) = mpsc::channel();
+        let first = thread::spawn({
+            let arguments = arguments.clone();
+            let events = events.clone();
+            move || {
+                let provider = PausedGitHub {
+                    provider: GitHub {
+                        lose_once: Cell::new(ambiguous),
+                        ..GitHub::default()
+                    },
+                    events,
+                    release: comment_wait,
+                    pause_once: Cell::new(true),
+                };
+                publish(&arguments, &provider, &provider, &TestClock)
+            }
+        });
+        assert_eq!(observed.recv().unwrap(), OverlapEvent::CommentWrite);
+
+        let (publisher_release, publisher_wait) = mpsc::channel();
+        let publisher = thread::spawn({
+            let arguments = arguments.clone();
+            let events = events.clone();
+            move || {
+                let provider = GitHub::default();
+                let clock = OverlapClock {
+                    event: OverlapEvent::PublisherWait,
+                    events,
+                    release: RefCell::new(Some(publisher_wait)),
+                };
+                let result = publish(&arguments, &provider, &provider, &clock);
+                (result, provider.requests.into_inner())
+            }
+        });
+
+        let (snapshot_release, snapshot_wait) = mpsc::channel();
+        let snapshot = thread::spawn({
+            let events = events.clone();
+            let snapshot_path = output.join("overview-snapshot.json");
+            move || {
+                let clock = OverlapClock {
+                    event: OverlapEvent::SnapshotWait,
+                    events,
+                    release: RefCell::new(Some(snapshot_wait)),
+                };
+                FileTransaction::open(&snapshot_path, &clock).is_ok()
+            }
+        });
+
+        let mut waits = vec![observed.recv().unwrap(), observed.recv().unwrap()];
+        waits.sort_by_key(|event| match event {
+            OverlapEvent::PublisherWait => 0,
+            OverlapEvent::SnapshotWait => 1,
+            OverlapEvent::CommentWrite => 2,
+        });
+        assert_eq!(
+            waits,
+            [OverlapEvent::PublisherWait, OverlapEvent::SnapshotWait]
+        );
+
+        comment_release.send(()).unwrap();
+        let first = first.join().unwrap();
+        publisher_release.send(()).unwrap();
+        snapshot_release.send(()).unwrap();
+        let (second, requests) = publisher.join().unwrap();
+        assert!(snapshot.join().unwrap());
+
+        if ambiguous {
+            assert_eq!(first["status"], "incomplete");
+            assert_eq!(second["status"], "needsReconciliation");
+        } else {
+            assert_eq!(first["status"], "succeeded");
+            assert_eq!(second, first);
+        }
+        assert!(requests.is_empty());
+    }
 }
 
 #[test]
