@@ -45,6 +45,14 @@ omits pure system-only target-change activity because PR target and policy reads
 carry its material state; it retains threads with human replies, pending review,
 or deleted history. Unknown history types remain explicit failures.
 
+ADO `ReviewersUpdate` replay validates requiredness changes through the same
+single-reviewer count and identity reader as participation changes. It validates
+the typed `ChangedToRequired` string and retains it in the thread projection so
+capture and publication compare complete metadata. Requiredness alone changes no
+vote, participation veto, approving event, or source anchor; it does not enter
+decision-order ambiguity checks because it supplies no decision authority.
+Malformed states and unsupported bulk attribution remain explicit failures.
+
 GitHub approval capture joins REST PR source and target identity to a GraphQL
 observation of classic branch protection, then reads every page of the effective
 branch rules. It retains the combined last-push approval requirement rather than
