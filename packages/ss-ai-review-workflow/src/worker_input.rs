@@ -20,7 +20,7 @@ const OUTPUT_LIMIT: usize = 16 * 1024;
 /// Accommodates both the native CLI and PowerShell's platform-specific newline.
 const OUTPUT_NEWLINE: &str = if cfg!(windows) { "\r\n" } else { "\n" };
 
-/// Inputs selected by the primary session for one worker attempt.
+/// Inputs selected by the review orchestrator for one worker attempt.
 #[expect(
     clippy::exhaustive_structs,
     reason = "This application-internal CLI boundary is constructed directly"
@@ -225,10 +225,9 @@ pub fn create_assignment(
     ]);
     let rendered = render(&text(&skill.join(template), clock)?, &bindings)?;
     let mut header = vec![
-        "This is authorized bounded phase work, not invocation or delegation of ss-review itself.".to_owned(),
         format!("Execute only the assigned phase: {phase}. Do not invoke the skill or advance the overall workflow."),
-        "Primary orchestration, publication, and every human decision gate remain exclusively with the primary user-facing session.".to_owned(),
-        "If user input is needed, report the unresolved question to that session and stop; do not ask or answer it yourself.".to_owned(),
+        "Review orchestration, publication, and human decision gates remain with the review orchestrator.".to_owned(),
+        "If user input is needed, report the unresolved question to the review orchestrator and stop; do not ask or answer it yourself.".to_owned(),
         "For any permitted nested dispatch, use reasoning_effort: \"medium\" and forward this requirement.".to_owned(),
         "Do not investigate or report diagnostics already checked by compilers, typecheckers, or linters.".to_owned(),
         format!("Repository instruction authorization: {}.", if options.repository_instructions { "authorized" } else { "not authorized" }),
@@ -300,7 +299,7 @@ pub fn create_assignment(
     let bash_path = path.replace('\'', "'\\''");
     let mut dispatch = vec![
         format!(
-            "Execute authorized bounded '{}' work, not the ss-review skill. Orchestration and human decisions remain with the primary session.",
+            "Execute authorized bounded '{}' work. Do not invoke ss-review or advance the overall workflow; orchestration and human decisions remain with the review orchestrator.",
             phase
         ),
         "Apply this recovery policy before initial shared reads and compaction reloads:".to_owned(),
@@ -328,7 +327,7 @@ pub fn create_assignment(
         format!("ss-ai workflow worker-document --assignment-path '{bash_path}' --document-id '{{{{DOCUMENT_ID}}}}' --offset 0"),
         "```".to_owned(),
         "Process each page, then repeat with its exact nextOffset until complete is true. Never truncate, summarize unread pages, or apply this reader to a PR capture.".to_owned(),
-        "On errors apply the recovery policy above before reporting an unresolved blocker to the primary session.".to_owned(),
+        "On errors apply the recovery policy above before reporting an unresolved blocker to the review orchestrator.".to_owned(),
     ]);
     dispatch.extend(assignment.documents.iter().map(|d| {
         format!(

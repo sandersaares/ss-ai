@@ -65,8 +65,8 @@ After recovery, verify the required output and continue from the failed step,
 not from selection or the start of the review. Keep unrelated preparation and
 review workers running unless their own inputs are invalid or stopping them is
 necessary for safe repair. A bounded worker that cannot recover reports the
-diagnostic, attempted corrections, paths, and unresolved work to the primary
-orchestrator; it does not ask the user or cancel other workers. The primary
+diagnostic, attempted corrections, paths, and unresolved work to the review
+orchestrator; it does not ask the user or cancel other workers. The review
 orchestrator applies this same policy before escalating.
 
 Human approval gates remain hard suspension points. Recovery cannot supply

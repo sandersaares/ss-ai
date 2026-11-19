@@ -14,7 +14,7 @@ ss-ai context prepare --path "{{CONTEXT_PATH}}" --request-path "{{REQUEST_PATH}}
 | --- | --- |
 | `CONTEXT_PATH` | Absolute path to the initial or uniquely prefixed refreshed capture. |
 | `REQUEST_PATH` | New absolute JSON path private to this query. Do not edit the generated request. |
-| `DIAGNOSTICS_PATH` | Absolute private `input-diagnostics.json` supplied in the worker assignment. Without an assignment, allocate it under the worker's own output directory; the primary session uses its own file. |
+| `DIAGNOSTICS_PATH` | Absolute private `input-diagnostics.json` supplied in the worker assignment. Without an assignment, allocate it under the worker's own output directory; the review orchestrator uses its own file. |
 | `QUERY` | `metadata`, `threads`, `comments`, `search`, or `changes`. |
 
 ## Calling shell

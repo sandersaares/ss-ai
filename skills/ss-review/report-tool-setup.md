@@ -42,7 +42,7 @@ and installation in one container, distribution, or user account does not provis
 
 Explain the missing or unusable components and the changes needed. On Ubuntu, include system
 libraries and fonts in the installation request, not just npm packages and the browser download.
-The primary session must receive the user's answer before running installation commands.
+The review orchestrator must receive the user's direct answer before running installation commands.
 
 Run the applicable platform procedure below. Commands without placeholders are literal.
 For all skill commands, replace `SKILL_ROOT` with the absolute directory containing the active

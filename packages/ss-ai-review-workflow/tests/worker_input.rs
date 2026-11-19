@@ -184,7 +184,7 @@ fn exact_unicode_pages_and_native_dispatch() {
     .replace("\r\n", "\n");
     assert_eq!(data, expected_data);
     let prompt = collect(assignment_path, "prompt");
-    assert!(prompt.contains("Primary orchestration, publication, and every human decision gate"));
+    assert!(prompt.contains("Review orchestration, publication, and human decision gates"));
     assert!(!prompt.contains("{{SKILL_ROOT}}"));
 }
 

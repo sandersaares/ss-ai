@@ -3,8 +3,8 @@
 ## Purpose
 
 `ss-review-proactor` finds a pull request for the current user to review across
-one or more repositories and hands it to `ss-review` in the same primary,
-user-facing session. The user configures the schedule outside this skill.
+one or more repositories and hands it to `ss-review` directly or through
+delegated execution. The user configures the schedule outside this skill.
 By default, each invocation continues with reviews in the active repository
 until it has no qualifying pull request, then advances to the next repository.
 The user can explicitly request one-shot mode to stop after the first completed
@@ -127,10 +127,18 @@ pull request. There is no earliest-claim tie-breaker. If the claim created by
 this cycle is missing or has expired, or the pull request is no longer
 eligible, the candidate is also discarded.
 
-If the claim holds, the primary agent hands off directly to the ordinary
-`ss-review` workflow. Its reviewer registration consumes the reservation:
+If the claim holds, the primary agent hands off to the ordinary `ss-review`
+workflow, either directly or through delegated execution. Its reviewer
+registration consumes the reservation:
 the reviewer assignment, rather than the comment, then prevents another review.
 There are no additional proactor checks inside `ss-review`.
+
+When a delegated review reaches a user gate, it returns the exact question,
+ordered choices, and complete presentation required before the question. The
+proactor displays that material before asking the user and relays only the
+user's exact answer. Audit handoffs retain the full finding text or document
+links and the pull request reminder so delegation does not reduce the user's
+decision context.
 
 This is a cooperative comment protocol, not an atomic service-side lock.
 It relies on discussion reads exposing competing claims and accepts the small
