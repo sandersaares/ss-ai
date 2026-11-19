@@ -697,7 +697,7 @@ impl Process for BrokenEvidence {
         if arguments[1].contains("search/issues?") && arguments[1].ends_with("per_page=100") {
             match self.fault {
                 Fault::EmptyTitle => value[0]["items"][0]["title"] = json!(" "),
-                Fault::RepeatedPr => value[1] = value[0].clone(),
+                Fault::RepeatedPr => value[1]["items"][0] = value[0]["items"][0].clone(),
                 _ => {}
             }
         } else if arguments[1] == "graphql" {
