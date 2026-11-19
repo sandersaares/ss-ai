@@ -13,7 +13,7 @@ The implementation follows a functional-core, imperative-boundary shape:
 
 ```text
 Analysis:
-  primary orchestrator -> bounded workers -> invariant-enforcing commands
+  review orchestrator -> bounded workers -> invariant-enforcing commands
                                                 |
                                                 v
                                   deterministic finding models
@@ -37,13 +37,13 @@ unless the review model genuinely needs it.
 
 ## Orchestration boundary
 
-The primary session is the sole owner of workflow state and user interaction.
+The agent executing the review owns workflow state and user interaction.
 It decides which bounded work can run concurrently, validates the artifacts
 returned by that work, and suspends at user decisions.
 
 Proactor handoffs supply a per-cycle review-state directory for artifacts and
 worker outputs, isolating fixed filenames from other reviews in the same
-session. They also supply the active selection journal. The primary agent
+session. They also supply the active selection journal. The review orchestrator
 keeps the proactor continuation context and latest loop instruction in its
 prose checkpoint. It verifies that journal immediately before the first
 publication write and returns to the proactor only after phase 9 completes;
@@ -60,8 +60,14 @@ runtime preferences.
 Workers own bounded analysis or policy classification, not orchestration. A
 worker receives explicit evidence and one bounded concern, writes to its
 assigned artifact, and reports unresolved
-questions to the primary session. It cannot advance the review globally or
+questions to the review orchestrator. It cannot advance the review globally or
 publish state remotely.
+
+A delegated review orchestrator returns a user gate as one complete handoff:
+the exact question, ordered choices, and every ordinary-session presentation
+element required before it. The caller presents that material unchanged before
+asking the user and relays only the user's exact response. This preserves audit
+text, links, and pull request identity across the delegation boundary.
 
 Review workers retain all detection and applicability judgment. For each
 finding, the worker synchronously spawns one fresh MAI Code 2 finding-writeup
@@ -161,7 +167,7 @@ to recover. An empty policy prevents assignment creation. Every preparation
 phase and original or replacement reviewer receives the same policy without
 adding unrelated shared-document roles. Workers retain the policy and reader
 command through compaction and apply recovery before reporting unresolved
-blockers to the primary session.
+blockers to the review orchestrator.
 PR dispatch prompts reference the calling-shell contract in their registered
 query recipe rather than repeating its instructions.
 
@@ -464,7 +470,7 @@ process per completed group rather than one per assessed file.
 `workflow-data.md` supplies common authoring rules. Task-specific contracts in
 `data-guides/` and the named definitions in `workflow-data.schema.json` specify
 the reference graph, expansion outcomes, per-file assessments, finding plans,
-human feedback, and merge decisions. The primary workflow and command recipes
+human feedback, and merge decisions. The review workflow and command recipes
 link producers and consumers to their relevant guide; workers do not load the
 entire collection. Shared schema validation rejects
 unknown fields and absent required arrays. Prepared commands own atomic writes
@@ -492,7 +498,7 @@ verdict. Merge-decision commands select PR and source commit from the audited
 capture. Carry-forward checks the previous binding and cannot create a true
 approval from absent or false state. Publication reads and validates the record
 directly before any remote write. These checks enforce representation and
-binding; the primary session still owns all human authority and semantic
+binding; the review orchestrator still owns all human authority and semantic
 revalidation decisions.
 
 ## Finding artifacts
@@ -945,7 +951,7 @@ opaque cursor. A semantic-decision update invalidates
 its cursors explicitly; a reader reports the error and starts a fresh query,
 not a guessed positional offset. Query errors block dependent analysis until
 recovery succeeds, without authorizing a raw-file fallback. The shared
-`error-recovery.md` policy directs workers and the primary orchestrator to
+`error-recovery.md` policy directs workers and the review orchestrator to
 correct invocation mistakes and retry safe transient failures before escalating.
 For request creation, the existing capture is the input and the saved request
 is a separate output; confusing those paths requires a corrected invocation,
@@ -1356,7 +1362,7 @@ The installer performs the same check before reporting success, retaining its
 exclusive installation lock throughout the render. Temporary probe files are
 removed on both success and failure.
 
-The primary session obtains installation consent;
+The review orchestrator obtains installation consent;
 noninteractive commands never ask, install implicitly, or launch an authentication
 prompt. An explicit installer uses a pinned npm lockfile and the browser installer
 from that dependency set. npm engine checking is strict so an unsupported Node.js
@@ -1364,11 +1370,12 @@ runtime fails installation instead of merely warning. On Windows x64, the instal
 verifies the official Pandoc archive's SHA-256 digest before installing it in
 user-local storage. Platform prerequisites and repair commands live in
 `report-tool-setup.md`, loaded only when setup or diagnosis is necessary.
-The installer marks its post-install discovery assertion as an installation attempt
-so failures direct the primary session to diagnosis instead of repeating the consent
-request. Browser-install failures also point to the guide's targeted incomplete-cache
-procedure. Cache deletion remains a separately approved user action with exclusive
-cache access; the installer never infers deletion targets from error text.
+The installer marks its post-install discovery assertion as an installation
+attempt so failures direct the review orchestrator to diagnosis instead of
+repeating the consent request. Browser-install failures also point to the
+guide's targeted incomplete-cache procedure. Cache deletion remains a separately
+approved user action with exclusive cache access; the installer never infers
+deletion targets from error text.
 
 On Ubuntu, the caller passes `--install-browser-dependencies` to the native
 installer to explicitly opt into system package

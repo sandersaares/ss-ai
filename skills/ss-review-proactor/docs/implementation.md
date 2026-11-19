@@ -2,10 +2,17 @@
 
 ## Boundaries
 
-The primary agent owns configuration, selection-mode resolution, local checkout preparation, the skill
-handoff, and human interaction. The shared `ss-ai` executable owns repository enumeration,
-eligibility, ordering, claim writes, the waiting period, and revalidation.
+The primary agent owns configuration, selection-mode resolution, local checkout
+preparation, the skill handoff, and human interaction. It may execute the
+handoff directly or delegate the `ss-review` invocation. The shared `ss-ai`
+executable owns repository enumeration, eligibility, ordering, claim writes,
+the waiting period, and revalidation.
 It emits one JSON result and keeps a local journal in session state.
+
+A delegated review returns a complete user-gate handoff rather than question
+text alone. The primary agent presents the exact finding or document material,
+links, pull request reminder, question, and ordered choices before asking the
+user. It then relays the user's exact answer and resumes the same review.
 
 Loop control belongs to the primary agent, not the selection executable.
 The agent repeats stages 1 through 5 by default and runs only one review under

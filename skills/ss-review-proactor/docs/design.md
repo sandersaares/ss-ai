@@ -3,8 +3,8 @@
 ## Purpose
 
 `ss-review-proactor` finds a pull request for the current user to review across
-one or more repositories and hands it to `ss-review` in the same primary,
-user-facing session. The user configures the schedule outside this skill.
+one or more repositories and hands it to `ss-review` directly or through
+delegated execution. The user configures the schedule outside this skill.
 By default, each invocation continues with reviews in the active repository
 until it has no qualifying pull request, then advances to the next repository.
 The user can explicitly request one-shot mode to stop after the first completed
@@ -144,13 +144,21 @@ pull request. There is no earliest-claim tie-breaker. If the claim created by
 this cycle is missing or has expired, or the pull request is no longer
 eligible, the candidate is also discarded.
 
-If the claim holds, the primary agent hands off directly to the ordinary
-`ss-review` workflow. Reviewer registration consumes the reservation in
-`available` mode through the resulting assignment. Submitting an active review
-does not release the active marker: the skill verifies the marker immediately
-before publication and marks it completed after the full review, including
-learning. Clean reviews and reviews that publish only ADO comments therefore
-also produce completion evidence without inventing an approval vote.
+If the claim holds, the primary agent hands off to the ordinary `ss-review`
+workflow, either directly or through delegated execution. Reviewer
+registration consumes the reservation in `available` mode through the
+resulting assignment. Submitting an active review does not release the active
+marker: the skill verifies the marker immediately before publication and marks
+it completed after the full review, including learning. Clean reviews and
+reviews that publish only ADO comments therefore also produce completion
+evidence without inventing an approval vote.
+
+When a delegated review reaches a user gate, it returns the exact question,
+ordered choices, and complete presentation required before the question. The
+proactor displays that material before asking the user and relays only the
+user's exact answer. Audit handoffs retain the full finding text or document
+links and the pull request reminder so delegation does not reduce the user's
+decision context.
 
 This is a cooperative comment protocol, not an atomic service-side lock.
 It relies on discussion reads exposing competing claims and accepts the small

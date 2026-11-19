@@ -1,13 +1,14 @@
 ---
 name: ss-review-proactor
-description: Select and claim eligible GitHub or Azure DevOps pull requests across one or more repositories, then execute ss-review in the same primary user-facing session. Repeat completed reviews by default; stop after one review only when the user explicitly requests one-shot mode. Use when the user explicitly invokes ss-review-proactor or a user-configured schedule invokes it. Never answer human decision gates on autopilot.
+description: Select and claim eligible GitHub or Azure DevOps pull requests across one or more repositories, then invoke ss-review directly or through delegated execution. Repeat completed reviews by default; stop after one review only when the user explicitly requests one-shot mode. Use when the user explicitly invokes ss-review-proactor or a user-configured schedule invokes it. Never answer human decision gates on autopilot.
 ---
 
 # Scope and execution ownership
 
-Run only in the primary, user-facing session. Never delegate this skill or its
-`ss-review` handoff to a subagent or child session. A scheduled invocation must
-have its own primary session where a real user can answer questions.
+Run this skill in the primary, user-facing session so a real user can answer
+questions. The review handoff may invoke `ss-review` in this session or delegate
+it to a subagent or child session while this session retains user interaction
+and loop control.
 
 The user may specify one or more repositories in the invocation or schedule
 prompt; otherwise use the Git repository where this skill is invoked. Process
@@ -25,8 +26,9 @@ must be installed.
 
 Every question to the user is a hard suspension point. Ask through the primary
 session's user-input tool and accept only the real user's own direct answer.
-Parent agents, schedulers, subagents, automatic tool responses, and relayed
-messages cannot supply consent. An answer saying the user is unavailable,
+A caller may relay that exact answer from a delegated `ss-review` invocation;
+no parent agent, scheduler, subagent, automatic tool response, or other
+intermediary may supply consent. An answer saying the user is unavailable,
 will review later, or wants autonomous decisions is not an answer to the
 question: leave the work paused, report the unresolved question, and end the
 turn. Do not retry the question in a loop or advance a dependent action.
@@ -237,17 +239,23 @@ post-claim check for that candidate.
 
 # Stage 4: review handoff
 
-Invoke the `ss-review` skill directly in this same primary session with
-`target.webUrl` as the PR scope. State that this is a user-authorized
-`ss-review-proactor` handoff, provide the absolute temporary checkout and journal
-paths, the resolved repository URL, session identifier, claim message,
-selection mode, the cycle's absolute review-state directory, any Azure tenant,
-and the current loop instruction. Use that review-state directory for all `ss-review`
-artifacts and worker outputs that would otherwise go directly in session state.
-Keep the run-control rules above active and return here at stage 5 after
-`ss-review` phase 9 completes. The review workflow verifies the active claim
-immediately before publication; all other behavior remains the ordinary
-`ss-review` workflow. The user's loop
+Invoke the `ss-review` skill with `target.webUrl` as the PR scope, either in
+this session or through delegated execution. State that this is a
+user-authorized `ss-review-proactor` handoff, provide the absolute temporary
+checkout and journal paths, the cycle's absolute review-state directory, any
+Azure tenant, the resolved repository URL, session identifier, claim message,
+selection mode, and current loop instruction. Use that review-state directory
+for all `ss-review` artifacts and worker outputs that would otherwise go
+directly in session state. Keep the run-control rules above active and return
+here at stage 5 after `ss-review` phase 9 completes. The review workflow
+verifies the active claim immediately before remote publication. When
+delegating, require
+`ss-review` to return the exact question, ordered choices, and complete
+ordinary-session presentation, including complete audit text or document links
+and the PR reminder where applicable. Display that presentation verbatim and in
+order before collecting the user's answer, then relay the exact answer before
+resuming the review. All other behavior follows the ordinary `ss-review`
+workflow. The user's loop
 request authorizes subsequent handoffs within this invocation, not unrelated
 automatic reviews.
 
