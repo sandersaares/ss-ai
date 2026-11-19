@@ -287,16 +287,30 @@ pub(crate) fn has_listed_review_activity(
 
     let threads = unique_list(api, &format!("{}/threads", target.pr_api()), "id")?;
     for event in ordered_events(&threads, api.transport.clock.now())? {
-        if event.kind != "VoteUpdate" {
-            continue;
-        }
-        for name in [
-            "CodeReviewVotedByIdentity",
-            "CodeReviewVotedByInitiatorIdentity",
-        ] {
-            if actor(event.value, name)?.eq_ignore_ascii_case(account) {
+        match event.kind {
+            "VoteUpdate" => {
+                for name in [
+                    "CodeReviewVotedByIdentity",
+                    "CodeReviewVotedByInitiatorIdentity",
+                ] {
+                    if actor(event.value, name)?.eq_ignore_ascii_case(account) {
+                        return Ok(true);
+                    }
+                }
+            }
+            "ReviewersUpdate"
+                if updated_reviewer(
+                    &event,
+                    "CodeReviewReviewersUpdatedNumDeclined",
+                    "CodeReviewReviewersUpdatedChangedIdentity",
+                )?
+                .is_some_and(|reviewer| reviewer.eq_ignore_ascii_case(account)) =>
+            {
+                // Both setting and clearing decline are review activity, even
+                // when neither transition leaves a positive vote behind.
                 return Ok(true);
             }
+            _ => {}
         }
     }
 

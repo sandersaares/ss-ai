@@ -828,6 +828,7 @@ impl Http for AzureMetadata {
                     json!({"pullRequestId": 6, "status": "active", "isDraft": false, "title": "reset approval", "createdBy": {"id": "author"}, "reviewers": [{"id": "account", "vote": 0}]}),
                     json!({"pullRequestId": 7, "status": "active", "isDraft": false, "title": "deleted discussion", "createdBy": {"id": "author"}, "reviewers": [{"id": "account", "vote": 0}]}),
                     json!({"pullRequestId": 8, "status": "active", "isDraft": false, "title": "system activity", "createdBy": {"id": "author"}, "reviewers": [{"id": "account", "vote": 0}]}),
+                    json!({"pullRequestId": 9, "status": "active", "isDraft": false, "title": "decline history", "createdBy": {"id": "author"}, "reviewers": [{"id": "account", "vote": 0}]}),
                 ]
             } else {
                 Vec::new()
@@ -835,8 +836,9 @@ impl Http for AzureMetadata {
             json!({"count": entries.len(), "value": entries})
         } else if url.path().ends_with("/pullRequests/2/commits")
             || url.path().ends_with("/pullRequests/6/commits")
+            || url.path().ends_with("/pullRequests/9/commits")
         {
-            let reset = url.path().ends_with("/6/commits");
+            let reset = url.path().ends_with("/6/commits") || url.path().ends_with("/9/commits");
             let date = if reset {
                 "2026-01-01T00:00:00Z"
             } else if query.contains_key("continuationToken") {
@@ -880,6 +882,19 @@ impl Http for AzureMetadata {
                 }],
                 "publishedDate": "2026-01-01T00:00:00Z"
             }]})
+        } else if url.path().ends_with("/pullRequests/9/threads") {
+            json!({"count": 1, "value": [{
+                "id": 9,
+                "comments": [{"id": 1, "commentType": "system"}],
+                "properties": {
+                    "CodeReviewThreadType": {"$type": "System.String", "$value": "ReviewersUpdate"},
+                    "CodeReviewReviewersUpdatedNumDeclined": {"$type": "System.Int32", "$value": 1},
+                    "CodeReviewReviewersUpdatedChangedIdentity": {"$type": "System.String", "$value": "1"},
+                    "CodeReviewReviewersUpdatedChangedDecline": {"$type": "System.String", "$value": "False"}
+                },
+                "identities": {"1": {"id": "account"}},
+                "publishedDate": "2026-01-01T00:00:00Z"
+            }]})
         } else {
             panic!("Unexpected Azure history, content or write endpoint: {url}")
         };
@@ -908,18 +923,18 @@ fn azure_metadata_and_commit_pages_filter_review_activity_before_vote_history() 
     assert_eq!(summary["counts"]["assessmentRequired"], 1);
     assert_eq!(summary["counts"]["failed"], 0);
     let calls = provider.calls.borrow();
-    assert_eq!(calls.len(), 11);
+    assert_eq!(calls.len(), 13);
     assert!(
         calls
             .iter()
             .any(|call| call.contains("continuationToken=next"))
     );
-    assert!(calls.iter().any(|call| call.contains("%24skip=7")));
-    assert_eq!(summary["counts"]["open"], 2);
+    assert!(calls.iter().any(|call| call.contains("%24skip=8")));
+    assert_eq!(summary["counts"]["open"], 3);
     assert!(summary["counts"].get("draft").is_none());
     assert_eq!(
         record(root.path())["inventory"].as_array().unwrap().len(),
-        2
+        3
     );
     assert!(!calls.iter().any(|call| call.contains("/pullRequests/3/")));
     assert!(!calls.iter().any(|call| call.contains("/pullRequests/4/")));
