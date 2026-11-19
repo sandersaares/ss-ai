@@ -8,7 +8,7 @@ Placeholders to replace:
 |-------------|-------------|
 | `SESSION_STATE` | Session state directory for this review. |
 | `REVIEWER_ID` | Identifier of your focus-area worker. |
-| `FINDING_PATH` | Absolute path of the UTF-8 JSON file you just wrote under your assigned staging directory. Follow `review.md`, "Finding structure", including multiline Markdown encoded with `\n` and `\n\n`. |
+| `FINDING_PATH` | Absolute path of the UTF-8 JSON file the finding-writeup child just wrote under the assigned staging directory. Follow `review.md`, "Finding structure", including multiline Markdown encoded with `\n` and `\n\n`. |
 
 Pass the file path, not its contents or an encoded payload. The command emits one JSON object with `findingId` and `artifactPath`; retain the assigned identifier for the group journal. On a validation error, correct the finding file and retry before continuing.
 

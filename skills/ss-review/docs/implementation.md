@@ -61,6 +61,15 @@ assigned artifact, and reports unresolved
 questions to the primary session. It cannot advance the review globally or
 publish state remotely.
 
+Review workers retain all detection and applicability judgment. For each
+finding, the worker synchronously spawns one fresh MAI Code 2 finding-writeup
+worker with a free-form prose assessment and exact operational paths. The
+writeup worker does not participate in review coverage or eligibility. It
+formats the supplied assessment, writes one JSON file, executes the existing
+artifact append command, and returns the command's durable identifier. The
+review worker waits for that result before processing another finding or
+completing the group.
+
 Native commands enforce mechanical invariants that should not depend on language-model
 judgment: schema validation, state transitions, deterministic rendering,
 comparison, target resolution, and publication. This allocation keeps judgment
@@ -490,13 +499,16 @@ Findings remain structured, versioned data for their entire lifetime. Markdown
 is an output format, never an intermediate database.
 
 Each review worker, defined in `design.md`, is the unit of concurrency, artifact
-ownership, and replacement. One worker owns one artifact across attempts;
-commands also serialize artifact mutations, including identifier allocation,
-so overlapping calls preserve every accepted finding. Completion is explicit so an empty
+ownership, and replacement. A fresh finding-writeup worker is its short-lived
+output delegate for one finding only and appends through the same artifact
+command. One review worker owns one artifact across attempts; commands also
+serialize artifact mutations, including identifier allocation, so overlapping
+calls preserve every accepted finding. Completion is explicit so an empty
 successful review can be distinguished from a worker that stopped before
 reporting. Its provenance names the worker and focus area, not a file partition.
-The central finding model validates every write while the
-originating worker still has enough context to repair it.
+The central finding model validates every write before the review worker
+continues, while the supplied assessment remains available for correction and
+resubmission.
 
 The shared finding-prose validator permits tab and line feed only in multiline
 fields and rejects every other C0 control character. Carriage returns are

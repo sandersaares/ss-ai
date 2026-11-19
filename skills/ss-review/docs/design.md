@@ -34,6 +34,11 @@ area and examines content not explicitly excluded by its scope. It is the unit
 of independent analysis. A generated focus area receives a worker unless its
 complete scope provably excludes every reviewed file.
 
+A **finding-writeup worker** receives one free-form assessment from a review
+worker. It trusts the review worker's detection and eligibility decision, then
+creates a clear, reproducible, traceable finding and submits it to the output
+artifact. It does not determine whether the assessed issue is real.
+
 A **file group** is a bounded set of related reviewed files. It is a worker's
 unit of iteration, completion journaling, and recovery, not a separate worker or findings
 artifact.
@@ -215,9 +220,16 @@ completed-work history and previously read file contents. File contents,
 including focus-area guidance, are re-read rather than replaced with summaries.
 Compaction timing remains the runtime's responsibility.
 
+When a review worker detects a finding, it spawns one fresh MAI Code 2
+finding-writeup worker and waits. The review worker supplies the assessed
+concern as natural-language prose plus the operational paths needed for
+submission. The finding-writeup worker validates the writeup's internal
+consistency and structured form; it does not reassess finding eligibility or
+truth. It submits the finding before returning its durable identifier.
+
 Each group is journaled as complete only after every member has analysis of the
-requested scope or a recorded explicit scope exclusion and its findings are
-durable.
+requested scope or a recorded explicit scope exclusion and all findings from
+their awaited writeup workers are durable.
 Per-file assessments are schema-defined records maintained by commands, not
 freeform checkpoint prose. Completion requires records for every group member.
 Even a wholly excluded group has per-file evidence and journaled completion,
