@@ -847,12 +847,14 @@ needs-review comment with a Markdown heading and a list explaining only why
 the existing approval cannot be renewed. It omits PR summaries, unrelated
 discussion, coverage caveats, and workflow diagnostics.
 It then dismisses the account's captured GitHub approving reviews or resets
-its positive ADO vote to zero. Already-cleared approvals require no write.
-It preserves other accounts' decisions, independent later approvals, and
-nonpositive votes. It never submits a negative review or modifies existing
-discussion. GitHub requires review-dismissal permission. Reset failures remain
-explicit even if the comment exists. ADO has no atomic prior-vote condition;
-a human vote can race with the request.
+captured positive ADO participation by removing that reviewer assignment.
+This restores normal proactor eligibility when no other assignment remains.
+Already-cleared approvals require no write. It preserves other accounts'
+decisions, independent later approvals, and nonpositive votes. It never submits
+a negative review or modifies existing discussion. GitHub requires
+review-dismissal permission. Reset failures remain explicit even if the comment
+exists. ADO has no atomic prior-state condition; a human reviewer change can
+race with the request.
 An account-owned `<!-- ss-autoreapprove-needs-review {JSON} -->` marker keeps
 future inspections at `needsReview` without preparing or assessing source.
 Only a strictly later approval by the authenticated account expires older

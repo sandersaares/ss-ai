@@ -388,6 +388,15 @@ impl<'a> Transport<'a> {
         Ok(page.payload)
     }
 
+    /// A reviewer removal cannot be replayed after an uncertain response.
+    pub(crate) fn ado_delete_once(&mut self, path: &str) -> Result<Value, AppError> {
+        let page = self.ado_request(path, "DELETE", None, &[], "7.1", RequestPolicy::WriteOnce)?;
+        if page.continuation.is_some() {
+            return Err(fail("ambiguousWrite", "Unexpected ADO delete continuation"));
+        }
+        Ok(page.payload)
+    }
+
     /// Retries explicit rate-limit refusals for initial publication writes.
     pub(crate) fn ado_write_with_rate_limit_retries(
         &mut self,

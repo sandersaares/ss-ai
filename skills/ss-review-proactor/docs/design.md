@@ -84,9 +84,10 @@ the identity or selection details of an earlier private repository.
 A qualifying pull request is open, is not a draft, was not authored by the
 current user, does not already list that user as a reviewer, contains a commit
 made in the past 14 days, and has no unexpired proactor claim. On GitHub,
-reviewers include both requested reviewers and authors of submitted reviews,
-because submitting a review removes the pending request. Team assignments do
-not imply an individual assignment.
+reviewers include requested reviewers and authors of active submitted reviews,
+because submitting a review removes the pending request. Pending and dismissed
+reviews do not count as assignments. Team assignments do not imply an
+individual assignment.
 
 On Azure DevOps, a reviewer entry with `hasDeclined: true` does not count as
 an assignment. The user can use the GUI's decline action to make a pull request

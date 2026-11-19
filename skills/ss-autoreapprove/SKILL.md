@@ -272,12 +272,14 @@ no PR summary, unrelated discussion, coverage caveats such as "Partial assessmen
 unrelated changes may not have been examined", or workflow diagnostics.
 Keep partial coverage and diagnostics in the final report, not the comment.
 After verifying the comment, the native transaction dismisses the account's
-captured approvals on GitHub or resets its positive ADO vote to zero. An already
-dismissed approval or cleared vote needs no further write. Never submit a
-negative review or alter another account's approval. Preserve independent later
-approvals, withdrawals, and negative decisions; ADO cannot atomically fence a
-concurrent vote change. Permission errors or unknown reset outcomes leave an
-explicit incomplete notification, not success.
+captured approvals on GitHub or removes its captured positive ADO reviewer
+assignment. This leaves the PR eligible for `ss-review-proactor` when no other
+assignment remains. An already dismissed approval or removed ADO reviewer needs
+no further write. Never submit a negative review, remove another account's
+assignment, or alter another account's approval. Preserve independent later
+approvals, withdrawals, negative decisions, and reviewer changes; ADO cannot
+atomically fence a concurrent reviewer change. Permission errors or unknown
+reset outcomes leave an explicit incomplete notification, not success.
 The transaction prevents duplicate comments and never replays an uncertain reset.
 An existing active marker needs no new comment.
 Dry runs report the decision without posting a marker or changing approvals.
