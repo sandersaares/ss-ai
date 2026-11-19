@@ -322,6 +322,10 @@ impl Provider {
                     self.later("CHANGES_REQUESTED");
                 }
             }
+            "concurrentFlag" => {
+                assert!(self.ado);
+                self.evidence.borrow_mut()["reviewers"][0]["isFlagged"] = json!(true);
+            }
             "approvalHistoryDeleted" => {
                 assert!(self.ado);
                 self.evidence.borrow_mut()["threads"]
@@ -1909,6 +1913,7 @@ fn refusal_resets_only_captured_positive_approvals(repository: &Sources) {
             "resetRefused",
             "concurrentApproval",
             "concurrentNegative",
+            "concurrentFlag",
             "approvalHistoryDeleted",
             "historyNegative",
             "historyWithdrawal",
@@ -1916,7 +1921,10 @@ fn refusal_resets_only_captured_positive_approvals(repository: &Sources) {
             if !ado
                 && matches!(
                     fault,
-                    "approvalHistoryDeleted" | "historyNegative" | "historyWithdrawal"
+                    "approvalHistoryDeleted"
+                        | "historyNegative"
+                        | "historyWithdrawal"
+                        | "concurrentFlag"
                 )
             {
                 continue;
@@ -1954,6 +1962,7 @@ fn refusal_resets_only_captured_positive_approvals(repository: &Sources) {
                         fault,
                         "concurrentApproval"
                             | "concurrentNegative"
+                            | "concurrentFlag"
                             | "historyNegative"
                             | "historyWithdrawal"
                     ));
@@ -2025,8 +2034,14 @@ fn assert_refusal_reset_standing(provider: &Provider, fault: &str) {
             | "resetUnknown"
             | "resetRefused"
             | "concurrentApproval"
+            | "concurrentFlag"
             | "approvalHistoryDeleted" => {
                 assert_eq!(evidence["reviewers"][0]["vote"], 10, "{fault}");
+                if fault == "concurrentFlag" {
+                    assert_eq!(evidence["reviewers"][0]["isFlagged"], true);
+                } else {
+                    assert_ne!(evidence["reviewers"][0]["isFlagged"].as_bool(), Some(true));
+                }
             }
             "historyWithdrawal" => {
                 assert_eq!(evidence["reviewers"][0]["vote"], 0, "{fault}");
@@ -2062,6 +2077,37 @@ fn assert_refusal_reset_standing(provider: &Provider, fault: &str) {
             );
         }
     }
+}
+
+/// A pending reset preserves a new request for the account's human attention.
+fn flagged_reviewer_is_preserved_during_pending_reset_recovery(repository: &Sources) {
+    let scope = TempDir::new().unwrap();
+    let root = scope.path().join("flagged-recovery");
+    let provider = repository.provider(true);
+    let (snapshot, prepared) = prepare(&root, &provider, false);
+    assess_as(&root, &provider, &snapshot, &prepared, "significant");
+    provider.fault.set("postReadFailure");
+    assert_eq!(
+        ss_ai::classification(&notify(&root, &provider, &snapshot).unwrap_err()),
+        "ambiguousWrite"
+    );
+    assert_eq!(provider.reset_writes.get(), 0);
+    let path = host_journal(&scope.path().join("host-store/review-notices"));
+    let pending: Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+    assert_eq!(pending["attempts"][0]["resets"][0]["state"], "pending");
+
+    provider.fault.set("");
+    provider.evidence.borrow_mut()["reviewers"][0]["isFlagged"] = json!(true);
+    let recovered = notify(&root, &provider, &snapshot).unwrap();
+    assert_eq!(recovered["items"][0]["status"], "needsReview");
+    assert_eq!(provider.reset_writes.get(), 0);
+    let evidence = provider.evidence.borrow();
+    assert_eq!(evidence["reviewers"][0]["vote"], 10);
+    assert_eq!(evidence["reviewers"][0]["isFlagged"], true);
+    drop(evidence);
+    let verified: Value = serde_json::from_slice(&fs::read(path).unwrap()).unwrap();
+    assert_eq!(verified["attempts"][0]["state"], "verified");
+    assert_eq!(verified["attempts"][0]["resets"][0]["state"], "verified");
 }
 
 /// Verifies that dry runs and uncertain comment effects never issue another POST.
@@ -3982,6 +4028,7 @@ fn native_assessment_and_notice_boundaries() {
     risk_judgments_and_uncertainty_prevent_publication(&repository);
     needs_review_notices_short_circuit_and_expire_only_after_external_approval(&repository);
     refusal_resets_only_captured_positive_approvals(&repository);
+    flagged_reviewer_is_preserved_during_pending_reset_recovery(&repository);
     inactive_approvals_remain_unverified(&repository);
     notice_dry_runs_refusals_and_uncertain_effects_do_not_duplicate_writes(&repository);
     notice_terminal_save_failures_preserve_original_recovery(&repository);

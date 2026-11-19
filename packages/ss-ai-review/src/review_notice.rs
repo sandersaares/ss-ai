@@ -20,7 +20,7 @@ use crate::error::{classification, fail};
 use crate::github_approval;
 use crate::github_approval::Evidence as GitHubEvidence;
 use crate::journal::FileJournal;
-use crate::json::{array, field, identifier, text};
+use crate::json::{array, boolean, field, identifier, text};
 use crate::publication::{Input, Scope, hash};
 use crate::renewal::Anchor;
 use crate::target::{Platform, Target};
@@ -636,8 +636,18 @@ fn reset_required(
             "Unknown reviewer vote during approval reset",
         ));
     }
-    if vote <= 0 || item.get("hasDeclined") == Some(&Value::Bool(true)) {
-        // Do not replace withdrawals, negative votes, or declined reviews.
+    let declined = item
+        .get("hasDeclined")
+        .map(boolean)
+        .transpose()?
+        .unwrap_or(false);
+    let flagged = item
+        .get("isFlagged")
+        .map(boolean)
+        .transpose()?
+        .unwrap_or(false);
+    if vote <= 0 || declined || flagged {
+        // Preserve withdrawals, declines, and requests for human attention.
         return Ok(ResetStanding::Cleared);
     }
     let mut current = original.clone();

@@ -262,7 +262,9 @@ by identity. Removing the ADO assignment makes the PR available to
 `ss-review-proactor` after its other eligibility checks. Already dismissed
 reviews and absent ADO reviewer assignments require no write. It does not cast
 a negative vote, remove another account's assignment, or modify existing
-discussion. A later human vote or reviewer change remains intact. Uncertainty keeps
+discussion. A later human vote, attention flag, or reviewer change remains
+intact. In particular, notification does not delete an ADO reviewer that became
+`isFlagged: true` after capture or during recovery. Uncertainty keeps
 its explicit diagnostic and partial run status even after the notice is posted.
 
 Inspection recognizes only service-authenticated comments by the account and
