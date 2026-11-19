@@ -260,6 +260,28 @@ Describe 'Prepared bounded worker inputs' {
         $counts.documentReadCalls | Should -Be ($script:NativePageReads + 2)
     }
 
+    It 'requires one awaited MAI Code 2 writeup worker for every reviewer finding' {
+        $result = New-TestWorkerAssignment -Phase review `
+            -SessionState $script:State -ScopePath $script:Scope -ManifestPath $script:Work.manifestPath `
+            -ReviewerId focus-001 -OutputDirectory (Join-Path $script:State 'finding-writeup-assignment')
+        $prompt = Read-AllSharedPages -AssignmentPath $result.assignmentPath -Id prompt
+        $prompt | Should -Match 'Do not write finding JSON yourself'
+        $prompt | Should -Match 'model: "mai-code-2"'
+        $prompt | Should -Match 'reasoning_effort: "medium"'
+        $prompt | Should -Match 'synchronous call and wait for the child to complete'
+        $prompt | Should -Match 'free-form assessment for this one finding'
+        $prompt | Should -Match 'finding-writeup\.md'
+        $prompt | Should -Match 'Require its final response to contain the assigned `findingId` and `artifactPath`'
+        $prompt | Should -Not -Match 'For each finding, write its JSON'
+
+        $writeupPath = Join-Path $script:SkillRoot 'finding-writeup.md'
+        Test-Path -LiteralPath $writeupPath -PathType Leaf | Should -BeTrue
+        $writeup = [IO.File]::ReadAllText($writeupPath)
+        $writeup | Should -Match 'not to decide whether the\s+finding is real'
+        $writeup | Should -Match 'pwsh-calls/append-finding-during-review\.md'
+        $writeup | Should -Match 'Return the command''s single JSON result verbatim'
+    }
+
     It 'stops dependent commands when the copied reader fails' {
         $result = New-TestWorkerAssignment -Phase references `
             -SessionState $script:State -ScopePath $script:Scope -OutputDirectory (Join-Path $script:State 'failure')

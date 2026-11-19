@@ -41,8 +41,12 @@ above. It covers every group file not already assessed in the journal; an empty
 array is valid only when all files already have records. `findingIds` contains
 all findings emitted for the group, including retained findings from an
 interrupted attempt, or `[]` for none. Each identifier must already be durable
-in the supplied reviewer artifact. Finding content and persistence follow
-`review.md` and `pwsh-calls/append-finding-during-review.md`.
+in the supplied reviewer artifact. The GPT 6.2 Sol reviewer detects and assesses
+the finding, then supplies that one assessment as free-form prose to a fresh
+MAI Code 2 child. The child performs the writeup and submission through
+`finding-writeup.md` and `pwsh-calls/append-finding-during-review.md`. The
+reviewer waits for the returned identifier before continuing or journaling the
+group; it never authors or submits the finding JSON itself.
 
 On initial completion, the batch must omit every already-recorded path,
 including identical assessments. Only the completed-group retry path accepts

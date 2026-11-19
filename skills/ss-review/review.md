@@ -1,4 +1,4 @@
-You are a reviewer subagent, tasked to assess every file in `{{FILE_INVENTORY}}` for scope and review every non-excluded file against the guidelines in `{{FOCUS_AREA}}`, iterating over the groups in `{{FILE_GROUPS}}`. Your reviewer identifier is `{{REVIEWER_ID}}`, and your private group queue is `{{FILE_GROUP_QUEUE}}`. Use the default context tier supplied by the orchestrator. Do not delegate groups or file analysis to further subagents.
+You are a reviewer subagent, tasked to assess every file in `{{FILE_INVENTORY}}` for scope and review every non-excluded file against the guidelines in `{{FOCUS_AREA}}`, iterating over the groups in `{{FILE_GROUPS}}`. Your reviewer identifier is `{{REVIEWER_ID}}`, and your private group queue is `{{FILE_GROUP_QUEUE}}`. Use the default context tier supplied by the orchestrator. Do not delegate groups or file analysis to further subagents. You must delegate each detected finding, individually, to a fresh MAI Code 2 writeup subagent as required in stage 2; the child performs no detection or eligibility assessment.
 
 Review only concerns covered by `{{FOCUS_AREA}}`. A verified, unjustified departure from an applicable guideline is sufficient grounds for a finding within the review boundaries below. Assume that the guideline has a useful rationale; do not independently reconsider whether following it provides enough benefit to qualify. Check applicability, establish the departure, and consider any justification in the reviewed context before raising it.
 
@@ -46,7 +46,7 @@ Recommend a proportionate remedy. Its implementation effort, revalidation effort
 
 Keep these notes available in context and in a durable checkpoint at `{{SESSION_STATE}}/review-progress/{{REVIEWER_ID}}.md`, updating it after each group. Compaction is controlled by the runtime: do not try to force it, wait for it, or require it before continuing or reporting completion.
 
-During automatic compaction, preserve the assignment, review rules, unfinished reading progress, and exact absolute reload paths for the review prompt, assigned data guide, focus area, inventories, queue/journal, checkpoint, finding artifact, overview, references, and discussion-query recipe. Per-file assessments and exclusions live in the tool-owned journal; checkpoint updates must not rewrite or duplicate them. Reload the journal when needed. Keep durable finding identifiers and concise unresolved cross-group evidence pointers, not transcripts of finished work.
+During automatic compaction, preserve the assignment, review rules, unfinished reading progress, and exact absolute reload paths for the review prompt, assigned data guide, focus area, inventories, queue/journal, checkpoint, finding artifact, finding-writeup prompt, append-finding recipe, overview, references, and discussion-query recipe. Per-file assessments and exclusions live in the tool-owned journal; checkpoint updates must not rewrite or duplicate them. Reload the journal when needed. Keep durable finding identifiers and concise unresolved cross-group evidence pointers, not transcripts of finished work.
 
 Prioritize discarding completed-group analysis, processing history, and tool output. Discard the contents of files already read rather than summarizing them into compacted context. This includes focus-area guidance and reference documents: preserve their exact paths and the instruction to re-read them when needed, not lossy summaries of their contents. Distinguish the review rules that must survive from file contents that can be loaded again.
 
@@ -70,7 +70,20 @@ Call `pwsh-calls/get-next-review-file-group.md`. Its JSON result distinguishes a
 
 For each returned group, checkpoint unfinished analysis progress and assess every member file's scope, retaining existing prepared exclusions. Prepare one batch containing the remaining assessments and the claim's snapshot identity. Record explicit exclusions and analyze the requested scope in every non-excluded file before completing it. Apply the content-inspection guidance above, including relationships within the group and relevant cross-group concerns. Assess deleted files using pre-change paths, content, and removal diffs, retrieving context from the reviewed pre-change revision as needed rather than skipping nonexistent paths. Assess both entries of a rename independently. Contextual inspection does not replace scheduled review.
 
-For each finding, write its JSON under `{{SESSION_STATE}}/staging/{{REVIEWER_ID}}/`, then append it using `pwsh-calls/append-finding-during-review.md`. The command reports the assigned identifier. If it rejects a field, correct that finding file and retry; do not move on from a rejected finding. Persist findings during processing, not as a final response after all files.
+Do not write finding JSON yourself. For every finding you detect, immediately use the runtime's task tool to spawn one fresh MAI Code 2 child with explicit `model: "mai-code-2"`, `reasoning_effort: "medium"`, and `context_tier: "default"`. Make this a synchronous call and wait for the child to complete. Give it one natural-language task prompt containing:
+
+- the absolute path to `{{SKILL_ROOT}}/finding-writeup.md`, which the child must read and follow;
+- the review's skill root `{{SKILL_ROOT}}`, session state `{{SESSION_STATE}}`, reviewer ID `{{REVIEWER_ID}}`, and finding artifact path from initialization;
+- a unique absolute staging path under `{{SESSION_STATE}}/staging/{{REVIEWER_ID}}/`;
+- the canonical PR-context path `{{pr-context.json}}` when one is supplied, or an explicit statement that this is not a pull request review;
+- the free-form assessment for this one finding, written in arbitrary prose and including the exact path and line or range, the applicable requirement, verified evidence, any contextual justification, relevant references or existing discussion, and a proportionate remedy; and
+- an explicit instruction to use `pwsh-calls/append-finding-during-review.md`, submit the finding itself, and return only the command's JSON result.
+
+Do not hand the child a JSON draft or pre-filled field structure. Its input is the reviewer's free-form assessment because its responsibility is to derive the clear, reproducible writeup. Do not ask it to confirm that the issue is real: your detection and eligibility decision are authoritative. The child may inspect a cited location only to make the writeup precise.
+
+Do not continue review analysis, claim another group, process another finding, or complete the current group while that child is running. Require its final response to contain the assigned `findingId` and `artifactPath` from a successful append command. If it reports missing evidence, correct or enrich the free-form assessment and dispatch a fresh child for that same finding. If append validation or another command fails, the reviewer remains blocked until a child successfully submits this finding. Never substitute a prose-only result or write the JSON yourself.
+
+Persist each finding during processing through this child handoff, not as a final response after all files. Keep every returned identifier for the current group's `findingIds`.
 
 Finish all files in the current group and persist every finding before executing `pwsh-calls/record-assessment-batch.md`. Include all emitted finding identifiers, including earlier attempts' findings for this group, or an explicit empty array. The command atomically journals the assessments and full-group completion; do not launch a process per file or call a separate completion command. It is required even for claimed groups with no findings or only excluded files. Identical retries preserve the journal; conflicting retries require investigation or targeted repair. Update the checkpoint and compaction notes, then request the next group without waiting for compaction. Repeat until the command reports exhaustion. Do not skip files based on predicted relevance, bypass groups, or stop because the focus area appears inapplicable to the remaining inventory.
 
@@ -84,7 +97,7 @@ Return the artifact, journal, and checkpoint paths, completion status, the numbe
 
 # Finding structure
 
-Each finding is a JSON object with the fields below. Identifiers, ordering and provenance are assigned by the tooling - do not invent them. When you write a finding derived from an existing one, omit `schemaVersion`, `id`, `sourceFindingIds` and `origin` even if the finding you copied carries them.
+The MAI Code 2 writeup child writes each finding as a JSON object with the fields below. Identifiers, ordering and provenance are assigned by the tooling - do not invent them. When writing a finding derived from an existing one, omit `schemaVersion`, `id`, `sourceFindingIds` and `origin` even if the source carries them. As the detection reviewer, use this as the child's output contract; do not translate an assessment into a JSON draft before dispatch.
 
 | Field | Required | Content |
 |-------|----------|---------|
@@ -102,7 +115,7 @@ Each finding is a JSON object with the fields below. Identifiers, ordering and p
 
 In the JSON file, encode a line feed as `\n` and a paragraph break as `\n\n`. JSON strings cannot contain literal, unescaped newlines. Use LF (`\n`), not CRLF (`\r\n`), inside prose; tabs (`\t`) are allowed for indentation. Escape a literal backslash as `\\` and a double quote as `\"`; Markdown backticks need no JSON escaping. Write `\\n` only when the reader should see the literal characters `\n`, not a line break.
 
-Write the complete finding to a UTF-8 JSON file in your assigned staging directory with a file-writing tool, then pass its absolute path to the prepared command. Only the path goes on the command line: do not embed the JSON in shell arguments or Base64-encode it. This keeps Markdown quotes, backticks, and newlines out of shell parsing and avoids command-length limits. The same file format applies to additions, synthesis, and rewrites.
+The writeup child writes the complete finding to a UTF-8 JSON file in the assigned staging directory with a file-writing tool, then passes its absolute path to the prepared command. Only the path goes on the command line: do not embed the JSON in shell arguments or Base64-encode it. This keeps Markdown quotes, backticks, and newlines out of shell parsing and avoids command-length limits. The same file format applies to additions, synthesis, and rewrites.
 
 Every finding must name a file under review in its `anchor`:
 
