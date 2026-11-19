@@ -1,18 +1,16 @@
-//! Composes the overview transaction with provider and rendering boundaries.
+//! Composes the overview transaction with provider boundaries.
 
 use std::any::type_name;
 use std::fmt;
 use std::fs;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 use ohno::AppError;
 use serde_json::{Value, json};
 use ss_ai_runtime::FileTransaction;
 
 use crate::error::{caused_by, fail};
-use crate::overview_snapshot::{
-    self, ContextInput, FrozenSnapshot, PreparedAdoSnapshot, PreparedSnapshot,
-};
+use crate::overview_snapshot::{self, ContextInput, FrozenSnapshot};
 use crate::overview_transaction::{self, EffectError, OverviewEffects};
 use crate::target::{Platform, Target};
 use crate::transport::Transport;
@@ -28,7 +26,7 @@ pub struct OverviewInput<'a> {
     pub capture: &'a Value,
     /// Authored overview Markdown.
     pub overview_path: &'a Path,
-    /// Directory for the publication journal and artifacts.
+    /// Directory for the publication journal and frozen report.
     pub output_directory: &'a Path,
     /// Active review skill root.
     pub skill_root: &'a Path,
@@ -54,71 +52,16 @@ impl fmt::Debug for OverviewInput<'_> {
     }
 }
 
-/// The local renderer's outcome without provider-specific dependencies.
-#[expect(
-    clippy::exhaustive_enums,
-    reason = "This is an internal command composition interface"
-)]
-pub enum OverviewRender {
-    /// Frozen HTML and archive paths and their hashes.
-    Ready {
-        /// Absolute HTML path.
-        html_path: PathBuf,
-        /// SHA-256 of the HTML.
-        html_hash: String,
-        /// Absolute archive path.
-        archive_path: PathBuf,
-        /// SHA-256 of the archive.
-        archive_hash: String,
-    },
-    /// Tools that require user consent before installation.
-    MissingTools {
-        /// Names of missing tools.
-        missing: Vec<String>,
-        /// Discovery diagnostics.
-        diagnostics: Vec<String>,
-    },
-}
-
-impl fmt::Debug for OverviewRender {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::Ready {
-                html_path,
-                archive_path,
-                ..
-            } => f
-                .debug_struct("Ready")
-                .field("html_path", html_path)
-                .field("archive_path", archive_path)
-                .finish(),
-            Self::MissingTools {
-                missing,
-                diagnostics,
-            } => f
-                .debug_struct("MissingTools")
-                .field("missing_count", &missing.len())
-                .field("diagnostic_count", &diagnostics.len())
-                .finish(),
-        }
-    }
-}
-
 // These discretionary byte budgets bound persisted input rather than enforce
-// provider limits. The prefix budget must match the CLI prefix-file reader.
+// provider limits. The CLI prefix reader matches this invocation bound.
 const MAX_PREFIX_BYTES: usize = 64 * 1024;
 const MAX_PATH_BYTES: usize = 4096;
 const MAX_URL_BYTES: usize = 4096;
-// Diagnostics use character counts to avoid splitting Unicode; the entry and
-// character caps bound journal size while retaining useful initial details.
 const MAX_ERROR_CHARS: usize = 4096;
-const MAX_DIAGNOSTIC_ENTRIES: usize = 16;
-const MAX_DIAGNOSTIC_CHARS: usize = 256;
 
-/// Publishes an initial overview using injected provider and renderer boundaries.
+/// Publishes an initial overview using injected provider boundaries.
 ///
 /// The capture must already have passed the capture reader's strict validation.
-/// The renderer is called only for Azure DevOps after freezing the Markdown.
 ///
 /// # Errors
 ///
@@ -128,7 +71,6 @@ pub fn publish_overview(
     process: &dyn Process,
     http: &dyn Http,
     clock: &dyn Clock,
-    mut render: impl FnMut(&Value) -> Result<OverviewRender, AppError>,
 ) -> Result<Value, AppError> {
     if !input.output_directory.is_absolute()
         || !input.overview_path.is_absolute()
@@ -173,17 +115,15 @@ pub fn publish_overview(
             .take(MAX_ERROR_CHARS)
             .collect::<String>();
         return Ok(json!({
-            "schemaVersion": 1,
+            "schemaVersion": 2,
             "pullRequestUrl": url,
             "status": "journalFailure",
             "stage": "preflight",
             "resultPath": input.output_directory.join("overview-publication-result.json"),
             "snapshot": null,
-            "artifact": null,
-            "comment": null,
+            "comments": [],
             "operations": [],
-            "error": message,
-            "missingTools": []
+            "error": message
         }));
     }
     let mut effects = Effects {
@@ -192,7 +132,6 @@ pub fn publish_overview(
         input,
         clock,
         snapshot_lock: None,
-        render: &mut render,
     };
     Ok(overview_transaction::publish(
         &input
@@ -212,7 +151,6 @@ struct Effects<'a, 'b> {
     input: &'b OverviewInput<'b>,
     clock: &'a dyn Clock,
     snapshot_lock: Option<FileTransaction<'a>>,
-    render: &'b mut dyn FnMut(&Value) -> Result<OverviewRender, AppError>,
 }
 
 impl OverviewEffects for Effects<'_, '_> {
@@ -224,7 +162,7 @@ impl OverviewEffects for Effects<'_, '_> {
         .map_err(effect_error)
     }
 
-    fn freeze(&mut self, _clock: &dyn Clock) -> Result<PreparedSnapshot, EffectError> {
+    fn freeze(&mut self, _clock: &dyn Clock) -> Result<FrozenSnapshot, EffectError> {
         let lock = FileTransaction::open(
             &self.input.output_directory.join("overview-snapshot.json"),
             self.clock,
@@ -241,126 +179,22 @@ impl OverviewEffects for Effects<'_, '_> {
         )
         .map_err(|error| local_error(error.to_string()))?;
         self.snapshot_lock = Some(lock);
-        if self.target.platform == Platform::AzureDevOps {
-            let preparation = (self.render)(&snapshot.record()).map_err(|error| {
-                let mut error = effect_error(error);
-                error.snapshot = Some(snapshot.record());
-                error.render_failed = true;
-                error
-            })?;
-            match preparation {
-                OverviewRender::Ready {
-                    html_path,
-                    html_hash,
-                    archive_path,
-                    archive_hash,
-                } => {
-                    let html_path = unicode_path(&html_path)
-                        .map_err(|message| render_error(message, &snapshot))?
-                        .to_owned();
-                    let archive_path = unicode_path(&archive_path)
-                        .map_err(|message| render_error(message, &snapshot))?
-                        .to_owned();
-                    if !hash_shape(&html_hash) || !hash_shape(&archive_hash) {
-                        return Err(render_error(
-                            "Overview artifact has an invalid hash".to_owned(),
-                            &snapshot,
-                        ));
-                    }
-                    let frozen_record = snapshot.record();
-                    let prepared = PreparedAdoSnapshot::from_render(
-                        snapshot,
-                        html_path,
-                        html_hash,
-                        archive_path,
-                        archive_hash,
-                    )
-                    .map_err(|error| {
-                        let mut error = local_error(error.to_string());
-                        error.snapshot = Some(frozen_record);
-                        error.render_failed = true;
-                        error
-                    })?;
-                    return Ok(PreparedSnapshot::AzureDevOps(prepared));
-                }
-                OverviewRender::MissingTools {
-                    missing,
-                    diagnostics,
-                } => {
-                    return Err(EffectError {
-                        message: format!(
-                            "Report tools are missing: {}",
-                            diagnostics
-                                .into_iter()
-                                .take(MAX_DIAGNOSTIC_ENTRIES)
-                                .map(|text| text
-                                    .chars()
-                                    .take(MAX_DIAGNOSTIC_CHARS)
-                                    .collect::<String>())
-                                .collect::<Vec<_>>()
-                                .join("; ")
-                        ),
-                        definite_refusal: false,
-                        missing_tools: missing
-                            .into_iter()
-                            .take(MAX_DIAGNOSTIC_ENTRIES)
-                            .map(|name| name.chars().take(MAX_DIAGNOSTIC_CHARS).collect())
-                            .collect(),
-                        snapshot: Some(snapshot.record()),
-                        render_failed: true,
-                    });
-                }
-            }
-        }
-        Ok(PreparedSnapshot::GitHub(snapshot))
+        Ok(snapshot)
     }
 
-    fn upload(&mut self, snapshot: &PreparedSnapshot) -> Result<Value, EffectError> {
-        match (self.target.platform, snapshot) {
-            (Platform::GitHub, PreparedSnapshot::GitHub(snapshot)) => {
-                overview_github::upload(&mut self.transport, &self.target, snapshot)
-            }
-            (Platform::AzureDevOps, PreparedSnapshot::AzureDevOps(snapshot)) => {
-                overview_ado::upload(&mut self.transport, &self.target, snapshot)
-            }
-            _ => {
-                return Err(local_error(
-                    "Prepared overview does not match provider".to_owned(),
-                ));
-            }
-        }
-        .map_err(|error| write_error(error, self.target.platform))
-    }
-
-    fn verify_artifact(
+    fn comment_bodies(
         &mut self,
-        snapshot: &PreparedSnapshot,
-        receipt: &Value,
-    ) -> Result<Value, EffectError> {
-        match (self.target.platform, snapshot) {
-            (Platform::GitHub, PreparedSnapshot::GitHub(snapshot)) => {
-                overview_github::verify_artifact(
-                    &mut self.transport,
-                    &self.target,
-                    snapshot,
-                    receipt,
-                )
-            }
-            (Platform::AzureDevOps, PreparedSnapshot::AzureDevOps(snapshot)) => {
-                overview_ado::verify_artifact(&mut self.transport, &self.target, snapshot, receipt)
-            }
-            _ => {
-                return Err(local_error(
-                    "Prepared overview does not match provider".to_owned(),
-                ));
-            }
-        }
-        .map_err(effect_error)
+        snapshot: &FrozenSnapshot,
+        prefix: &str,
+        clock: &dyn Clock,
+    ) -> Result<Vec<String>, EffectError> {
+        overview_snapshot::comment_bodies(snapshot, prefix, clock)
+            .map_err(|error| local_error(error.to_string()))
     }
 
     fn comment(
         &mut self,
-        _snapshot: &PreparedSnapshot,
+        _snapshot: &FrozenSnapshot,
         payload: &Value,
     ) -> Result<Value, EffectError> {
         match self.target.platform {
@@ -376,7 +210,7 @@ impl OverviewEffects for Effects<'_, '_> {
 
     fn verify_comment(
         &mut self,
-        _snapshot: &PreparedSnapshot,
+        _snapshot: &FrozenSnapshot,
         payload: &Value,
     ) -> Result<(), EffectError> {
         match self.target.platform {
@@ -389,29 +223,6 @@ impl OverviewEffects for Effects<'_, '_> {
         }
         .map_err(effect_error)
     }
-}
-
-/// Restricts renderer-provided digests to lowercase SHA-256 text.
-fn hash_shape(value: &str) -> bool {
-    value.len() == 64
-        && value
-            .bytes()
-            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
-}
-
-/// Rejects paths that cannot be represented faithfully in workflow JSON.
-fn unicode_path(path: &Path) -> Result<&str, String> {
-    path.to_str()
-        .filter(|value| path.is_absolute() && value.len() <= MAX_PATH_BYTES)
-        .ok_or_else(|| "Overview artifact path must be absolute and bounded Unicode".into())
-}
-
-/// Keeps the frozen snapshot visible after local rendering fails.
-fn render_error(message: String, snapshot: &FrozenSnapshot) -> EffectError {
-    let mut error = local_error(message);
-    error.snapshot = Some(snapshot.record());
-    error.render_failed = true;
-    error
 }
 
 /// Keeps unclassified failures from authorizing a repeated write.
@@ -438,8 +249,5 @@ fn local_error(message: String) -> EffectError {
     EffectError {
         message,
         definite_refusal: false,
-        missing_tools: Vec::new(),
-        snapshot: None,
-        render_failed: false,
     }
 }

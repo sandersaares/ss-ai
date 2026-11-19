@@ -1269,50 +1269,35 @@ The recipe supplies its inputs directly to that operation.
 `overview-snapshot.json`
 binds its immutable Markdown to the PR, inspected commits, run identifier, and
 content hash. The native boundary carries that validated identity in a frozen
-snapshot type instead of passing arbitrary JSON to provider adapters. ADO
-publication requires a separately prepared state with the rendered HTML and ZIP
-paths and hashes; both states serialize through the existing journal record
-shape. The mutable local overview and audit documents may subsequently describe
-newer content.
+snapshot type instead of passing arbitrary JSON to provider adapters. The
+mutable local overview and audit documents may subsequently describe newer
+content.
 
-Manifest reuse compares filesystem-resolved artifact directories with the
-generation root or its immediate retry directory and retains the recorded path
-spellings. A missing recorded artifact directory is incomplete frozen state,
-not an I/O failure; reuse rejects it without creating the directory.
+The publisher hashes and decodes the frozen Markdown, adds attribution, and
+splits the UTF-8 bytes into comment bodies of at most 64 KiB. It preserves the
+report text and prefers paragraph and line boundaries. Multipart comments use
+the same visible part label and repeat attribution. The first body starts with
+`[Copilot speaking]`; a different caller prefix follows it verbatim, while a
+matching caller prefix is not duplicated.
 
-`overview-publication-result.json` records intent before each non-idempotent
-write and retains returned IDs before verification. Upload is verified before the
-linking comment is created. Known successful attempts are reused; an attempt
-that wrote or may have written remote state is not automatically replayed.
-Transports retry service-confirmed rate-limit refusals until accepted, without
-replaying ambiguous writes.
-The initial comment is not edited and later overview generation does not publish.
-The caller supplies attribution in a UTF-8 file and passes its path to the native operation. The native transaction
-uses the verified artifact URL on either platform and prepends a nonempty prefix
-verbatim, separated from the linked sentence by a blank line. The default prefix
-is empty so callers explicitly select attribution according to their active
-instructions rather than a hard-coded policy.
-Creation and verification use the same complete comment body. Resuming a successful
-publication reuses its receipt even if the caller supplies a different prefix.
+`overview-publication-result.json` records intent before each comment write and
+retains its part number, part count, and returned ID before verification.
+GitHub uses top-level issue-comment writes. ADO creates each part as an
+unanchored thread with `fixed` status. Creation and verification use the same
+complete body. Known successful attempts are reused; an attempt that wrote or
+may have written remote state is not automatically replayed. Transports retry
+service-confirmed rate-limit refusals until accepted, without replaying
+ambiguous writes.
+
+The initial comments are not edited and later overview generation does not
+publish. The caller supplies attribution in a UTF-8 file and passes its path to
+the native operation. Resuming a successful publication reuses all receipts even
+if the caller supplies a different prefix.
 
 All publication failures are explicit outcomes at this boundary, including
-partial uploads, unresolved ADO threads, and diagnostic-write failures. The
-orchestrator notifies the user and continues reviewing without a repair gate.
-It still prompts for missing-tool installation, and may retry a tool-only
-failure after consent and setup when no remote write was attempted.
-
-GitHub uses a `public: false` Gist and a separate issue-comment endpoint for the
-PR conversation. Native Mermaid source is preserved. Truncated Gist API content
-is verified through the complete Git revision rather than treating the partial
-JSON field as the report; this also covers the documented large-file raw retrieval
-limit without another size-dependent code path. The comment links the rendered
-revision, not Raw. No Gist web-rendering size ceiling is inferred from API limits.
-
-ADO uploads and reads the exact ZIP bytes, then creates an unanchored thread with
-`fixed` status. The archive contains only `report.html`; its stable entry timestamp
-keeps packaging independent of wall-clock time. Its binary transport path bypasses JSON parsing and HTML sign-in sniffing
-only for explicit attachment reads; HTTP status and frozen content-hash checks
-establish identity. JSON callers retain their existing checks.
+partial multipart publication, unresolved ADO threads, and diagnostic-write
+failures. The orchestrator notifies the user and continues reviewing without a
+repair gate. No report-rendering tools are required for this publication path.
 
 Captured discussion remains verbatim. The orchestrator and reviewers recognize
 informational overview comments using receipt IDs and declared purpose, while
@@ -1403,9 +1388,10 @@ version. Rendering invokes the resolved executable directly; installation
 temporarily prepends its directory to `PATH` for npm and invokes the same
 executable for Puppeteer's browser setup.
 
-Pandoc and browser tools are HTML prerequisites, not GitHub Gist prerequisites.
-An explicit installation decline permits Markdown audit presentation. The
-user's decision is retained for the run to prevent repeated installation prompts.
+Pandoc and browser tools are HTML prerequisites, not inline overview-comment
+prerequisites. An explicit installation decline permits Markdown audit
+presentation. The user's decision is retained for the run to prevent repeated
+installation prompts.
 
 ## HTML report rendering
 

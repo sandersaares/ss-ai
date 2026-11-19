@@ -1,18 +1,17 @@
 //! CLI composition for the initial review overview publication.
 
 use std::ffi::OsString;
-use std::fs::{self, File};
+use std::fs::File;
 use std::io::Read;
-use std::path::{Component, Path, PathBuf, absolute};
+use std::path::{Path, PathBuf, absolute};
 
 use clap::Parser;
 use clap::error::ErrorKind;
 use ohno::AppError;
-use serde_json::{Value, from_slice, to_string};
-use ss_ai_review::{OverviewInput, OverviewRender, publish_overview};
+use serde_json::to_string;
+use ss_ai_review::{OverviewInput, publish_overview};
 use ss_ai_review_context::read_capture;
-use ss_ai_review_workflow::{overview_artifact, report_html, report_tools};
-use ss_ai_runtime::{Clock, Process, caused_by, fail, read_bytes};
+use ss_ai_runtime::{Clock, Process, caused_by, fail};
 
 use crate::Http;
 
@@ -74,104 +73,8 @@ pub(crate) fn run(
         comment_prefix: &prefix,
         tenant: cli.tenant.as_deref(),
     };
-    let result = publish_overview(&input, process, http, clock, |snapshot| {
-        let markdown = snapshot
-            .get("markdownPath")
-            .and_then(Value::as_str)
-            .ok_or_else(|| fail("invalidState", "Snapshot has no Markdown path"))?;
-        let hash = snapshot
-            .get("markdownHash")
-            .and_then(Value::as_str)
-            .ok_or_else(|| fail("invalidState", "Snapshot has no Markdown hash"))?;
-        let tools_directory = path(&report_tools::tools_directory()?)?;
-        let artifact_directory = artifact_directory(&output_directory, snapshot, hash, clock)?;
-        fs::create_dir_all(&artifact_directory)?;
-        let artifact = overview_artifact::freeze(
-            Path::new(markdown),
-            hash,
-            &artifact_directory,
-            &skill_root,
-            &tools_directory,
-            process,
-            clock,
-            |tools, guard, source, output| {
-                // Match the renderer's resolved output path while retaining the
-                // requested artifact path in the manifest.
-                let renderer_source = renderer_path(source)?;
-                let parent = output
-                    .parent()
-                    .ok_or_else(|| fail("invalidState", "Report output has no parent"))?;
-                let name = output
-                    .file_name()
-                    .ok_or_else(|| fail("invalidState", "Report output has no filename"))?;
-                let rendered_output = fs::canonicalize(parent)?.join(name);
-                let renderer_skill_root = renderer_path(&skill_root)?;
-                let mut result = report_html::write_report(
-                    &renderer_source,
-                    &rendered_output,
-                    &renderer_skill_root,
-                    "Pull request overview",
-                    tools,
-                    guard,
-                    process,
-                    clock,
-                )?;
-                if result.html_path != rendered_output {
-                    return Err(fail("invalidState", "Renderer returned a different path"));
-                }
-                source.clone_into(&mut result.source_path);
-                output.clone_into(&mut result.html_path);
-                Ok(result)
-            },
-        )?;
-        Ok(match artifact {
-            overview_artifact::Preparation::Ready(artifact) => OverviewRender::Ready {
-                html_path: artifact.html_path,
-                html_hash: artifact.html_hash,
-                archive_path: artifact.archive_path,
-                archive_hash: artifact.archive_hash,
-            },
-            overview_artifact::Preparation::MissingTools(tools) => OverviewRender::MissingTools {
-                missing: tools.missing,
-                diagnostics: tools.diagnostics,
-            },
-            _ => return Err(fail("invalidState", "Unknown overview preparation outcome")),
-        })
-    })?;
+    let result = publish_overview(&input, process, http, clock)?;
     Ok(to_string(&result)?)
-}
-
-/// Keeps generations separate, while honoring a matching existing manifest.
-fn artifact_directory(
-    output: &Path,
-    snapshot: &Value,
-    markdown_hash: &str,
-    clock: &dyn Clock,
-) -> Result<PathBuf, AppError> {
-    let run_id = snapshot
-        .get("runId")
-        .and_then(Value::as_str)
-        .filter(|value| {
-            value.len() == 32
-                && value
-                    .bytes()
-                    .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
-        })
-        .ok_or_else(|| fail("invalidState", "Snapshot has an invalid run identifier"))?;
-    let root = output.join("overview-publication");
-    if let Some(bytes) = read_bytes(&root.join("html.json"), clock)? {
-        let manifest: Value = from_slice(&bytes).map_err(|error| {
-            caused_by("invalidState", "Malformed overview HTML manifest", error)
-        })?;
-        let hash = manifest
-            .get("sourceHash")
-            .and_then(Value::as_str)
-            .ok_or_else(|| fail("invalidState", "Overview HTML manifest has no source hash"))?;
-        if hash == markdown_hash {
-            return Ok(root);
-        }
-    }
-    Ok(root.join(run_id))
 }
 
 /// Makes paths absolute relative to this process without losing Unicode.
@@ -183,19 +86,9 @@ fn path(value: &Path) -> Result<PathBuf, AppError> {
     Ok(path)
 }
 
-/// Resolves parent components as the filesystem does before report rendering.
-fn renderer_path(value: &Path) -> Result<PathBuf, AppError> {
-    if value.components().any(|part| part == Component::ParentDir) {
-        Ok(fs::canonicalize(value)?)
-    } else {
-        Ok(value.to_owned())
-    }
-}
-
 /// Limits attribution input while preserving every accepted UTF-8 byte.
 fn read_prefix(path: &Path) -> Result<String, AppError> {
-    // Keep this discretionary read bound aligned with the publication boundary:
-    // attribution is embedded in both a provider comment and its journal.
+    // Match the publication boundary's discretionary attribution bound.
     const MAX_PREFIX_BYTES: u64 = 64 * 1024;
     let mut bytes = Vec::new();
     File::open(path)?
