@@ -55,7 +55,7 @@ request to remain eligible.
 An active claim remains observable through review work and user pauses. The
 review workflow verifies it immediately before publication and changes it to
 completed only after the full workflow succeeds. Completed markers block later
-`assigned` selection by the same reviewer without creating an approval vote
+selection in either mode by the same reviewer without creating an approval vote
 only while the source commit and reviewer participation fingerprint still
 match. A new source revision or a changed assignment/review state makes the
 completed marker historical rather than current.

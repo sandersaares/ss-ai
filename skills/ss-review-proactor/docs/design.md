@@ -125,8 +125,8 @@ Resolution does not invalidate a claim.
 A reserved claim is live for 60 minutes from the service's comment creation
 timestamp; editing it does not extend that interval. Confirmation changes it
 to an active claim that remains live across review work and user pauses.
-Completion changes the same comment to evidence used by later `assigned`
-selection. Deleted comments do not hold claims. All sessions respect live
+Completion changes the same comment to evidence used by later selection in
+either mode. Deleted comments do not hold claims. All sessions respect live
 reserved and active claims, including claims from another identity. Expired
 reserved claims from earlier attempts are ignored, including those posted by
 the current user or from the same session.

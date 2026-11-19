@@ -694,17 +694,14 @@ pub(crate) fn run(
             continue;
         }
         let comments = provider.comments(&target)?;
-        if initial.selection_mode == SelectionMode::Assigned
-            && comments.iter().any(|comment| {
-                comment.author.same_account(&initial.identity)
-                    && marker(&comment.body).is_some_and(|marker| {
-                        marker.state == ClaimState::Completed
-                            && fresh.source_commit.as_deref() == Some(marker.revision)
-                            && fresh.review_fingerprint.as_deref()
-                                == Some(marker.review_fingerprint)
-                    })
-            })
-        {
+        if comments.iter().any(|comment| {
+            comment.author.same_account(&initial.identity)
+                && marker(&comment.body).is_some_and(|marker| {
+                    marker.state == ClaimState::Completed
+                        && fresh.source_commit.as_deref() == Some(marker.revision)
+                        && fresh.review_fingerprint.as_deref() == Some(marker.review_fingerprint)
+                })
+        }) {
             initial.record(id, "completedReview");
             continue;
         }

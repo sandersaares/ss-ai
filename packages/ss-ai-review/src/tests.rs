@@ -451,6 +451,31 @@ fn publication_check_allows_only_explicit_closed_pull_request_authorization() {
 }
 
 #[test]
+fn completed_available_review_is_not_selected_again() {
+    let clock = FakeClock::new();
+    let mut provider = FakeProvider::new();
+    let mut journal = MemoryJournal::default();
+    let state = initial(Platform::GitHub);
+    select(&mut provider, &mut journal, &clock, false);
+    select(&mut provider, &mut journal, &clock, true);
+    complete(&mut provider, &mut journal, &clock, state.clone()).unwrap();
+
+    let mut next_journal = MemoryJournal::default();
+    let next = run(
+        &mut provider,
+        &mut next_journal,
+        &clock,
+        state,
+        "Reserving",
+        false,
+    )
+    .unwrap();
+    assert_eq!(next.status, Status::Claimed);
+    assert_eq!(next.target.unwrap().pull_request_id, 11);
+    assert_eq!(next.diagnostics[0].reason, "completedReview");
+}
+
+#[test]
 fn completed_assigned_review_is_not_selected_again() {
     let clock = FakeClock::new();
     let mut provider = FakeProvider::new();

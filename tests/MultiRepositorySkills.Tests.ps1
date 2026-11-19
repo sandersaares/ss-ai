@@ -69,7 +69,7 @@ Describe 'Multi-repository skill contracts' {
         $script:ProactorSkill |
             Should -Match 'requires an assignment to the signed-in user and excludes an existing active\s+submitted review'
         $script:ProactorSkill |
-            Should -Match 'submitting an active review prevents repeat selection'
+            Should -Match 'a matching completed marker prevents\s+repeat selection'
         $script:ProactorCommands |
             Should -Match '--selection-mode "\{\{SELECTION_MODE\}\}"'
         $script:ProactorCommands |

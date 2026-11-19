@@ -264,9 +264,9 @@ Do not review just the repository's current changes without the selected PR
 scope. Do not skip an unanswered audit, invent finding decisions, or approve a
 pull request on the user's behalf.
 
-After reviewer registration, leave the claim as discussion history. In
-`available` mode, assignment prevents repeat selection. In `assigned` mode,
-submitting an active review prevents repeat selection. Do not acquire another
+After reviewer registration, leave the claim as discussion history. A resulting
+assignment, an active submitted review, or a matching completed marker prevents
+repeat selection according to the mode. Do not acquire another
 PR while this review is active, paused, failed, cancelled, or awaiting
 reconciliation. A `confirmed`
 selection result or a completed agent turn is not a completed review.
