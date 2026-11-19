@@ -339,6 +339,13 @@ draft activity does not change approval authority.
 System notifications with null or omitted property bags do not supply vote,
 reset, or reviewer authority. Inspection does not interpret their prose.
 
+Reviewer-requiredness events use the typed `CodeReviewReviewersUpdatedNumChanged`
+count, `CodeReviewReviewersUpdatedChangedIdentity` identity mapping, and
+`CodeReviewReviewersUpdatedChangedToRequired` string state (`True` or `False`).
+Inspection retains and validates this metadata without treating it as a vote,
+withdrawal, decline, removal, or group contribution. Reviewer-add events retain
+their participation semantics, and existing and later votes retain their authority.
+
 Reviewer-decline events use the typed `CodeReviewReviewersUpdatedNumDeclined`
 count, `CodeReviewReviewersUpdatedChangedIdentity` identity mapping, and
 `CodeReviewReviewersUpdatedChangedDecline` string state. Inspection retains
