@@ -391,10 +391,19 @@ fn split_oversized_fence(
     } else {
         opening.to_owned()
     };
+    let generated_close_overhead = closing
+        .len()
+        .checked_add(separator.len())
+        .and_then(|length| length.checked_add(separator.len()))
+        .ok_or_else(|| SnapshotError::invalid_input("Overview fence metadata is too large"))?;
+    let original_close_overhead = original_close
+        .len()
+        .checked_add(separator.len())
+        .ok_or_else(|| SnapshotError::invalid_input("Overview fence metadata is too large"))?;
+    let fence_overhead = generated_close_overhead.max(original_close_overhead);
     let overhead = part_opening
         .len()
-        .checked_add(closing.len())
-        .and_then(|length| length.checked_add(separator.len()))
+        .checked_add(fence_overhead)
         .ok_or_else(|| SnapshotError::invalid_input("Overview fence metadata is too large"))?;
     let content_capacity = capacity
         .checked_sub(overhead)
@@ -1284,6 +1293,15 @@ mod tests {
                 .iter()
                 .all(|chunk| chunk.starts_with("```text\n") && chunk.ends_with("```\n"))
         );
+    }
+
+    #[test]
+    fn oversized_fences_reserve_original_closing_marker_space() {
+        let report = "```text\nabcdefghij\n``````  \n";
+        let chunks = split_at_boundaries(report, 24).unwrap();
+        assert!(chunks.len() > 1);
+        assert!(chunks.iter().all(|chunk| chunk.len() <= 24));
+        assert_eq!(chunks.last().unwrap(), "```text\nghij\n``````  \n");
     }
 
     #[test]
