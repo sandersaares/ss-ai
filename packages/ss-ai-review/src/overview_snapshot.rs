@@ -361,7 +361,7 @@ fn split_oversized_fence(
     let opening = text
         .get(..opening_end)
         .ok_or_else(|| SnapshotError::invalid_state("Overview fence opening is invalid"))?;
-    let (opening_marker, _) = fence_marker(opening)
+    let (opening_marker, opening_info) = fence_marker(opening)
         .ok_or_else(|| SnapshotError::invalid_input("Invalid overview fence"))?;
     let indentation = opening
         .get(..opening.len().saturating_sub(opening.trim_start().len()))
@@ -380,7 +380,12 @@ fn split_oversized_fence(
     } else {
         "\n"
     };
-    let overhead = opening
+    let part_opening = if opening_info.trim().eq_ignore_ascii_case("mermaid") {
+        format!("{indentation}{opening_marker}text{separator}")
+    } else {
+        opening.to_owned()
+    };
+    let overhead = part_opening
         .len()
         .checked_add(closing.len())
         .and_then(|length| length.checked_add(separator.len()))
@@ -398,7 +403,7 @@ fn split_oversized_fence(
         let end = preferred_boundary(remaining, content_capacity)?;
         let (piece, rest) = remaining.split_at(end);
         let mut part = String::with_capacity(capacity);
-        part.push_str(opening);
+        part.push_str(&part_opening);
         part.push_str(piece);
         if !piece.ends_with('\n') {
             part.push_str(separator);
@@ -409,7 +414,7 @@ fn split_oversized_fence(
         remaining = rest;
     }
     let mut last = String::with_capacity(capacity);
-    last.push_str(opening);
+    last.push_str(&part_opening);
     last.push_str(remaining);
     if !remaining.is_empty() && !remaining.ends_with('\n') {
         last.push_str(separator);
@@ -458,11 +463,16 @@ fn preferred_boundary(text: &str, capacity: usize) -> Result<usize, SnapshotErro
     let line_end = candidate
         .rfind('\n')
         .and_then(|position| position.checked_add('\n'.len_utf8()));
-    paragraph_end
+    let boundary = paragraph_end
         .or(line_end)
         .filter(|position| *position > 0)
-        .or(Some(end))
-        .ok_or_else(|| SnapshotError::invalid_state("Overview Markdown made no splitting progress"))
+        .unwrap_or(end);
+    if boundary == 0 {
+        return Err(SnapshotError::invalid_state(
+            "Overview Markdown made no splitting progress",
+        ));
+    }
+    Ok(boundary)
 }
 
 /// Supplies a structurally valid frozen snapshot to transaction boundary tests.
@@ -888,9 +898,9 @@ mod tests {
     use serde_json::{Error as JsonError, Value, json};
 
     use super::{
-        FrozenSnapshot, InvalidInput, InvalidState, MAX_COMMENT_BYTES, SnapshotError, SnapshotIo,
-        commit, frozen_snapshot_for_test, hash, hash_shape, make_report, parse_json,
-        split_at_boundaries, split_comment_bodies, validate_context, validate_overview,
+        FrozenSnapshot, InvalidInput, InvalidState, MAX_COMMENT_BYTES, MAX_PART_LABEL_BYTES,
+        SnapshotError, SnapshotIo, commit, frozen_snapshot_for_test, hash, hash_shape, make_report,
+        parse_json, split_at_boundaries, split_comment_bodies, validate_context, validate_overview,
     };
     use crate::OverviewInput;
 
@@ -1259,5 +1269,35 @@ mod tests {
                 .iter()
                 .all(|chunk| chunk.starts_with("```text\n") && chunk.ends_with("```\n"))
         );
+    }
+
+    #[test]
+    fn oversized_mermaid_blocks_render_as_literal_source() {
+        let report = "```mermaid\nflowchart LR\nA --> B\nC --> D\nE --> F\n```\n";
+        let chunks = split_at_boundaries(report, 38).unwrap();
+        assert!(chunks.len() > 1);
+        assert!(
+            chunks
+                .iter()
+                .all(|chunk| chunk.starts_with("```text\n") && chunk.ends_with("```\n"))
+        );
+        assert!(chunks.iter().all(|chunk| !chunk.contains("```mermaid")));
+    }
+
+    #[test]
+    fn near_limit_attribution_rejects_zero_progress_multibyte_fences() {
+        let capacity = 14;
+        let prefix_length = MAX_COMMENT_BYTES
+            .checked_sub("[Copilot speaking]\n\n".len())
+            .and_then(|value| value.checked_sub("\n\n".len()))
+            .and_then(|value| value.checked_sub(MAX_PART_LABEL_BYTES))
+            .and_then(|value| value.checked_sub(capacity))
+            .unwrap();
+        let prefix = "p".repeat(prefix_length);
+        let report = format!("```text\n{}\n```\n", "🦀".repeat(100));
+        let Err(error) = split_comment_bodies(&report, &prefix) else {
+            panic!("near-limit multibyte fence unexpectedly split")
+        };
+        assert!(error.to_string().contains("no splitting progress"));
     }
 }
