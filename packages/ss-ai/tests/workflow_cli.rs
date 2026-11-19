@@ -1121,8 +1121,7 @@ fn installed_script_free_worker_dispatch_reads_required_guidance() {
             assert_eq!(content, expected, "{id}");
         } else {
             assert!(
-                content
-                    .contains("Primary orchestration, publication, and every human decision gate")
+                content.contains("Review orchestration, publication, and human decision gates")
             );
             assert!(content.contains("# Stage 1: group the complete inventory"));
         }

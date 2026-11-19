@@ -60,24 +60,27 @@ Explicit `self-review` mode provides non-interactive review during a local devel
 
 The caller receives absolute filesystem paths to rendered Markdown findings in the invoking session. Delivery distinguishes policy-approved findings from findings whose required audit was skipped, and includes both in the complete report. Skipped findings remain unaudited, not approved or rejected. No findings and no policy-approved findings are distinct outcomes.
 
-Self-review asks no questions and requires no HTML rendering tools. Missing information that prevents a reliable review produces an explicit blocker rather than an assumed human decision. The mode does not relax primary-session ownership or change the gates of ordinary review.
+Self-review asks no questions and requires no HTML rendering tools. Missing information that prevents a reliable review produces an explicit blocker rather than an assumed human decision. These rules do not depend on whether the review runs directly or as delegated work.
 
 ## Interaction ownership
 
 The central accountability tenet is that analysis may be delegated, but user
 authority may not.
 
-The primary user-facing session owns the review and every question posed to the
-user. Subagents may inspect evidence and propose findings within bounded work.
-The auto-approval worker may approve claims only under the defined policy;
-workers cannot make user decisions or perform publication. When the workflow
-asks a question, only the user's direct answer can resume work that depends on it.
+The agent executing the review owns orchestration and every question that
+reaches the user. That agent may run in a user-facing session, subagent, or
+child session. Subagents may inspect evidence and propose findings within
+bounded work. The auto-approval worker may approve claims only under the
+defined policy; workers cannot make user decisions or perform publication. When
+the workflow asks a question, only the user's direct answer can resume work
+that depends on it. A delegated review may return the question to its caller so
+that caller can obtain and relay the user's exact answer.
 
 A user-authorized `ss-review-proactor` invocation may select and claim a pull
-request before handing it to this skill in the same primary session. This
-scheduled entry retains the same human authority and uses the ordinary review
-workflow. The proactor owns the claim check before handoff; this skill adds no
-claim checks or special reviewer-registration behavior.
+request before handing it to this skill directly or through delegated execution.
+This scheduled entry retains the same human authority and uses the ordinary
+review workflow. The proactor owns the claim check before handoff; this skill
+adds no claim checks or special reviewer-registration behavior.
 
 In proactor loop mode, this skill still completes one review at a time before
 returning control to the proactor. A user instruction that the current review
@@ -611,7 +614,7 @@ Relevant conversations include later replies and edits, not just opening
 comments. The meaning of that discussion and the author's intent remain matters
 of judgment, verified against the reviewed content.
 
-The same reading contract applies to the primary session and every worker,
+The same reading contract applies to the review orchestrator and every worker,
 regardless of context size or phase. Readers select bounded work and retain
 identifiers, evidence references, and decisions rather than accumulating page
 dumps. Authorship classification and freshness change discovery cover their

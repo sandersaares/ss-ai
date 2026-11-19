@@ -3,8 +3,10 @@
 ## Boundaries
 
 The primary agent owns configuration, local checkout preparation, the skill
-handoff, and human interaction. The shared `ss-ai` executable owns repository enumeration,
-eligibility, ordering, claim writes, the waiting period, and revalidation.
+handoff, and human interaction. It may execute the handoff directly or delegate
+the `ss-review` invocation. The shared `ss-ai` executable owns repository
+enumeration, eligibility, ordering, claim writes, the waiting period, and
+revalidation.
 It emits one JSON result and keeps a local journal in session state.
 
 Loop control belongs to the primary agent, not the selection executable.

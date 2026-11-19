@@ -3,8 +3,8 @@
 ## Purpose
 
 `ss-review-proactor` finds a pull request for the current user to review across
-one or more repositories and hands it to `ss-review` in the same primary,
-user-facing session. The user configures the schedule outside this skill.
+one or more repositories and hands it to `ss-review` directly or through
+delegated execution. The user configures the schedule outside this skill.
 By default, each invocation continues with reviews in the active repository
 until it has no qualifying pull request, then advances to the next repository.
 The user can explicitly request one-shot mode to stop after the first completed
@@ -127,8 +127,9 @@ pull request. There is no earliest-claim tie-breaker. If the claim created by
 this cycle is missing or has expired, or the pull request is no longer
 eligible, the candidate is also discarded.
 
-If the claim holds, the primary agent hands off directly to the ordinary
-`ss-review` workflow. Its reviewer registration consumes the reservation:
+If the claim holds, the primary agent hands off to the ordinary `ss-review`
+workflow, either directly or through delegated execution. Its reviewer
+registration consumes the reservation:
 the reviewer assignment, rather than the comment, then prevents another review.
 There are no additional proactor checks inside `ss-review`.
 

@@ -9,9 +9,9 @@ review judgments, and human interaction.
 
 The first consumers are `ss-review-proactor` for selection and confirmation
 and `ss-review` for reviewer registration and exact Git comparisons. The
-proactor's intentional handoff to `ss-review` remains in the primary user-facing
-session. Registration does
-not approve a pull request. The `ss-review` workflow owns review capture,
+proactor may hand `ss-review` off directly or through delegated execution while
+retaining user interaction and loop control. Registration does not approve a
+pull request. The `ss-review` workflow owns review capture,
 judgments, report rendering, and publication.
 
 ## Version compatibility
