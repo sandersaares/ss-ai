@@ -478,6 +478,9 @@ pub(crate) fn project_threads(threads: &[Value]) -> Result<Vec<Value>, AppError>
                     "CodeReviewVoteResult",
                     "CodeReviewVotedByIdentity",
                     "CodeReviewVotedByInitiatorIdentity",
+                    "CodeReviewResetMultipleVotesNumVoters",
+                    "CodeReviewResetMultipleVotesReason",
+                    "CodeReviewResetMultipleVotesExampleVoterIdentities",
                     "CodeReviewReviewersUpdatedNumAdded",
                     "CodeReviewReviewersUpdatedNumRemoved",
                     "CodeReviewReviewersUpdatedNumChanged",
@@ -485,6 +488,7 @@ pub(crate) fn project_threads(threads: &[Value]) -> Result<Vec<Value>, AppError>
                     "CodeReviewReviewersUpdatedAddedIdentity",
                     "CodeReviewReviewersUpdatedRemovedIdentity",
                     "CodeReviewReviewersUpdatedChangedIdentity",
+                    "CodeReviewReviewersUpdatedChangedToRequired",
                     "CodeReviewReviewersUpdatedChangedDecline",
                     "CodeReviewReviewersUpdatedByIdentity",
                 ],
@@ -1107,6 +1111,18 @@ fn decide_history(
                     false
                 }
             }
+            "ResetMultipleVotes" => {
+                if reset_reviewer(event, account)? {
+                    // A reset withdraws the vote, not a participation veto, and
+                    // cannot establish source-change renewal authority.
+                    latest = Some(0);
+                    approval = None;
+                    anchor = None;
+                    true
+                } else {
+                    false
+                }
+            }
             "ReviewersUpdate" => {
                 let mut relevant = false;
                 for (count, identity, removing) in [
@@ -1161,12 +1177,31 @@ fn decide_history(
                         declined = Some(value);
                     }
                 }
-                let key = "CodeReviewReviewersUpdatedNumChanged";
-                if property(event.value, key, "System.Int32")? != &json!(0) {
-                    return Err(fail(
-                        "service",
-                        format!("ADO reviewer event {} has unsupported {key}", event.id),
-                    ));
+                if updated_reviewer(
+                    event,
+                    "CodeReviewReviewersUpdatedNumChanged",
+                    "CodeReviewReviewersUpdatedChangedIdentity",
+                )?
+                .is_some()
+                {
+                    // Requiredness is reviewer metadata, not a decision or participation
+                    // change; preserve vote authority and ordering (docs/reapproval.md).
+                    match text(property(
+                        event.value,
+                        "CodeReviewReviewersUpdatedChangedToRequired",
+                        "System.String",
+                    )?)? {
+                        "True" | "False" => {}
+                        _ => {
+                            return Err(fail(
+                                "service",
+                                format!(
+                                    "ADO reviewer event {} has invalid requiredness state",
+                                    event.id
+                                ),
+                            ));
+                        }
+                    }
                 }
                 relevant
             }
@@ -1278,6 +1313,65 @@ fn decide_history(
         "service",
         format!("ADO current vote {current:?} does not match history {latest:?}"),
     ))
+}
+
+/// Attributes bulk resets only to identities explicitly named by the service.
+fn reset_reviewer(event: &Event<'_>, account: &str) -> Result<bool, AppError> {
+    let count = property(
+        event.value,
+        "CodeReviewResetMultipleVotesNumVoters",
+        "System.Int32",
+    )?
+    .as_u64()
+    .filter(|count| *count > 0)
+    .ok_or_else(|| {
+        fail(
+            "service",
+            format!("Invalid ADO reset count in thread {}", event.id),
+        )
+    })?;
+    text(property(
+        event.value,
+        "CodeReviewResetMultipleVotesReason",
+        "System.String",
+    )?)?;
+    let examples = text(property(
+        event.value,
+        "CodeReviewResetMultipleVotesExampleVoterIdentities",
+        "System.String",
+    )?)?;
+    let examples: Vec<String> = serde_json::from_str(examples).map_err(|error| {
+        crate::error::caused_by(
+            "service",
+            format!("Invalid ADO reset voter identities in thread {}", event.id),
+            error,
+        )
+    })?;
+    if !u64::try_from(examples.len()).is_ok_and(|len| len <= count) {
+        return Err(fail(
+            "service",
+            format!(
+                "ADO reset examples exceed voter count in thread {}",
+                event.id
+            ),
+        ));
+    }
+    let mut identities = HashSet::new();
+    for example in examples {
+        let id = text(field(
+            field(field(event.value, "identities")?, &example)?,
+            "id",
+        )?)?;
+        if !identities.insert(id) {
+            return Err(fail(
+                "service",
+                format!("Duplicate ADO reset voter in thread {}", event.id),
+            ));
+        }
+    }
+    // Examples need not enumerate every affected voter. Absence is not a reset;
+    // an unexplained current-vote mismatch still fails in decide_history.
+    Ok(identities.contains(account))
 }
 
 /// Resolves single-reviewer transitions without guessing bulk account attribution.
@@ -1905,6 +1999,241 @@ mod tests {
         decide(no_reset).unwrap_err();
     }
 
+    /// Mirrors the captured bulk reset with synthetic identities and a shifted date.
+    fn multiple_vote_reset() -> Value {
+        json!({
+            "id": 65139267, "publishedDate": "2026-01-01T20:09:15.390Z",
+            "properties": {
+                "CodeReviewThreadType": {"$type": "System.String", "$value": "ResetMultipleVotes"},
+                "CodeReviewResetMultipleVotesNumVoters": {"$type": "System.Int32", "$value": 3},
+                "CodeReviewResetMultipleVotesReason": {
+                    "$type": "System.String", "$value": "Pull request marked as draft"
+                },
+                "CodeReviewResetMultipleVotesExampleVoterIdentities": {
+                    "$type": "System.String", "$value": "[\"1\",\"2\",\"3\"]"
+                }
+            },
+            "identities": {
+                "1": {"id": "other-reviewer-1"}, "2": {"id": "other-reviewer-2"},
+                "3": {"id": "other-reviewer-3"}
+            },
+            "comments": [{
+                "id": 1, "commentType": "system",
+                "content": "Votes of Fixture reviewer and 2 other users were reset: Pull request marked as draft"
+            }]
+        })
+    }
+
+    #[test]
+    fn multiple_vote_reset_of_other_reviewers_never_establishes_approval() {
+        let mut value = evidence(&fixture()["stages"][0]);
+        value["reviewers"] = json!([
+            {"id": "other-reviewer-1", "vote": 0},
+            {"id": "other-reviewer-2", "vote": 0},
+            {"id": "other-reviewer-3", "vote": 0}
+        ]);
+        let mut reset = multiple_vote_reset();
+        reset["publishedDate"] = json!("2026-11-09T20:09:15.390Z");
+        value["threads"] = json!([reset]);
+        let captured: Evidence = serde_json::from_value(value.clone()).unwrap();
+        let compact = super::compact(&captured).unwrap();
+        let fixture = fixture();
+        let account = fixture["accountId"].as_str().unwrap();
+        let now = timestamp("2026-11-10T00:00:00Z").unwrap();
+        for observed in [&captured, &compact] {
+            assert_eq!(
+                observed
+                    .decide(
+                        account,
+                        value["pullRequest"]["repository"]["id"].as_str().unwrap(),
+                        1,
+                        now
+                    )
+                    .unwrap(),
+                Decision::NoPriorApproval
+            );
+            assert!(
+                observed
+                    .approval_events(account, "", 1, now)
+                    .unwrap()
+                    .is_empty()
+            );
+        }
+        let projected = serde_json::to_value(compact).unwrap();
+        assert_eq!(
+            projected["threads"][0]["properties"],
+            value["threads"][0]["properties"]
+        );
+        assert_eq!(
+            projected["threads"][0]["identities"],
+            value["threads"][0]["identities"]
+        );
+    }
+
+    #[test]
+    fn multiple_vote_reset_withdraws_only_the_named_accounts_authority() {
+        let fixture = fixture();
+        for named in [false, true] {
+            let mut value = evidence(&fixture["stages"][2]);
+            reviewer_policy(&mut value, json!({"requireVoteOnLastIteration": true}));
+            let expected = decide(value.clone()).unwrap();
+            let original_threads = value["threads"].clone();
+            let mut reset = multiple_vote_reset();
+            if named {
+                reset["identities"]["1"]["id"] = fixture["accountId"].clone();
+                value["reviewers"][0]["vote"] = json!(0);
+            }
+            value["threads"].as_array_mut().unwrap().push(reset);
+            let expected = if named {
+                Decision::Ineligible {
+                    reason: "approvalWithdrawn".to_owned(),
+                }
+            } else {
+                expected
+            };
+            let captured: Evidence = serde_json::from_value(value.clone()).unwrap();
+            let compact = super::compact(&captured).unwrap();
+            assert_eq!(
+                decide(serde_json::to_value(&compact).unwrap()).unwrap(),
+                expected
+            );
+            // Compaction keeps unrelated authority, and chronology ignores list ordering.
+            let projected = serde_json::to_value(compact).unwrap();
+            assert_eq!(
+                projected["threads"][1]["properties"],
+                original_threads[1]["properties"]
+            );
+            value["threads"].as_array_mut().unwrap().reverse();
+            assert_eq!(decide(value).unwrap(), expected);
+            assert_eq!(
+                captured
+                    .reset_superseded(
+                        fixture["accountId"].as_str().unwrap(),
+                        if named { 0 } else { 10 },
+                        timestamp("2026-01-02T00:00:00Z").unwrap()
+                    )
+                    .unwrap(),
+                named
+            );
+        }
+    }
+
+    #[test]
+    fn multiple_vote_reset_replays_later_votes_and_preserves_participation_vetoes() {
+        let fixture = fixture();
+        let mut baseline = evidence(&fixture["stages"][2]);
+        let mut reset = multiple_vote_reset();
+        reset["identities"]["1"]["id"] = fixture["accountId"].clone();
+        baseline["threads"].as_array_mut().unwrap().push(reset);
+        for (vote, expected) in [
+            (
+                0,
+                Decision::Ineligible {
+                    reason: "approvalWithdrawn".to_owned(),
+                },
+            ),
+            (
+                -10,
+                Decision::Ineligible {
+                    reason: "negativeDecision".to_owned(),
+                },
+            ),
+            (
+                10,
+                Decision::AlreadyValid {
+                    approval_event_id: "later-vote".to_owned(),
+                },
+            ),
+        ] {
+            let mut value = baseline.clone();
+            let mut event = value["threads"][1].clone();
+            event["id"] = json!("later-vote");
+            event["publishedDate"] = json!("2026-01-01T22:00:00Z");
+            event["properties"]["CodeReviewVoteResult"]["$value"] = json!(vote.to_string());
+            value["threads"].as_array_mut().unwrap().push(event);
+            value["reviewers"][0]["vote"] = json!(vote);
+            assert_eq!(decide(value).unwrap(), expected);
+        }
+        let mut value = baseline.clone();
+        let mut decline = decline_event();
+        decline["publishedDate"] = json!("2026-01-01T19:00:00Z");
+        value["threads"].as_array_mut().unwrap().push(decline);
+        value["reviewers"][0]["vote"] = json!(0);
+        assert_eq!(
+            decide(value).unwrap(),
+            Decision::Ineligible {
+                reason: "pendingHumanReview".to_owned()
+            }
+        );
+        // A bulk reset cannot erase a contradictory current negative decision.
+        baseline["reviewers"][0]["vote"] = json!(-10);
+        assert_eq!(
+            decide(baseline).unwrap(),
+            Decision::Ineligible {
+                reason: "negativeDecision".to_owned()
+            }
+        );
+    }
+
+    #[test]
+    fn multiple_vote_reset_requires_structured_attribution_not_prose_or_examples_absence() {
+        let original = multiple_vote_reset();
+        for (path, replacement) in [
+            (
+                "/properties/CodeReviewResetMultipleVotesNumVoters/$value",
+                json!(0),
+            ),
+            (
+                "/properties/CodeReviewResetMultipleVotesNumVoters/$value",
+                json!(2),
+            ),
+            (
+                "/properties/CodeReviewResetMultipleVotesReason/$value",
+                Value::Null,
+            ),
+            (
+                "/properties/CodeReviewResetMultipleVotesExampleVoterIdentities/$type",
+                json!("System.String[]"),
+            ),
+            (
+                "/properties/CodeReviewResetMultipleVotesExampleVoterIdentities/$value",
+                json!(["1", "2", "3"]),
+            ),
+            (
+                "/properties/CodeReviewResetMultipleVotesExampleVoterIdentities/$value",
+                json!("not json"),
+            ),
+            (
+                "/properties/CodeReviewResetMultipleVotesExampleVoterIdentities/$value",
+                json!("[1,2,3]"),
+            ),
+            (
+                "/properties/CodeReviewResetMultipleVotesExampleVoterIdentities/$value",
+                json!("[\"1\",\"1\"]"),
+            ),
+            ("/identities/1/id", Value::Null),
+        ] {
+            let mut reset = original.clone();
+            *reset.pointer_mut(path).unwrap() = replacement;
+            let mut value = evidence(&fixture()["stages"][0]);
+            value["threads"] = json!([reset]);
+            decide(value).unwrap_err();
+        }
+        let mut value = evidence(&fixture()["stages"][2]);
+        let mut reset = original;
+        reset["properties"]["CodeReviewResetMultipleVotesNumVoters"]["$value"] = json!(4);
+        reset["comments"][0]["content"] = json!("The authenticated account approved this PR");
+        value["threads"].as_array_mut().unwrap().push(reset);
+        assert_eq!(decide(value.clone()).unwrap().status(), "alreadyValid");
+        value["reviewers"][0]["vote"] = json!(0);
+        assert!(
+            decide(value)
+                .unwrap_err()
+                .to_string()
+                .contains("missing authoritative vote-reset evidence")
+        );
+    }
+
     #[test]
     fn policy_evidence_gaps_name_the_missing_configuration_or_setting() {
         let mut value = evidence(&fixture()["stages"][2]);
@@ -2312,6 +2641,207 @@ mod tests {
             serde_json::from_str(include_str!("../tests/fixtures/ado-reviewer-decline.json"))
                 .unwrap();
         fixture["thread"].clone()
+    }
+
+    /// Preserves the captured add/requiredness sequence on the fixture's synthetic clock.
+    fn requiredness_events() -> [Value; 2] {
+        let mut added = fixture()["stages"][1]["threads"][0].clone();
+        added["id"] = json!(90);
+        added["publishedDate"] = json!("2026-01-01T00:26:47.680Z");
+        let mut changed = added.clone();
+        changed["id"] = json!(91);
+        changed["publishedDate"] = json!("2026-01-01T00:26:47.820Z");
+        let properties = changed["properties"].as_object_mut().unwrap();
+        properties.remove("CodeReviewReviewersUpdatedAddedIdentity");
+        properties["CodeReviewReviewersUpdatedNumAdded"]["$value"] = json!(0);
+        properties["CodeReviewReviewersUpdatedNumChanged"]["$value"] = json!(1);
+        properties.insert(
+            "CodeReviewReviewersUpdatedChangedIdentity".to_owned(),
+            json!({"$type": "System.String", "$value": "1"}),
+        );
+        properties.insert(
+            "CodeReviewReviewersUpdatedChangedToRequired".to_owned(),
+            json!({"$type": "System.String", "$value": "True"}),
+        );
+        [added, changed]
+    }
+
+    #[test]
+    fn requiredness_metadata_preserves_add_history_without_granting_approval() {
+        let mut value = evidence(&fixture()["stages"][0]);
+        value["threads"] = json!(requiredness_events());
+        assert_eq!(decide(value.clone()).unwrap(), Decision::NoPriorApproval);
+        let captured: Evidence = serde_json::from_value(value.clone()).unwrap();
+        let compact = super::compact(&captured).unwrap();
+        let retained = serde_json::to_value(&compact).unwrap();
+        assert_eq!(retained["threads"].as_array().unwrap().len(), 2);
+        for (retained, original) in retained["threads"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .zip(value["threads"].as_array().unwrap())
+        {
+            for key in ["id", "publishedDate", "properties", "identities"] {
+                assert_eq!(retained[key], original[key], "{key}");
+            }
+        }
+        assert_eq!(
+            decide(serde_json::to_value(&compact).unwrap()).unwrap(),
+            Decision::NoPriorApproval
+        );
+        let mut changed = value.clone();
+        changed["threads"][1]["properties"]["CodeReviewReviewersUpdatedChangedToRequired"]["$value"] =
+            json!("False");
+        let changed: Evidence = serde_json::from_value(changed).unwrap();
+        assert!(!super::equivalent(&captured, &changed).unwrap());
+        assert!(
+            captured
+                .approval_events(
+                    fixture()["accountId"].as_str().unwrap(),
+                    "",
+                    1,
+                    timestamp("2026-01-02T00:00:00Z").unwrap(),
+                )
+                .unwrap()
+                .is_empty()
+        );
+        // Re-adding a reviewer still clears prior authority; metadata cannot hide the add.
+        let mut earlier = fixture()["stages"][1]["threads"][1].clone();
+        earlier["publishedDate"] = json!("2026-01-01T00:25:00Z");
+        value["threads"].as_array_mut().unwrap().push(earlier);
+        assert_eq!(decide(value).unwrap(), Decision::NoPriorApproval);
+    }
+
+    #[test]
+    fn requiredness_metadata_preserves_vote_authority_and_its_source_anchor() {
+        for required in ["True", "False"] {
+            for after_vote in [false, true] {
+                let mut value = evidence(&fixture()["stages"][2]);
+                let [added, mut changed] = requiredness_events();
+                if after_vote {
+                    changed["publishedDate"] = json!("2026-01-01T00:28:00Z");
+                }
+                changed["properties"]["CodeReviewReviewersUpdatedChangedToRequired"]["$value"] =
+                    json!(required);
+                value["threads"][0] = added;
+                value["threads"].as_array_mut().unwrap().push(changed);
+                value["reviewers"][0]["votedFor"] = json!([{"id": "group", "vote": 10}]);
+                assert_eq!(
+                    decide(value.clone()).unwrap(),
+                    Decision::AlreadyValid {
+                        approval_event_id: "2".to_owned()
+                    }
+                );
+                reviewer_policy(&mut value, json!({"requireVoteOnEachIteration": true}));
+                let expected = Decision::AssessmentRequired {
+                    anchor: Anchor {
+                        review_id: "2".to_owned(),
+                        source_commit: value["iterations"][0]["sourceRefCommit"]["commitId"]
+                            .as_str()
+                            .unwrap()
+                            .to_owned(),
+                    },
+                    approval_event_id: "2".to_owned(),
+                };
+                let captured: Evidence = serde_json::from_value(value.clone()).unwrap();
+                assert_eq!(decide(value).unwrap(), expected);
+                assert_eq!(
+                    decide(serde_json::to_value(super::compact(&captured).unwrap()).unwrap())
+                        .unwrap(),
+                    expected
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn requiredness_metadata_leaves_current_and_later_votes_authoritative() {
+        for current in [0, -5, -10, 5, 10] {
+            let mut value = evidence(&fixture()["stages"][1]);
+            value["threads"][0] = json!(requiredness_events()[0]);
+            value["threads"]
+                .as_array_mut()
+                .unwrap()
+                .push(requiredness_events()[1].clone());
+            value["reviewers"][0]["vote"] = json!(current);
+            let mut later = value["threads"][1].clone();
+            later["id"] = json!(92);
+            later["publishedDate"] = json!("2026-01-01T00:29:00Z");
+            later["properties"]["CodeReviewVoteResult"]["$value"] = json!(current.to_string());
+            value["threads"].as_array_mut().unwrap().push(later);
+            let expected = match current {
+                0 => Decision::Ineligible {
+                    reason: "approvalWithdrawn".to_owned(),
+                },
+                -5 | -10 => Decision::Ineligible {
+                    reason: "negativeDecision".to_owned(),
+                },
+                _ => Decision::AlreadyValid {
+                    approval_event_id: "92".to_owned(),
+                },
+            };
+            assert_eq!(decide(value.clone()).unwrap(), expected);
+            value["threads"].as_array_mut().unwrap().pop();
+            if current < 0 {
+                assert_eq!(decide(value).unwrap(), expected);
+            } else if current == 0 {
+                assert!(
+                    decide(value)
+                        .unwrap_err()
+                        .to_string()
+                        .contains("does not match history")
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn malformed_requiredness_metadata_remains_an_explicit_failure() {
+        for (path, replacement) in [
+            (
+                "/properties/CodeReviewReviewersUpdatedNumChanged/$type",
+                json!("System.String"),
+            ),
+            (
+                "/properties/CodeReviewReviewersUpdatedNumChanged/$value",
+                json!("1"),
+            ),
+            (
+                "/properties/CodeReviewReviewersUpdatedNumChanged/$value",
+                json!(-1),
+            ),
+            (
+                "/properties/CodeReviewReviewersUpdatedNumChanged/$value",
+                json!(2),
+            ),
+            (
+                "/properties/CodeReviewReviewersUpdatedChangedIdentity/$value",
+                json!("missing"),
+            ),
+            (
+                "/properties/CodeReviewReviewersUpdatedChangedToRequired/$type",
+                json!("System.Boolean"),
+            ),
+            (
+                "/properties/CodeReviewReviewersUpdatedChangedToRequired/$value",
+                json!(true),
+            ),
+            (
+                "/properties/CodeReviewReviewersUpdatedChangedToRequired/$value",
+                json!("unknown"),
+            ),
+            (
+                "/properties/CodeReviewReviewersUpdatedChangedToRequired",
+                Value::Null,
+            ),
+            ("/identities/1/id", Value::Null),
+        ] {
+            let mut value = evidence(&fixture()["stages"][0]);
+            let [added, mut changed] = requiredness_events();
+            *changed.pointer_mut(path).unwrap() = replacement;
+            value["threads"] = json!([added, changed]);
+            decide(value).expect_err(path);
+        }
     }
 
     #[test]

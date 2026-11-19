@@ -339,6 +339,13 @@ draft activity does not change approval authority.
 System notifications with null or omitted property bags do not supply vote,
 reset, or reviewer authority. Inspection does not interpret their prose.
 
+Reviewer-requiredness events use the typed `CodeReviewReviewersUpdatedNumChanged`
+count, `CodeReviewReviewersUpdatedChangedIdentity` identity mapping, and
+`CodeReviewReviewersUpdatedChangedToRequired` string state (`True` or `False`).
+Inspection retains and validates this metadata without treating it as a vote,
+withdrawal, decline, removal, or group contribution. Reviewer-add events retain
+their participation semantics, and existing and later votes retain their authority.
+
 Reviewer-decline events use the typed `CodeReviewReviewersUpdatedNumDeclined`
 count, `CodeReviewReviewersUpdatedChangedIdentity` identity mapping, and
 `CodeReviewReviewersUpdatedChangedDecline` string state. Inspection retains
@@ -392,6 +399,14 @@ authoritative reset-cause evidence. Current `resetOnSourcePush` and
 `resetRejectionsOnSourcePush` settings alone do not establish historical
 causality; missing evidence is an actionable failure. Neither generated English
 nor `isReapprove` proves automatic invalidation.
+
+`ResetMultipleVotes` events record neutral vote resets for the identities named
+in their structured example list. A named account's reset reports `ineligible`
+with reason `approvalWithdrawn`, just like an ordinary zero-vote event; it does
+not authorize renewal, including when the reason is draft conversion. The
+example list may omit affected voters, so inspection does not infer a reset
+for an unlisted account. Other accounts' history remains unchanged, and an
+unexplained current-vote mismatch remains an explicit failure.
 
 ### ADO publication
 
