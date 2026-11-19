@@ -314,10 +314,11 @@ thread; existing PR-reader permissions govern its download. The reader extracts
 the HTML and opens it in a browser. ZIP is the container because the ADO PR
 attachment API accepts ZIP but not raw HTML files.
 
-On both platforms, the comment defaults to only `Pull request overview (auto-generated).`,
-with the entire sentence linked to the generated overview. Callers may supply an
-attribution prefix, which appears verbatim before a blank line and the linked sentence.
-An omitted or empty prefix leaves the default comment unchanged. Commit identifiers and
+On both platforms, the comment contains `Pull request overview (auto-generated).`,
+with the entire sentence linked to the generated overview, followed by the
+pull-request reply-routing notice. Callers may supply an attribution prefix,
+which appears verbatim before a blank line and the linked sentence. An omitted
+or empty prefix leaves that attribution absent. Commit identifiers and
 review-state disclaimers belong in the report, not the comment.
 
 Publishing the overview is best-effort. Failures are reported to the user with
@@ -670,6 +671,12 @@ Publication is mechanical rather than interpretive. It renders each approved
 finding in full, places it using validated destination metadata, and reads back
 what the service can attest. A summary reports the review outcome and execution
 diagnostics without restating the findings.
+
+Every pull request comment, including initial-overview links, finding comments,
+follow-up replies, and the final summary, ends with
+`ℹ️ Replies are not monitored. To discuss the finding, reach out via Teams.`
+This line tells readers to use the direct support channels instead of opening a
+discussion that the reviewer will not monitor.
 
 Remote writes are not assumed to be transactional. An ambiguous or partial run
 requires reconciliation instead of an automatic retry, because duplicate

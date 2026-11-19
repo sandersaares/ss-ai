@@ -18,9 +18,9 @@ The command consumes the full initial capture programmatically. Any agent lookup
 
 Run this once immediately after initial overview generation and validation, before review workers.
 It freezes the overview and inspected commits, creates an unlisted Markdown Gist on GitHub or an
-ZIP attachment containing one self-contained `report.html` on ADO, verifies it, and posts a separate top-level linking comment. The ADO
-thread is created resolved. The comment contains the supplied prefix verbatim, a blank line,
-and a link to the overview; without a prefix it contains only the link. It does not submit a review or cast a vote.
+ZIP attachment containing one self-contained `report.html` on ADO, verifies it, and posts a separate top-level linking comment. The ADO thread is created resolved. The comment contains the supplied prefix
+verbatim, a blank line, a link to the overview, and the reply-routing notice. It
+does not submit a review or cast a vote.
 
 The JSON result records `status`, `stage`, `error`, `missingTools`, `snapshot`, `artifact`,
 `comment`, `operations`, and an absolute `resultPath`. `succeeded` means both the artifact and

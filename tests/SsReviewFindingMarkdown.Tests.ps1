@@ -234,6 +234,8 @@ Describe 'Finding rendering' {
             ''
             '- `src/retry.rs:40-44`'
             '- `src/legacy.rs`'
+            ''
+            'ℹ️ Replies are not monitored. To discuss the finding, reach out via Teams.'
         ) -join "`n"
 
         $text | Should -BeExactly $expected
@@ -1335,9 +1337,9 @@ Describe 'Approved set delivery' {
         $combined | Should -Not -BeLike '*# Rejected finding*'
     }
 
-    # The per-finding files and the combined document are two renderings of one review, so a reader
-    # of either meets the same findings saying the same thing, presented in the same order.
-    It 'repeats each approved body verbatim in presentation order' {
+    # Per-finding files represent PR comments and include the reply-routing notice, while the
+    # combined local document intentionally omits that publication-only wrapper.
+    It 'repeats each approved substantive body in presentation order' {
         Invoke-MarkdownCommand -ArgumentList @(
             '--path', $script:ApprovedPath
             '--output-directory', $script:MarkdownRoot
@@ -1349,6 +1351,7 @@ Describe 'Approved set delivery' {
         foreach ($findingId in @('F2', 'F1')) {
             $body = [System.IO.File]::ReadAllText((Join-Path $script:MarkdownRoot "$findingId.md"))
             $body = $body.Substring($body.IndexOf('# '))
+            $body = $body.Substring(0, $body.Length - ("`n`nℹ️ Replies are not monitored. To discuss the finding, reach out via Teams.").Length)
 
             $index = $combined.IndexOf($body)
             $index | Should -BeGreaterThan $lastIndex -Because $findingId

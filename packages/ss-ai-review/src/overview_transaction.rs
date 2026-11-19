@@ -16,6 +16,10 @@ use ss_ai_runtime::FileTransaction;
 use crate::Clock;
 use crate::overview_snapshot::PreparedSnapshot;
 
+/// Tells pull request participants where not to direct a reply.
+const PR_COMMENT_SUFFIX: &str =
+    "ℹ️ Replies are not monitored. To discuss the finding, reach out via Teams.";
+
 /// Provider and local preparation operations supplied by the composition root.
 ///
 /// Freeze returns a provider-ready snapshot type, including ADO HTML and archive
@@ -322,6 +326,7 @@ fn execute(
     } else {
         format!("{prefix}\n\n{link}")
     };
+    let body = format!("{body}\n\n{PR_COMMENT_SUFFIX}");
     result["stage"] = json!("comment");
     let payload = json!({ "body": body });
     let comment = write_effect(journal, result, "comment", |_| {
@@ -662,7 +667,7 @@ mod tests {
         assert_eq!(
             effects.body.as_deref(),
             Some(
-                "prefix\nexact\n\n[Pull request overview (auto-generated).](https://example.test/report)"
+                "prefix\nexact\n\n[Pull request overview (auto-generated).](https://example.test/report)\n\nℹ️ Replies are not monitored. To discuss the finding, reach out via Teams."
             )
         );
         assert_eq!(journal.writes[0]["operations"][0]["status"], "pending");
