@@ -1,10 +1,10 @@
 # Self-review delivery
 
-Use this procedure only after self-review completes phase 6. It delivers analysis to the local caller, not an approved review for publication.
+Use this procedure only after self-review completes phase 5. It delivers analysis to the local caller, not an approved review for publication.
 
 # Stage 1: verify classification
 
-Use the phase 6 result from `pwsh-calls/get-next-auto-approval-finding.md` and require `isComplete: true`. Retain `auditFindingIds` as the findings whose audit is skipped. Resume incomplete classification through phase 6; never infer that a missing decision means approval.
+Use the phase 5 result from `pwsh-calls/get-next-auto-approval-finding.md` and require `isComplete: true`. Retain `auditFindingIds` as the findings whose audit is skipped. Resume incomplete classification through phase 5; never infer that a missing decision means approval.
 
 Keep those findings and their `needs-audit` records unchanged. Do not build an approved set: it intentionally cannot include undecided findings, whereas this delivery must include them.
 
@@ -22,4 +22,4 @@ Deliver those paths directly in the current session, grouped as **Policy-approve
 
 Report the absolute `combinedPath` as the complete Markdown report, explicitly noting that it also contains any unaudited findings. Include the local content-overview path. When there are no findings, deliver the empty combined report and explicitly state that the review found none; when all findings require audit, state that none were policy-approved rather than calling the review clean.
 
-Include concise diagnostics: self-review mode, reviewed scope, policy-approved count, skipped-audit count, and that no audit or remote writes occurred. Use `SESSION_STATE` for the absolute directory containing this review's artifacts. Report cache Hit/Miss next to `userInstructionFileCount` from `{{SESSION_STATE}}/focus-area-cache-diagnostics.json`, including zero when no user-scoped instruction files were discovered. Retain applicable phase 5 freshness diagnostics. Finish here without merge approval, publication, or learning.
+Include concise diagnostics: self-review mode, reviewed scope, policy-approved count, skipped-audit count, and that no audit or remote writes occurred. Use `SESSION_STATE` for the absolute directory containing this review's artifacts. Report cache Hit/Miss next to `userInstructionFileCount` from `{{SESSION_STATE}}/focus-area-cache-diagnostics.json`, including zero when no user-scoped instruction files were discovered. Retain applicable phase 4 freshness diagnostics. Finish here without merge approval, publication, or learning.
