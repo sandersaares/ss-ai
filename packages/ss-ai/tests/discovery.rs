@@ -75,7 +75,7 @@ impl Process for GitHub {
             ("GET", "repos/example/widgets") => json!({"id": 123}),
             (
                 "GET",
-                "search/issues?q=repo%3Aexample%2Fwidgets%20is%3Apr%20is%3Aopen%20reviewed-by%3Areviewer&per_page=100",
+                "search/issues?q=repo%3Aexample%2Fwidgets%20is%3Apr%20is%3Aopen%20reviewed-by%3Areviewer%20-author%3Areviewer&per_page=100",
             ) => {
                 if self.empty {
                     json!([{"total_count": 0, "incomplete_results": false, "items": []}])
@@ -813,8 +813,9 @@ impl Http for AzureMetadata {
         } else if url.path().ends_with("/pullRequests") {
             let entries = if query.get("$skip").unwrap() == "0" {
                 vec![
-                    json!({"pullRequestId": 2, "status": "active", "isDraft": false, "title": "cutoff"}),
+                    json!({"pullRequestId": 2, "status": "active", "isDraft": false, "title": "cutoff", "createdBy": {"id": "author"}}),
                     json!({"pullRequestId": 3, "isDraft": true}),
+                    json!({"pullRequestId": 4, "status": "active", "isDraft": false, "title": "self-authored", "createdBy": {"id": "account"}}),
                 ]
             } else {
                 Vec::new()
@@ -862,7 +863,7 @@ fn azure_metadata_and_commit_pages_preserve_tenant_and_do_not_collect_vote_histo
             .iter()
             .any(|call| call.contains("continuationToken=next"))
     );
-    assert!(calls.iter().any(|call| call.contains("%24skip=2")));
+    assert!(calls.iter().any(|call| call.contains("%24skip=3")));
     assert_eq!(summary["counts"]["open"], 1);
     assert!(summary["counts"].get("draft").is_none());
     assert_eq!(
@@ -870,6 +871,7 @@ fn azure_metadata_and_commit_pages_preserve_tenant_and_do_not_collect_vote_histo
         1
     );
     assert!(!calls.iter().any(|call| call.contains("/pullRequests/3/")));
+    assert!(!calls.iter().any(|call| call.contains("/pullRequests/4/")));
 }
 
 /// Real captured provider shapes with injected transport, never live approvals.
@@ -954,8 +956,8 @@ impl Http for AzureApproval {
         } else if url.path().ends_with("/pullRequests") {
             if query.get("$skip").unwrap() == "0" {
                 values(&json!([
-                    {"pullRequestId": 1, "status": "active", "isDraft": false, "title": "recent"},
-                    {"pullRequestId": 2, "status": "active", "isDraft": false, "title": "excluded old"}
+                    {"pullRequestId": 1, "status": "active", "isDraft": false, "title": "recent", "createdBy": {"id": "author"}},
+                    {"pullRequestId": 2, "status": "active", "isDraft": false, "title": "excluded old", "createdBy": {"id": "author"}}
                 ]))
             } else {
                 values(&json!([]))
@@ -1838,7 +1840,7 @@ impl Process for GitHubApproval {
                 json!({"id": id, "login": "reviewer", "type": "User"})
             }
             "repos/example/widgets" => json!({"id": 123}),
-            "search/issues?q=repo%3Aexample%2Fwidgets%20is%3Apr%20is%3Aopen%20reviewed-by%3Areviewer&per_page=100" =>
+            "search/issues?q=repo%3Aexample%2Fwidgets%20is%3Apr%20is%3Aopen%20reviewed-by%3Areviewer%20-author%3Areviewer&per_page=100" =>
             {
                 json!([{
                     "total_count": 2,

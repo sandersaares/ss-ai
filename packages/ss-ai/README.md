@@ -445,11 +445,11 @@ describes the assignment and page records.
 
 Discovery collects metadata and complete commit timestamps for open PRs reviewed
 by the authenticated account before any approval history, discussion, or Git
-content. It shares the proactor's inclusive 14-day cutoff and latest non-future
-UTC committer timestamp. PRs without account-owned review history do not enter
-the inventory; reviewed PRs without an approval remain eligible for inspection.
-Missing or malformed commit evidence is an error; future-only commits produce
-`noRecentCommit`.
+content. It excludes self-authored PRs and shares the proactor's inclusive
+14-day cutoff and latest non-future UTC committer timestamp. PRs without
+account-owned review history do not enter the inventory; reviewed PRs without an
+approval remain eligible for inspection. Missing or malformed commit evidence is
+an error; future-only commits produce `noRecentCommit`.
 
 ```powershell
 ss-ai autoreapprove discover --repository-url "{{REPOSITORY_URL}}" `

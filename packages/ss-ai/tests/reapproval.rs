@@ -661,7 +661,7 @@ impl Process for Provider {
                 json!({"id": if self.fault.get() == "auth" { 99 } else { 42 }, "login": "reviewer", "type": "User"})
             }
             "repos/example/widgets" => json!({"id": 123}),
-            "search/issues?q=repo%3Aexample%2Fwidgets%20is%3Apr%20is%3Aopen%20reviewed-by%3Areviewer&per_page=100" =>
+            "search/issues?q=repo%3Aexample%2Fwidgets%20is%3Apr%20is%3Aopen%20reviewed-by%3Areviewer%20-author%3Areviewer&per_page=100" =>
             {
                 let mut candidates = self.candidates.iter().map(|number| json!({
                     "number": number, "state": "open", "draft": false, "title": "Recent source"
@@ -920,8 +920,8 @@ impl Http for Provider {
         } else if path.ends_with("/pullRequests") {
             if query.get("$skip").unwrap() == "0" {
                 values(
-                    &json!([{"pullRequestId": 1, "status": "active", "isDraft": false, "title": "Recent"},
-                    {"pullRequestId": 2, "status": "active", "isDraft": false, "title": "Old"}]),
+                    &json!([{"pullRequestId": 1, "status": "active", "isDraft": false, "title": "Recent", "createdBy": {"id": "author"}},
+                    {"pullRequestId": 2, "status": "active", "isDraft": false, "title": "Old", "createdBy": {"id": "author"}}]),
                 )
             } else {
                 values(&json!([]))

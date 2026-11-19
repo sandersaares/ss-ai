@@ -390,8 +390,8 @@ impl Api<'_> {
                     .as_deref()
                     .ok_or_else(|| fail("authentication", "GitHub account has no login"))?;
                 let query = format!(
-                    "repo:{}/{} is:pr is:open reviewed-by:{}",
-                    repository.organization, repository.repository, login
+                    "repo:{}/{} is:pr is:open reviewed-by:{} -author:{}",
+                    repository.organization, repository.repository, login, login
                 );
                 for pr in self
                     .transport
@@ -441,6 +441,11 @@ impl Api<'_> {
                         .ok_or_else(|| fail("service", "Reviewed PR offset overflow"))?;
                     for pr in values {
                         let id = pr_id(field(&pr, "pullRequestId")?)?;
+                        if !boolean(field(&pr, "isDraft")?)?
+                            && identifier(field(field(&pr, "createdBy")?, "id")?)? == account_id
+                        {
+                            continue;
+                        }
                         if !seen.insert(id) {
                             return Err(fail(
                                 "service",
