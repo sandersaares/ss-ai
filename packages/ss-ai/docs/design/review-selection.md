@@ -13,8 +13,9 @@ inputs and journal records are defined in the [package reference](../../README.m
 
 Selection considers all open pull requests in the supplied repository. A
 candidate must not be a draft, self-authored, or already assigned to the
-authenticated user. GitHub assignment includes requested users and submitted
-review authors, but not team membership or pending reviews.
+authenticated user. GitHub assignment includes requested users and authors of
+active submitted reviews, but not team membership, pending reviews, or
+dismissed reviews.
 Azure DevOps entries with `hasDeclined: true` do not count as assignments.
 Entries with a false or absent flag still count, regardless of vote.
 

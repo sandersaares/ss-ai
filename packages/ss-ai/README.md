@@ -62,8 +62,10 @@ missing project/repository from collection and pull request identifier.
 Read selection results' `status`, `target`, and `diagnostics`. `claimed`
 requires checkout preparation, then confirmation. A replacement `claimed`
 requires its own preparation. `confirmed` proceeds directly to `ss-review`.
-`noCandidate` finishes without review. Errors require the calling skill's
-human-input procedure; do not automatically repeat a possibly successful write.
+`noCandidate` means this single-repository selection operation has no candidate;
+an orchestrating skill can run a fresh operation for another repository.
+Errors require the calling skill's human-input procedure; do not automatically
+repeat a possibly successful write.
 
 Registration returns `platform`, `pullRequestUrl`, `status`, and `identity`.
 Status is `added`, `alreadyRegistered`, or `selfIsAuthor` (GitHub only).
@@ -473,6 +475,9 @@ without refreshing completed recency checks or the enumerated inventory.
 Use a new run path for a fresh scan. A discovery candidate still requires
 approval assessment and freshness checks; discovery is not authorization to
 publish.
+The native run is repository-scoped. A multi-repository skill invocation creates
+a separate fresh run path for each repository and processes those runs
+sequentially.
 
 For a direct assessment, `assessmentProgress` reports judged changed paths
 and completed required documents and requested context ranges. A required
@@ -842,20 +847,23 @@ needs-review comment with a Markdown heading and a list explaining only why
 the existing approval cannot be renewed. It omits PR summaries, unrelated
 discussion, coverage caveats, and workflow diagnostics.
 It then dismisses the account's captured GitHub approving reviews or resets
-its positive ADO vote to zero. Already-cleared approvals require no write.
-It preserves other accounts' decisions, independent later approvals, and
-nonpositive votes. It never submits a negative review or modifies existing
-discussion. GitHub requires review-dismissal permission. Reset failures remain
-explicit even if the comment exists. ADO has no atomic prior-vote condition;
-a human vote can race with the request.
+captured positive ADO participation by removing that reviewer assignment.
+This restores normal proactor eligibility when no other assignment remains.
+Already-cleared approvals require no write. It preserves other accounts'
+decisions, independent later approvals, and nonpositive votes. It never submits
+a negative review or modifies existing discussion. GitHub requires
+review-dismissal permission. Reset failures remain explicit even if the comment
+exists. ADO has no atomic prior-state condition; a human reviewer change can
+race with the request.
 An account-owned `<!-- ss-autoreapprove-needs-review {JSON} -->` marker keeps
 future inspections at `needsReview` without preparing or assessing source.
 Only a strictly later approval by the authenticated account expires older
 markers. Another account's approval does not.
 Dry runs never post notices or change approvals.
 
-Final skill output lists every in-range candidate as a linked PR number and
-title with its decision. `reviewNotice` distinguishes retained refusals.
+Final skill output lists every in-range candidate with its repository, linked
+PR number and title, and decision. `reviewNotice` distinguishes retained
+refusals.
 
 ### Assessment records
 

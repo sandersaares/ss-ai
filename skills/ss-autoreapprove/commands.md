@@ -9,10 +9,10 @@ command finish rather than starting a duplicate.
 
 | Placeholder | Value |
 | --- | --- |
-| `REPOSITORY` | Supported HTTPS repository browser URL resolved in skill stage 1 from the explicit repository or invocation checkout. Keep it fixed throughout the run. |
-| `RUN` | Absolute session-state path for this invocation's run JSON. |
+| `REPOSITORY` | Supported HTTPS repository browser URL for the active entry in skill stage 1's ordered repository list. Keep it fixed throughout that repository's run. |
+| `RUN` | Fresh absolute session-state path for the active repository's run JSON. Use a separate path for every repository. |
 | `POLICY` | Absolute path to this installed skill's `significance.md`. |
-| `TENANT` | User-selected Azure tenant; omit the argument when not supplied. |
+| `TENANT` | User-selected Azure tenant for the active repository; omit the argument when not supplied. |
 | `PR` | Positive PR identifier returned by discovery. |
 | `SNAPSHOT` | Exact `snapshotDigest` returned by inspection. |
 | `AFTER_PR` | `nextAfter` from the previous results page. |
@@ -38,6 +38,11 @@ do not alter the JSON content itself.
 
 # Stage 1: discovery and history
 
+The native commands accept one repository per run. Execute the recipes for the
+active repository, complete its final results, then repeat them with the next
+repository URL and a fresh run path. Do not pass a repository list to one native
+run.
+
 ```powershell
 ss-ai autoreapprove discover --repository-url "{{REPOSITORY}}" --state-path "{{RUN}}" --policy-path "{{POLICY}}" --tenant "{{TENANT}}" --dry-run
 ss-ai autoreapprove results --state-path "{{RUN}}" --after "{{AFTER_PR}}"
@@ -45,12 +50,13 @@ ss-ai autoreapprove inspect --repository-url "{{REPOSITORY}}" --state-path "{{RU
 ```
 
 Omit `--dry-run` only for an authorized publishing invocation. Omit `--tenant`
-when not supplied. The mode and policy are immutable for this run. Read
+when not supplied. The mode and policy are immutable for this repository's run. Read
 `items`, `counts`, `state`, `error`, and `nextAfter`; follow all results pages.
 Omit `--after` for the first page; later cursors are positive PR IDs.
 Inspect only recent nondraft entries requiring assessment. Retain each
-inspection's `snapshotDigest`. Scope failures stop the run; independent PR
-failures remain visible while other eligible PRs can proceed.
+inspection's `snapshotDigest`. Scope failures stop the active repository's
+run; independent PR failures remain visible while other eligible PRs in that
+repository can proceed.
 Inspection or refresh can return no item when a PR has become a draft; do not
 assess or report that PR.
 
@@ -312,9 +318,10 @@ draft; do not report or perform further work on that PR.
 source and decision evidence, posts an attributed standalone Markdown comment
 containing only reasons for withholding reapproval, and verifies its hidden
 marker. It then dismisses captured account-owned GitHub approvals or resets
-the account's positive ADO vote to zero. Already-cleared approvals need no write.
-It preserves independent later approvals and nonpositive votes; ADO has no
-atomic vote-change precondition. Reset permission errors and unknown effects
+captured positive ADO participation by removing that reviewer assignment.
+Already-cleared approvals need no write. It preserves independent later
+approvals and nonpositive votes; ADO has no atomic reviewer-change precondition.
+Reset permission errors and unknown effects
 remain explicit failures even when the comment exists.
 Repeating the original command with the same utility version and
 supported run schema reconciles the same intent without posting again.

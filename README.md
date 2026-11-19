@@ -12,8 +12,8 @@ general machine setup or user-facing Copilot preferences.
 | [`ss-cargo-deps-tidy`](skills/ss-cargo-deps-tidy/SKILL.md) | Tidies Rust dependency declarations across a Cargo workspace: unifies declaration style, centralises versions on the workspace level, disables default features, and verifies minimum-version compatibility for published libraries. |
 | [`ss-review`](skills/ss-review/SKILL.md) | Reviews requested content with evidence, bounded workers, and explicit human approval before publication. Explicit `self-review` mode delivers local Markdown findings non-interactively, including skipped audit findings, without remote writes. |
 | [`ss-review-deep`](skills/ss-review-deep/SKILL.md) | Explicitly requested deep review orchestration. |
-| [`ss-review-proactor`](skills/ss-review-proactor/SKILL.md) | Selects and claims a pull request before a review in the primary session; retains human decision gates. |
-| [`ss-autoreapprove`](skills/ss-autoreapprove/SKILL.md) | Renews invalidated approvals only under the installed significance policy; supports read-only dry runs. |
+| [`ss-review-proactor`](skills/ss-review-proactor/SKILL.md) | Selects and claims pull requests across an ordered repository list before reviewing them in the primary session; retains human decision gates. |
+| [`ss-autoreapprove`](skills/ss-autoreapprove/SKILL.md) | Renews invalidated approvals across an ordered repository list only under the installed significance policy; supports read-only dry runs. |
 
 Each skill lives under `skills/<name>/`, with `SKILL.md` as its entry point.
 Instructions come from independently configured directories rather than from
@@ -127,8 +127,10 @@ readiness, the review reports that limitation and uses Markdown as specified
 by its workflow.
 
 Configure schedules explicitly for `ss-review-proactor` or `ss-autoreapprove`;
-installation does not enable them. Proactor selects one review by default;
-explicit loop mode repeats completed reviews without bypassing human questions.
+installation does not enable them. Both accept one or more repositories and
+process them sequentially with separate state. Proactor continues in one
+repository until no candidate remains, then advances to the next repository;
+one-shot mode stops after one completed review without bypassing human questions.
 Autoreapproval preserves external approval and uses its installed significance
 policy and guarded writes. See each skill for supported providers and limitations.
 
