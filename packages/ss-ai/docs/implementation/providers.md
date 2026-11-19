@@ -88,6 +88,8 @@ Selection and confirmation exclude entries with `hasDeclined: true` from
 assignment evidence. A nonzero vote on an active assignment identifies a
 submitted review. Registration includes declined entries so it preserves their
 votes, decline flags, and other metadata.
+Azure DevOps selection reads every iteration page and uses the source commit
+from the highest iteration identifier, matching capture and publication.
 
 Discussion records preserve service creation timestamps and comment/thread
 identifiers. Selection hashes the authenticated reviewer's assignment and

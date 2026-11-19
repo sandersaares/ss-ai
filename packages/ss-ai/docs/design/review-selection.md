@@ -17,6 +17,11 @@ assigned to the authenticated user. The `assigned` mode reverses the assignment
 filter and additionally excludes a pull request where that user has submitted
 an active review.
 
+The selected source revision comes from the GitHub pull request head or the
+highest-numbered Azure DevOps iteration's `sourceRefCommit`. This matches the
+revision evidence used by capture and publication rather than Azure merge-state
+metadata.
+
 GitHub assignment includes requested users and authors of active submitted
 reviews, but not team membership, pending reviews, or dismissed reviews.
 Azure DevOps entries with `hasDeclined: true` do not count as assignments.

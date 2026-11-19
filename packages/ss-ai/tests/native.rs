@@ -1016,6 +1016,13 @@ impl Http for AdoFlow {
             }
             (
                 "GET",
+                "Project/_apis/git/repositories/Repo/pullRequests/10/iterations?api-version=7.1",
+            ) => json!({"count":2,"value":[
+                {"id":1,"sourceRefCommit":{"commitId":"source-older"}},
+                {"id":2,"sourceRefCommit":{"commitId":"source-10"}}
+            ]}),
+            (
+                "GET",
                 "Project/_apis/git/repositories/Repo/pullRequests/10/commits?%24top=100&api-version=7.1",
             ) => json!({"count":1,"value":[{"committer":{"date":"2026-09-27T00:00:00Z"}}]}),
             (

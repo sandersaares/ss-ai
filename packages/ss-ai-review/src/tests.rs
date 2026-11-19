@@ -1788,6 +1788,10 @@ fn ado_selection_excludes_only_declined_reviewer_assignments() {
         ];
         if declined == Some(true) {
             steps.push(Step::read(
+                &ado(&format!("{path}/iterations"), ""),
+                json!({"value":[{"id":2,"sourceRefCommit":{"commitId":"source-2"}},{"id":7,"sourceRefCommit":{"commitId":"source-7"}}]}),
+            ));
+            steps.push(Step::read(
                 &ado(&format!("{path}/commits"), "%24top=100&"),
                 json!({"value":[{"committer":{"date":"2026-09-27T00:00:00Z"}}]}),
             ));
@@ -1810,6 +1814,9 @@ fn ado_selection_excludes_only_declined_reviewer_assignments() {
                 Some("alreadyReviewer")
             }
         );
+        if declined == Some(true) {
+            assert_eq!(candidate.source_commit.as_deref(), Some("source-7"));
+        }
         script.done();
     }
 }
@@ -1851,6 +1858,10 @@ fn assigned_mode_requires_an_assignment_without_a_submitted_ado_review() {
         ];
         if expected.is_none() {
             steps.push(Step::read(
+                &ado(&format!("{path}/iterations"), ""),
+                json!({"value":[{"id":7,"sourceRefCommit":{"commitId":"source-7"}}]}),
+            ));
+            steps.push(Step::read(
                 &ado(&format!("{path}/commits"), "%24top=100&"),
                 json!({"value":[{"committer":{"date":"2026-09-27T00:00:00Z"}}]}),
             ));
@@ -1866,6 +1877,9 @@ fn assigned_mode_requires_an_assignment_without_a_submitted_ado_review() {
             )
             .unwrap();
         assert_eq!(candidate.reason.as_deref(), expected);
+        if expected.is_none() {
+            assert_eq!(candidate.source_commit.as_deref(), Some("source-7"));
+        }
         script.done();
     }
 }

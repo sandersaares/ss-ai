@@ -6,6 +6,7 @@
 
 use std::collections::HashSet;
 use std::num::NonZeroU32;
+use std::num::NonZeroU64;
 
 use jiff::Timestamp;
 use ohno::AppError;
@@ -610,15 +611,14 @@ impl Provider for Api<'_> {
         } else {
             pr.get("isDraft").map(boolean).transpose()?.unwrap_or(false)
         };
-        let source_commit = pr
-            .pointer(if github {
-                "/head/sha"
-            } else {
-                "/lastMergeSourceCommit/commitId"
-            })
-            .map(text)
-            .transpose()?
-            .map(str::to_owned);
+        let mut source_commit = if github {
+            pr.pointer("/head/sha")
+                .map(text)
+                .transpose()?
+                .map(str::to_owned)
+        } else {
+            None
+        };
         let mut reason = if status != if github { "open" } else { "active" } {
             Some("closed")
         } else if draft {
@@ -650,6 +650,34 @@ impl Provider for Api<'_> {
         }
         let mut latest = None;
         if reason.is_none() {
+            if !github {
+                let iterations = self
+                    .transport
+                    .ado_list(&format!("{}/iterations", target.pr_api()))?;
+                let mut latest_iteration: Option<(NonZeroU64, String)> = None;
+                let mut seen = HashSet::new();
+                for iteration in iterations {
+                    let id = iteration
+                        .get("id")
+                        .map(identifier)
+                        .transpose()?
+                        .and_then(|id| id.parse::<u64>().ok())
+                        .and_then(NonZeroU64::new)
+                        .ok_or_else(|| fail("service", "Invalid ADO iteration identifier"))?;
+                    if !seen.insert(id) {
+                        return Err(fail("service", "Repeated ADO iteration identifier"));
+                    }
+                    let commit =
+                        text(field(field(&iteration, "sourceRefCommit")?, "commitId")?)?.to_owned();
+                    if latest_iteration
+                        .as_ref()
+                        .is_none_or(|(current, _)| id > *current)
+                    {
+                        latest_iteration = Some((id, commit));
+                    }
+                }
+                source_commit = latest_iteration.map(|(_, commit)| commit);
+            }
             let (time, recent) = self.commit_recency(target, now)?;
             latest = time;
             if !recent {
