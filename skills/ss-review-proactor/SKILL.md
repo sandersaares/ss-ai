@@ -249,8 +249,12 @@ discarded candidates, contention and expiration decisions, and journal path)
 from every repository processed so far.
 State whether looping remains enabled and whether the invocation is continuing,
 finished, or paused, with the reason.
-Keep these diagnostics in a collapsible section if included in an `ss-review`
-GitHub summary. Do not post a separate summary comment just for selection.
+Keep the cross-repository aggregate only in the primary-session report. If an
+`ss-review` GitHub summary includes selection diagnostics, include only
+information from that summary's destination repository and the selected PR;
+exclude other repository names, identities, candidates, claims, journals,
+and repository-list progress. Keep destination-repository diagnostics in a
+collapsible section. Do not post a separate summary comment just for selection.
 
 Restart only after `ss-review` completes all phases, including publication
 (or its defined nothing-to-publish outcome) and learning, with no unresolved

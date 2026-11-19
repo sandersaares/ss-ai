@@ -52,6 +52,12 @@ to one review, including decision logs and publication records. The selection
 executable's journal schema and lifecycle remain unchanged: a new cycle uses a
 fresh journal, while confirmation reuses its own cycle's journal.
 
+The stage-5 aggregate remains in primary-session prose and must not become
+shared `ss-review` publication data. Before an `ss-review` GitHub summary is
+published, filter proactor diagnostics to the selected pull request's exact
+repository. Do not include other repository URLs, identities, candidates,
+claims, journal paths, exhaustion state, or ordered-list position.
+
 The primary agent creates a unique temporary checkout subdirectory per cycle under
 session state, or under the checkout parent folder supplied in the user's
 prompt. It passes that checkout's absolute path to `ss-review` and keeps it

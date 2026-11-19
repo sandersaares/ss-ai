@@ -73,6 +73,12 @@ independently. Defaulting the repository does not authorize reuse or
 modification of the invocation checkout; review preparation still uses a
 separate temporary checkout.
 
+The primary session retains the aggregate list and diagnostics for operator
+visibility. Remote review summaries never contain cross-repository data: when a
+summary belongs to a pull request, it can publish diagnostics only from that
+pull request's repository. This prevents a later public review from exposing
+the identity or selection details of an earlier private repository.
+
 ## Selection
 
 A qualifying pull request is open, is not a draft, was not authored by the

@@ -38,6 +38,10 @@ Describe 'Multi-repository skill contracts' {
             Should -Match 'On `noCandidate`, switch to the next repository'
         $script:ProactorSkill |
             Should -Match 'Do not cycle back to an earlier repository during the same invocation'
+        $script:ProactorSkill |
+            Should -Match 'Keep the cross-repository aggregate only in the primary-session report'
+        $script:ProactorSkill |
+            Should -Match 'include only\s+information from that summary''s destination repository'
     }
 
     It 'isolates sequential autoreapproval runs by repository' {
