@@ -313,10 +313,12 @@ controls; publication does not create separately accessible artifacts.
 
 Each comment body is at most 64 KiB in UTF-8. The operation emits one comment
 when the complete report fits and otherwise emits consecutive parts with explicit
-part labels. Every part contains attribution. The caller-supplied prefix remains
-verbatim; when it does not already start with `[Copilot speaking]`, the publisher
-puts that required marker first. Markdown rendering and Mermaid availability
-follow the provider's native comment support.
+part labels. Every part contains attribution and the reply-routing notice.
+The caller-supplied prefix remains verbatim; when it does not already start with
+`[Copilot speaking]`, the publisher puts that required marker first. Markdown
+rendering and Mermaid availability follow the provider's native comment support.
+Oversized Mermaid diagrams render as literal source in balanced text fences so
+each part remains independently readable.
 
 Commit identifiers and review-state disclaimers belong in the report body.
 Publication does not submit a review or cast a vote.
@@ -671,6 +673,12 @@ Publication is mechanical rather than interpretive. It renders each approved
 finding in full, places it using validated destination metadata, and reads back
 what the service can attest. A summary reports the review outcome and execution
 diagnostics without restating the findings.
+
+Every pull request comment, including initial-overview links, finding comments,
+follow-up replies, and the final summary, ends with
+`ℹ️ Replies are not monitored. To discuss the finding, reach out via Teams.`
+This line tells readers to use the direct support channels instead of opening a
+discussion that the reviewer will not monitor.
 
 Remote writes are not assumed to be transactional. An ambiguous or partial run
 requires reconciliation instead of an automatic retry, because duplicate

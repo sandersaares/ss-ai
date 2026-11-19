@@ -366,6 +366,9 @@ Keep passing complete capture paths to publication and validation commands. If t
 
 Approved findings go to one of three destinations. Choose it first:
 
+Every comment the review posts to a pull request ends with the line
+`ℹ️ Replies are not monitored. To discuss the finding, reach out via Teams.`.
+
 | Destination | When |
 |-------------|------|
 | Tracker | The user asked for issues or work items; or there is no pull request and the user prefers tracked items to a document; or publication refused because the pull request is closed and the user chose tracker items over publishing onto it anyway. |

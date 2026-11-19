@@ -181,6 +181,10 @@ const MAX_PART_LABEL_BYTES: usize =
     "**Pull request overview (auto-generated, part 18446744073709551615 of 18446744073709551615).**\n\n"
         .len();
 
+/// Tells pull request participants where not to direct a reply.
+const PR_COMMENT_SUFFIX: &str =
+    "ℹ️ Replies are not monitored. To discuss the finding, reach out via Teams.";
+
 /// Builds exact, attributed inline comments from the frozen Markdown report.
 pub(crate) fn comment_bodies(
     snapshot: &FrozenSnapshot,
@@ -212,7 +216,7 @@ fn split_comment_bodies(report: &str, prefix: &str) -> Result<Vec<String>, Snaps
     let report = report
         .strip_prefix("[Copilot speaking]\n\n")
         .unwrap_or(report);
-    let single = format!("{attribution}\n\n{report}");
+    let single = format!("{attribution}\n\n{report}\n\n{PR_COMMENT_SUFFIX}");
     if single.len() <= MAX_COMMENT_BYTES {
         return Ok(vec![single]);
     }
@@ -221,6 +225,8 @@ fn split_comment_bodies(report: &str, prefix: &str) -> Result<Vec<String>, Snaps
         .len()
         .checked_add("\n\n".len())
         .and_then(|length| length.checked_add(MAX_PART_LABEL_BYTES))
+        .and_then(|length| length.checked_add("\n\n".len()))
+        .and_then(|length| length.checked_add(PR_COMMENT_SUFFIX.len()))
         .ok_or_else(|| SnapshotError::invalid_input("Overview attribution is too large"))?;
     let capacity = MAX_COMMENT_BYTES
         .checked_sub(overhead)
@@ -239,7 +245,7 @@ fn split_comment_bodies(report: &str, prefix: &str) -> Result<Vec<String>, Snaps
             })?;
             let label =
                 format!("**Pull request overview (auto-generated, part {part} of {count}).**\n\n");
-            let body = format!("{attribution}\n\n{label}{chunk}");
+            let body = format!("{attribution}\n\n{label}{chunk}\n\n{PR_COMMENT_SUFFIX}");
             if body.len() > MAX_COMMENT_BYTES {
                 return Err(SnapshotError::invalid_state(
                     "Overview comment chunk exceeded the provider limit",
@@ -899,8 +905,9 @@ mod tests {
 
     use super::{
         FrozenSnapshot, InvalidInput, InvalidState, MAX_COMMENT_BYTES, MAX_PART_LABEL_BYTES,
-        SnapshotError, SnapshotIo, commit, frozen_snapshot_for_test, hash, hash_shape, make_report,
-        parse_json, split_at_boundaries, split_comment_bodies, validate_context, validate_overview,
+        PR_COMMENT_SUFFIX, SnapshotError, SnapshotIo, commit, frozen_snapshot_for_test, hash,
+        hash_shape, make_report, parse_json, split_at_boundaries, split_comment_bodies,
+        validate_context, validate_overview,
     };
     use crate::OverviewInput;
 
@@ -1220,7 +1227,13 @@ mod tests {
         for body in &bodies {
             let content = body.strip_prefix(prefix).unwrap();
             let end = content.find(").**\n\n").unwrap() + ").**\n\n".len();
-            restored.push_str(content.get(end..).unwrap());
+            restored.push_str(
+                content
+                    .get(end..)
+                    .unwrap()
+                    .strip_suffix(&format!("\n\n{PR_COMMENT_SUFFIX}"))
+                    .unwrap(),
+            );
         }
         assert_eq!(
             restored,
@@ -1237,7 +1250,9 @@ mod tests {
         .unwrap();
         assert_eq!(
             bodies,
-            ["[Copilot speaking]\n\n# Content overview\n\nRésumé"]
+            [format!(
+                "[Copilot speaking]\n\n# Content overview\n\nRésumé\n\n{PR_COMMENT_SUFFIX}"
+            )]
         );
     }
 
@@ -1291,6 +1306,8 @@ mod tests {
             .checked_sub("[Copilot speaking]\n\n".len())
             .and_then(|value| value.checked_sub("\n\n".len()))
             .and_then(|value| value.checked_sub(MAX_PART_LABEL_BYTES))
+            .and_then(|value| value.checked_sub("\n\n".len()))
+            .and_then(|value| value.checked_sub(PR_COMMENT_SUFFIX.len()))
             .and_then(|value| value.checked_sub(capacity))
             .unwrap();
         let prefix = "p".repeat(prefix_length);

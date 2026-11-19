@@ -18,6 +18,10 @@ use ss_ai_review_workflow::markdown_preparation::{Options, prepare};
 use ss_ai_runtime::{Clock, fail};
 use url::Url;
 
+/// Names the required footer in pull request publication expectations.
+const PR_COMMENT_SUFFIX: &str =
+    "ℹ️ Replies are not monitored. To discuss the finding, reach out via Teams.";
+
 /// Avoids real waits while exercising atomic file publication.
 struct TestClock;
 
@@ -174,10 +178,12 @@ fn complete_rendering_exposes_parts_without_reparsing_markdown() {
             .collect::<Vec<_>>()
             .join("\n\n");
         assert_eq!(output["body"], joined);
-        assert_eq!(
-            output["published"],
+        let expected = if destination == "pullRequest" {
+            format!("[Copilot speaking]\n\n{joined}\n\n{PR_COMMENT_SUFFIX}")
+        } else {
             format!("[Copilot speaking]\n\n{joined}")
-        );
+        };
+        assert_eq!(output["published"], expected);
         assert!(joined.contains("One paragraph\n\nAnother paragraph"));
     }
 }
@@ -194,7 +200,8 @@ fn comment_preserves_all_prose_and_block_boundaries() {
             "**Consequence**:\n\nA transient failure hangs the caller indefinitely.\n\n",
             "**Recommended action**:\n\n```rust\ncount += 1;\n```\n\n",
             "**References**:\n\n- docs/design.md\n- [RFC](https://example.invalid/rfc)\n\n",
-            "**Impacted locations**:\n\n- `src/retry.rs:40-44`\n- `src/legacy.rs`"
+            "**Impacted locations**:\n\n- `src/retry.rs:40-44`\n- `src/legacy.rs`\n\n",
+            "ℹ️ Replies are not monitored. To discuss the finding, reach out via Teams."
         ))
     );
 }
@@ -280,6 +287,7 @@ fn documents_order_findings_and_audit_shows_publication_text() {
         .unwrap();
     let doc = doc.as_str().unwrap();
     assert_eq!(doc.matches("[Copilot speaking]").count(), 1);
+    assert_eq!(doc.matches(PR_COMMENT_SUFFIX).count(), 0);
     assert!(doc.find("# Synthesis").unwrap() < doc.find("# Terminate").unwrap());
     assert!(doc.contains("\n\n---\n\n"));
     let audit = render(&json!({"operation":"auditDocument","destination":"tracker","findings":input,"overview":"Overview\r\n"})).unwrap();
@@ -1115,11 +1123,13 @@ fn comment_includes_authorship_for_partial_finding() {
     let finding = json!({"title":"Heading", "description":"", "consequence":"- Detail"});
     assert_eq!(
         render(&json!({"operation":"comment","finding":finding})).unwrap(),
-        "[Copilot speaking]\n\n# Heading\n\n**Consequence**:\n\n- Detail"
+        format!(
+            "[Copilot speaking]\n\n# Heading\n\n**Consequence**:\n\n- Detail\n\n{PR_COMMENT_SUFFIX}"
+        )
     );
     assert_eq!(
         render(&json!({"operation":"comment","finding":{}})).unwrap(),
-        "[Copilot speaking]\n\n"
+        format!("[Copilot speaking]\n\n{PR_COMMENT_SUFFIX}")
     );
     assert!(
         render(&json!({"operation":"finding","destination":"pullRequest","finding":finding}))

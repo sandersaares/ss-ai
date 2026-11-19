@@ -20,7 +20,9 @@ Run this once immediately after initial overview generation and validation, befo
 It freezes the overview and inspected commits, then posts the Markdown directly as GitHub
 top-level pull request comments or resolved, unanchored ADO comments. Each UTF-8 comment body
 is at most 64 KiB. A larger overview is divided into consecutive parts with part labels and
-attribution on every body. It does not submit a review or cast a vote.
+attribution and the reply-routing notice on every body. Oversized Mermaid diagrams render
+as fenced literal source instead of invalid partial diagrams. Publication does not submit a
+review or cast a vote.
 
 The JSON result records `status`, `stage`, `error`, `snapshot`, `comments`, `operations`, and an
 absolute `resultPath`. Each operation identifies its `part` and `partCount`; `comments` retains

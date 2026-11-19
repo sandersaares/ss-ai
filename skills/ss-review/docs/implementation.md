@@ -1090,7 +1090,9 @@ to short prose, avoiding guesses about whether a field begins with block syntax.
 
 The summary is derived from the approved finding set and diagnostic artifacts,
 not from remote publication observations. The renderer also owns the required
-speaker marker so no adapter can omit or duplicate it.
+speaker marker so no adapter can omit or duplicate it. Pull-request comment
+wrappers append the reply-routing notice after the approved substantive prose;
+tracker and local-document wrappers do not use it.
 
 ## Publication
 
@@ -1293,6 +1295,10 @@ The initial comments are not edited and later overview generation does not
 publish. The caller supplies attribution in a UTF-8 file and passes its path to
 the native operation. Resuming a successful publication reuses all receipts even
 if the caller supplies a different prefix.
+Every multipart body ends with the same reply-routing notice used by finding
+comments and review summaries. Oversized fenced Mermaid blocks become fenced
+text so each independently rendered comment displays literal diagram source
+instead of an invalid partial diagram.
 
 All publication failures are explicit outcomes at this boundary, including
 partial multipart publication, unresolved ADO threads, and diagnostic-write
