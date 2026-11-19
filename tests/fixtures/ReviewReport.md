@@ -9,8 +9,8 @@ Preserve **formatted prose**, `literal code`, and [source references](https://ex
 ```mermaid
 flowchart LR
     Source["Canonical Markdown"] --> HTML["Standalone HTML"]
-    Source --> Gist["Unlisted Gist"]
-    HTML --> ADO["ADO attachment"]
+    Source --> GitHub["GitHub comment"]
+    Source --> ADO["ADO comment"]
 ```
 
 ```mermaid
@@ -25,8 +25,8 @@ sequenceDiagram
 
 | Input | Presentation |
 | --- | --- |
-| Markdown | HTML or rendered Gist |
-| Mermaid | Embedded SVG or native Gist diagrams |
+| Markdown | Standalone HTML or provider comment |
+| Mermaid | Embedded SVG or native provider rendering |
 
 ## Finding F1
 

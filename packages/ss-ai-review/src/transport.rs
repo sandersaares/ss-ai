@@ -56,10 +56,7 @@ pub trait Http {
         ))
     }
 
-    /// Sends attachment bytes without interpreting them as JSON.
-    ///
-    /// Implementations that do not support binary requests refuse them rather
-    /// than accidentally labeling the payload as JSON.
+    /// Supplies an isolated binary boundary for legacy transport unit tests.
     fn send_binary(
         &self,
         _method: &str,
@@ -131,18 +128,17 @@ impl NativeHttp {
         body: Option<&[u8]>,
         kind: HttpBodyKind,
     ) -> Result<reqwest::blocking::Request, AppError> {
+        let accept = match kind {
+            HttpBodyKind::Binary if method == "GET" => "application/octet-stream",
+            HttpBodyKind::Json | HttpBodyKind::JsonPatch | HttpBodyKind::Binary => {
+                "application/json"
+            }
+        };
         let mut request = self
             .client
             .request(Method::from_bytes(method.as_bytes())?, url)
             .bearer_auth(token)
-            .header(
-                "Accept",
-                if matches!(kind, HttpBodyKind::Binary) && method == "GET" {
-                    "application/octet-stream"
-                } else {
-                    "application/json"
-                },
-            );
+            .header("Accept", accept);
         if let Some(body) = body {
             request = request
                 .header(
@@ -215,7 +211,7 @@ enum HttpBodyKind {
     Json,
     /// JSON Patch operations.
     JsonPatch,
-    /// Attachment bytes.
+    /// Attachment bytes for isolated legacy transport tests.
     Binary,
 }
 
@@ -288,11 +284,6 @@ impl<'a> Transport<'a> {
             http,
             clock,
         }
-    }
-
-    /// Shares the invocation's injected process boundary with provider operations.
-    pub(crate) fn process(&self) -> &dyn Process {
-        self.process
     }
 
     /// Exposes the configured collection for provider route validation.
@@ -933,7 +924,7 @@ impl<'a> Transport<'a> {
     ) -> Result<Page, AppError> {
         let policy = match kind {
             AdoRequestKind::Json { policy } => policy,
-            AdoRequestKind::JsonPatch | AdoRequestKind::Binary => RequestPolicy::Standard,
+            AdoRequestKind::JsonPatch => RequestPolicy::Standard,
         };
         let body = body.map(serde_json::to_vec).transpose()?;
         let response = self.ado_response(path, method, body.as_deref(), query, version, kind)?;
@@ -1000,49 +991,6 @@ impl<'a> Transport<'a> {
         })
     }
 
-    /// Uploads or reads attachment bytes while retaining response evidence.
-    ///
-    /// Explicit throttling refusals may be retried; uncertain upload failures
-    /// are not. Paths are relative to the configured collection.
-    pub(crate) fn ado_binary(
-        &mut self,
-        path: &str,
-        method: &str,
-        body: Option<&[u8]>,
-        query: &[(&str, String)],
-        version: &str,
-    ) -> Result<HttpResponse, AppError> {
-        if self.platform != Platform::AzureDevOps
-            || !matches!((method, body), ("GET", None) | ("POST", Some(_)))
-        {
-            return Err(fail("invalidInput", "Invalid Azure attachment request"));
-        }
-        // Only a proven HTTP 429 refusal may retry this intent-bearing upload.
-        let response =
-            self.ado_response(path, method, body, query, version, AdoRequestKind::Binary)?;
-        // ADO uses this status for intercepted sign-in pages. Ordinary HTML
-        // attachments remain permissible when delivered with a successful read.
-        if method == "GET" && response.status == 203 {
-            return Err(fail(
-                "authentication",
-                "Azure DevOps returned HTTP 203 for an attachment; authenticate with the collection's tenant",
-            ));
-        }
-        // Attachment reads are verified by the caller's frozen content hash.
-        if method == "POST"
-            && response
-                .headers
-                .get("content-type")
-                .is_some_and(|value| value.to_ascii_lowercase().contains("text/html"))
-        {
-            return Err(fail(
-                "ambiguousWrite",
-                "Azure DevOps returned a sign-in document; authenticate with the collection's tenant",
-            ));
-        }
-        Ok(response)
-    }
-
     /// Applies the same authentication and replay decisions to all ADO bytes.
     fn ado_response(
         &mut self,
@@ -1071,10 +1019,9 @@ impl<'a> Transport<'a> {
             parts.join("&")
         );
         let read = method == "GET";
-        let binary = matches!(kind, AdoRequestKind::Binary);
         let policy = match kind {
             AdoRequestKind::Json { policy } => policy,
-            AdoRequestKind::JsonPatch | AdoRequestKind::Binary => RequestPolicy::Standard,
+            AdoRequestKind::JsonPatch => RequestPolicy::Standard,
         };
         let mut transient_attempt = 0_u32;
         let mut rate_attempt = 0_u32;
@@ -1084,7 +1031,6 @@ impl<'a> Transport<'a> {
             let response = match kind {
                 AdoRequestKind::Json { .. } => self.http.send(method, &url, &token, body),
                 AdoRequestKind::JsonPatch => self.http.send_json_patch(method, &url, &token, body),
-                AdoRequestKind::Binary => self.http.send_binary(method, &url, &token, body),
             };
             let response = match response {
                 Ok(response) => response,
@@ -1147,17 +1093,13 @@ impl<'a> Transport<'a> {
                 continue;
             }
             if !(200..300).contains(&response.status) {
-                let text = if binary {
-                    String::from_utf8_lossy(&response.body).into_owned()
-                } else {
-                    String::from_utf8(response.body).map_err(|error| {
-                        crate::error::caused_by(
-                            if read { "service" } else { "ambiguousWrite" },
-                            "Azure DevOps output is not UTF-8".to_owned(),
-                            error,
-                        )
-                    })?
-                };
+                let text = String::from_utf8(response.body).map_err(|error| {
+                    crate::error::caused_by(
+                        if read { "service" } else { "ambiguousWrite" },
+                        "Azure DevOps output is not UTF-8".to_owned(),
+                        error,
+                    )
+                })?;
                 let kind = match response.status {
                     401 => "authentication",
                     400..500 => "permissionDenied",
@@ -1198,8 +1140,6 @@ enum AdoRequestKind {
     Json { policy: RequestPolicy },
     /// JSON Patch writes retry explicit rate-limit refusals.
     JsonPatch,
-    /// Attachments may retry explicit throttling refusals, not uncertain writes.
-    Binary,
 }
 
 /// ADO paging callers explicitly consume continuation; others reject truncation.
@@ -1643,7 +1583,7 @@ mod tests {
     }
 
     #[test]
-    fn native_requests_preserve_binary_body_and_content_type() {
+    fn native_requests_preserve_json_body_and_content_type() {
         let http = NativeHttp::new().unwrap();
         let bytes = b"\0\xff<\x80";
         let request = http
@@ -1848,89 +1788,6 @@ mod tests {
     }
 
     #[test]
-    fn binary_upload_and_download_keep_bytes_and_http_evidence() {
-        let bytes = b"<\0\xff\x80";
-        let fixture = Fixture::new(vec![
-            response(201, br#"{"id":"abc"}"#),
-            response(200, bytes),
-        ]);
-        let target = target();
-        let mut transport = Transport::new(&target, Some("tenant"), &fixture, &fixture, &fixture);
-        let upload = transport
-            .ado_binary(
-                "_apis/attachments",
-                "POST",
-                Some(bytes),
-                &[("fileName", "a b".into())],
-                "7.1",
-            )
-            .unwrap();
-        assert_eq!(upload.status, 201);
-        assert_eq!(upload.body, br#"{"id":"abc"}"#);
-        let download = transport
-            .ado_binary("_apis/attachments/abc", "GET", None, &[], "7.1")
-            .unwrap();
-        assert_eq!(download.body, bytes);
-        assert_eq!(fixture.tokens.get(), 1);
-        let calls = fixture.calls.borrow();
-        assert_eq!(calls[0].0, "POST");
-        assert_eq!(
-            calls[0].1,
-            "https://dev.azure.com/org/_apis/attachments?fileName=a%20b&api-version=7.1"
-        );
-        assert_eq!(calls[0].2, bytes);
-        assert_eq!(calls[1].0, "GET");
-        assert!(calls[1].2.is_empty());
-    }
-
-    #[test]
-    fn binary_read_rejects_signin_status_without_rejecting_html_attachments() {
-        let mut headers = BTreeMap::new();
-        headers.insert("content-type".to_owned(), "text/html".to_owned());
-        let fixture = Fixture::new(vec![
-            Ok(HttpResponse::new(
-                203,
-                headers.clone(),
-                b"<sign-in>".to_vec(),
-            )),
-            Ok(HttpResponse::new(
-                200,
-                headers,
-                b"<html>report</html>".to_vec(),
-            )),
-            response(201, br#"{"id":"abc"}"#),
-            response(203, br#"{"id":7}"#),
-        ]);
-        let target = target();
-        let mut transport = Transport::new(&target, None, &fixture, &fixture, &fixture);
-        let error = transport
-            .ado_binary("attachment", "GET", None, &[], "7.1")
-            .unwrap_err();
-        assert_eq!(classification(&error), "authentication");
-        assert!(error.to_string().contains("HTTP 203"));
-        assert_eq!(fixture.calls.borrow().len(), 1);
-        assert_eq!(fixture.waits.borrow().len(), 0);
-        assert_eq!(
-            transport
-                .ado_binary("attachment", "GET", None, &[], "7.1")
-                .unwrap()
-                .body,
-            b"<html>report</html>"
-        );
-        assert_eq!(
-            transport
-                .ado_binary("attachment", "POST", Some(b"zip"), &[], "7.1")
-                .unwrap()
-                .status,
-            201
-        );
-        assert_eq!(
-            transport.request("resource", "GET", None).unwrap(),
-            json!({"id": 7})
-        );
-    }
-
-    #[test]
     fn json_read_rejects_signin_document_with_misleading_media_type() {
         let fixture = Fixture::new(vec![Ok(HttpResponse::new(
             203,
@@ -1944,109 +1801,6 @@ mod tests {
         assert!(error.to_string().contains("tenant"));
         assert_eq!(fixture.calls.borrow().len(), 1);
         assert_eq!(fixture.waits.borrow().len(), 0);
-    }
-
-    #[test]
-    fn binary_reads_refresh_and_retry_but_writes_are_not_replayed_when_ambiguous() {
-        let fixture = Fixture::new(vec![
-            response(401, b"expired"),
-            response(429, b"limited"),
-            response(503, b"unavailable"),
-            response(200, b"\xff"),
-            response(503, b"\xff"),
-        ]);
-        let target = target();
-        let mut transport = Transport::new(&target, None, &fixture, &fixture, &fixture);
-        assert_eq!(
-            transport
-                .ado_binary("attachment", "GET", None, &[], "7.1")
-                .unwrap()
-                .body,
-            b"\xff"
-        );
-        assert_eq!(fixture.tokens.get(), 2);
-        assert_eq!(fixture.waits.borrow().len(), 2);
-        let error = transport
-            .ado_binary("attachment", "POST", Some(b"data"), &[], "7.1")
-            .unwrap_err();
-        assert_eq!(classification(&error), "ambiguousWrite");
-        assert_eq!(fixture.calls.borrow().len(), 5);
-    }
-
-    #[test]
-    fn binary_errors_and_json_validation_remain_distinct() {
-        let fixture = Fixture::new(vec![
-            response(403, b"\xff fixture-token"),
-            response(302, b"redirect"),
-            Err(fail("service", "connection failed")),
-            response(200, b"\xff"),
-            response(200, b"not-json"),
-        ]);
-        let target = target();
-        let mut transport = Transport::new(&target, None, &fixture, &fixture, &fixture);
-        let error = transport
-            .ado_binary("attachment", "GET", None, &[], "7.1")
-            .unwrap_err();
-        assert_eq!(classification(&error), "permissionDenied");
-        assert!(!error.to_string().contains("fixture-token"));
-        let error = transport
-            .ado_binary("attachment", "GET", None, &[], "7.1")
-            .unwrap_err();
-        assert_eq!(classification(&error), "service");
-        let error = transport
-            .ado_binary("attachment", "POST", Some(b"x"), &[], "7.1")
-            .unwrap_err();
-        assert_eq!(classification(&error), "ambiguousWrite");
-        assert_eq!(
-            classification(&transport.request("resource", "GET", None).unwrap_err()),
-            "service"
-        );
-        assert_eq!(
-            classification(&transport.request("resource", "POST", None).unwrap_err()),
-            "ambiguousWrite"
-        );
-        assert_eq!(fixture.calls.borrow().len(), 5);
-    }
-
-    #[test]
-    fn binary_upload_retries_explicit_throttling_and_reads_do_not_sniff_html() {
-        let mut throttle_headers = BTreeMap::new();
-        throttle_headers.insert("retry-after".to_owned(), "3".to_owned());
-        let mut html_headers = BTreeMap::new();
-        html_headers.insert("content-type".to_owned(), "text/html".to_owned());
-        let fixture = Fixture::new(vec![
-            Ok(HttpResponse::new(
-                429,
-                throttle_headers,
-                b"limited".to_vec(),
-            )),
-            response(201, b"uploaded"),
-            Ok(HttpResponse::new(
-                200,
-                html_headers.clone(),
-                b"<content".to_vec(),
-            )),
-            Ok(HttpResponse::new(200, html_headers, b"<sign-in".to_vec())),
-        ]);
-        let target = target();
-        let mut transport = Transport::new(&target, None, &fixture, &fixture, &fixture);
-        let uploaded = transport
-            .ado_binary("attachment", "POST", Some(b"data"), &[], "7.1")
-            .unwrap();
-        assert_eq!(uploaded.status, 201);
-        assert_eq!(fixture.calls.borrow().len(), 2);
-        assert_eq!(fixture.waits.borrow().as_slice(), [Duration::from_secs(3)]);
-        assert_eq!(
-            transport
-                .ado_binary("attachment", "GET", None, &[], "7.1")
-                .unwrap()
-                .body,
-            b"<content"
-        );
-        let error = transport
-            .ado_binary("attachment", "POST", Some(b"data"), &[], "7.1")
-            .unwrap_err();
-        assert_eq!(classification(&error), "ambiguousWrite");
     }
 
     #[test]

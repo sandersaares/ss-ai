@@ -17,27 +17,28 @@ For Azure DevOps, append `--tenant "{{TENANT}}"` when a tenant was supplied.
 The command consumes the full initial capture programmatically. Any agent lookup of its URL or commit metadata must use `query-pr-context.md`; do not open the capture or replace this input with a projection.
 
 Run this once immediately after initial overview generation and validation, before review workers.
-It freezes the overview and inspected commits, creates an unlisted Markdown Gist on GitHub or an
-ZIP attachment containing one self-contained `report.html` on ADO, verifies it, and posts a separate top-level linking comment. The ADO thread is created resolved. The comment contains the supplied prefix
-verbatim, a blank line, a link to the overview, and the reply-routing notice. It
-does not submit a review or cast a vote.
+It freezes the overview and inspected commits, then posts the Markdown directly as GitHub
+top-level pull request comments or resolved, unanchored ADO comments. Each UTF-8 comment body
+is at most 64 KiB. A larger overview is divided into consecutive parts with part labels and
+attribution and the reply-routing notice on every body. Oversized Mermaid diagrams render
+as fenced literal source instead of invalid partial diagrams. Publication does not submit a
+review or cast a vote.
 
-The JSON result records `status`, `stage`, `error`, `missingTools`, `snapshot`, `artifact`,
-`comment`, `operations`, and an absolute `resultPath`. `succeeded` means both the artifact and
-comment were verified. `skipped` means the PR is closed. Every other status is an explicit
+The JSON result records `status`, `stage`, `error`, `snapshot`, `comments`, `operations`, and an
+absolute `resultPath`. Each operation identifies its `part` and `partCount`; `comments` retains
+the matching receipts in that order.
+`succeeded` means every comment was verified. `skipped` means the PR is closed. Every other status is an explicit
 publication limitation, not a failed code review.
 
 On failure, notify the user of the failed stage and error, any known remote URL, and the absolute
 diagnostic path, then continue the review without asking them to repair publication. An error
 before JSON is emitted follows the same non-blocking rule: report the error and continue.
-The exception is missing tools: follow `check-report-tools.md` if no installation decision exists
-for this run, and retry after approved setup only when no remote write was attempted.
 
 Never blindly repeat a write. `needsReconciliation` indicates an earlier attempt may have created
 remote state; keep reviewing and leave investigation to the user. Include the publication outcome
 in the final session diagnostics without calling the review itself failed.
 
-The initial report and comment remain unchanged, including when a resumed invocation supplies
+The initial report and comments remain unchanged, including when a resumed invocation supplies
 a different prefix. Do not rerun this step after an overview is
-regenerated for freshness or audit. Resuming a successful run reuses its existing receipt.
-Do not upload `audit-findings.md`, audit HTML, reviewer artifacts, or feedback instead of the overview.
+regenerated for freshness or audit. Resuming a successful run reuses its existing receipts.
+Do not publish `audit-findings.md`, audit HTML, reviewer artifacts, or feedback instead of the overview.
