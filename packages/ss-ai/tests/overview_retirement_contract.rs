@@ -374,11 +374,11 @@ fn publication_preserves_prefix_and_partial_effects() {
         assert!(report.contains(&"a".repeat(40)));
         let expected = if prefix.is_empty() {
             format!(
-                "{link}\n\nℹ️ Replies are not monitored. To discuss the finding, reach out via Teams/email directly."
+                "{link}\n\nℹ️ Replies are not monitored. To discuss the finding, reach out via Teams."
             )
         } else {
             format!(
-                "{prefix}\n\n{link}\n\nℹ️ Replies are not monitored. To discuss the finding, reach out via Teams/email directly."
+                "{prefix}\n\n{link}\n\nℹ️ Replies are not monitored. To discuss the finding, reach out via Teams."
             )
         };
         assert_eq!(*provider.comment.borrow(), expected);

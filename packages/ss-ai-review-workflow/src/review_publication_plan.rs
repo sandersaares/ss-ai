@@ -426,12 +426,9 @@ mod tests {
                     .unwrap()
                     .starts_with("[Copilot speaking]\n\n")
             );
-            assert!(
-                item["body"]
-                    .as_str()
-                    .unwrap()
-                    .ends_with("\n\nℹ️ Replies are not monitored. To discuss the finding, reach out via Teams/email directly.")
-            );
+            assert!(item["body"].as_str().unwrap().ends_with(
+                "\n\nℹ️ Replies are not monitored. To discuss the finding, reach out via Teams."
+            ));
         }
         let summary = result["summaryBody"].as_str().unwrap();
         assert!(summary.contains("Published 5 findings. 2 findings follow up"));
@@ -439,11 +436,9 @@ mod tests {
         assert!(summary.contains("| Instruction expansion | Degraded |"));
         assert!(summary.contains("| User instruction files | 2 |"));
         assert!(summary.contains("<details>"));
-        assert!(
-            summary.ends_with(
-                "ℹ️ Replies are not monitored. To discuss the finding, reach out via Teams/email directly."
-            )
-        );
+        assert!(summary.ends_with(
+            "ℹ️ Replies are not monitored. To discuss the finding, reach out via Teams."
+        ));
     }
 
     #[test]
@@ -551,11 +546,9 @@ mod tests {
         let summary = result["summaryBody"].as_str().unwrap();
         assert!(summary.contains("This review raises no findings."));
         assert!(!summary.contains("<details>"));
-        assert!(
-            summary.ends_with(
-                "ℹ️ Replies are not monitored. To discuss the finding, reach out via Teams/email directly."
-            )
-        );
+        assert!(summary.ends_with(
+            "ℹ️ Replies are not monitored. To discuss the finding, reach out via Teams."
+        ));
     }
 
     #[test]

@@ -18,7 +18,7 @@ use crate::overview_snapshot::PreparedSnapshot;
 
 /// Tells pull request participants where not to direct a reply.
 const PR_COMMENT_SUFFIX: &str =
-    "ℹ️ Replies are not monitored. To discuss the finding, reach out via Teams/email directly.";
+    "ℹ️ Replies are not monitored. To discuss the finding, reach out via Teams.";
 
 /// Provider and local preparation operations supplied by the composition root.
 ///
@@ -667,7 +667,7 @@ mod tests {
         assert_eq!(
             effects.body.as_deref(),
             Some(
-                "prefix\nexact\n\n[Pull request overview (auto-generated).](https://example.test/report)\n\nℹ️ Replies are not monitored. To discuss the finding, reach out via Teams/email directly."
+                "prefix\nexact\n\n[Pull request overview (auto-generated).](https://example.test/report)\n\nℹ️ Replies are not monitored. To discuss the finding, reach out via Teams."
             )
         );
         assert_eq!(journal.writes[0]["operations"][0]["status"], "pending");

@@ -16,7 +16,7 @@ use crate::workflow_plan::parse_json;
 const AUTHOR: &str = "[Copilot speaking]";
 /// Tells pull request participants where not to direct a reply.
 const PR_COMMENT_SUFFIX: &str =
-    "ℹ️ Replies are not monitored. To discuss the finding, reach out via Teams/email directly.";
+    "ℹ️ Replies are not monitored. To discuss the finding, reach out via Teams.";
 const SEPARATOR: &str = "\n\n---\n\n";
 
 /// Renders a JSON request without reading or writing files.
