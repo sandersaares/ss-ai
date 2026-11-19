@@ -275,7 +275,11 @@ impl Api<'_> {
             .list(&format!("{}/reviews", target.pr_api()))?
         {
             let state = text(field(&review, "state")?)?;
-            let reviewer = Identity::from_account(target.platform, field(&review, "user")?)?;
+            let Some(user) = review.get("user").filter(|user| !user.is_null()) else {
+                // Deleted GitHub accounts can leave submitted review history with no author.
+                continue;
+            };
+            let reviewer = Identity::from_account(target.platform, user)?;
             if identity.may_match(&reviewer) {
                 let id = review
                     .get("id")

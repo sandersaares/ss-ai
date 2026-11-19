@@ -105,6 +105,7 @@ struct FakeProvider {
     fail_create: bool,
     fail_delete: bool,
     fail_read: bool,
+    source_revision: String,
     review_fingerprint: String,
 }
 
@@ -119,6 +120,7 @@ impl FakeProvider {
             fail_create: false,
             fail_delete: false,
             fail_read: false,
+            source_revision: "source-10".to_owned(),
             review_fingerprint: "a".repeat(64),
         }
     }
@@ -144,7 +146,11 @@ impl Provider for FakeProvider {
             target: target.clone(),
             reason: self.reasons.get(&target.pull_request_id).cloned(),
             latest: Some(timestamp("2026-09-27T00:00:00Z").unwrap()),
-            source_commit: Some(format!("source-{}", target.pull_request_id)),
+            source_commit: Some(if target.pull_request_id == 10 {
+                self.source_revision.clone()
+            } else {
+                format!("source-{}", target.pull_request_id)
+            }),
             review_fingerprint: Some(self.review_fingerprint.clone()),
         })
     }
@@ -473,6 +479,53 @@ fn completed_available_review_is_not_selected_again() {
     assert_eq!(next.status, Status::Claimed);
     assert_eq!(next.target.unwrap().pull_request_id, 11);
     assert_eq!(next.diagnostics[0].reason, "completedReview");
+}
+
+#[test]
+fn completion_preserves_the_reviewed_revision_when_source_changes() {
+    let clock = FakeClock::new();
+    let mut provider = FakeProvider::new();
+    let mut journal = MemoryJournal::default();
+    let mut state = initial(Platform::GitHub);
+    state.selection_mode = SelectionMode::Assigned;
+    run(
+        &mut provider,
+        &mut journal,
+        &clock,
+        state.clone(),
+        "Reserving",
+        false,
+    )
+    .unwrap();
+    run(
+        &mut provider,
+        &mut journal,
+        &clock,
+        state.clone(),
+        "Reserving",
+        true,
+    )
+    .unwrap();
+    provider.source_revision = "source-11".to_owned();
+    complete(&mut provider, &mut journal, &clock, state.clone()).unwrap();
+
+    let mut next_journal = MemoryJournal::default();
+    let next = run(
+        &mut provider,
+        &mut next_journal,
+        &clock,
+        state,
+        "Reserving",
+        false,
+    )
+    .unwrap();
+    assert_eq!(next.target.unwrap().pull_request_id, 10);
+    assert!(
+        !next
+            .diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.reason == "completedReview")
+    );
 }
 
 #[test]
@@ -1839,6 +1892,38 @@ fn assigned_mode_requires_a_request_without_a_submitted_github_review() {
         assert_eq!(candidate.reason.as_deref(), expected);
         script.done();
     }
+
+    let script = Script::new(vec![
+        Step::read(
+            "repos/example/widgets/pulls/10",
+            json!({"state":"open","draft":false,"user":{"id":99}}),
+        ),
+        Step::read(
+            "repos/example/widgets/pulls/10/requested_reviewers?per_page=100",
+            json!([{"users":[{"id":42}],"teams":[]}]),
+        ),
+        Step::read(
+            "repos/example/widgets/pulls/10/reviews?per_page=100",
+            json!([[{"state":"DISMISSED","user":null}]]),
+        ),
+        Step::write(
+            "graphql",
+            "POST",
+            json!({"query":crate::api::COMMIT_QUERY,"variables":{"owner":"example","repo":"widgets","num":10,"cur":null,"size":100}}),
+            json!({"data":{"repository":{"pullRequest":{"commits":{"nodes":[{"commit":{"committedDate":"2026-09-27T00:00:00Z"}}],"pageInfo":{"hasNextPage":false}}}}}}),
+        ),
+    ]);
+    let clock = FakeClock::new();
+    let candidate = api(Platform::GitHub, &script, &clock)
+        .candidate(
+            &repository(Platform::GitHub).candidate(10.try_into().unwrap()),
+            &identity(Platform::GitHub),
+            clock.now(),
+            SelectionMode::Assigned,
+        )
+        .unwrap();
+    assert!(candidate.reason.is_none());
+    script.done();
 }
 
 #[test]

@@ -1005,7 +1005,8 @@ The marker is a complete line, accepting LF and CRLF:
 `STATE` is `reserved`, `active`, or `completed`. `SOURCE_COMMIT` identifies the
 reviewed revision and `PARTICIPATION_FINGERPRINT` identifies the reviewer's
 current assignment and review state. Completion evidence excludes later
-`assigned` selection only while both values still match.
+selection only while both values still match. Completion preserves the original
+reviewed source revision while refreshing participation evidence.
 
 The fixed preparation interval
 is 60 seconds. A reserved claim lives for 60 minutes from service creation.

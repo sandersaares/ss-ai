@@ -940,10 +940,7 @@ pub(crate) fn complete(
     let body = transition_claim(
         &reservation.intent.body,
         ClaimState::Completed,
-        candidate
-            .source_commit
-            .as_deref()
-            .or(Some(current_marker.revision)),
+        Some(current_marker.revision),
         candidate
             .review_fingerprint
             .as_deref()

@@ -57,7 +57,9 @@ review workflow verifies it immediately before publication and changes it to
 completed only after the full workflow succeeds. Completed markers block later
 selection in either mode by the same reviewer without creating an approval vote
 only while the source commit and reviewer participation fingerprint still
-match. A new source revision or a changed assignment/review state makes the
+match. Completion preserves the revision that the claim originally bound, not
+a later live head, while refreshing participation evidence from the completed
+review. A new source revision or a changed assignment/review state makes the
 completed marker historical rather than current.
 
 An invalid reserved claim is discarded. The utility deletes only its verified
