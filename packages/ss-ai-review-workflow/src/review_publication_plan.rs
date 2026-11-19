@@ -12,7 +12,7 @@ use crate::anchors::resolve_anchor_in_diff;
 use crate::approved::{
     check_approved_schema, check_approved_value, check_follow_up, identifier_matches,
 };
-use crate::markdown::render;
+use crate::markdown::{append_pull_request_comment_suffix, render};
 use crate::workflow_plan::parse_json;
 
 /// Reads and validates an approved artifact without rereading it for planning.
@@ -219,6 +219,11 @@ pub fn prepare(
         "followUpCount": replies.len(), "diagnostics": diagnostics
     }))
     .map_err(invalid)?;
+    let summary = append_pull_request_comment_suffix(
+        summary
+            .as_str()
+            .ok_or_else(|| invalid("Review summary did not render as text"))?,
+    );
     threads.extend(replies);
     Ok(json!({"plan": threads, "summaryBody": summary}))
 }
@@ -421,6 +426,9 @@ mod tests {
                     .unwrap()
                     .starts_with("[Copilot speaking]\n\n")
             );
+            assert!(item["body"].as_str().unwrap().ends_with(
+                "\n\nℹ️ Replies are not monitored. To discuss the finding, reach out via Teams."
+            ));
         }
         let summary = result["summaryBody"].as_str().unwrap();
         assert!(summary.contains("Published 5 findings. 2 findings follow up"));
@@ -428,6 +436,9 @@ mod tests {
         assert!(summary.contains("| Instruction expansion | Degraded |"));
         assert!(summary.contains("| User instruction files | 2 |"));
         assert!(summary.contains("<details>"));
+        assert!(summary.ends_with(
+            "ℹ️ Replies are not monitored. To discuss the finding, reach out via Teams."
+        ));
     }
 
     #[test]
@@ -535,6 +546,9 @@ mod tests {
         let summary = result["summaryBody"].as_str().unwrap();
         assert!(summary.contains("This review raises no findings."));
         assert!(!summary.contains("<details>"));
+        assert!(summary.ends_with(
+            "ℹ️ Replies are not monitored. To discuss the finding, reach out via Teams."
+        ));
     }
 
     #[test]

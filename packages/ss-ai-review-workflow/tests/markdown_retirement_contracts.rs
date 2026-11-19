@@ -8,6 +8,10 @@
 use serde_json::{Value, json};
 use ss_ai_review_workflow::markdown::render;
 
+/// Names the required footer in pull request publication expectations.
+const PR_COMMENT_SUFFIX: &str =
+    "ℹ️ Replies are not monitored. To discuss the finding, reach out via Teams.";
+
 /// Supplies complete authored prose while allowing each test to vary one field.
 fn finding() -> Value {
     json!({
@@ -64,13 +68,25 @@ fn retired_rendering_contract_documents_preserve_single_and_multiple_bodies() {
         let first_body =
             render(&json!({"operation":"finding","destination":destination,"finding":first}))
                 .unwrap();
-        assert_eq!(one, first_body.as_str().unwrap());
+        let first_body = first_body.as_str().unwrap();
+        if destination == "pullRequest" {
+            assert_eq!(
+                one,
+                first_body
+                    .strip_suffix(&format!("\n\n{PR_COMMENT_SUFFIX}"))
+                    .unwrap()
+            );
+        } else {
+            assert_eq!(one, first_body);
+        }
         let two = document(&[first.clone(), second.clone()]);
         assert!(two.starts_with(&one));
         assert!(two.contains("\n\n---\n\n"));
-        // Tracker documents contain standalone items, each with its own authorship marker.
         let expected_markers = if destination == "tracker" { 2 } else { 1 };
         assert_eq!(two.matches("[Copilot speaking]").count(), expected_markers);
+        if destination == "pullRequest" {
+            assert!(!two.contains("Replies are not monitored."));
+        }
         assert!(two.contains("Second"));
     }
 }

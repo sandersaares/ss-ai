@@ -5,7 +5,7 @@
 )]
 #![allow(
     clippy::result_large_err,
-    reason = "This best-effort boundary handles occasional failures and keeps snapshot and tool diagnostics inline rather than allocating for each error"
+    reason = "This best-effort boundary handles occasional failures and keeps snapshot diagnostics inline rather than allocating for each error"
 )]
 
 use std::path::Path;
@@ -14,32 +14,28 @@ use serde_json::{Value, json};
 use ss_ai_runtime::FileTransaction;
 
 use crate::Clock;
-use crate::overview_snapshot::PreparedSnapshot;
+use crate::overview_snapshot::FrozenSnapshot;
 
 /// Provider and local preparation operations supplied by the composition root.
 ///
-/// Freeze returns a provider-ready snapshot type, including ADO HTML and archive
-/// preparation. It acquires the snapshot lock after the result lock and permits refreshing an unpublished snapshot:
+/// Freeze acquires the snapshot lock after the result lock and permits refreshing an unpublished snapshot:
 /// the transaction calls it only after validating that no write may have occurred.
 /// Write errors must mark a definite refusal only when the service proved that
 /// no write occurred.
 pub(crate) trait OverviewEffects {
     fn is_open(&mut self) -> Result<bool, EffectError>;
-    fn freeze(&mut self, clock: &dyn Clock) -> Result<PreparedSnapshot, EffectError>;
-    fn upload(&mut self, snapshot: &PreparedSnapshot) -> Result<Value, EffectError>;
-    fn verify_artifact(
+    fn freeze(&mut self, clock: &dyn Clock) -> Result<FrozenSnapshot, EffectError>;
+    fn comment_bodies(
         &mut self,
-        snapshot: &PreparedSnapshot,
-        receipt: &Value,
-    ) -> Result<Value, EffectError>;
-    fn comment(
-        &mut self,
-        snapshot: &PreparedSnapshot,
-        payload: &Value,
-    ) -> Result<Value, EffectError>;
+        snapshot: &FrozenSnapshot,
+        prefix: &str,
+        clock: &dyn Clock,
+    ) -> Result<Vec<String>, EffectError>;
+    fn comment(&mut self, snapshot: &FrozenSnapshot, payload: &Value)
+    -> Result<Value, EffectError>;
     fn verify_comment(
         &mut self,
-        snapshot: &PreparedSnapshot,
+        snapshot: &FrozenSnapshot,
         payload: &Value,
     ) -> Result<(), EffectError>;
 }
@@ -48,10 +44,6 @@ pub(crate) trait OverviewEffects {
 pub(crate) struct EffectError {
     pub(crate) message: String,
     pub(crate) definite_refusal: bool,
-    pub(crate) missing_tools: Vec<String>,
-    /// Preparation can fail after freezing Markdown but before rendering succeeds.
-    pub(crate) snapshot: Option<Value>,
-    pub(crate) render_failed: bool,
 }
 
 /// Holds exclusive transaction ownership over the complete publication.
@@ -96,13 +88,12 @@ pub(crate) fn publish(
     }
 }
 
-/// Creates the same bounded result envelope as the PowerShell publisher.
+/// Creates the bounded result envelope for the native publication command.
 fn new_result(url: &str, path: &str) -> Value {
     json!({
-        "schemaVersion": 1, "pullRequestUrl": url, "status": "preparing",
+        "schemaVersion": 2, "pullRequestUrl": url, "status": "preparing",
         "stage": "preflight", "resultPath": path, "snapshot": null,
-        "artifact": null, "comment": null, "operations": [],
-        "error": null, "missingTools": []
+        "comments": [], "operations": [], "error": null
     })
 }
 
@@ -111,7 +102,7 @@ fn validate_record(record: &Value, url: &str) -> Result<(), &'static str> {
     let object = record
         .as_object()
         .ok_or("Overview record is not an object")?;
-    if object.get("schemaVersion") != Some(&json!(1))
+    if object.get("schemaVersion") != Some(&json!(2))
         || object.get("pullRequestUrl").and_then(Value::as_str) != Some(url)
     {
         return Err("An overview publication record for a different PR or format already exists");
@@ -131,28 +122,18 @@ fn validate_record(record: &Value, url: &str) -> Result<(), &'static str> {
             | "journalFailure"
     ) || !matches!(
         object.get("stage").and_then(Value::as_str),
-        Some(
-            "preflight"
-                | "freeze"
-                | "renderHtml"
-                | "upload"
-                | "verifyArtifact"
-                | "comment"
-                | "verifyComment"
-        )
+        Some("preflight" | "freeze" | "prepareComments" | "comment" | "verifyComment")
     ) || object.get("resultPath").and_then(Value::as_str).is_none()
-        || !object.get("missingTools").is_some_and(|tools| {
-            tools
-                .as_array()
-                .is_some_and(|tools| tools.iter().all(Value::is_string))
-        })
         || !object
             .get("error")
             .is_some_and(|error| error.is_null() || error.is_string())
-        || ["snapshot", "artifact", "comment"].iter().any(|key| {
-            !object
-                .get(*key)
-                .is_some_and(|value| value.is_null() || value.is_object())
+        || !object
+            .get("snapshot")
+            .is_some_and(|value| value.is_null() || value.is_object())
+        || !object.get("comments").is_some_and(|comments| {
+            comments
+                .as_array()
+                .is_some_and(|items| items.iter().all(Value::is_object))
         })
     {
         return Err("Malformed overview publication record");
@@ -161,13 +142,29 @@ fn validate_record(record: &Value, url: &str) -> Result<(), &'static str> {
         .get("operations")
         .and_then(Value::as_array)
         .ok_or("Malformed overview operations")?;
-    if operations.len() > 2 {
-        return Err("Malformed overview operations");
-    }
+    let mut expected_part = 1_u64;
+    let mut expected_count = None;
     for (index, operation) in operations.iter().enumerate() {
-        let name = if index == 0 { "upload" } else { "comment" };
+        let part = operation
+            .get("part")
+            .and_then(Value::as_u64)
+            .ok_or("Malformed overview comment part")?;
+        let part_count = operation
+            .get("partCount")
+            .and_then(Value::as_u64)
+            .ok_or("Malformed overview comment count")?;
+        if part != expected_part
+            || part > part_count
+            || expected_count.is_some_and(|count| count != part_count)
+        {
+            return Err("Malformed overview operations");
+        }
+        expected_part = expected_part
+            .checked_add(1)
+            .ok_or("Malformed overview operations")?;
+        expected_count = Some(part_count);
         let state = operation.get("status").and_then(Value::as_str);
-        if operation.get("name").and_then(Value::as_str) != Some(name)
+        if operation.get("name").and_then(Value::as_str) != Some("comment")
             || !matches!(
                 state,
                 Some("pending" | "completed" | "failed" | "ambiguous")
@@ -178,29 +175,33 @@ fn validate_record(record: &Value, url: &str) -> Result<(), &'static str> {
         {
             return Err("Malformed overview operation");
         }
-        if index == 1
-            && operations
-                .first()
-                .and_then(|op| op.get("status"))
+        if index > 0
+            && index
+                .checked_sub(1)
+                .and_then(|previous| operations.get(previous))
+                .and_then(|operation| operation.get("status"))
                 .and_then(Value::as_str)
                 != Some("completed")
         {
-            return Err("Comment has no completed upload");
+            return Err("Overview comment part has no completed predecessor");
         }
     }
+    if expected_count.is_some_and(|count| usize::try_from(count).ok() != Some(operations.len()))
+        && status == "succeeded"
+    {
+        return Err("Incomplete overview record claims success");
+    }
     if status == "succeeded"
-        && (operations.len() != 2
+        && (operations.is_empty()
             || operations.iter().any(|operation| {
                 operation["status"] != "completed" || !has_id(&operation["response"])
             })
-            || ["snapshot", "artifact", "comment"]
-                .iter()
-                .any(|key| !record[*key].is_object())
-            || !record["artifact"]["url"]
-                .as_str()
-                .is_some_and(|url| !url.is_empty())
-            || !has_id(&record["artifact"])
-            || !has_id(&record["comment"])
+            || !record["snapshot"].is_object()
+            || !record["comments"].is_array()
+            || record["comments"].as_array().is_none_or(|comments| {
+                comments.len() != operations.len()
+                    || comments.iter().any(|comment| !has_id(comment))
+            })
             || !record["error"].is_null())
     {
         return Err("Incomplete overview record claims success");
@@ -261,14 +262,6 @@ fn run(
         if result["status"] == "journalFailure" {
             return result;
         }
-        if result["stage"] == "freeze" {
-            if let Some(snapshot) = error.snapshot.filter(Value::is_object) {
-                result["snapshot"] = snapshot;
-            }
-            if error.render_failed {
-                result["stage"] = json!("renderHtml");
-            }
-        }
         result["status"] = json!(
             if result["operations"].as_array().is_some_and(Vec::is_empty) {
                 "failed"
@@ -277,7 +270,6 @@ fn run(
             }
         );
         result["error"] = json!(bounded(&error.message));
-        result["missingTools"] = json!(error.missing_tools);
     }
     if let Err(error) = journal.write(&result) {
         journal_failure(&mut result, &error);
@@ -302,33 +294,24 @@ fn execute(
     result["stage"] = json!("freeze");
     let snapshot = effects.freeze(clock)?;
     result["snapshot"] = snapshot.record();
-    result["stage"] = json!("upload");
-    let artifact = write_effect(journal, result, "upload", |_| effects.upload(&snapshot))?;
-    result["stage"] = json!("verifyArtifact");
-    let verified = effects.verify_artifact(&snapshot, &artifact)?;
-    result["artifact"] = verified.clone();
-    if !has_id(&verified) || verified["id"] != artifact["id"] {
-        return Err(local_error(
-            "Verified overview artifact has a different or missing identifier",
-        ));
+    result["stage"] = json!("prepareComments");
+    let bodies = effects.comment_bodies(&snapshot, prefix, clock)?;
+    if bodies.is_empty() {
+        return Err(local_error("Frozen overview produced no comments"));
     }
-    let url = verified["url"]
-        .as_str()
-        .filter(|url| !url.is_empty())
-        .ok_or_else(|| local_error("Verified overview artifact has no URL"))?;
-    let link = format!("[Pull request overview (auto-generated).]({url})");
-    let body = if prefix.is_empty() {
-        link
-    } else {
-        format!("{prefix}\n\n{link}")
-    };
-    result["stage"] = json!("comment");
-    let payload = json!({ "body": body });
-    let comment = write_effect(journal, result, "comment", |_| {
-        effects.comment(&snapshot, &payload)
-    })?;
-    result["stage"] = json!("verifyComment");
-    effects.verify_comment(&snapshot, &json!({ "body": body, "comment": comment }))?;
+    let count = bodies.len();
+    for (index, body) in bodies.into_iter().enumerate() {
+        result["stage"] = json!("comment");
+        let part = index
+            .checked_add(1)
+            .ok_or_else(|| local_error("Overview has too many comment parts"))?;
+        let payload = json!({ "body": body });
+        let comment = write_effect(journal, result, part, count, |_| {
+            effects.comment(&snapshot, &payload)
+        })?;
+        result["stage"] = json!("verifyComment");
+        effects.verify_comment(&snapshot, &json!({ "body": body, "comment": comment }))?;
+    }
     result["status"] = json!("succeeded");
     Ok(())
 }
@@ -337,13 +320,20 @@ fn execute(
 fn write_effect(
     journal: &mut dyn Journal,
     result: &mut Value,
-    name: &str,
+    part: usize,
+    part_count: usize,
     action: impl FnOnce(&Value) -> Result<Value, EffectError>,
 ) -> Result<Value, EffectError> {
     let operations = result["operations"]
         .as_array_mut()
         .expect("new result has operations");
-    operations.push(json!({ "name": name, "status": "pending", "response": null }));
+    operations.push(json!({
+        "name": "comment",
+        "part": part,
+        "partCount": part_count,
+        "status": "pending",
+        "response": null
+    }));
     save_or_stop(journal, result)?;
     let response = match action(result) {
         Ok(response) => response,
@@ -368,14 +358,13 @@ fn write_effect(
         .expect("intent exists");
     operation["status"] = json!("completed");
     operation["response"] = response.clone();
-    // Keep an unexpected receipt in the operation even when it cannot populate
-    // the object-shaped convenience field; it still proves a write may exist.
+    // Keep an unexpected receipt even when it cannot populate the receipt list;
+    // the completed operation still proves a write may exist.
     if response.is_object() {
-        result[if name == "upload" {
-            "artifact"
-        } else {
-            "comment"
-        }] = response.clone();
+        let comments = result["comments"]
+            .as_array_mut()
+            .expect("new result has comments");
+        comments.push(response.clone());
     }
     save_or_stop(journal, result)?;
     if !has_id(&response) {
@@ -429,9 +418,6 @@ fn local_error(message: &str) -> EffectError {
     EffectError {
         message: message.to_owned(),
         definite_refusal: false,
-        missing_tools: Vec::new(),
-        snapshot: None,
-        render_failed: false,
     }
 }
 
@@ -447,7 +433,7 @@ mod tests {
     use serde_json::{Value, json};
 
     use super::{Clock, EffectError, Journal, OverviewEffects, new_result, run};
-    use crate::overview_snapshot::{PreparedSnapshot, frozen_snapshot_for_test};
+    use crate::overview_snapshot::{FrozenSnapshot, frozen_snapshot_for_test};
 
     const URL: &str = "https://example.test/pr/1";
 
@@ -523,6 +509,7 @@ mod tests {
         lock_held: Option<Rc<Cell<bool>>>,
         observed: Option<Rc<RefCell<Vec<Value>>>>,
         missing_id: bool,
+        bodies: Option<Vec<String>>,
     }
 
     impl Effects {
@@ -533,21 +520,29 @@ mod tests {
             if let Some(observed) = &self.observed {
                 let observed = observed.borrow();
                 match name {
-                    "upload" => assert_eq!(
-                        observed.last().unwrap()["operations"][0]["status"],
-                        "pending"
-                    ),
-                    "verifyArtifact" => assert_eq!(
-                        observed.last().unwrap()["operations"][0]["response"]["id"],
-                        "artifact-id"
-                    ),
                     "comment" => assert_eq!(
-                        observed.last().unwrap()["operations"][1]["status"],
+                        observed.last().unwrap()["operations"]
+                            .as_array()
+                            .unwrap()
+                            .last()
+                            .unwrap()["status"],
                         "pending"
                     ),
                     "verifyComment" => assert_eq!(
-                        observed.last().unwrap()["operations"][1]["response"]["id"],
-                        47
+                        observed.last().unwrap()["operations"]
+                            .as_array()
+                            .unwrap()
+                            .last()
+                            .unwrap()["response"]["id"],
+                        u64::try_from(
+                            observed.last().unwrap()["operations"]
+                                .as_array()
+                                .unwrap()
+                                .len()
+                        )
+                        .unwrap()
+                        .checked_add(46)
+                        .unwrap()
                     ),
                     _ => {}
                 }
@@ -557,17 +552,6 @@ mod tests {
                 Err(EffectError {
                     message: format!("{name} failed"),
                     definite_refusal: self.refused,
-                    missing_tools: if name == "freeze" {
-                        vec!["renderer".into()]
-                    } else {
-                        vec![]
-                    },
-                    snapshot: if name == "freeze" {
-                        Some(json!({ "runId": "frozen" }))
-                    } else {
-                        None
-                    },
-                    render_failed: name == "freeze",
                 })
             } else {
                 Ok(())
@@ -581,48 +565,54 @@ mod tests {
             Ok(!self.closed)
         }
 
-        fn freeze(&mut self, _: &dyn Clock) -> Result<PreparedSnapshot, EffectError> {
+        fn freeze(&mut self, _: &dyn Clock) -> Result<FrozenSnapshot, EffectError> {
             self.step("freeze")?;
-            Ok(PreparedSnapshot::GitHub(frozen_snapshot_for_test(
+            Ok(frozen_snapshot_for_test(
                 "0123456789abcdef0123456789abcdef",
                 "report.md",
                 &"0".repeat(64),
-            )))
+            ))
         }
 
-        fn upload(&mut self, _: &PreparedSnapshot) -> Result<Value, EffectError> {
-            self.step("upload")?;
+        fn comment_bodies(
+            &mut self,
+            _: &FrozenSnapshot,
+            prefix: &str,
+            _: &dyn Clock,
+        ) -> Result<Vec<String>, EffectError> {
+            self.step("prepareComments")?;
+            Ok(self
+                .bodies
+                .clone()
+                .unwrap_or_else(|| vec![format!("[Copilot speaking]\n\n{prefix}\n\nreport")]))
+        }
+
+        fn comment(&mut self, _: &FrozenSnapshot, payload: &Value) -> Result<Value, EffectError> {
+            self.step("comment")?;
+            self.body = payload["body"].as_str().map(str::to_owned);
+            let id = u64::try_from(self.calls.iter().filter(|name| **name == "comment").count())
+                .unwrap()
+                .checked_add(46)
+                .unwrap();
             Ok(if self.missing_id {
                 json!({ "id": null, "url": null })
             } else {
-                json!({ "id": "artifact-id", "url": null })
+                json!({ "id": id, "url": null })
             })
-        }
-
-        fn verify_artifact(
-            &mut self,
-            _: &PreparedSnapshot,
-            receipt: &Value,
-        ) -> Result<Value, EffectError> {
-            self.step("verifyArtifact")?;
-            assert_eq!(receipt["id"], "artifact-id");
-            Ok(json!({ "id": "artifact-id", "url": "https://example.test/report" }))
-        }
-
-        fn comment(&mut self, _: &PreparedSnapshot, payload: &Value) -> Result<Value, EffectError> {
-            self.step("comment")?;
-            self.body = payload["body"].as_str().map(str::to_owned);
-            Ok(json!({ "id": 47, "url": null }))
         }
 
         fn verify_comment(
             &mut self,
-            _: &PreparedSnapshot,
+            _: &FrozenSnapshot,
             payload: &Value,
         ) -> Result<(), EffectError> {
             self.step("verifyComment")?;
             assert_eq!(payload["body"].as_str(), self.body.as_deref());
-            assert_eq!(payload["comment"]["id"], 47);
+            let id = u64::try_from(self.calls.iter().filter(|name| **name == "comment").count())
+                .unwrap()
+                .checked_add(46)
+                .unwrap();
+            assert_eq!(payload["comment"]["id"], id);
             Ok(())
         }
     }
@@ -661,24 +651,17 @@ mod tests {
         assert!(result["snapshot"].get("prepared").is_none());
         assert_eq!(
             effects.body.as_deref(),
-            Some(
-                "prefix\nexact\n\n[Pull request overview (auto-generated).](https://example.test/report)"
-            )
+            Some("[Copilot speaking]\n\nprefix\nexact\n\nreport")
         );
         assert_eq!(journal.writes[0]["operations"][0]["status"], "pending");
-        assert_eq!(
-            journal.writes[1]["operations"][0]["response"]["id"],
-            "artifact-id"
-        );
-        assert_eq!(journal.writes[2]["operations"][1]["status"], "pending");
-        assert_eq!(journal.writes[3]["operations"][1]["response"]["id"], 47);
+        assert_eq!(journal.writes[1]["operations"][0]["response"]["id"], 47);
+        assert_eq!(result["comments"], json!([{"id": 47, "url": null}]));
         assert_eq!(
             effects.calls,
             [
                 "isOpen",
                 "freeze",
-                "upload",
-                "verifyArtifact",
+                "prepareComments",
                 "comment",
                 "verifyComment"
             ]
@@ -693,7 +676,7 @@ mod tests {
 
     #[test]
     fn uncertain_and_completed_writes_never_replay() {
-        for stage in ["upload", "verifyArtifact", "comment", "verifyComment"] {
+        for stage in ["comment", "verifyComment"] {
             let mut journal = MemoryJournal::default();
             let mut effects = Effects {
                 fail: Some(stage),
@@ -705,18 +688,15 @@ mod tests {
             let next = publish(&mut journal, &mut retry, "");
             assert_eq!(next["status"], "needsReconciliation", "{stage}");
             assert!(retry.calls.is_empty(), "{stage}");
-            if stage != "upload" {
-                assert_eq!(next["operations"][0]["response"]["id"], "artifact-id");
-            }
             if stage == "verifyComment" {
-                assert_eq!(next["operations"][1]["response"]["id"], 47);
+                assert_eq!(next["comments"][0]["id"], 47);
             }
         }
     }
 
     #[test]
-    fn definite_refusal_and_tool_only_failure_allow_retry() {
-        for stage in ["upload", "freeze"] {
+    fn definite_refusal_and_preparation_failure_allow_retry() {
+        for stage in ["comment", "freeze"] {
             let mut journal = MemoryJournal::default();
             let mut effects = Effects {
                 fail: Some(stage),
@@ -726,9 +706,7 @@ mod tests {
             let result = publish(&mut journal, &mut effects, "");
             if stage == "freeze" {
                 assert_eq!(result["status"], "failed");
-                assert_eq!(result["missingTools"], json!(["renderer"]));
-                assert_eq!(result["stage"], "renderHtml");
-                assert_eq!(result["snapshot"]["runId"], "frozen");
+                assert_eq!(result["stage"], "freeze");
             } else {
                 assert_eq!(result["operations"][0]["status"], "failed");
             }
@@ -740,11 +718,10 @@ mod tests {
     #[test]
     fn journal_failure_stops_effects_and_keeps_received_ids() {
         for (fail_write, expected_calls, id) in [
-            (0, vec!["isOpen", "freeze"], Value::Null),
-            (1, vec!["isOpen", "freeze", "upload"], json!("artifact-id")),
+            (0, vec!["isOpen", "freeze", "prepareComments"], Value::Null),
             (
-                3,
-                vec!["isOpen", "freeze", "upload", "verifyArtifact", "comment"],
+                1,
+                vec!["isOpen", "freeze", "prepareComments", "comment"],
                 json!(47),
             ),
         ] {
@@ -757,11 +734,8 @@ mod tests {
             assert_eq!(result["status"], "journalFailure");
             assert!(result["error"].as_str().unwrap().contains("disk failure"));
             assert_eq!(effects.calls, expected_calls);
-            if fail_write == 1 {
-                assert_eq!(result["artifact"]["id"], id);
-            }
-            if fail_write == 3 {
-                assert_eq!(result["comment"]["id"], id);
+            if fail_write != 0 {
+                assert_eq!(result["comments"][0]["id"], id);
             }
         }
     }
@@ -792,15 +766,43 @@ mod tests {
             ..MemoryJournal::default()
         };
         let mut effects = Effects {
-            fail: Some("upload"),
+            fail: Some("comment"),
             ..Effects::default()
         };
         let result = publish(&mut journal, &mut effects, "");
         assert_eq!(result["status"], "journalFailure");
         let error = result["error"].as_str().unwrap();
-        assert!(error.contains("upload failed"));
+        assert!(error.contains("comment failed"));
         assert!(error.contains("disk failure"));
         assert_eq!(result["operations"][0]["status"], "ambiguous");
+    }
+
+    #[test]
+    fn multipart_comments_keep_part_identity_in_the_journal() {
+        let mut journal = MemoryJournal::default();
+        let mut effects = Effects {
+            bodies: Some(vec!["part one".into(), "part two".into()]),
+            ..Effects::default()
+        };
+        let result = publish(&mut journal, &mut effects, "");
+        assert_eq!(result["status"], "succeeded");
+        assert_eq!(result["comments"].as_array().unwrap().len(), 2);
+        assert_eq!(result["operations"][0]["part"], 1);
+        assert_eq!(result["operations"][0]["partCount"], 2);
+        assert_eq!(result["operations"][1]["part"], 2);
+        assert_eq!(result["operations"][1]["partCount"], 2);
+        assert_eq!(
+            effects.calls,
+            [
+                "isOpen",
+                "freeze",
+                "prepareComments",
+                "comment",
+                "verifyComment",
+                "comment",
+                "verifyComment"
+            ]
+        );
     }
 
     #[test]

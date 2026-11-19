@@ -316,21 +316,24 @@ early summary from becoming a self-confirming verdict.
 The initial overview is automatically published as preparation material as soon
 as it is generated, before review workers run. It is an immutable snapshot of the
 inspected source and merge-base commits, not a completed review or merge verdict.
-Later local overview regeneration does not update the initial report or comment.
+Later local overview regeneration does not update the initial report or comments.
 
-GitHub receives an unlisted Markdown Gist with native Mermaid diagrams, linked
-from a separate top-level PR comment. Anyone with its URL can read it, regardless
-of repository permissions. Azure DevOps receives a ZIP attachment containing one
-self-contained `report.html`, linked from a separate, resolved informational
-thread; existing PR-reader permissions govern its download. The reader extracts
-the HTML and opens it in a browser. ZIP is the container because the ADO PR
-attachment API accepts ZIP but not raw HTML files.
+GitHub receives top-level pull request comments containing the Markdown overview.
+Azure DevOps receives unanchored, resolved informational comments containing the
+same Markdown. The comments remain subject to the pull request's normal access
+controls; publication does not create separately accessible artifacts.
 
-On both platforms, the comment defaults to only `Pull request overview (auto-generated).`,
-with the entire sentence linked to the generated overview. Callers may supply an
-attribution prefix, which appears verbatim before a blank line and the linked sentence.
-An omitted or empty prefix leaves the default comment unchanged. Commit identifiers and
-review-state disclaimers belong in the report, not the comment.
+Each comment body is at most 64 KiB in UTF-8. The operation emits one comment
+when the complete report fits and otherwise emits consecutive parts with explicit
+part labels. Every part contains attribution and the reply-routing notice.
+The caller-supplied prefix remains verbatim; when it does not already start with
+`[Copilot speaking]`, the publisher puts that required marker first. Markdown
+rendering and Mermaid availability follow the provider's native comment support.
+Oversized Mermaid diagrams render as literal source in balanced text fences so
+each part remains independently readable.
+
+Commit identifiers and review-state disclaimers belong in the report body.
+Publication does not submit a review or cast a vote.
 
 Publishing the overview is best-effort. Failures are reported to the user with
 diagnostics, but never require them to investigate before the review proceeds.
@@ -682,6 +685,12 @@ Publication is mechanical rather than interpretive. It renders each approved
 finding in full, places it using validated destination metadata, and reads back
 what the service can attest. A summary reports the review outcome and execution
 diagnostics without restating the findings.
+
+Every pull request comment, including initial-overview links, finding comments,
+follow-up replies, and the final summary, ends with
+`ℹ️ Replies are not monitored. To discuss the finding, reach out via Teams.`
+This line tells readers to use the direct support channels instead of opening a
+discussion that the reviewer will not monitor.
 
 Remote writes are not assumed to be transactional. An ambiguous or partial run
 requires reconciliation instead of an automatic retry, because duplicate

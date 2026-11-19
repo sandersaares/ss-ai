@@ -51,7 +51,7 @@ mod error {
 pub use capture::{capture_target, collect_capture};
 pub use command::{run, run_in};
 pub use final_review::{FinalReviewInput, final_review_check_prior, publish_final_review};
-pub use overview::{OverviewInput, OverviewRender, publish_overview};
+pub use overview::{OverviewInput, publish_overview};
 #[doc(hidden)]
 pub use overview_snapshot::{overview_text_is_publishable, validate_overview_structure};
 pub use ss_ai_runtime::{
