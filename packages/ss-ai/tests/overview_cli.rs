@@ -208,7 +208,9 @@ struct PausedGitHub {
     provider: GitHub,
     events: Sender<OverlapEvent>,
     release: Receiver<()>,
-    pause_once: Cell<bool>,
+    pause_on_write: usize,
+    fail_after_pause: bool,
+    writes: Cell<usize>,
 }
 
 impl Process for PausedGitHub {
@@ -224,11 +226,28 @@ impl Process for PausedGitHub {
             && arguments
                 .windows(2)
                 .any(|pair| pair == ["--method", "POST"]);
-        if is_comment && self.pause_once.replace(false) {
-            self.events
-                .send(OverlapEvent::CommentWrite)
-                .map_err(io::Error::other)?;
-            self.release.recv().map_err(io::Error::other)?;
+        if is_comment {
+            let write = self
+                .writes
+                .get()
+                .checked_add(1)
+                .ok_or_else(|| io::Error::other("overview comment write count overflowed"))?;
+            self.writes.set(write);
+            if write == self.pause_on_write {
+                self.events
+                    .send(OverlapEvent::CommentWrite)
+                    .map_err(io::Error::other)?;
+                self.release.recv().map_err(io::Error::other)?;
+                let response = self.provider.execute(program, arguments, input)?;
+                if self.fail_after_pause {
+                    return Ok(ProcessOutput::new(
+                        false,
+                        Vec::new(),
+                        b"lost response".to_vec(),
+                    ));
+                }
+                return Ok(response);
+            }
         }
         self.provider.execute(program, arguments, input)
     }
@@ -529,18 +548,20 @@ fn overlapping_publishers_and_snapshot_writer_contend_without_reposting() {
             let events = events.clone();
             move || {
                 let provider = PausedGitHub {
-                    provider: GitHub {
-                        lose_once: Cell::new(ambiguous),
-                        ..GitHub::default()
-                    },
+                    provider: GitHub::default(),
                     events,
                     release: comment_wait,
-                    pause_once: Cell::new(true),
+                    pause_on_write: 2,
+                    fail_after_pause: ambiguous,
+                    writes: Cell::new(0),
                 };
                 publish(&arguments, &provider, &provider, &TestClock)
             }
         });
-        assert_eq!(observed.recv().unwrap(), OverlapEvent::CommentWrite);
+        assert_eq!(
+            observed.recv_timeout(Duration::from_secs(60)).unwrap(),
+            OverlapEvent::CommentWrite
+        );
 
         let (publisher_release, publisher_wait) = mpsc::channel();
         let publisher = thread::spawn({
@@ -572,7 +593,10 @@ fn overlapping_publishers_and_snapshot_writer_contend_without_reposting() {
             }
         });
 
-        let mut waits = vec![observed.recv().unwrap(), observed.recv().unwrap()];
+        let mut waits = vec![
+            observed.recv_timeout(Duration::from_secs(60)).unwrap(),
+            observed.recv_timeout(Duration::from_secs(60)).unwrap(),
+        ];
         waits.sort_by_key(|event| match event {
             OverlapEvent::PublisherWait => 0,
             OverlapEvent::SnapshotWait => 1,
@@ -592,7 +616,12 @@ fn overlapping_publishers_and_snapshot_writer_contend_without_reposting() {
 
         if ambiguous {
             assert_eq!(first["status"], "incomplete");
+            assert_eq!(first["comments"].as_array().unwrap().len(), 1);
+            assert_eq!(first["operations"][0]["status"], "completed");
+            assert_eq!(first["operations"][1]["status"], "ambiguous");
             assert_eq!(second["status"], "needsReconciliation");
+            assert_eq!(second["operations"], first["operations"]);
+            assert_eq!(second["comments"], first["comments"]);
         } else {
             assert_eq!(first["status"], "succeeded");
             assert_eq!(second, first);
