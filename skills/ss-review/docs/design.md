@@ -212,8 +212,8 @@ work. Initialization, immutable snapshots, and publication retain their conflict
 checks; concurrency does not authorize replacement or duplicate delivery.
 
 Review workers use the default context tier, relying on automatic compaction
-and durable group progress to continue beyond a context window. Quality
-refinement and synthesis use long context for review-wide analysis. Optional
+and durable group progress to continue beyond a context window. Synthesis uses
+long context for review-wide analysis. Optional
 subagent token budgets are not set. Notes guide automatic compaction toward
 preserving instructions, progress, and exact reload paths while discarding
 completed-work history and previously read file contents. File contents,
@@ -421,7 +421,7 @@ maintenance burden must be proportionate to the consequences avoided. A
 disproportionate remedy is simplified; the finding is omitted when no
 proportionate, actionable recommendation remains. High cost alone is not a veto
 when the consequences warrant it. The finding states material trade-offs; the
-maintainer retains responsibility for prioritization. Refinement and synthesis
+maintainer retains responsibility for prioritization. Review and synthesis
 preserve this policy rather than imposing an additional benefit threshold.
 
 Duplication is judged by root cause and remedy rather than by shared vocabulary
@@ -431,7 +431,7 @@ explanation and action account for the underlying observations. This produces a
 smaller, more useful review without making minority or unrecognized findings
 disappear.
 
-The finding's identity survives refinement, audit, freshness checks, and
+The finding's identity survives audit, freshness checks, and
 publication, so a decision always names the same logical recommendation.
 
 ## Audit and approval
@@ -494,7 +494,7 @@ The freshness tenet is that approval applies to a claim supported by a specific
 body of evidence. It applies when the review is associated with a pull request,
 where the content and discussion can move underneath an in-progress review.
 
-After refinement and synthesis, before policy classification or human audit,
+After synthesis, before policy classification or human audit,
 the review refreshes source and discussion and retires stale findings. The
 presented text and resulting decisions refer to that checked snapshot, which
 remains unchanged while awaiting the user.

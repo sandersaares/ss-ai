@@ -45,14 +45,14 @@ Proactor handoffs supply a per-cycle review-state directory for artifacts and
 worker outputs, isolating fixed filenames from other reviews in the same
 session. The primary agent keeps the proactor continuation context and latest
 loop instruction in its prose checkpoint. It returns to the proactor only
-after phase 10 completes; that workflow owns further selection.
+after phase 9 completes; that workflow owns further selection.
 
 Model, reasoning-effort, and context-tier choices in `SKILL.md` are passed as
 explicit spawn arguments. Every subagent uses medium reasoning effort,
 including nested workers and retries; delegated prompts carry that requirement
 to nested dispatches. Review workers, including retries, and the auto-approval
-worker receive the default context tier explicitly. Quality refinement and
-synthesis receive the long-context tier. Unspecified context tiers remain
+worker receive the default context tier explicitly. Synthesis receives the
+long-context tier. Unspecified context tiers remain
 runtime preferences.
 
 Workers own bounded analysis or policy classification, not orchestration. A
@@ -229,9 +229,7 @@ typechecker, or linter checks to every analysis worker. Content-overview
 preparation does not seed those checks as completeness questions.
 
 Review workers apply the boundary before investigating or recording a finding.
-Quality refinement removes findings that duplicate compiler, typechecker, or
-linter checks from the consolidated artifact before strengthening the remaining
-claims. Synthesis and freshness revalidation preserve the same boundary. Mixed
+Synthesis and freshness revalidation preserve the same boundary. Mixed
 findings retain only independently supported concerns beyond those checks.
 
 This is a semantic scope decision in the prompts, not a keyword filter in the
@@ -569,17 +567,6 @@ returns directly to the human audit and requires a fresh merge decision, even
 when the source commit is unchanged. Settling that audit without explicit merge
 approval records a false decision rather than retaining the earlier approval.
 
-## Finding quality refinement
-
-Quality refinement is a distinct transformation over the consolidated finding
-artifact. It applies the principles in `design.md`, "Findings", before the
-audit, using the finding model to preserve identity and provenance while
-rewriting sound findings or recording why unsupported ones were removed.
-
-The layer has no approval authority and does not render publication prose. This
-keeps evidence correction independent of the later user decision about whether
-a valid recommendation is worth publishing.
-
 ## Auto-approval
 
 Auto-approval runs after synthesis and before the human audit. The policy lives
@@ -617,12 +604,12 @@ approval and its original source.
 
 ## Human audit
 
-Phase 7 offers document approval and an optional in-session presentation.
+Phase 6 offers document approval and an optional in-session presentation.
 Only the latter loads `../audit-in-session.md`. Both use the same rendering,
 feedback, decision, and approved-set commands; no separate queue or decision
 schema represents the walkthrough.
 
-`../SKILL.md` phase 7 owns the literal document-audit question template and ordered
+`../SKILL.md` phase 6 owns the literal document-audit question template and ordered
 choice labels. The orchestrator substitutes the audited PR identity, omits its
 reminder when there is no PR, and filters out merge approval for self-authored
 PRs or non-PR destinations. It preserves all remaining wording and choice order,
