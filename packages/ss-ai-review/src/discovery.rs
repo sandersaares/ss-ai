@@ -18,6 +18,7 @@ use crate::clock::{is_recent, timestamp};
 use crate::discussion;
 use crate::error::{classification, fail};
 use crate::github_approval::Evidence as GitHubEvidence;
+use crate::identity::Identity;
 use crate::journal::{FileJournal, read_bytes};
 use crate::json::{boolean, field, identifier, required_optional, text};
 use crate::objects;
@@ -937,7 +938,7 @@ pub(crate) fn discover(
     };
     run.save(&journal)?;
     if !run.enumeration_complete {
-        match metadata(api, input.repository) {
+        match metadata(api, input.repository, &identity) {
             Ok(inventory) => {
                 run.inventory = inventory;
                 run.enumeration_complete = true;
@@ -2166,10 +2167,14 @@ pub(crate) fn work(
     Ok(result)
 }
 
-/// Projects enumeration metadata without asking for reviews, discussions, or objects.
-fn metadata(api: &mut Api<'_>, repository: &Target) -> Result<Vec<Entry>, AppError> {
+/// Projects reviewed PR metadata without asking for reviews, discussions, or objects.
+fn metadata(
+    api: &mut Api<'_>,
+    repository: &Target,
+    identity: &Identity,
+) -> Result<Vec<Entry>, AppError> {
     let mut entries = Vec::new();
-    for (id, value) in api.open_pull_requests(repository)? {
+    for (id, value) in api.reviewed_pull_requests(repository, identity)? {
         let github = repository.platform == Platform::GitHub;
         if boolean(field(&value, if github { "draft" } else { "isDraft" })?)? {
             continue;

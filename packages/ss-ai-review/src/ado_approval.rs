@@ -248,6 +248,90 @@ pub(crate) fn capture(api: &mut Api<'_>, target: &Target) -> Result<Evidence, Ap
     Ok(first)
 }
 
+/// Verifies actual account review activity after reviewer-assignment filtering.
+pub(crate) fn has_listed_review_activity(
+    api: &mut Api<'_>,
+    target: &Target,
+    pull_request: &Value,
+    account: &str,
+) -> Result<bool, AppError> {
+    let mut reviewer_ids = HashSet::new();
+    for reviewer in array(field(pull_request, "reviewers")?)? {
+        let id = identifier(field(reviewer, "id")?)?;
+        if !reviewer_ids.insert(id.to_lowercase()) {
+            return Err(fail("service", "Duplicate ADO reviewer in discovery"));
+        }
+        if !id.eq_ignore_ascii_case(account) {
+            continue;
+        }
+        if reviewer
+            .get("isContainer")
+            .is_some_and(|value| value != false)
+        {
+            return Err(fail("service", "Authenticated ADO reviewer is a group"));
+        }
+        if vote(field(reviewer, "vote")?)? != 0 {
+            return Ok(true);
+        }
+        for flag in ["isFlagged", "hasDeclined"] {
+            if reviewer
+                .get(flag)
+                .map(boolean)
+                .transpose()?
+                .unwrap_or(false)
+            {
+                return Ok(true);
+            }
+        }
+    }
+
+    let threads = unique_list(api, &format!("{}/threads", target.pr_api()), "id")?;
+    for event in ordered_events(&threads, api.transport.clock.now())? {
+        match event.kind {
+            "VoteUpdate" => {
+                for name in [
+                    "CodeReviewVotedByIdentity",
+                    "CodeReviewVotedByInitiatorIdentity",
+                ] {
+                    if actor(event.value, name)?.eq_ignore_ascii_case(account) {
+                        return Ok(true);
+                    }
+                }
+            }
+            "ReviewersUpdate"
+                if updated_reviewer(
+                    &event,
+                    "CodeReviewReviewersUpdatedNumDeclined",
+                    "CodeReviewReviewersUpdatedChangedIdentity",
+                )?
+                .is_some_and(|reviewer| reviewer.eq_ignore_ascii_case(account)) =>
+            {
+                // Both setting and clearing decline are review activity, even
+                // when neither transition leaves a positive vote behind.
+                return Ok(true);
+            }
+            _ => {}
+        }
+    }
+
+    Ok(threads.iter().any(|thread| {
+        !is_deleted(thread)
+            && thread
+                .get("comments")
+                .and_then(Value::as_array)
+                .is_some_and(|comments| {
+                    comments.iter().any(|comment| {
+                        !is_deleted(comment)
+                            && comment.get("commentType").and_then(Value::as_str) != Some("system")
+                            && comment
+                                .pointer("/author/id")
+                                .and_then(Value::as_str)
+                                .is_some_and(|id| id.eq_ignore_ascii_case(account))
+                    })
+                })
+    }))
+}
+
 /// Collects one complete service observation without reading repository content.
 fn observe(api: &mut Api<'_>, target: &Target) -> Result<Evidence, AppError> {
     let pr = project_pull_request(&api.transport.request(&target.pr_api(), "GET", None)?);

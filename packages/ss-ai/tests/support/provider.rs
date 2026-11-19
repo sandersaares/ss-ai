@@ -103,6 +103,20 @@ fn github(args: &[String]) {
                     .to_owned()
             }
         }
+        ("GET", "search/issues?q=repo%3Aexample%2Fwidgets%20is%3Apr%20is%3Aopen%20reviewed-by%3Areviewer%20-author%3Areviewer&per_page=1") => {
+            if env::var_os("FIXTURE_NO_CANDIDATES").is_some() {
+                r#"{"total_count":0,"incomplete_results":false,"items":[]}"#.to_owned()
+            } else {
+                r#"{"total_count":1,"incomplete_results":false,"items":[]}"#.to_owned()
+            }
+        }
+        ("GET", "search/issues?q=repo%3Aexample%2Fwidgets%20is%3Apr%20is%3Aopen%20reviewed-by%3Areviewer%20-author%3Areviewer&per_page=100") => {
+            if env::var_os("FIXTURE_NO_CANDIDATES").is_some() {
+                r#"[{"total_count":0,"incomplete_results":false,"items":[]}]"#.to_owned()
+            } else {
+                r#"[{"total_count":1,"incomplete_results":false,"items":[{"number":10,"state":"open","draft":false,"title":"fixture"}]}]"#.to_owned()
+            }
+        }
         ("GET", "repos/example/widgets/pulls/10") => {
             r#"{"state":"open","draft":false,"user":{"id":99,"login":"author"}}"#.to_owned()
         }

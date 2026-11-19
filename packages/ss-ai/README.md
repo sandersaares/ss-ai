@@ -443,11 +443,15 @@ describes the assignment and page records.
 
 ## Reapproval discovery
 
-Discovery collects open-PR metadata and complete commit timestamps before
-any approval history, discussion, or Git content. It shares the proactor's
-inclusive 14-day cutoff and latest non-future UTC committer timestamp, but
-does not apply the proactor's already-reviewed exclusion. Missing or malformed
-commit evidence is an error; future-only commits produce `noRecentCommit`.
+Discovery collects metadata and complete commit timestamps for open PRs reviewed
+by the authenticated account before full approval-history capture, discussion,
+or Git content. It excludes self-authored PRs, partitions GitHub searches around its
+result cap, and verifies Azure DevOps reviewer assignments against account-owned
+review activity. It shares the proactor's inclusive 14-day cutoff and latest
+non-future UTC committer timestamp. PRs without account-owned review history do
+not enter the inventory; reviewed PRs without an approval remain eligible for
+inspection. Missing or malformed commit evidence is an error; future-only
+commits produce `noRecentCommit`.
 
 ```powershell
 ss-ai autoreapprove discover --repository-url "{{REPOSITORY_URL}}" `
