@@ -75,6 +75,14 @@ impl Process for GitHub {
             ("GET", "repos/example/widgets") => json!({"id": 123}),
             (
                 "GET",
+                "search/issues?q=repo%3Aexample%2Fwidgets%20is%3Apr%20is%3Aopen%20reviewed-by%3Areviewer%20-author%3Areviewer&per_page=1",
+            ) => json!({
+                "total_count": if self.empty { 0 } else if self.draft_only { 1 } else { 6 },
+                "incomplete_results": false,
+                "items": []
+            }),
+            (
+                "GET",
                 "search/issues?q=repo%3Aexample%2Fwidgets%20is%3Apr%20is%3Aopen%20reviewed-by%3Areviewer%20-author%3Areviewer&per_page=100",
             ) => {
                 if self.empty {
@@ -686,7 +694,7 @@ impl Process for BrokenEvidence {
     ) -> StdIoResult<ProcessOutput> {
         let output = self.provider.execute(program, arguments, input)?;
         let mut value: Value = serde_json::from_slice(&output.stdout).unwrap();
-        if arguments[1].contains("search/issues?") {
+        if arguments[1].contains("search/issues?") && arguments[1].ends_with("per_page=100") {
             match self.fault {
                 Fault::EmptyTitle => value[0]["items"][0]["title"] = json!(" "),
                 Fault::RepeatedPr => value[1] = value[0].clone(),
@@ -813,22 +821,43 @@ impl Http for AzureMetadata {
         } else if url.path().ends_with("/pullRequests") {
             let entries = if query.get("$skip").unwrap() == "0" {
                 vec![
-                    json!({"pullRequestId": 2, "status": "active", "isDraft": false, "title": "cutoff", "createdBy": {"id": "author"}}),
+                    json!({"pullRequestId": 2, "status": "active", "isDraft": false, "title": "cutoff", "createdBy": {"id": "author"}, "reviewers": [{"id": "account", "vote": 10}]}),
                     json!({"pullRequestId": 3, "isDraft": true}),
-                    json!({"pullRequestId": 4, "status": "active", "isDraft": false, "title": "self-authored", "createdBy": {"id": "account"}}),
+                    json!({"pullRequestId": 4, "status": "active", "isDraft": false, "title": "self-authored", "createdBy": {"id": "ACCOUNT"}, "reviewers": [{"id": "account", "vote": 10}]}),
+                    json!({"pullRequestId": 5, "status": "active", "isDraft": false, "title": "assigned only", "createdBy": {"id": "author"}, "reviewers": [{"id": "account", "vote": 0}]}),
+                    json!({"pullRequestId": 6, "status": "active", "isDraft": false, "title": "reset approval", "createdBy": {"id": "author"}, "reviewers": [{"id": "account", "vote": 0}]}),
                 ]
             } else {
                 Vec::new()
             };
             json!({"count": entries.len(), "value": entries})
-        } else if url.path().ends_with("/pullRequests/2/commits") {
-            let date = if query.contains_key("continuationToken") {
+        } else if url.path().ends_with("/pullRequests/2/commits")
+            || url.path().ends_with("/pullRequests/6/commits")
+        {
+            let reset = url.path().ends_with("/6/commits");
+            let date = if reset {
+                "2026-01-01T00:00:00Z"
+            } else if query.contains_key("continuationToken") {
                 "2026-10-01T00:00:00Z"
             } else {
                 headers.insert("x-ms-continuationtoken".to_owned(), "next".to_owned());
                 "2026-09-14T10:00:00Z"
             };
             json!({"count": 1, "value": [{"committer": {"date": date}}]})
+        } else if url.path().ends_with("/pullRequests/5/threads") {
+            json!({"count": 0, "value": []})
+        } else if url.path().ends_with("/pullRequests/6/threads") {
+            json!({"count": 1, "value": [{
+                "id": 6,
+                "comments": [{"id": 1, "commentType": "system"}],
+                "properties": {
+                    "CodeReviewThreadType": {"$type": "System.String", "$value": "VoteUpdate"},
+                    "CodeReviewVotedByIdentity": {"$type": "System.String", "$value": "1"},
+                    "CodeReviewVotedByInitiatorIdentity": {"$type": "System.String", "$value": "1"}
+                },
+                "identities": {"1": {"id": "account"}},
+                "publishedDate": "2026-01-01T00:00:00Z"
+            }]})
         } else {
             panic!("Unexpected Azure history, content or write endpoint: {url}")
         };
@@ -841,7 +870,7 @@ impl Http for AzureMetadata {
 }
 
 #[test]
-fn azure_metadata_and_commit_pages_preserve_tenant_and_do_not_collect_vote_history() {
+fn azure_metadata_and_commit_pages_filter_review_activity_before_vote_history() {
     let root = fixture();
     let mut args = arguments(
         root.path(),
@@ -857,21 +886,26 @@ fn azure_metadata_and_commit_pages_preserve_tenant_and_do_not_collect_vote_histo
     assert_eq!(summary["counts"]["assessmentRequired"], 1);
     assert_eq!(summary["counts"]["failed"], 0);
     let calls = provider.calls.borrow();
-    assert_eq!(calls.len(), 6);
+    assert_eq!(calls.len(), 9);
     assert!(
         calls
             .iter()
             .any(|call| call.contains("continuationToken=next"))
     );
-    assert!(calls.iter().any(|call| call.contains("%24skip=3")));
-    assert_eq!(summary["counts"]["open"], 1);
+    assert!(calls.iter().any(|call| call.contains("%24skip=5")));
+    assert_eq!(summary["counts"]["open"], 2);
     assert!(summary["counts"].get("draft").is_none());
     assert_eq!(
         record(root.path())["inventory"].as_array().unwrap().len(),
-        1
+        2
     );
     assert!(!calls.iter().any(|call| call.contains("/pullRequests/3/")));
     assert!(!calls.iter().any(|call| call.contains("/pullRequests/4/")));
+    assert!(
+        !calls
+            .iter()
+            .any(|call| call.contains("/pullRequests/5/commits"))
+    );
 }
 
 /// Real captured provider shapes with injected transport, never live approvals.
@@ -956,8 +990,8 @@ impl Http for AzureApproval {
         } else if url.path().ends_with("/pullRequests") {
             if query.get("$skip").unwrap() == "0" {
                 values(&json!([
-                    {"pullRequestId": 1, "status": "active", "isDraft": false, "title": "recent", "createdBy": {"id": "author"}},
-                    {"pullRequestId": 2, "status": "active", "isDraft": false, "title": "excluded old", "createdBy": {"id": "author"}}
+                    {"pullRequestId": 1, "status": "active", "isDraft": false, "title": "recent", "createdBy": {"id": "author"}, "reviewers": [{"id": "10000000-0000-4000-8000-000000000001", "vote": 10}]},
+                    {"pullRequestId": 2, "status": "active", "isDraft": false, "title": "excluded old", "createdBy": {"id": "author"}, "reviewers": [{"id": "10000000-0000-4000-8000-000000000001", "vote": 10}]}
                 ]))
             } else {
                 values(&json!([]))
@@ -1840,6 +1874,14 @@ impl Process for GitHubApproval {
                 json!({"id": id, "login": "reviewer", "type": "User"})
             }
             "repos/example/widgets" => json!({"id": 123}),
+            "search/issues?q=repo%3Aexample%2Fwidgets%20is%3Apr%20is%3Aopen%20reviewed-by%3Areviewer%20-author%3Areviewer&per_page=1" =>
+            {
+                json!({
+                    "total_count": 2,
+                    "incomplete_results": false,
+                    "items": []
+                })
+            }
             "search/issues?q=repo%3Aexample%2Fwidgets%20is%3Apr%20is%3Aopen%20reviewed-by%3Areviewer%20-author%3Areviewer&per_page=100" =>
             {
                 json!([{
@@ -2343,7 +2385,7 @@ impl Process for PausedMetadata {
         arguments: &[String],
         input: &[u8],
     ) -> StdIoResult<ProcessOutput> {
-        if arguments[1].contains("search/issues?") {
+        if arguments[1].contains("search/issues?") && arguments[1].ends_with("per_page=1") {
             self.signal.send(Signal::Enumerating).unwrap();
             self.release.recv().unwrap();
         }

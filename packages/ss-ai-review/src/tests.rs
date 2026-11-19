@@ -12,6 +12,7 @@ use std::panic::{RefUnwindSafe, UnwindSafe};
 use std::time::Duration;
 
 use jiff::Timestamp;
+use jiff::civil::Date;
 use ohno::AppError;
 use serde_json::{Value, json};
 
@@ -872,6 +873,79 @@ fn github_owned_pages_preserve_order_objects_and_shape_errors() {
         assert_eq!(crate::classification(&error), "service");
         script.done();
     }
+}
+
+/// Supplies a search larger than GitHub's result cap using disjoint date ranges.
+struct SearchCap {
+    ranges: Cell<usize>,
+}
+
+impl Process for SearchCap {
+    fn execute(
+        &self,
+        program: &str,
+        arguments: &[String],
+        _input: &[u8],
+    ) -> io::Result<ProcessOutput> {
+        assert_eq!(program, "gh");
+        let path = &arguments[1];
+        let earlier: Date = "2000-01-01".parse().unwrap();
+        let later: Date = "2026-09-28".parse().unwrap();
+        let (earlier_count, later_count) = if let Some(range) = path
+            .split("%20created%3A")
+            .nth(1)
+            .and_then(|range| range.split('&').next())
+        {
+            self.ranges.set(self.ranges.get() + 1);
+            let (start, end) = range.split_once("..").unwrap();
+            let start: Date = start.parse().unwrap();
+            let end: Date = end.parse().unwrap();
+            (
+                usize::from(start <= earlier && earlier <= end) * 1000,
+                usize::from(start <= later && later <= end),
+            )
+        } else {
+            (1000, 1)
+        };
+        let total = earlier_count + later_count;
+        let mut items: Vec<_> = (1..=earlier_count.min(1000))
+            .map(|number| json!({"number": number}))
+            .collect();
+        if later_count != 0 && earlier_count != 1000 {
+            items.push(json!({"number": 1001}));
+        }
+        let page = json!({
+            "total_count": total,
+            "incomplete_results": false,
+            "items": items
+        });
+        let response = if path.ends_with("per_page=1") {
+            page
+        } else {
+            json!([page])
+        };
+        Ok(ProcessOutput::new(
+            true,
+            serde_json::to_vec(&response).unwrap(),
+            Vec::new(),
+        ))
+    }
+}
+
+#[test]
+fn github_search_partitions_results_beyond_service_cap() {
+    let process = SearchCap {
+        ranges: Cell::new(0),
+    };
+    let http = Script::new(Vec::new());
+    let clock = FakeClock::new();
+    let mut transport =
+        Transport::new(&repository(Platform::GitHub), None, &process, &http, &clock);
+    let items = transport
+        .search_issues("repo:example/widgets is:pr")
+        .unwrap();
+    assert_eq!(items.len(), 1001);
+    assert!(process.ranges.get() > 1);
 }
 
 #[test]

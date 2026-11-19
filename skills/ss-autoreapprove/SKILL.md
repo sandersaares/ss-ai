@@ -103,10 +103,12 @@ select multiple repositories in priority order, example schedule prompts are:
 The utility enumerates complete metadata for open PRs reviewed by the
 authenticated account, excludes self-authored PRs, discards drafts, and applies
 the proactor's inclusive 14-day committer-time window before any approval
-history or content work. PRs never reviewed by that account do not enter the
+history capture or content work. PRs never reviewed by that account do not enter the
 inventory. A reviewed PR without an approval still receives its inspection
 decision. Excluded PRs produce counts, not per-PR assignments. The window never
-limits approval history or the cumulative comparison.
+limits approval history or the cumulative comparison. GitHub search partitions
+results above its service cap, and Azure DevOps reviewer assignments require
+account-owned review activity before admission.
 
 # Stage 2: inspect eligible history
 

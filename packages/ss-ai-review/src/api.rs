@@ -393,10 +393,7 @@ impl Api<'_> {
                     "repo:{}/{} is:pr is:open reviewed-by:{} -author:{}",
                     repository.organization, repository.repository, login, login
                 );
-                for pr in self
-                    .transport
-                    .search_issues(&format!("search/issues?q={}", escape(&query)))?
-                {
+                for pr in self.transport.search_issues(&query)? {
                     let id = pr_id(field(&pr, "number")?)?;
                     if !seen.insert(id) {
                         return Err(fail(
@@ -441,9 +438,22 @@ impl Api<'_> {
                         .ok_or_else(|| fail("service", "Reviewed PR offset overflow"))?;
                     for pr in values {
                         let id = pr_id(field(&pr, "pullRequestId")?)?;
-                        if !boolean(field(&pr, "isDraft")?)?
-                            && identifier(field(field(&pr, "createdBy")?, "id")?)? == account_id
-                        {
+                        if boolean(field(&pr, "isDraft")?)? {
+                            continue;
+                        }
+                        let author = Identity::from_account(
+                            Platform::AzureDevOps,
+                            field(&pr, "createdBy")?,
+                        )?;
+                        if author.same_account(identity) {
+                            continue;
+                        }
+                        if !crate::ado_approval::has_listed_review_activity(
+                            self,
+                            &repository.candidate(id),
+                            &pr,
+                            account_id,
+                        )? {
                             continue;
                         }
                         if !seen.insert(id) {

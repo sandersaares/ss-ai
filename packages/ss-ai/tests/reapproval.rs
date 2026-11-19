@@ -661,6 +661,14 @@ impl Process for Provider {
                 json!({"id": if self.fault.get() == "auth" { 99 } else { 42 }, "login": "reviewer", "type": "User"})
             }
             "repos/example/widgets" => json!({"id": 123}),
+            "search/issues?q=repo%3Aexample%2Fwidgets%20is%3Apr%20is%3Aopen%20reviewed-by%3Areviewer%20-author%3Areviewer&per_page=1" =>
+            {
+                json!({
+                    "total_count": self.candidates.len() + 1,
+                    "incomplete_results": false,
+                    "items": []
+                })
+            }
             "search/issues?q=repo%3Aexample%2Fwidgets%20is%3Apr%20is%3Aopen%20reviewed-by%3Areviewer%20-author%3Areviewer&per_page=100" =>
             {
                 let mut candidates = self.candidates.iter().map(|number| json!({
@@ -920,8 +928,8 @@ impl Http for Provider {
         } else if path.ends_with("/pullRequests") {
             if query.get("$skip").unwrap() == "0" {
                 values(
-                    &json!([{"pullRequestId": 1, "status": "active", "isDraft": false, "title": "Recent", "createdBy": {"id": "author"}},
-                    {"pullRequestId": 2, "status": "active", "isDraft": false, "title": "Old", "createdBy": {"id": "author"}}]),
+                    &json!([{"pullRequestId": 1, "status": "active", "isDraft": false, "title": "Recent", "createdBy": {"id": "author"}, "reviewers": [{"id": "10000000-0000-4000-8000-000000000001", "vote": 10}]},
+                    {"pullRequestId": 2, "status": "active", "isDraft": false, "title": "Old", "createdBy": {"id": "author"}, "reviewers": [{"id": "10000000-0000-4000-8000-000000000001", "vote": 10}]}]),
                 )
             } else {
                 values(&json!([]))
