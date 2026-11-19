@@ -1261,8 +1261,8 @@ $PSNativeCommandUseErrorActionPreference = $true
     }
 }
 
-# The skill delivers a review whose target is not a pull request by hand: phase 7 builds the
-# approved set and phase 9 renders that set into one document the user posts. The two commands are
+# The skill delivers a review whose target is not a pull request by hand: phase 6 builds the
+# approved set and phase 8 renders that set into one document the user posts. The two commands are
 # joined only by the phase text, so the join is asserted here.
 Describe 'Approved set delivery' {
     BeforeEach {

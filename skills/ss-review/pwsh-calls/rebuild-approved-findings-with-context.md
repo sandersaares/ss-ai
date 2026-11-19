@@ -11,4 +11,4 @@ Placeholders to replace:
 | `CONTEXT_PATH` | Absolute path to the latest capture whose evidence has completed revalidation. |
 | `REPOSITORY_PATH` | Local clone holding the reviewed commits. |
 
-Keep `--context-path` pointed at the full refreshed capture so commit, anchor, and follow-up validation use complete evidence. Any agent investigation of a reported target or metadata value uses `query-pr-context.md`, never a direct capture read or a query result substituted for this input. Handle the validation summary and any excluded anchors as phase 8 describes; report errors before continuing to publication.
+Keep `--context-path` pointed at the full refreshed capture so commit, anchor, and follow-up validation use complete evidence. Any agent investigation of a reported target or metadata value uses `query-pr-context.md`, never a direct capture read or a query result substituted for this input. Handle the validation summary and any excluded anchors as phase 7 describes; report errors before continuing to publication.

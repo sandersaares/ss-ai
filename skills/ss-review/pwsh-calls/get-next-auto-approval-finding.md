@@ -11,6 +11,6 @@ Placeholders to replace:
 
 The command emits a single JSON object with `isComplete`, `remainingCount`, `finding`, and `auditFindingIds`. `finding` is the next full finding with no recorded classification or audit verdict, in artifact order, or null when none remain. `remainingCount` includes the returned finding. The command is read-only: it returns the same finding until a decision is recorded.
 
-`auditFindingIds` lists live findings with no decision or with `needs-audit`, not rejected or dropped findings. After phase 6 verifies `isComplete`, phase 7 uses these identifiers for human presentation. On a direct return to phase 7, unclassified new findings in this list require the user's decision too; do not rerun policy classification.
+`auditFindingIds` lists live findings with no decision or with `needs-audit`, not rejected or dropped findings. After phase 5 verifies `isComplete`, phase 6 uses these identifiers for human presentation. On a direct return to phase 6, unclassified new findings in this list require the user's decision too; do not rerun policy classification.
 
 A missing decision log means nothing has been classified yet. Missing findings or invalid input are errors, not completion. On an error, apply [error recovery](../error-recovery.md) before continuing.
