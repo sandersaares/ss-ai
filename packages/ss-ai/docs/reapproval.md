@@ -257,10 +257,12 @@ The complete UTF-8 comment, including its escaped marker, fits a conservative
 an individually oversized reason; the assessment retains the full explanation.
 After verifying the comment, notification clears the authenticated account's
 captured positive decisions: GitHub dismisses retained `APPROVED` reviews by
-immutable review ID, and ADO resets a positive reviewer vote to zero. Already
-dismissed reviews and nonpositive votes require no write.
-It does not cast a negative vote, change other reviewers, or modify existing
-discussion. Uncertainty keeps
+immutable review ID, and ADO removes the captured positive reviewer assignment
+by identity. Removing the ADO assignment makes the PR available to
+`ss-review-proactor` after its other eligibility checks. Already dismissed
+reviews and absent ADO reviewer assignments require no write. It does not cast
+a negative vote, remove another account's assignment, or modify existing
+discussion. A later human vote or reviewer change remains intact. Uncertainty keeps
 its explicit diagnostic and partial run status even after the notice is posted.
 
 Inspection recognizes only service-authenticated comments by the account and
@@ -303,9 +305,9 @@ ADO rereads account vote history to preserve a later independent approval,
 including one with unchanged vote strength. Changed history without a provably
 later approval remains an explicit failure, not permission to skip the reset.
 It preserves withdrawals, negative
-votes, and reviewer removal, including decisions visible in history captured
-after an earlier positive reviewer read. Its API has no atomic prior-vote condition, so a
-human decision can still race with the reset request. Closed or draft PR recovery
+votes, declines, and reviewer removal, including decisions visible in history captured
+after an earlier positive reviewer read. Its API has no atomic prior-state condition, so a
+human decision can still race with the reviewer-removal request. Closed or draft PR recovery
 reads existing effects without initiating resets. An approval that still needs
 clearing leaves notification incomplete; closure or draft conversion alone
 cannot verify a reset. Reopening permits a pending reset but never replays an

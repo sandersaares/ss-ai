@@ -1476,37 +1476,39 @@ fn eligibility_exclusions_avoid_commit_reads_and_ignore_pending_reviews_or_teams
             script.done();
         }
     }
-    let script = Script::new(vec![
-        Step::read(
-            "repos/example/widgets/pulls/10",
-            json!({"state":"open","draft":false,"user":{"id":99}}),
-        ),
-        Step::read(
-            "repos/example/widgets/pulls/10/requested_reviewers?per_page=100",
-            json!([{"users":[],"teams":[{"id":42,"slug":"reviewer"}]}]),
-        ),
-        Step::read(
-            "repos/example/widgets/pulls/10/reviews?per_page=100",
-            json!([[{"state":"PENDING","user":{"id":42}}]]),
-        ),
-        Step::write(
-            "graphql",
-            "POST",
-            json!({"query":crate::api::COMMIT_QUERY,"variables":{"owner":"example","repo":"widgets","num":10,"cur":null,"size":100}}),
-            json!({"data":{"repository":{"pullRequest":{"commits":{"nodes":[{"commit":{"committedDate":"2026-09-27T00:00:00Z"}}],"pageInfo":{"hasNextPage":false}}}}}}),
-        ),
-    ]);
-    let clock = FakeClock::new();
-    assert!(
-        api(Platform::GitHub, &script, &clock)
-            .candidate(
-                &repository(Platform::GitHub).candidate(10.try_into().unwrap()),
-                &identity(Platform::GitHub),
-                clock.now()
-            )
-            .unwrap()
-            .reason
-            .is_none()
-    );
-    script.done();
+    for state in ["PENDING", "DISMISSED"] {
+        let script = Script::new(vec![
+            Step::read(
+                "repos/example/widgets/pulls/10",
+                json!({"state":"open","draft":false,"user":{"id":99}}),
+            ),
+            Step::read(
+                "repos/example/widgets/pulls/10/requested_reviewers?per_page=100",
+                json!([{"users":[],"teams":[{"id":42,"slug":"reviewer"}]}]),
+            ),
+            Step::read(
+                "repos/example/widgets/pulls/10/reviews?per_page=100",
+                json!([[{"state":state,"user":{"id":42}}]]),
+            ),
+            Step::write(
+                "graphql",
+                "POST",
+                json!({"query":crate::api::COMMIT_QUERY,"variables":{"owner":"example","repo":"widgets","num":10,"cur":null,"size":100}}),
+                json!({"data":{"repository":{"pullRequest":{"commits":{"nodes":[{"commit":{"committedDate":"2026-09-27T00:00:00Z"}}],"pageInfo":{"hasNextPage":false}}}}}}),
+            ),
+        ]);
+        let clock = FakeClock::new();
+        assert!(
+            api(Platform::GitHub, &script, &clock)
+                .candidate(
+                    &repository(Platform::GitHub).candidate(10.try_into().unwrap()),
+                    &identity(Platform::GitHub),
+                    clock.now()
+                )
+                .unwrap()
+                .reason
+                .is_none()
+        );
+        script.done();
+    }
 }

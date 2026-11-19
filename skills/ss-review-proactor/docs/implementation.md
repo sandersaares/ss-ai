@@ -68,7 +68,8 @@ other unrecoverable external failures still stop the affected workflow.
 GitHub lists open pull requests through paginated REST and reads their commits
 through the GraphQL commits connection. The REST pull-request commits endpoint
 is not used because it caps the result at 250 commits. Requested reviewers,
-submitted reviews, and issue comments are paginated independently.
+submitted reviews, and issue comments are paginated independently. Selection
+ignores pending and dismissed submissions when deriving reviewer assignments.
 
 Azure DevOps lists active pull requests with `$top` and `$skip`, continuing
 until an empty page so a service-side page-size limit cannot truncate selection.

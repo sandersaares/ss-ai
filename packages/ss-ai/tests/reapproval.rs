@@ -256,7 +256,22 @@ impl Provider {
         event["lastUpdatedDate"] = json!(at);
         event["properties"]["CodeReviewVoteResult"]["$value"] = json!(value.to_string());
         evidence["threads"].as_array_mut().unwrap().push(event);
-        evidence["reviewers"][0]["vote"] = json!(value);
+        if let Some(reviewer) = evidence["reviewers"].as_array_mut().unwrap().first_mut() {
+            reviewer["vote"] = json!(value);
+        } else {
+            evidence["reviewers"]
+                .as_array_mut()
+                .unwrap()
+                .push(json!({"id":"10000000-0000-4000-8000-000000000001","vote":value}));
+        }
+    }
+
+    /// Mirrors the service's removal of the authenticated reviewer assignment.
+    fn ado_remove_reviewer(&self) {
+        self.evidence.borrow_mut()["reviewers"]
+            .as_array_mut()
+            .unwrap()
+            .retain(|reviewer| reviewer["id"] != "10000000-0000-4000-8000-000000000001");
     }
 
     fn later(&self, state: &str) {
@@ -776,35 +791,19 @@ impl Http for Provider {
                 serde_json::to_vec(&value).unwrap(),
             ))
         };
-        if method == "PUT"
-            && body.is_some_and(|body| serde_json::from_slice::<Value>(body).unwrap()["vote"] == 0)
-        {
+        if method == "DELETE" && path.ends_with("/reviewers/10000000-0000-4000-8000-000000000001") {
             self.reset_writes.set(self.reset_writes.get() + 1);
-            assert!(path.ends_with("/reviewers/10000000-0000-4000-8000-000000000001"));
-            let request: Value = serde_json::from_slice(body.unwrap()).unwrap();
-            assert_eq!(
-                request,
-                json!({"id": "10000000-0000-4000-8000-000000000001", "vote": 0})
-            );
+            assert!(body.is_none());
             if self.fault.get() == "resetRefused" {
                 return response(403, json!({}));
             }
             if self.fault.get() != "resetUnknown" {
-                self.ado_vote(
-                    0,
-                    100 + u32::try_from(self.reset_writes.get()).unwrap(),
-                    self.notice_time(),
-                );
-                // Keep fixture notice lookup independent of generated system event ordering.
-                let mut evidence = self.evidence.borrow_mut();
-                let threads = evidence["threads"].as_array_mut().unwrap();
-                let event = threads.pop().unwrap();
-                threads.insert(0, event);
+                self.ado_remove_reviewer();
             }
             if matches!(self.fault.get(), "resetUnknown" | "lostResetReply") {
                 return Err(io::Error::other("Lost reset reply").into());
             }
-            return response(200, self.evidence.borrow()["reviewers"][0].clone());
+            return Ok(HttpResponse::new(204, BTreeMap::new(), Vec::new()));
         }
         if method != "GET" {
             self.writes.set(self.writes.get() + 1);
@@ -1992,7 +1991,7 @@ fn refusal_resets_only_captured_positive_approvals(repository: &Sources) {
                 fs::write(&path, before).unwrap();
                 // Manual clearing settles a failed reset without replaying the refused request.
                 if ado {
-                    provider.ado_vote(0, 200, "2026-09-28T09:07:00Z");
+                    provider.ado_remove_reviewer();
                 } else {
                     let mut evidence = provider.evidence.borrow_mut();
                     evidence["reviews"][1]["state"] = json!("DISMISSED");
@@ -2018,16 +2017,27 @@ fn refusal_resets_only_captured_positive_approvals(repository: &Sources) {
 fn assert_refusal_reset_standing(provider: &Provider, fault: &str) {
     let evidence = provider.evidence.borrow();
     if provider.ado {
-        let expected = match fault {
-            "concurrentNegative" | "historyNegative" => -10,
+        match fault {
+            "concurrentNegative" | "historyNegative" => {
+                assert_eq!(evidence["reviewers"][0]["vote"], -10, "{fault}");
+            }
             "dryRun"
             | "resetUnknown"
             | "resetRefused"
             | "concurrentApproval"
-            | "approvalHistoryDeleted" => 10,
-            _ => 0,
-        };
-        assert_eq!(evidence["reviewers"][0]["vote"], expected, "{fault}");
+            | "approvalHistoryDeleted" => {
+                assert_eq!(evidence["reviewers"][0]["vote"], 10, "{fault}");
+            }
+            "historyWithdrawal" => {
+                assert_eq!(evidence["reviewers"][0]["vote"], 0, "{fault}");
+            }
+            _ => {
+                assert!(
+                    evidence["reviewers"].as_array().unwrap().is_empty(),
+                    "{fault}"
+                );
+            }
+        }
     } else {
         assert_eq!(
             evidence["reviews"][0]["state"], "APPROVED",
@@ -2176,7 +2186,7 @@ fn inactive_approvals_remain_unverified(repository: &Sources) {
                     // Inactive readback may settle an approval only after it really is cleared.
                     provider.fault.set(fault);
                     if ado {
-                        provider.evidence.borrow_mut()["reviewers"][0]["vote"] = json!(0);
+                        provider.ado_remove_reviewer();
                     } else {
                         provider.evidence.borrow_mut()["reviews"][1]["state"] = json!("DISMISSED");
                     }
