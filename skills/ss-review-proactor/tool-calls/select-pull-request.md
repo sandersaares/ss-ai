@@ -2,15 +2,21 @@
 ss-ai review select --repository-url "{{REPOSITORY_URL}}" --session-id "{{SESSION_ID}}" --state-path "{{STATE_PATH}}" --claim-message "{{CLAIM_MESSAGE}}"
 ```
 
+Run this command once for the active repository in the ordered repository list.
+The native command remains single-repository; the skill owns list advancement.
+After a completed review, keep using the same repository. On `noCandidate`,
+advance to the next repository and issue a fresh command with its URL and a
+fresh state path.
+
 Placeholders to replace:
 
 | Placeholder | Description |
 |-------------|-------------|
-| `REPOSITORY_URL` | GitHub or Azure DevOps repository browser URL resolved in stage 1 of `SKILL.md`: the explicit invocation/schedule repository, or the invocation's Git repository by default. Not a clone or pull request URL. |
+| `REPOSITORY_URL` | Active GitHub or Azure DevOps repository browser URL resolved in stage 1 of `SKILL.md`: an entry from the explicit invocation/schedule list, or the invocation's Git repository by default. Not a clone or pull request URL. |
 | `SESSION_ID` | Identifier of the primary user-facing session executing this invocation. |
 | `STATE_PATH` | Fresh absolute path to a JSON journal in the current cycle's session-state subdirectory. Reuse this exact path for confirmation, never for a new cycle or selection run. |
 | `CLAIM_MESSAGE` | Standard announcement from stage 2 of `SKILL.md`, adapted to the current user's communication policy, without protocol markers. Pass it as one literal string argument, escaping for the invoking shell if one is used. Reuse it for confirmation. |
-| `TENANT` | Optional user-configured Azure tenant for this repository. |
+| `TENANT` | Optional user-configured Azure tenant for the active repository. |
 
 For Azure DevOps, optionally append `--tenant "{{TENANT}}"`. Use the same tenant
 during `ss-review`.

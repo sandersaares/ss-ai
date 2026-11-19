@@ -2,13 +2,15 @@
 
 ## Purpose
 
-`ss-review-proactor` finds a pull request for the current user to review and
-hands it to `ss-review` in the same primary, user-facing session. The user
-configures the schedule outside this skill. By default, each invocation
-continues with another review after each completion. The user can explicitly
-request one-shot mode to stop after the first completed review. An invocation
-with no qualifying pull request finishes without requesting work or changing
-the schedule, including in loop mode.
+`ss-review-proactor` finds a pull request for the current user to review across
+one or more repositories and hands it to `ss-review` in the same primary,
+user-facing session. The user configures the schedule outside this skill.
+By default, each invocation continues with reviews in the active repository
+until it has no qualifying pull request, then advances to the next repository.
+The user can explicitly request one-shot mode to stop after the first completed
+review. An invocation finishes without requesting work or changing the schedule
+when no configured repository has a qualifying pull request, including in loop
+mode.
 
 GitHub and Azure DevOps Services repositories are supported. Authentication is
 the same as in `ss-review`: the signed-in GitHub CLI account or the Azure CLI
@@ -39,17 +41,22 @@ invocations.
 The next cycle begins only after all review phases, including publication and
 learning, finish. A review with nothing to publish still completes normally.
 Unanswered questions, failures, and cancelled reviews do not advance the loop.
-No qualifying pull request ends the invocation without polling.
+An active repository with no qualifying pull request advances the repository
+cursor. Exhausting every repository ends the invocation without polling.
 
-Successive cycles retain the repository and user configuration unless the
-user changes them. Each cycle has separate review artifacts, a fresh claim
-journal, and a unique checkout, so earlier reviews remain available and no
-audit decisions or publication state carry into the next review.
+Successive cycles retain the ordered repositories and user configuration
+unless the user changes them. A completed review returns to the same active
+repository. A `noCandidate` result advances the repository cursor and an
+exhausted repository is not revisited during the invocation. Each cycle has
+separate review artifacts, a fresh claim journal, and a unique checkout, so
+earlier reviews remain available and no audit decisions or publication state
+carry into the next review or repository.
 
 ## Repository scope
 
-An explicit repository in the invocation or schedule prompt takes precedence.
-Otherwise, the skill uses the Git repository containing the invocation's
+One or more explicit repositories in the invocation or schedule prompt take
+precedence. The skill preserves their order and processes exact duplicate URLs
+once. Otherwise, the skill uses the Git repository containing the invocation's
 working directory without asking the user to provide or confirm its URL.
 Linked worktrees and checkout subdirectories identify their containing
 repository, not the skill's installation repository.
@@ -60,9 +67,11 @@ when there is no `origin`. HTTPS and SSH clone URLs are converted to supported
 repository browser URLs. Missing, unsupported, or ambiguous repository
 configuration requires user input.
 
-The resolved repository remains fixed throughout selection and confirmation.
-Defaulting the repository does not authorize reuse or modification of the
-invocation checkout; review preparation still uses a separate temporary checkout.
+Every resolved repository remains fixed throughout its selection and
+confirmation cycles. An Azure tenant can be associated with each repository
+independently. Defaulting the repository does not authorize reuse or
+modification of the invocation checkout; review preparation still uses a
+separate temporary checkout.
 
 ## Selection
 

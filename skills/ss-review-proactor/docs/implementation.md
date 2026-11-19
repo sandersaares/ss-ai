@@ -16,21 +16,33 @@ next cycle without interrupting that review or answering its human gates.
 
 The continuation boundary follows the complete `ss-review` workflow, including
 learning. Selection confirmation, worker completion, publication alone, and
-turn completion do not authorize the next cycle. Empty selection ends the
-invocation; unresolved questions, failures, and cancellation block continuation.
+turn completion do not authorize the next cycle. An empty selection advances
+to the next repository and ends the invocation only after the complete list is
+exhausted; unresolved questions, failures, and cancellation block continuation.
 The agent checks the latest loop instruction before restarting configuration
 and does not reload an earlier opt-in over a later stop instruction.
 
-The primary agent resolves repository scope before calling the selection
-executable. An explicit invocation or schedule repository overrides the
-default from the invocation's Git checkout. The default comes from session
-repository metadata or, when absent, the checkout's fetch remote as specified
-in the design's repository scope. The agent converts clone URLs to browser
-URLs and passes the resolved value as `--repository-url`; the executable
-validates the provider coordinates. Confirmation receives that
-same URL rather than inferring scope again from a temporary checkout. Later
-cycles retain the original invocation directory and resolved configuration
-unless the user changes them, including after learning uses another worktree.
+The primary agent resolves the ordered repository scope before calling the
+selection executable. One or more explicit invocation or schedule repositories
+override the one-entry default from the invocation's Git checkout. The default
+comes from session repository metadata or, when absent, the checkout's fetch
+remote as specified in the design's repository scope. The agent validates the
+complete list, preserves its order, and removes exact duplicate URLs. It converts
+clone URLs to browser URLs and passes only the active repository as
+`--repository-url`; the executable remains a single-repository operation and
+validates the provider coordinates. Confirmation receives that same URL rather
+than inferring scope again from a temporary checkout. Later cycles retain the
+original invocation directory, ordered list, active position, exhausted
+repositories, and resolved per-repository configuration unless the user changes
+them, including after learning uses another worktree.
+
+The active repository remains selected across completed reviews. A
+`noCandidate` selection or confirmation marks it exhausted and advances the
+cursor. The agent creates and confirms a fresh cycle for the next repository;
+it never revisits an exhausted repository during the same invocation. A failure
+or unanswered user gate does not advance the cursor. One-shot mode still checks
+later repositories when necessary to find the first candidate, then stops after
+that review completes.
 
 For each cycle, the primary agent creates a fresh subdirectory in session state
 containing the selection journal and a separate review-state directory.
@@ -145,8 +157,9 @@ discussion as diagnostics.
 
 Instruction contract tests cover default looping, explicit one-shot control,
 the latest-user-instruction boundary, completion-only continuation,
-empty-selection termination, and
-per-cycle state isolation across the proactor and review handoff. Recovery
+same-repository continuation, ordered `noCandidate` advancement,
+all-repositories-empty termination, and per-cycle state isolation across the
+proactor and review handoff. Recovery
 contracts cover corrected invocations, bounded transient retries, preserved
 human gates, and reconciliation before replaying ambiguous external writes.
 
