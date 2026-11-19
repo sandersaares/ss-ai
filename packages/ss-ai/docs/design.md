@@ -75,11 +75,15 @@ requirements are satisfied.
 Reviewer removal, declines, withdrawals, and negative decisions prevent using old
 authority. Inspection replays participation and vote events chronologically:
 a later direct approval establishes new authority after a decline; undoing the
-decline alone does not. Missing reset causality, unknown policy settings, and
+decline alone does not. Changing whether a reviewer is required updates metadata,
+not approval authority; existing and later votes still govern the decision.
+Missing reset causality, unknown policy settings, and
 uninterpretable history are explicit tooling failures, never successful unresolved outcomes.
 Current reset settings and a later push alone do not prove why a vote is zero.
 Routine untyped system notifications do not change approval standing or supply
 vote-reset authority.
+Structured bulk vote resets withdraw authority only for explicitly identified
+reviewers. They never establish approval or permission to renew an older vote.
 Target-branch change notifications likewise supply no approval or reset authority.
 Current target and applicable policy evidence still govern inspection and
 publication freshness; the approving source iteration remains the assessment anchor.
