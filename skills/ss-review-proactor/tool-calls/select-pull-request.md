@@ -32,10 +32,13 @@ result needs its own preparation before confirmation.
 
 Immediately before `ss-review` publishes, replace `review select` with
 `review check` and preserve all argument values. The command verifies the
-active reservation and returns `confirmed` without extending a deadline.
+active reservation and returns `confirmed` without extending a deadline. If the
+pull request closed and the user explicitly authorized closed-PR publication in
+`ss-review`, append `--publish-to-closed-pull-request` only for this check.
 
 After `ss-review` completes phase 9, replace `review select` with
-`review complete` and preserve all argument values. The command changes the
+`review complete` and preserve all argument values except the closed-PR switch.
+The command changes the
 active marker to `completed` and returns `completed`. Do not select another
 pull request until this command succeeds.
 

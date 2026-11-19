@@ -40,7 +40,8 @@ ss-ai review confirm --repository-url "{{REPOSITORY_URL}}" `
   --claim-message "{{CLAIM_MESSAGE}}" --selection-mode "{{SELECTION_MODE}}"
 ss-ai review check --repository-url "{{REPOSITORY_URL}}" `
   --session-id "{{SESSION_ID}}" --state-path "{{STATE_PATH}}" `
-  --claim-message "{{CLAIM_MESSAGE}}" --selection-mode "{{SELECTION_MODE}}"
+  --claim-message "{{CLAIM_MESSAGE}}" --selection-mode "{{SELECTION_MODE}}" `
+  [--publish-to-closed-pull-request]
 ss-ai review complete --repository-url "{{REPOSITORY_URL}}" `
   --session-id "{{SESSION_ID}}" --state-path "{{STATE_PATH}}" `
   --claim-message "{{CLAIM_MESSAGE}}" --selection-mode "{{SELECTION_MODE}}"
@@ -54,6 +55,7 @@ ss-ai reviewer register --url "{{PR_URL}}"
 | `STATE_PATH` | Absolute path to a fresh session-state journal for selection; the same path for confirmation. |
 | `CLAIM_MESSAGE` | Nonempty announcement following the caller's communication policy, without a protocol marker. |
 | `SELECTION_MODE` | `available` selects unassigned work and is the default. `assigned` requires an assignment without an active submitted review. Use the same value for confirmation. |
+| `PUBLISH_TO_CLOSED_PULL_REQUEST` | Optional `review check` authorization after the ordinary review workflow has explicitly approved publication onto a closed pull request. |
 | `PR_URL` | Browser URL of the pull request to register on. |
 
 Azure DevOps accepts optional `--tenant "{{TENANT}}"`; `TENANT` is the
@@ -70,7 +72,9 @@ Read selection results' `status`, `target`, and `diagnostics`. `claimed`
 requires checkout preparation, then confirmation. A replacement `claimed`
 requires its own preparation. `confirmed` proceeds directly to `ss-review`.
 `check` verifies the active reservation immediately before publication without
-changing it. `complete` changes the owned active marker to completion evidence
+changing it. `--publish-to-closed-pull-request` relaxes only the closed-state
+eligibility check; ownership and source-bound evidence remain required.
+`complete` changes the owned active marker to completion evidence
 after the full review workflow finishes. `noCandidate` means this single-repository selection operation has no candidate;
 an orchestrating skill can run a fresh operation for another repository.
 Errors require the calling skill's human-input procedure; do not automatically
@@ -995,10 +999,15 @@ request identifier must appear in `attempted`.
 The marker is a complete line, accepting LF and CRLF:
 
 ```text
-<!-- ss-review-proactor:v2 session=SESSION_ID claim=CLAIM_UUID state=STATE -->
+<!-- ss-review-proactor:v3 session=SESSION_ID claim=CLAIM_UUID state=STATE revision=SOURCE_COMMIT review=PARTICIPATION_FINGERPRINT -->
 ```
 
-`STATE` is `reserved`, `active`, or `completed`. The fixed preparation interval
+`STATE` is `reserved`, `active`, or `completed`. `SOURCE_COMMIT` identifies the
+reviewed revision and `PARTICIPATION_FINGERPRINT` identifies the reviewer's
+current assignment and review state. Completion evidence excludes later
+`assigned` selection only while both values still match.
+
+The fixed preparation interval
 is 60 seconds. A reserved claim lives for 60 minutes from service creation.
 Confirmation changes the marker to `active`, which remains observable across
 review pauses and expires only through explicit completion or cleanup.

@@ -118,7 +118,7 @@ fn github(args: &[String]) {
             }
         }
         ("GET", "repos/example/widgets/pulls/10") => {
-            r#"{"state":"open","draft":false,"user":{"id":99,"login":"author"}}"#.to_owned()
+            r#"{"state":"open","draft":false,"user":{"id":99,"login":"author"},"head":{"sha":"source-10"}}"#.to_owned()
         }
         ("GET", "repos/example/widgets/pulls/10/requested_reviewers?per_page=100") => {
             if Path::new(&root).join("registration.json").exists() {

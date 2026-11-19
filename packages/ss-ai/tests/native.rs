@@ -1008,7 +1008,8 @@ impl Http for AdoFlow {
                 | "Project/_apis/git/repositories/Repo/pullRequests/10/reviewers?api-version=7.1",
             ) => json!({"count":0,"value":[]}),
             ("GET", "Project/_apis/git/repositories/Repo/pullRequests/10?api-version=7.1") => {
-                json!({"status":"active","createdBy":{"id":"author"},"isDraft":false})
+                json!({"status":"active","createdBy":{"id":"author"},"isDraft":false,
+                    "lastMergeSourceCommit":{"commitId":"source-10"}})
             }
             (
                 "GET",
@@ -1107,7 +1108,7 @@ fn ado_command_selection_and_confirmation_preserve_resolved_threads_and_schema_t
         .to_vec();
         args.push(path.as_os_str().to_owned());
         if preexisting {
-            let body = "Review\r\n\r\n<!-- ss-review-proactor:v2 session=review-session claim=aaaaaaaa-1234-1234-1234-123456789abc state=reserved -->";
+            let body = "Review\r\n\r\n<!-- ss-review-proactor:v3 session=review-session claim=aaaaaaaa-1234-1234-1234-123456789abc state=reserved revision=source-10 review=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa -->";
             // Schema-3 fields and PowerShell's timestamp precision, including explicit nulls.
             let state = json!({
                 "schemaVersion":3,"sessionId":"review-session","repositoryUrl":"https://dev.azure.com/org/Project/_git/Repo","selectionMode":"available",

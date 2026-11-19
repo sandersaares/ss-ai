@@ -78,6 +78,10 @@ Describe 'Multi-repository skill contracts' {
             Should -Match 'replace `review select` with\s+`review complete`'
         $script:ReviewSkill |
             Should -Match 'run the active-reservation `review check` command'
+        $script:ReviewSkill |
+            Should -Match 'Append\s+`--publish-to-closed-pull-request` only when the user'
+        $script:ProactorCommands |
+            Should -Match 'append `--publish-to-closed-pull-request` only for this check'
         $script:ProactorDesign |
             Should -Match 'One resolved mode applies to every\s+configured repository'
     }

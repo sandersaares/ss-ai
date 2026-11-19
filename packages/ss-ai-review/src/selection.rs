@@ -34,6 +34,16 @@ pub(crate) enum SelectionMode {
     Assigned,
 }
 
+/// Supplies parseable ownership and review evidence from a claim marker.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct ClaimMarker<'a> {
+    session: &'a str,
+    token: &'a str,
+    state: ClaimState,
+    revision: &'a str,
+    review_fingerprint: &'a str,
+}
+
 /// Names the externally observable phase of a review reservation.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum ClaimState {
@@ -186,9 +196,11 @@ impl State {
                 }
                 let marker = marker(&claim.body)
                     .ok_or_else(|| fail("invalidState", "Journal claim has no protocol marker"))?;
-                if marker.0 != self.session_id
-                    || marker.1 != claim.token
-                    || marker.2
+                let same_session = marker.session == self.session_id;
+                let same_token = marker.token == claim.token;
+                if !same_session
+                    || !same_token
+                    || marker.state
                         != match self.status {
                             Status::Claiming | Status::Claimed | Status::Discarding => {
                                 ClaimState::Reserved
@@ -552,6 +564,10 @@ pub(crate) struct Candidate {
     pub(crate) reason: Option<String>,
     /// Latest non-future commit instant used for deterministic candidate ranking.
     pub(crate) latest: Option<Timestamp>,
+    /// Current source revision bound into completion evidence.
+    pub(crate) source_commit: Option<String>,
+    /// Current reviewer participation bound into completion evidence.
+    pub(crate) review_fingerprint: Option<String>,
 }
 
 /// Normalized discussion evidence includes resolved ADO threads.
@@ -580,7 +596,7 @@ pub(crate) struct RemoteClaim {
 /// Fixed protocol syntax is shared by creation, discovery, and ownership checks.
 static CLAIM_MARKER: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(
-    r"(?m)^<!-- ss-review-proactor:v2 session=([A-Za-z0-9._:-]+) claim=([0-9a-fA-F]{8}(?:-[0-9a-fA-F]{4}){3}-[0-9a-fA-F]{12}) state=(reserved|active|completed) -->\r?$"
+    r"(?m)^<!-- ss-review-proactor:v3 session=([A-Za-z0-9._:-]+) claim=([0-9a-fA-F]{8}(?:-[0-9a-fA-F]{4}){3}-[0-9a-fA-F]{12}) state=(reserved|active|completed) revision=([A-Za-z0-9._:-]+) review=([0-9a-f]{64}) -->\r?$"
 ).expect("fixed claim marker pattern")
 });
 
@@ -680,9 +696,13 @@ pub(crate) fn run(
         let comments = provider.comments(&target)?;
         if initial.selection_mode == SelectionMode::Assigned
             && comments.iter().any(|comment| {
-                comment.author.may_match(&initial.identity)
-                    && marker(&comment.body)
-                        .is_some_and(|(_, _, state)| state == ClaimState::Completed)
+                comment.author.same_account(&initial.identity)
+                    && marker(&comment.body).is_some_and(|marker| {
+                        marker.state == ClaimState::Completed
+                            && fresh.source_commit.as_deref() == Some(marker.revision)
+                            && fresh.review_fingerprint.as_deref()
+                                == Some(marker.review_fingerprint)
+                    })
             })
         {
             initial.record(id, "completedReview");
@@ -698,7 +718,24 @@ pub(crate) fn run(
             continue;
         }
         let token = Uuid::new_v4().to_string();
-        let body = claim_body(message, &initial.session_id, &token, ClaimState::Reserved);
+        let source_commit = fresh
+            .source_commit
+            .as_deref()
+            .ok_or_else(|| fail("service", "Candidate has no source revision"))?;
+        let review_fingerprint = fresh.review_fingerprint.as_deref().ok_or_else(|| {
+            fail(
+                "service",
+                "Candidate has no reviewer participation evidence",
+            )
+        })?;
+        let body = claim_body(
+            message,
+            &initial.session_id,
+            &token,
+            ClaimState::Reserved,
+            source_commit,
+            review_fingerprint,
+        );
         initial.stage = Stage::Claiming(Intent {
             target: target.clone(),
             token,
@@ -768,13 +805,12 @@ fn confirm_claim(
         ));
     }
     if let Some(comment) = owned
-        && (!comment.author.may_match(&state.identity)
-            || marker(&comment.body)
-                != Some((
-                    state.session_id.as_str(),
-                    claim.intent.token.as_str(),
-                    ClaimState::Reserved,
-                )))
+        && (!comment.author.same_account(&state.identity)
+            || marker(&comment.body).is_none_or(|marker| {
+                marker.session != state.session_id
+                    || marker.token != claim.intent.token
+                    || marker.state != ClaimState::Reserved
+            }))
     {
         return Err(fail(
             "invalidState",
@@ -805,7 +841,7 @@ fn confirm_claim(
         state.stage = Stage::Selecting;
     } else {
         let target = target.clone();
-        let body = transition_claim(&claim.intent.body, ClaimState::Active)?;
+        let body = transition_claim(&claim.intent.body, ClaimState::Active, None, None)?;
         let remote = RemoteClaim {
             id: claim.id.clone(),
             thread_id: claim.thread_id.clone(),
@@ -837,6 +873,7 @@ pub(crate) fn check(
     journal: &mut dyn Journal,
     clock: &dyn Clock,
     initial: State,
+    publish_to_closed_pull_request: bool,
 ) -> Result<State, AppError> {
     let mut state = owned_workflow(journal, initial)?;
     let Stage::Confirmed(reservation) = &state.stage else {
@@ -858,6 +895,7 @@ pub(crate) fn check(
         .reason
         .filter(|reason| {
             !(state.selection_mode == SelectionMode::Available && reason == "alreadyReviewer")
+                && !(publish_to_closed_pull_request && reason == "closed")
         })
     {
         return Err(fail(
@@ -894,7 +932,26 @@ pub(crate) fn complete(
     };
     let comments = provider.comments(&target)?;
     verify_active_claim(&state, reservation, &comments, clock.now())?;
-    let body = transition_claim(&reservation.intent.body, ClaimState::Completed)?;
+    let current_marker = marker(&reservation.intent.body)
+        .ok_or_else(|| fail("invalidState", "Active claim has no protocol marker"))?;
+    let candidate = provider.candidate(
+        &reservation.intent.target,
+        &state.identity,
+        clock.now(),
+        state.selection_mode,
+    )?;
+    let body = transition_claim(
+        &reservation.intent.body,
+        ClaimState::Completed,
+        candidate
+            .source_commit
+            .as_deref()
+            .or(Some(current_marker.revision)),
+        candidate
+            .review_fingerprint
+            .as_deref()
+            .or(Some(current_marker.review_fingerprint)),
+    )?;
     let Stage::Confirmed(mut reservation) = state.stage else {
         return Err(fail("invalidState", "Confirmed reservation disappeared"));
     };
@@ -960,13 +1017,12 @@ fn verify_active_claim(
             "The active review reservation is missing; human reconciliation is required",
         )
     })?;
-    if !owned.author.may_match(&state.identity)
-        || marker(&owned.body)
-            != Some((
-                state.session_id.as_str(),
-                reservation.intent.token.as_str(),
-                ClaimState::Active,
-            ))
+    if !owned.author.same_account(&state.identity)
+        || marker(&owned.body).is_none_or(|marker| {
+            marker.session != state.session_id
+                || marker.token != reservation.intent.token
+                || marker.state != ClaimState::Active
+        })
     {
         return Err(fail(
             "invalidState",
@@ -1003,7 +1059,7 @@ pub(crate) fn valid_session(session: &str) -> bool {
 }
 
 /// Extracts ownership tokens only from a complete protocol line, not prose fragments.
-fn marker(body: &str) -> Option<(&str, &str, ClaimState)> {
+fn marker(body: &str) -> Option<ClaimMarker<'_>> {
     let captures = CLAIM_MARKER.captures(body)?;
     let state = match captures.get(3)?.as_str() {
         "reserved" => ClaimState::Reserved,
@@ -1011,27 +1067,49 @@ fn marker(body: &str) -> Option<(&str, &str, ClaimState)> {
         "completed" => ClaimState::Completed,
         _ => return None,
     };
-    Some((captures.get(1)?.as_str(), captures.get(2)?.as_str(), state))
+    Some(ClaimMarker {
+        session: captures.get(1)?.as_str(),
+        token: captures.get(2)?.as_str(),
+        state,
+        revision: captures.get(4)?.as_str(),
+        review_fingerprint: captures.get(5)?.as_str(),
+    })
 }
 
 /// Constructs one complete protocol marker with caller-approved prose.
-fn claim_body(message: &str, session: &str, token: &str, state: ClaimState) -> String {
+fn claim_body(
+    message: &str,
+    session: &str,
+    token: &str,
+    state: ClaimState,
+    revision: &str,
+    review_fingerprint: &str,
+) -> String {
     format!(
-        "{message}\n\n<!-- ss-review-proactor:v2 session={session} claim={token} state={} -->",
+        "{message}\n\n<!-- ss-review-proactor:v3 session={session} claim={token} state={} revision={revision} review={review_fingerprint} -->",
         state.label()
     )
 }
 
 /// Changes only the protocol marker while preserving the announced prose.
-fn transition_claim(body: &str, state: ClaimState) -> Result<String, AppError> {
-    let (session, token, _) =
+fn transition_claim(
+    body: &str,
+    state: ClaimState,
+    revision: Option<&str>,
+    review_fingerprint: Option<&str>,
+) -> Result<String, AppError> {
+    let marker =
         marker(body).ok_or_else(|| fail("invalidState", "Claim has no protocol marker"))?;
     Ok(CLAIM_MARKER
         .replace(
             body,
             format!(
-                "<!-- ss-review-proactor:v2 session={session} claim={token} state={} -->",
-                state.label()
+                "<!-- ss-review-proactor:v3 session={} claim={} state={} revision={} review={} -->",
+                marker.session,
+                marker.token,
+                state.label(),
+                revision.unwrap_or(marker.revision),
+                review_fingerprint.unwrap_or(marker.review_fingerprint),
             ),
         )
         .into_owned())
@@ -1043,13 +1121,13 @@ fn transition_claim(body: &str, state: ClaimState) -> Result<String, AppError> {
 /// creation time so future-dated evidence remains reserved under clock skew.
 /// Completed and unmarked comments do not reserve work.
 fn live(comment: &Comment, now: Timestamp) -> Result<bool, AppError> {
-    let Some((_, _, state)) = marker(&comment.body) else {
+    let Some(marker) = marker(&comment.body) else {
         return Ok(false);
     };
-    if state == ClaimState::Active {
+    if marker.state == ClaimState::Active {
         return Ok(true);
     }
-    if state == ClaimState::Completed {
+    if marker.state == ClaimState::Completed {
         return Ok(false);
     }
     let created = timestamp(&comment.created_at)?;
@@ -1118,7 +1196,7 @@ mod tests {
                     state.claim = Some(Claim {
                         token: "aaaaaaaa-1234-1234-1234-123456789abc".to_owned(),
                         body: format!(
-                            "<!-- ss-review-proactor:v2 session=session claim=aaaaaaaa-1234-1234-1234-123456789abc state={claim_state} -->"
+                            "<!-- ss-review-proactor:v3 session=session claim=aaaaaaaa-1234-1234-1234-123456789abc state={claim_state} revision=source-10 review=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa -->"
                         ),
                         id: created.then(|| "comment".to_owned()),
                         thread_id: (created && platform == Platform::AzureDevOps)

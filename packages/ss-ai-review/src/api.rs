@@ -10,6 +10,7 @@ use std::num::NonZeroU32;
 use jiff::Timestamp;
 use ohno::AppError;
 use serde_json::{Value, json};
+use sha2::{Digest, Sha256};
 
 use crate::clock::{is_recent, latest_commit};
 use crate::error::fail;
@@ -33,6 +34,7 @@ pub(crate) struct Api<'a> {
 struct ReviewerParticipation {
     assigned: bool,
     submitted_review: bool,
+    fingerprint: String,
 }
 
 /// GitHub's commits connection avoids the REST pull-request commit result cap.
@@ -223,21 +225,22 @@ impl Api<'_> {
             let mut participation = ReviewerParticipation {
                 assigned: false,
                 submitted_review: false,
+                fingerprint: String::new(),
             };
+            let mut evidence = Vec::new();
             for value in self
                 .transport
                 .list(&format!("{}/reviewers", target.pr_api()))?
             {
-                if value
+                let declined = value
                     .get("hasDeclined")
                     .map(boolean)
                     .transpose()?
-                    .unwrap_or(false)
-                    || !identity.may_match(&Identity::from_account(target.platform, &value)?)
-                {
+                    .unwrap_or(false);
+                let reviewer = Identity::from_account(target.platform, &value)?;
+                if !identity.may_match(&reviewer) {
                     continue;
                 }
-                participation.assigned = true;
                 let vote = value
                     .get("vote")
                     .map(|vote| {
@@ -247,8 +250,14 @@ impl Api<'_> {
                     })
                     .transpose()?
                     .unwrap_or(0);
-                participation.submitted_review |= vote != 0;
+                evidence.push(format!("ado:{declined}:{vote}"));
+                if !declined {
+                    participation.assigned = true;
+                    participation.submitted_review |= vote != 0;
+                }
             }
+            participation.fingerprint =
+                Self::participation_fingerprint(participation.assigned, &mut evidence);
             return Ok(participation);
         }
 
@@ -258,12 +267,23 @@ impl Api<'_> {
                 .iter()
                 .any(|reviewer| identity.may_match(reviewer)),
             submitted_review: false,
+            fingerprint: String::new(),
         };
+        let mut evidence = Vec::new();
         for review in self
             .transport
             .list(&format!("{}/reviews", target.pr_api()))?
         {
             let state = text(field(&review, "state")?)?;
+            let reviewer = Identity::from_account(target.platform, field(&review, "user")?)?;
+            if identity.may_match(&reviewer) {
+                let id = review
+                    .get("id")
+                    .map(identifier)
+                    .transpose()?
+                    .unwrap_or_else(|| "unknown".to_owned());
+                evidence.push(format!("github:{id}:{state}"));
+            }
             // Pending and dismissed reviews do not count as active participation.
             // Ref: docs/design/review-selection.md, "Eligibility and ranking".
             if ["PENDING", "DISMISSED"]
@@ -272,15 +292,21 @@ impl Api<'_> {
             {
                 continue;
             }
-            if identity.may_match(&Identity::from_account(
-                target.platform,
-                field(&review, "user")?,
-            )?) {
+            if identity.may_match(&reviewer) {
                 participation.assigned = true;
                 participation.submitted_review = true;
             }
         }
+        participation.fingerprint =
+            Self::participation_fingerprint(participation.assigned, &mut evidence);
         Ok(participation)
+    }
+
+    /// Reduces mutable service lists to stable reviewer participation evidence.
+    fn participation_fingerprint(assigned: bool, evidence: &mut [String]) -> String {
+        evidence.sort();
+        let joined = format!("assigned={assigned}\n{}", evidence.join("\n"));
+        format!("{:x}", Sha256::digest(joined.as_bytes()))
     }
 
     /// Resolves bare ADO identifiers before writes and reports the resolved URL.
@@ -580,6 +606,15 @@ impl Provider for Api<'_> {
         } else {
             pr.get("isDraft").map(boolean).transpose()?.unwrap_or(false)
         };
+        let source_commit = pr
+            .pointer(if github {
+                "/head/sha"
+            } else {
+                "/lastMergeSourceCommit/commitId"
+            })
+            .map(text)
+            .transpose()?
+            .map(str::to_owned);
         let mut reason = if status != if github { "open" } else { "active" } {
             Some("closed")
         } else if draft {
@@ -589,8 +624,10 @@ impl Provider for Api<'_> {
         } else {
             None
         };
+        let mut review_fingerprint = None;
         if reason.is_none() {
             let participation = self.reviewer_participation(target, identity)?;
+            review_fingerprint = Some(participation.fingerprint.clone());
             match selection_mode {
                 SelectionMode::Available if participation.submitted_review => {
                     reason = Some("alreadyReviewed");
@@ -619,6 +656,8 @@ impl Provider for Api<'_> {
             target: target.clone(),
             reason: reason.map(str::to_owned),
             latest,
+            source_commit,
+            review_fingerprint,
         })
     }
 

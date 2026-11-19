@@ -418,6 +418,9 @@ struct Selection {
         long_help = None
     )]
     mode: SelectionMode,
+    /// Allows an active reservation to publish after the pull request closes.
+    #[arg(long, help = None, long_help = None)]
+    publish_to_closed_pull_request: bool,
 }
 
 /// Accepts browser coordinates or explicit registration coordinates.
@@ -787,7 +790,13 @@ fn execute(
                     &arguments.claim_message,
                     true,
                 )?,
-                ReviewAction::Check => selection::check(&mut api, &mut journal, clock, initial)?,
+                ReviewAction::Check => selection::check(
+                    &mut api,
+                    &mut journal,
+                    clock,
+                    initial,
+                    arguments.publish_to_closed_pull_request,
+                )?,
                 ReviewAction::Complete => {
                     selection::complete(&mut api, &mut journal, clock, initial)?
                 }

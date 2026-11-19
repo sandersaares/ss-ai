@@ -132,7 +132,7 @@ existing reviewer state.
 The claim marker is a versioned HTML comment:
 
 ```text
-<!-- ss-review-proactor:v2 session=SESSION_TOKEN claim=CLAIM_UUID state=STATE -->
+<!-- ss-review-proactor:v3 session=SESSION_TOKEN claim=CLAIM_UUID state=STATE revision=SOURCE_COMMIT review=PARTICIPATION_FINGERPRINT -->
 ```
 
 The session token comes from the primary session. A fresh UUID distinguishes

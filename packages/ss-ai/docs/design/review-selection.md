@@ -55,7 +55,10 @@ request to remain eligible.
 An active claim remains observable through review work and user pauses. The
 review workflow verifies it immediately before publication and changes it to
 completed only after the full workflow succeeds. Completed markers block later
-`assigned` selection by the same reviewer without creating an approval vote.
+`assigned` selection by the same reviewer without creating an approval vote
+only while the source commit and reviewer participation fingerprint still
+match. A new source revision or a changed assignment/review state makes the
+completed marker historical rather than current.
 
 An invalid reserved claim is discarded. The utility deletes only its verified
 own comment, never another claim or an Azure DevOps thread. It then selects

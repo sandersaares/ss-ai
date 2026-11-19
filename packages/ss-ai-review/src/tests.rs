@@ -105,6 +105,7 @@ struct FakeProvider {
     fail_create: bool,
     fail_delete: bool,
     fail_read: bool,
+    review_fingerprint: String,
 }
 
 impl FakeProvider {
@@ -118,6 +119,7 @@ impl FakeProvider {
             fail_create: false,
             fail_delete: false,
             fail_read: false,
+            review_fingerprint: "a".repeat(64),
         }
     }
 }
@@ -142,6 +144,8 @@ impl Provider for FakeProvider {
             target: target.clone(),
             reason: self.reasons.get(&target.pull_request_id).cloned(),
             latest: Some(timestamp("2026-09-27T00:00:00Z").unwrap()),
+            source_commit: Some(format!("source-{}", target.pull_request_id)),
+            review_fingerprint: Some(self.review_fingerprint.clone()),
         })
     }
     fn comments(&mut self, target: &Target) -> Result<Vec<Comment>, AppError> {
@@ -254,7 +258,7 @@ fn select(
 
 fn competing() -> Comment {
     Comment { id: "competitor".to_owned(), thread_id: None, author: identity(Platform::GitHub),
-        body: "Comment\n\n<!-- ss-review-proactor:v2 session=session-b claim=aaaaaaaa-1234-1234-1234-123456789abc state=reserved -->".to_owned(),
+        body: "Comment\n\n<!-- ss-review-proactor:v3 session=session-b claim=aaaaaaaa-1234-1234-1234-123456789abc state=reserved revision=source-10 review=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa -->".to_owned(),
         created_at: "2026-09-28T09:59:00Z".to_owned() }
 }
 
@@ -394,6 +398,7 @@ fn active_claim_survives_preparation_expiration_until_explicit_completion() {
         &mut journal,
         &clock,
         initial(Platform::GitHub),
+        false,
     )
     .unwrap();
     assert_eq!(checked.status, Status::Confirmed);
@@ -411,6 +416,38 @@ fn active_claim_survives_preparation_expiration_until_explicit_completion() {
         &provider.comments[&10][0].body,
         "completed"
     ));
+}
+
+#[test]
+fn publication_check_allows_only_explicit_closed_pull_request_authorization() {
+    let clock = FakeClock::new();
+    let mut provider = FakeProvider::new();
+    let mut journal = MemoryJournal::default();
+    select(&mut provider, &mut journal, &clock, false);
+    select(&mut provider, &mut journal, &clock, true);
+    provider.reasons.insert(10, "closed".to_owned());
+
+    let refused = check(
+        &mut provider,
+        &mut journal,
+        &clock,
+        initial(Platform::GitHub),
+        false,
+    )
+    .unwrap_err();
+    assert_eq!(crate::classification(&refused), "invalidState");
+    assert_eq!(
+        check(
+            &mut provider,
+            &mut journal,
+            &clock,
+            initial(Platform::GitHub),
+            true,
+        )
+        .unwrap()
+        .status,
+        Status::Confirmed
+    );
 }
 
 #[test]
@@ -455,11 +492,26 @@ fn completed_assigned_review_is_not_selected_again() {
     assert_eq!(next.status, Status::Claimed);
     assert_eq!(next.target.unwrap().pull_request_id, 11);
     assert_eq!(next.diagnostics[0].reason, "completedReview");
+
+    provider.review_fingerprint = "b".repeat(64);
+    let mut rerequested_journal = MemoryJournal::default();
+    let mut rerequested_state = initial(Platform::GitHub);
+    rerequested_state.selection_mode = SelectionMode::Assigned;
+    let rerequested = run(
+        &mut provider,
+        &mut rerequested_journal,
+        &clock,
+        rerequested_state,
+        "Reserving",
+        false,
+    )
+    .unwrap();
+    assert_eq!(rerequested.target.unwrap().pull_request_id, 10);
 }
 
 fn marker_has_state(body: &str, expected: &str) -> bool {
     body.lines().any(|line| {
-        line.starts_with("<!-- ss-review-proactor:v2 ")
+        line.starts_with("<!-- ss-review-proactor:v3 ")
             && line.contains(&format!("state={expected}"))
     })
 }
@@ -644,7 +696,7 @@ fn live_claim_checks_still_validate_later_timestamp_evidence() {
 
 #[test]
 fn tampered_owner_body_or_duplicate_identifiers_cannot_delete_claims() {
-    for mutation in ["author", "body", "duplicate"] {
+    for mutation in ["author", "conflict", "body", "duplicate"] {
         let clock = FakeClock::new();
         let mut provider = FakeProvider::new();
         let mut journal = MemoryJournal::default();
@@ -655,6 +707,7 @@ fn tampered_owner_body_or_duplicate_identifiers_cannot_delete_claims() {
                 comments[0].author.id = Some("other".to_owned());
                 comments[0].author.unique_name = None;
             }
+            "conflict" => comments[0].author.id = Some("other".to_owned()),
             "body" => comments[0].body = "Replaced body".to_owned(),
             _ => comments.push(comments[0].clone()),
         }

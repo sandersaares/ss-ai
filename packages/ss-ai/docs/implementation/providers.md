@@ -90,5 +90,8 @@ submitted review. Registration includes declined entries so it preserves their
 votes, decline flags, and other metadata.
 
 Discussion records preserve service creation timestamps and comment/thread
-identifiers. Claim ownership requires these identifiers, the author, session,
-and token; surrounding announcement prose is not ownership evidence.
+identifiers. Selection hashes the authenticated reviewer's assignment and
+complete review-state list into completion evidence. Claim ownership uses
+strict account identity, these identifiers, the session and token, the source
+revision, and that participation fingerprint; surrounding announcement prose
+is not ownership evidence.

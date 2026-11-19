@@ -162,7 +162,8 @@ Prepare every phase-1 step-5/step-6 preparation assignment and phase-2 reviewer 
 
    For a proactor handoff, first run the active-reservation `review check`
    command from the selection journal and continue only when it returns
-   `confirmed`.
+   `confirmed`. Append `--publish-to-closed-pull-request` only when the user
+   has already made that explicit publication authorization.
 
    Publication is best-effort. The transport waits and retries explicit rate-limit refusals until success; these are definite rejections, not ambiguous writes. Notify the user of other failures and saved diagnostics, then continue the review without waiting for repair. This publication path does not need report-rendering tools. Never replay ambiguous writes or treat a partially posted multipart report as fully published.
 
@@ -383,8 +384,10 @@ A pull request run that reached the service is not resolved by filing into a tra
 For a proactor handoff, run the active-reservation `review check` command from
 the handed-off selection journal immediately before the first publication
 write. Use the repository URL, session, journal path, claim message, tenant,
-and selection mode retained in the proactor checkpoint. Do not recreate the
-journal or continue if the command does not return `confirmed`.
+and selection mode retained in the proactor checkpoint. Append
+`--publish-to-closed-pull-request` only when the user has explicitly authorized
+that destination. Do not recreate the journal or continue if the command does
+not return `confirmed`.
 
 Publish the approved findings. Execute the command in `pwsh-calls/publish-pull-request-review.md`, replacing its placeholders.
 
