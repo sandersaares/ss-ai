@@ -654,7 +654,9 @@ fn invalid_capture_and_inaccessible_output_do_not_write_comments() {
 fn unpublished_private_paths_never_post() {
     let fixture = fixture();
     let arguments = arguments(fixture.path(), false);
-    let private = fixture.path().join("output 雪");
+    // `OverviewCli` converts its inputs to absolute paths before publication.
+    // Match that spelling so this fixture does not depend on platform path cleanup.
+    let private = std::path::absolute(fixture.path().join("output 雪")).unwrap();
     let source = format!("{}\n{}", overview(), private.display());
     fs::write(fixture.path().join("overview 雪.md"), source).unwrap();
     let provider = GitHub::default();
