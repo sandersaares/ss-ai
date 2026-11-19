@@ -301,18 +301,20 @@ pub(crate) fn has_listed_review_activity(
     }
 
     Ok(threads.iter().any(|thread| {
-        thread
-            .get("comments")
-            .and_then(Value::as_array)
-            .is_some_and(|comments| {
-                comments.iter().any(|comment| {
-                    !is_deleted(comment)
-                        && comment
-                            .pointer("/author/id")
-                            .and_then(Value::as_str)
-                            .is_some_and(|id| id.eq_ignore_ascii_case(account))
+        !is_deleted(thread)
+            && thread
+                .get("comments")
+                .and_then(Value::as_array)
+                .is_some_and(|comments| {
+                    comments.iter().any(|comment| {
+                        !is_deleted(comment)
+                            && comment.get("commentType").and_then(Value::as_str) != Some("system")
+                            && comment
+                                .pointer("/author/id")
+                                .and_then(Value::as_str)
+                                .is_some_and(|id| id.eq_ignore_ascii_case(account))
+                    })
                 })
-            })
     }))
 }
 

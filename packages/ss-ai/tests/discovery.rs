@@ -826,6 +826,8 @@ impl Http for AzureMetadata {
                     json!({"pullRequestId": 4, "status": "active", "isDraft": false, "title": "self-authored", "createdBy": {"id": "ACCOUNT"}, "reviewers": [{"id": "account", "vote": 10}]}),
                     json!({"pullRequestId": 5, "status": "active", "isDraft": false, "title": "assigned only", "createdBy": {"id": "author"}, "reviewers": [{"id": "account", "vote": 0}]}),
                     json!({"pullRequestId": 6, "status": "active", "isDraft": false, "title": "reset approval", "createdBy": {"id": "author"}, "reviewers": [{"id": "account", "vote": 0}]}),
+                    json!({"pullRequestId": 7, "status": "active", "isDraft": false, "title": "deleted discussion", "createdBy": {"id": "author"}, "reviewers": [{"id": "account", "vote": 0}]}),
+                    json!({"pullRequestId": 8, "status": "active", "isDraft": false, "title": "system activity", "createdBy": {"id": "author"}, "reviewers": [{"id": "account", "vote": 0}]}),
                 ]
             } else {
                 Vec::new()
@@ -858,6 +860,26 @@ impl Http for AzureMetadata {
                 "identities": {"1": {"id": "account"}},
                 "publishedDate": "2026-01-01T00:00:00Z"
             }]})
+        } else if url.path().ends_with("/pullRequests/7/threads") {
+            json!({"count": 1, "value": [{
+                "id": 7,
+                "isDeleted": true,
+                "comments": [{
+                    "id": 1,
+                    "commentType": "text",
+                    "author": {"id": "account"}
+                }]
+            }]})
+        } else if url.path().ends_with("/pullRequests/8/threads") {
+            json!({"count": 1, "value": [{
+                "id": 8,
+                "comments": [{
+                    "id": 1,
+                    "commentType": "system",
+                    "author": {"id": "account"}
+                }],
+                "publishedDate": "2026-01-01T00:00:00Z"
+            }]})
         } else {
             panic!("Unexpected Azure history, content or write endpoint: {url}")
         };
@@ -886,13 +908,13 @@ fn azure_metadata_and_commit_pages_filter_review_activity_before_vote_history() 
     assert_eq!(summary["counts"]["assessmentRequired"], 1);
     assert_eq!(summary["counts"]["failed"], 0);
     let calls = provider.calls.borrow();
-    assert_eq!(calls.len(), 9);
+    assert_eq!(calls.len(), 11);
     assert!(
         calls
             .iter()
             .any(|call| call.contains("continuationToken=next"))
     );
-    assert!(calls.iter().any(|call| call.contains("%24skip=5")));
+    assert!(calls.iter().any(|call| call.contains("%24skip=7")));
     assert_eq!(summary["counts"]["open"], 2);
     assert!(summary["counts"].get("draft").is_none());
     assert_eq!(
@@ -905,6 +927,16 @@ fn azure_metadata_and_commit_pages_filter_review_activity_before_vote_history() 
         !calls
             .iter()
             .any(|call| call.contains("/pullRequests/5/commits"))
+    );
+    assert!(
+        !calls
+            .iter()
+            .any(|call| call.contains("/pullRequests/7/commits"))
+    );
+    assert!(
+        !calls
+            .iter()
+            .any(|call| call.contains("/pullRequests/8/commits"))
     );
 }
 

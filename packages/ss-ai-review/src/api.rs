@@ -438,6 +438,12 @@ impl Api<'_> {
                         .ok_or_else(|| fail("service", "Reviewed PR offset overflow"))?;
                     for pr in values {
                         let id = pr_id(field(&pr, "pullRequestId")?)?;
+                        if !seen.insert(id) {
+                            return Err(fail(
+                                "service",
+                                "Azure DevOps repeated a reviewed pull request while paging",
+                            ));
+                        }
                         if boolean(field(&pr, "isDraft")?)? {
                             continue;
                         }
@@ -455,12 +461,6 @@ impl Api<'_> {
                             account_id,
                         )? {
                             continue;
-                        }
-                        if !seen.insert(id) {
-                            return Err(fail(
-                                "service",
-                                "Azure DevOps repeated a reviewed pull request while paging",
-                            ));
                         }
                         result.push((id, pr));
                     }

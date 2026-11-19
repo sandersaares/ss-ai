@@ -1055,6 +1055,34 @@ fn ado_short_pr_pages_continue_until_empty_and_repeated_prs_fail() {
 }
 
 #[test]
+fn ado_reviewed_pr_paging_rejects_repeated_excluded_ids() {
+    let path = "A%20Project/_apis/git/repositories/A%20Repo/pullRequests";
+    let script = Script::new(vec![
+        Step::read(
+            &ado(
+                path,
+                "%24skip=0&%24top=100&searchCriteria.reviewerId=reviewer-id&searchCriteria.status=active&",
+            ),
+            json!({"count": 1, "value": [{"pullRequestId": 10, "isDraft": true}]}),
+        ),
+        Step::read(
+            &ado(
+                path,
+                "%24skip=1&%24top=100&searchCriteria.reviewerId=reviewer-id&searchCriteria.status=active&",
+            ),
+            json!({"count": 1, "value": [{"pullRequestId": 10, "isDraft": true}]}),
+        ),
+    ]);
+    let clock = FakeClock::new();
+    let result = api(Platform::AzureDevOps, &script, &clock).reviewed_pull_requests(
+        &repository(Platform::AzureDevOps),
+        &identity(Platform::AzureDevOps),
+    );
+    assert_eq!(crate::classification(&result.unwrap_err()), "service");
+    script.done();
+}
+
+#[test]
 fn registration_preserves_existing_ado_votes_metadata_and_identity_aliases() {
     for matching in ["id", "descriptor", "uniqueName"] {
         let mut reviewer = json!({"id":"different","descriptor":"aad.different","uniqueName":"different@example.com","vote":-10,"hasDeclined":true,"isRequired":true,"isFlagged":true,"votedFor":[{"id":"team"}]});
