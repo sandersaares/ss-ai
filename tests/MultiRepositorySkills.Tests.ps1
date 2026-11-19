@@ -45,6 +45,8 @@ Describe 'Multi-repository skill contracts' {
             Should -Match 'For each repository, create a fresh absolute run path'
         $script:AutoreapproveSkill |
             Should -Match 'Do not overlap repository runs'
+        $script:AutoreapproveSkill |
+            Should -Match 'run stage 1 `discover` with that repository''s URL and tenant'
         $script:AutoreapproveCommands |
             Should -Match 'The native commands accept one repository per run'
         $script:AutoreapproveCommands |

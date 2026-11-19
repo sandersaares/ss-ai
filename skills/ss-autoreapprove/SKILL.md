@@ -324,7 +324,9 @@ approval request; clearing an existing approval belongs only to native `notify`.
 
 After all candidates and final `results` pages for the active repository reach
 their terminal outcomes, create a fresh run path for the next repository and
-continue at stage 2. Repeat stages 2 through 4 until every configured repository
+run stage 1 `discover` with that repository's URL and tenant, the invocation's
+policy, and the invocation's dry-run mode. Continue at stage 2 only after
+discovery succeeds. Repeat stages 1 through 4 until every configured repository
 is terminal. Do not overlap repository runs or carry a candidate, budget,
 worker, or stale-recovery count into the next repository.
 
