@@ -711,7 +711,7 @@ fn document(
     let mut sections = Vec::new();
     for finding in ordered(findings) {
         let text = if !audit && destination == "pullRequest" {
-            pull_request_comment(&body(finding, false, "", "")?)
+            body(finding, false, "", "")?
         } else {
             destination_text(finding, destination, context)?
         };
@@ -721,7 +721,12 @@ fn document(
             text
         });
     }
-    Ok(sections.join(SEPARATOR))
+    let text = sections.join(SEPARATOR);
+    if !audit && destination == "pullRequest" && !text.is_empty() {
+        Ok(format!("{AUTHOR}\n\n{text}"))
+    } else {
+        Ok(text)
+    }
 }
 
 /// Renders a publication summary without making an approval decision.

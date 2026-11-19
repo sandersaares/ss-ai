@@ -286,8 +286,8 @@ fn documents_order_findings_and_audit_shows_publication_text() {
     let doc = render(&json!({"operation":"document","destination":"pullRequest","findings":input}))
         .unwrap();
     let doc = doc.as_str().unwrap();
-    assert_eq!(doc.matches("[Copilot speaking]").count(), 2);
-    assert_eq!(doc.matches(PR_COMMENT_SUFFIX).count(), 2);
+    assert_eq!(doc.matches("[Copilot speaking]").count(), 1);
+    assert_eq!(doc.matches(PR_COMMENT_SUFFIX).count(), 0);
     assert!(doc.find("# Synthesis").unwrap() < doc.find("# Terminate").unwrap());
     assert!(doc.contains("\n\n---\n\n"));
     let audit = render(&json!({"operation":"auditDocument","destination":"tracker","findings":input,"overview":"Overview\r\n"})).unwrap();
