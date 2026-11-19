@@ -133,6 +133,13 @@ registration consumes the reservation:
 the reviewer assignment, rather than the comment, then prevents another review.
 There are no additional proactor checks inside `ss-review`.
 
+When a delegated review reaches a user gate, it returns the exact question,
+ordered choices, and complete presentation required before the question. The
+proactor displays that material before asking the user and relays only the
+user's exact answer. Audit handoffs retain the full finding text or document
+links and the pull request reminder so delegation does not reduce the user's
+decision context.
+
 This is a cooperative comment protocol, not an atomic service-side lock.
 It relies on discussion reads exposing competing claims and accepts the small
 window between its final check and reviewer registration.

@@ -61,6 +61,12 @@ assigned artifact, and reports unresolved
 questions to the review orchestrator. It cannot advance the review globally or
 publish state remotely.
 
+A delegated review orchestrator returns a user gate as one complete handoff:
+the exact question, ordered choices, and every ordinary-session presentation
+element required before it. The caller presents that material unchanged before
+asking the user and relays only the user's exact response. This preserves audit
+text, links, and pull request identity across the delegation boundary.
+
 Review workers retain all detection and applicability judgment. For each
 finding, the worker synchronously spawns one fresh MAI Code 2 finding-writeup
 worker with a free-form prose assessment and exact operational paths. The

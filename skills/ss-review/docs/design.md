@@ -73,8 +73,12 @@ child session. Subagents may inspect evidence and propose findings within
 bounded work. The auto-approval worker may approve claims only under the
 defined policy; workers cannot make user decisions or perform publication. When
 the workflow asks a question, only the user's direct answer can resume work
-that depends on it. A delegated review may return the question to its caller so
-that caller can obtain and relay the user's exact answer.
+that depends on it. A delegated review returns the exact question, ordered
+choices, and complete presentation required before the question. The caller
+shows that presentation before obtaining and relaying the user's exact answer.
+Audit handoffs preserve the destination-specific finding text or document links
+and the pull request reminder instead of reducing the decision to question
+text alone.
 
 A user-authorized `ss-review-proactor` invocation may select and claim a pull
 request before handing it to this skill directly or through delegated execution.

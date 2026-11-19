@@ -226,11 +226,15 @@ checkout and journal paths, the cycle's absolute review-state directory, any
 Azure tenant, and the current loop instruction. Use that review-state directory
 for all `ss-review` artifacts and worker outputs that would otherwise go
 directly in session state. Keep the run-control rules above active and return
-here at stage 5 after `ss-review` phase 9 completes. When delegating, obtain and
-relay the user's exact answer to any question returned by `ss-review` before
-resuming it. Follow the ordinary `ss-review` workflow without additional claim
-checks or special registration handling. The user's loop request authorizes
-subsequent handoffs within this invocation, not unrelated automatic reviews.
+here at stage 5 after `ss-review` phase 9 completes. When delegating, require
+`ss-review` to return the exact question, ordered choices, and complete
+ordinary-session presentation, including complete audit text or document links
+and the PR reminder where applicable. Display that presentation verbatim and in
+order before collecting the user's answer, then relay the exact answer before
+resuming the review. Follow the ordinary `ss-review` workflow without
+additional claim checks or special registration handling. The user's loop
+request authorizes subsequent handoffs within this invocation, not unrelated
+automatic reviews.
 
 Apply `ss-review` in full, including its ownership and human decision rules.
 Do not review just the repository's current changes without the selected PR
