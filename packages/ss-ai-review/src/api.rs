@@ -430,7 +430,13 @@ impl Provider for Api<'_> {
                     .transport
                     .list(&format!("{}/reviews", target.pr_api()))?
                 {
-                    if text(field(&review, "state")?)?.eq_ignore_ascii_case("PENDING") {
+                    let state = text(field(&review, "state")?)?;
+                    // Dismissed submissions no longer represent active reviewer participation.
+                    // Ref: docs/design/review-selection.md, "Eligibility and ranking".
+                    if ["PENDING", "DISMISSED"]
+                        .iter()
+                        .any(|inactive| state.eq_ignore_ascii_case(inactive))
+                    {
                         continue;
                     }
                     if identity.may_match(&Identity::from_account(

@@ -177,12 +177,14 @@ A significant or uncertain live assessment produces an attributed standalone nee
 comment with a hidden marker. The comment contains a readable list of reasons
 for withholding renewal, not a PR summary, coverage caveats, or workflow
 diagnostics. The utility then clears the account's captured positive approval:
-GitHub dismisses its retained approving reviews; ADO resets its positive vote
-to zero. Already-cleared approvals need no write. The utility does not cast
-negative votes or change another account's decisions. Independent later
-approvals supersede the refusal and remain intact. ADO cannot atomically
-condition a reset on the prior vote, so a concurrent human vote can race with
-the request. Reset failures remain explicit even when the comment exists.
+GitHub dismisses its retained approving reviews; ADO removes its captured
+positive reviewer assignment. This restores ordinary proactor admission when no
+other reviewer assignment exists. Already-dismissed approvals and absent ADO
+reviewers need no write. The utility does not cast negative votes or change
+another account's decisions or assignment. Independent later approvals
+supersede the refusal and remain intact. ADO cannot atomically condition a
+removal on the prior reviewer state, so a concurrent human decision can race
+with the request. Reset failures remain explicit even when the comment exists.
 Future runs retain that decision without another
 source assessment or duplicate comment. A strictly later approval by the
 authenticated account expires older markers; another account cannot reset them.

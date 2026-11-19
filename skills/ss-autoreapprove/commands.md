@@ -312,9 +312,10 @@ draft; do not report or perform further work on that PR.
 source and decision evidence, posts an attributed standalone Markdown comment
 containing only reasons for withholding reapproval, and verifies its hidden
 marker. It then dismisses captured account-owned GitHub approvals or resets
-the account's positive ADO vote to zero. Already-cleared approvals need no write.
-It preserves independent later approvals and nonpositive votes; ADO has no
-atomic vote-change precondition. Reset permission errors and unknown effects
+captured positive ADO participation by removing that reviewer assignment.
+Already-cleared approvals need no write. It preserves independent later
+approvals and nonpositive votes; ADO has no atomic reviewer-change precondition.
+Reset permission errors and unknown effects
 remain explicit failures even when the comment exists.
 Repeating the original command with the same utility version and
 supported run schema reconciles the same intent without posting again.

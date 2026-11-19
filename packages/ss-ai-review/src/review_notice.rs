@@ -20,7 +20,7 @@ use crate::error::{classification, fail};
 use crate::github_approval;
 use crate::github_approval::Evidence as GitHubEvidence;
 use crate::journal::FileJournal;
-use crate::json::{array, field, identifier, text};
+use crate::json::{array, boolean, field, identifier, text};
 use crate::publication::{Input, Scope, hash};
 use crate::renewal::Anchor;
 use crate::target::{Platform, Target};
@@ -636,8 +636,18 @@ fn reset_required(
             "Unknown reviewer vote during approval reset",
         ));
     }
-    if vote <= 0 || item.get("hasDeclined") == Some(&Value::Bool(true)) {
-        // Do not replace withdrawals, negative votes, or declined reviews.
+    let declined = item
+        .get("hasDeclined")
+        .map(boolean)
+        .transpose()?
+        .unwrap_or(false);
+    let flagged = item
+        .get("isFlagged")
+        .map(boolean)
+        .transpose()?
+        .unwrap_or(false);
+    if vote <= 0 || declined || flagged {
+        // Preserve withdrawals, declines, and requests for human attention.
         return Ok(ResetStanding::Cleared);
     }
     let mut current = original.clone();
@@ -774,7 +784,7 @@ impl<'a> Store<'a> {
             .any(|attempt| attempt.run_id == run && attempt.state == State::Intent)
     }
 
-    /// Posts a decision notice once, then clears only the captured account-owned approvals.
+    /// Posts a notice once, then clears captured account-owned approval participation.
     pub(crate) fn publish(
         &mut self,
         api: &mut Api<'_>,
@@ -1018,11 +1028,9 @@ impl<'a> Store<'a> {
                     &format!("{}/reviews/{review_id}/dismissals", target.pr_api()),
                     &json!({"message": format!("{}\n\n{rationale}", input.attribution)}),
                 ),
-                Platform::AzureDevOps => api.transport.ado_write_once(
-                    &format!("{}/reviewers/{review_id}", target.pr_api()),
-                    "PUT",
-                    &json!({"id": review_id, "vote": 0}),
-                ),
+                Platform::AzureDevOps => api
+                    .transport
+                    .ado_delete_once(&format!("{}/reviewers/{review_id}", target.pr_api())),
             };
             if let Err(error) = result
                 && classification(&error) != "ambiguousWrite"

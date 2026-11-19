@@ -62,7 +62,8 @@ the most authoritative shared identifier. Duplicate-registration detection
 accepts any matching identifier to protect existing votes and metadata.
 
 GitHub reviewer evidence combines requested users and submitted review
-authors without expanding teams or treating pending reviews as participation.
+authors without expanding teams or treating pending and dismissed reviews as
+participation.
 Registration preserves team requests and adds only the authenticated login.
 Azure DevOps registration leaves any matching existing reviewer untouched and
 creates a neutral reviewer only when none matches.
