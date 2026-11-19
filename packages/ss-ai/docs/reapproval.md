@@ -393,6 +393,14 @@ authoritative reset-cause evidence. Current `resetOnSourcePush` and
 causality; missing evidence is an actionable failure. Neither generated English
 nor `isReapprove` proves automatic invalidation.
 
+`ResetMultipleVotes` events record neutral vote resets for the identities named
+in their structured example list. A named account's reset reports `ineligible`
+with reason `approvalWithdrawn`, just like an ordinary zero-vote event; it does
+not authorize renewal, including when the reason is draft conversion. The
+example list may omit affected voters, so inspection does not infer a reset
+for an unlisted account. Other accounts' history remains unchanged, and an
+unexplained current-vote mismatch remains an explicit failure.
+
 ### ADO publication
 
 ADO renewals preserve the existing positive vote strength. The native transaction

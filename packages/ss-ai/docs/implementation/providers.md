@@ -45,6 +45,14 @@ omits pure system-only target-change activity because PR target and policy reads
 carry its material state; it retains threads with human replies, pending review,
 or deleted history. Unknown history types remain explicit failures.
 
+Bulk `ResetMultipleVotes` history retains its typed voter count, reason, and
+example identity keys. The service encodes those keys as a JSON string array
+inside a `System.String` property. Replay validates the count and resolves each
+key through the thread's identity map; it applies a neutral reset only to a
+named account. Examples need not enumerate all affected voters, so absence
+cannot override unrelated history or explain a contradictory current vote.
+The reason remains evidence, not proof of source-change renewal authority.
+
 GitHub approval capture joins REST PR source and target identity to a GraphQL
 observation of classic branch protection, then reads every page of the effective
 branch rules. It retains the combined last-push approval requirement rather than
