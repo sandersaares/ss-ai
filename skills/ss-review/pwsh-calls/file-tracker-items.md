@@ -18,7 +18,7 @@ For Azure DevOps, append `--tenant "{{TENANT}}"` when a tenant was supplied.
 
 Omit `--context-path` only for an approved review with no pull request binding; the items are then filed without their links back to the code and the discussion.
 
-Otherwise the artifact must carry a non-null `reviewedContextHash` and this command requires the matching checked capture before any tracker write, including on continuation. A mismatch requires freshness revalidation and rebuilding the approved set, not substituting an unchecked capture. This requirement is independent of the tracker destination. Use `query-pr-context.md` for any agent lookup of the capture's provenance, URL, or discussion; do not open the capture or replace this path with a query projection. Handle the publication status and errors as phase 9 describes.
+Otherwise the artifact must carry a non-null `reviewedContextHash` and this command requires the matching checked capture before any tracker write, including on continuation. A mismatch requires freshness revalidation and rebuilding the approved set, not substituting an unchecked capture. This requirement is independent of the tracker destination. Use `query-pr-context.md` for any agent lookup of the capture's provenance, URL, or discussion; do not open the capture or replace this path with a query projection. Handle the publication status and errors as phase 8 describes.
 
 Add these only when they apply:
 

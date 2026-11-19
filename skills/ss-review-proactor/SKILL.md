@@ -224,7 +224,7 @@ paths, the cycle's absolute review-state directory, any Azure tenant, and the
 current loop instruction. Use that review-state directory for all `ss-review`
 artifacts and worker outputs that would otherwise go directly in session state.
 Keep the run-control rules above active and return here at stage 5 after
-`ss-review` phase 10 completes. Follow the ordinary `ss-review` workflow without
+`ss-review` phase 9 completes. Follow the ordinary `ss-review` workflow without
 additional claim checks or special registration handling. The user's loop
 request authorizes subsequent handoffs within this invocation, not unrelated
 automatic reviews.
