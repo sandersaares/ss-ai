@@ -68,9 +68,7 @@ fn retired_rendering_contract_documents_preserve_single_and_multiple_bodies() {
         let two = document(&[first.clone(), second.clone()]);
         assert!(two.starts_with(&one));
         assert!(two.contains("\n\n---\n\n"));
-        // Tracker documents contain standalone items, each with its own authorship marker.
-        let expected_markers = if destination == "tracker" { 2 } else { 1 };
-        assert_eq!(two.matches("[Copilot speaking]").count(), expected_markers);
+        assert_eq!(two.matches("[Copilot speaking]").count(), 2);
         assert!(two.contains("Second"));
     }
 }

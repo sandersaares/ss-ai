@@ -14,6 +14,9 @@ use ss_ai_runtime::{Clock, FileTransaction, fail};
 use crate::workflow_plan::parse_json;
 
 const AUTHOR: &str = "[Copilot speaking]";
+/// Tells pull request participants where not to direct a reply.
+const PR_COMMENT_SUFFIX: &str =
+    "ℹ️ Replies are not monitored. To discuss the finding, reach out via Teams/email directly.";
 const SEPARATOR: &str = "\n\n---\n\n";
 
 /// Renders a JSON request without reading or writing files.
@@ -124,10 +127,14 @@ pub fn render(request: &Value) -> Result<Value, String> {
             let (follow_url, pr_url) = direct_urls(request)?.unwrap_or(("", ""));
             let blocks = finding_blocks(finding, tracker, follow_url, pr_url)?;
             let body = blocks.join("\n\n");
-            let published = if tracker && body.is_empty() {
-                AUTHOR.to_owned()
+            let published = if tracker {
+                if body.is_empty() {
+                    AUTHOR.to_owned()
+                } else {
+                    format!("{AUTHOR}\n\n{body}")
+                }
             } else {
-                format!("{AUTHOR}\n\n{body}")
+                pull_request_comment(&body)
             };
             Ok(json!({
                 "title": optional_text(finding, "title")?.unwrap_or(""),
@@ -138,10 +145,9 @@ pub fn render(request: &Value) -> Result<Value, String> {
         }
         "comment" => {
             let finding = required(request, "finding")?;
-            Ok(Value::String(format!(
-                "{AUTHOR}\n\n{}",
-                body(finding, false, "", "")?
-            )))
+            Ok(Value::String(pull_request_comment(&body(
+                finding, false, "", "",
+            )?)))
         }
         "trackerFields" => {
             let finding = required(request, "finding")?;
@@ -656,7 +662,7 @@ fn destination_text(
     context: Option<&Value>,
 ) -> Result<String, String> {
     if destination == "pullRequest" {
-        return Ok(format!("{AUTHOR}\n\n{}", body(finding, false, "", "")?));
+        return Ok(pull_request_comment(&body(finding, false, "", "")?));
     }
     let item = tracker_item(finding, context)?;
     Ok(format!(
@@ -664,6 +670,21 @@ fn destination_text(
         required_text(&item, "title")?,
         required_text(&item, "body")?
     ))
+}
+
+/// Builds a complete pull request comment from its substantive review prose.
+fn pull_request_comment(body: &str) -> String {
+    let comment = if body.is_empty() {
+        AUTHOR.to_owned()
+    } else {
+        format!("{AUTHOR}\n\n{body}")
+    };
+    append_pull_request_comment_suffix(&comment)
+}
+
+/// Keeps the reply-routing notice last in every final pull request post.
+pub(crate) fn append_pull_request_comment_suffix(text: &str) -> String {
+    format!("{text}\n\n{PR_COMMENT_SUFFIX}")
 }
 
 /// Groups synthesis findings ahead of reviewer findings without disturbing either order.
@@ -690,7 +711,7 @@ fn document(
     let mut sections = Vec::new();
     for finding in ordered(findings) {
         let text = if !audit && destination == "pullRequest" {
-            body(finding, false, "", "")?
+            pull_request_comment(&body(finding, false, "", "")?)
         } else {
             destination_text(finding, destination, context)?
         };
@@ -700,12 +721,7 @@ fn document(
             text
         });
     }
-    let text = sections.join(SEPARATOR);
-    if !audit && destination == "pullRequest" && !text.is_empty() {
-        Ok(format!("{AUTHOR}\n\n{text}"))
-    } else {
-        Ok(text)
-    }
+    Ok(sections.join(SEPARATOR))
 }
 
 /// Renders a publication summary without making an approval decision.

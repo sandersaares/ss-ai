@@ -373,9 +373,13 @@ fn publication_preserves_prefix_and_partial_effects() {
         assert!(report.contains("before the review"));
         assert!(report.contains(&"a".repeat(40)));
         let expected = if prefix.is_empty() {
-            link.clone()
+            format!(
+                "{link}\n\nℹ️ Replies are not monitored. To discuss the finding, reach out via Teams/email directly."
+            )
         } else {
-            format!("{prefix}\n\n{link}")
+            format!(
+                "{prefix}\n\n{link}\n\nℹ️ Replies are not monitored. To discuss the finding, reach out via Teams/email directly."
+            )
         };
         assert_eq!(*provider.comment.borrow(), expected);
         assert_eq!(

@@ -1090,7 +1090,9 @@ to short prose, avoiding guesses about whether a field begins with block syntax.
 
 The summary is derived from the approved finding set and diagnostic artifacts,
 not from remote publication observations. The renderer also owns the required
-speaker marker so no adapter can omit or duplicate it.
+speaker marker so no adapter can omit or duplicate it. Pull-request comment
+wrappers append the reply-routing notice after the approved substantive prose;
+tracker and local-document wrappers do not use it.
 
 ## Publication
 
@@ -1294,6 +1296,8 @@ is empty so callers explicitly select attribution according to their active
 instructions rather than a hard-coded policy.
 Creation and verification use the same complete comment body. Resuming a successful
 publication reuses its receipt even if the caller supplies a different prefix.
+The final comment body ends with the same reply-routing notice used by finding
+comments and review summaries.
 
 All publication failures are explicit outcomes at this boundary, including
 partial uploads, unresolved ADO threads, and diagnostic-write failures. The
