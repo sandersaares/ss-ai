@@ -8,7 +8,7 @@ use crate::error::fail;
 use crate::json::{field, identifier, required_optional};
 use crate::target::Platform;
 
-/// Preserves the identity shape shared by registrations and schema-2 journals.
+/// Preserves the identity shape shared by registrations and selection journals.
 ///
 /// Optional identifiers reflect provider evidence, not interchangeable authority.
 /// Use `same_account` for ownership and `may_match` to avoid overwriting an

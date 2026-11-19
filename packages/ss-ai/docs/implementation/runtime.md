@@ -25,7 +25,7 @@ Jiff `Timestamp` represents instants; fixed `std::time::Duration` values express
 elapsed policy intervals rather than calendar arithmetic. The service parser
 checks the RFC 3339 shape before Jiff parses the timestamp because the broader
 ISO syntax accepted by Jiff is not the service evidence contract. Wire deadlines
-use an explicit UTC offset for schema-2 interoperability.
+use an explicit UTC offset for schema-3 interoperability.
 
 The production clock obtains timestamps through Jiff and delays through `tick`.
 A local current-thread Tokio runtime drives each delay, keeping the command and

@@ -118,10 +118,14 @@ fn github(args: &[String]) {
             }
         }
         ("GET", "repos/example/widgets/pulls/10") => {
-            r#"{"state":"open","draft":false,"user":{"id":99,"login":"author"}}"#.to_owned()
+            r#"{"state":"open","draft":false,"user":{"id":99,"login":"author"},"head":{"sha":"source-10"}}"#.to_owned()
         }
         ("GET", "repos/example/widgets/pulls/10/requested_reviewers?per_page=100") => {
-            r#"[{"users":[],"teams":[]}]"#.to_owned()
+            if Path::new(&root).join("registration.json").exists() {
+                r#"[{"users":[{"id":42,"login":"reviewer"}],"teams":[]}]"#.to_owned()
+            } else {
+                r#"[{"users":[],"teams":[]}]"#.to_owned()
+            }
         }
         ("GET", "repos/example/widgets/pulls/10/reviews?per_page=100") => "[[]]".to_owned(),
         ("POST", "graphql") => {
@@ -141,6 +145,17 @@ fn github(args: &[String]) {
                 process::exit(1);
             }
             r#"{"id":55}"#.to_owned()
+        }
+        ("PATCH", "repos/example/widgets/issues/comments/55") => {
+            let mut input = String::new();
+            io::stdin().read_to_string(&mut input).unwrap();
+            fs::write(&claim, &input).unwrap();
+            let body = input
+                .strip_prefix("{\"body\":")
+                .unwrap()
+                .strip_suffix('}')
+                .unwrap();
+            format!(r#"{{"id":55,"body":{body}}}"#)
         }
         ("GET", "repos/example/widgets/issues/10/comments?per_page=100") => {
             match fs::read_to_string(&claim) {

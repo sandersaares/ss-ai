@@ -9,23 +9,28 @@ See the [selection design](../design/review-selection.md) for user-visible rules
 
 ## Wire records and workflow stages
 
-The journal uses schema 2 and its ownership fields. Typed validation checks
+The journal uses schema 3 and its ownership fields. Typed validation checks
 both structural and state-dependent requirements at read and write boundaries.
 The workflow converts validated wire records to a private stage enum: claim
 intents carry ownership and target data, while created reservations also carry
-remote identifiers and a parsed deadline. Transitions change stages as complete
-values; persistence converts them back to schema 2. Attempts and diagnostics
-use nonzero PR identifiers while retaining numeric JSON fields.
+remote identifiers and a parsed deadline. The selection mode remains part of
+that immutable ownership scope across confirmation and replacement. Transitions
+change stages as complete values; persistence converts them back to schema 3.
+Attempts and diagnostics use nonzero PR identifiers while retaining numeric
+JSON fields.
 
-Confirmation checks the supplied session, exact repository URL, and
-authenticated identity before any claim effect. Ownership uses remote
+Confirmation checks the supplied session, exact repository URL, selection
+mode, and authenticated identity before any claim effect. Ownership uses remote
 comment/thread identifiers, author, session, and UUID, not surrounding prose.
 
 `selecting` records precede enumeration; `claiming` precedes creation;
-`claimed` contains identifiers and a check deadline; `confirmed` records the
-sole-live-claim decision. `discarding` precedes deletion. `noCandidate` is a
-successful completed search, not an error fallback. Only `claimed` can enter
-confirmation. Interrupted states require human reconciliation.
+`claimed` contains identifiers and a check deadline; `activating` precedes the
+activation update; `confirmed` records the sole-live-claim decision;
+`completing` precedes the completion update; and `completed` records the
+observable completion marker. `discarding` precedes deletion. `noCandidate` is a
+successful completed search, not an error fallback. Only `claimed` can enter confirmation. Only `confirmed` can enter publication
+verification or completion. Interrupted update states require human
+reconciliation.
 
 ## Transaction lifetime and publication
 

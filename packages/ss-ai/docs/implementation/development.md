@@ -20,7 +20,7 @@ Unit tests use fake time and in-process provider evidence. Integration tests
 exercise real files, retained locks, concurrent replacement, CLI processes,
 Windows command shims, large UTF-8 streams, and installed-tool discovery.
 Synchronization uses explicit signals and progress checks, not real-time
-sleeps. Tests preserve valid schema-2 journals and ambiguous-write states.
+sleeps. Tests preserve valid schema-3 proactor journals and ambiguous-write states.
 
 ## Shared test preparation
 

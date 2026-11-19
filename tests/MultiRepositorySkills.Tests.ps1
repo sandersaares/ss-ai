@@ -12,6 +12,12 @@ BeforeAll {
     $script:ProactorDesign = [IO.File]::ReadAllText(
         (Join-Path $root 'skills\ss-review-proactor\docs\design.md')
     )
+    $script:ProactorCommands = [IO.File]::ReadAllText(
+        (Join-Path $root 'skills\ss-review-proactor\tool-calls\select-pull-request.md')
+    )
+    $script:ReviewSkill = [IO.File]::ReadAllText(
+        (Join-Path $root 'skills\ss-review\SKILL.md')
+    )
     $script:AutoreapproveSkill = [IO.File]::ReadAllText(
         (Join-Path $root 'skills\ss-autoreapprove\SKILL.md')
     )
@@ -55,6 +61,31 @@ Describe 'Multi-repository skill contracts' {
             Should -Match 'The native commands accept one repository per run'
         $script:AutoreapproveCommands |
             Should -Match 'Use a separate path for every repository'
+    }
+
+    It 'supports assignment-filtered proactor selection' {
+        $script:ProactorSkill |
+            Should -Match 'Use `assigned` only when the user explicitly asks'
+        $script:ProactorSkill |
+            Should -Match 'requires an assignment to the signed-in user and excludes an existing active\s+submitted review'
+        $script:ProactorSkill |
+            Should -Match 'a matching completed marker prevents\s+repeat selection'
+        $script:ProactorCommands |
+            Should -Match '--selection-mode "\{\{SELECTION_MODE\}\}"'
+        $script:ProactorCommands |
+            Should -Match '`assigned` to require an assignment without an active submitted review'
+        $script:ProactorCommands |
+            Should -Match 'replace `review select` with\s+`review complete`'
+        $script:ReviewSkill |
+            Should -Match 'run the active-reservation `review check` command'
+        $script:ReviewSkill |
+            Should -Match 'Append\s+`--publish-to-closed-pull-request` only when the user'
+        $script:ProactorCommands |
+            Should -Match 'append `--publish-to-closed-pull-request` only for this check'
+        $script:ProactorCommands |
+            Should -Match '--reviewed-source-commit "\{\{REVIEWED_SOURCE_COMMIT\}\}"'
+        $script:ProactorDesign |
+            Should -Match 'One resolved mode applies to every\s+configured repository'
     }
 
     It 'aggregates autoreapproval results across repository runs' {

@@ -6,16 +6,18 @@
 
 use std::collections::HashSet;
 use std::num::NonZeroU32;
+use std::num::NonZeroU64;
 
 use jiff::Timestamp;
 use ohno::AppError;
 use serde_json::{Value, json};
+use sha2::{Digest, Sha256};
 
 use crate::clock::{is_recent, latest_commit};
 use crate::error::fail;
 use crate::identity::Identity;
 use crate::json::{array, boolean, field, identifier, text};
-use crate::selection::{Candidate, Comment, Provider, RemoteClaim};
+use crate::selection::{Candidate, Comment, Provider, RemoteClaim, SelectionMode};
 use crate::target::{Platform, Target, escape};
 use crate::transport::{Transport, ado_items};
 
@@ -27,6 +29,13 @@ use crate::transport::{Transport, ado_items};
 pub(crate) struct Api<'a> {
     /// Executes requests and recovery policy without leaking credentials into state.
     pub(crate) transport: Transport<'a>,
+}
+
+/// Separates assignment evidence from completion of a submitted review.
+struct ReviewerParticipation {
+    assigned: bool,
+    submitted_review: bool,
+    fingerprint: String,
 }
 
 /// GitHub's commits connection avoids the REST pull-request commit result cap.
@@ -205,6 +214,104 @@ impl Api<'_> {
             }
         }
         Ok(identities)
+    }
+
+    /// Distinguishes an active assignment from a submitted review by this account.
+    fn reviewer_participation(
+        &mut self,
+        target: &Target,
+        identity: &Identity,
+    ) -> Result<ReviewerParticipation, AppError> {
+        if target.platform == Platform::AzureDevOps {
+            let mut participation = ReviewerParticipation {
+                assigned: false,
+                submitted_review: false,
+                fingerprint: String::new(),
+            };
+            let mut evidence = Vec::new();
+            for value in self
+                .transport
+                .list(&format!("{}/reviewers", target.pr_api()))?
+            {
+                let declined = value
+                    .get("hasDeclined")
+                    .map(boolean)
+                    .transpose()?
+                    .unwrap_or(false);
+                let reviewer = Identity::from_account(target.platform, &value)?;
+                if !identity.may_match(&reviewer) {
+                    continue;
+                }
+                let vote = value
+                    .get("vote")
+                    .map(|vote| {
+                        vote.as_i64()
+                            .filter(|vote| matches!(vote, -10 | -5 | 0 | 5 | 10))
+                            .ok_or_else(|| fail("service", "Invalid ADO vote value"))
+                    })
+                    .transpose()?
+                    .unwrap_or(0);
+                evidence.push(format!("ado:{declined}:{vote}"));
+                if !declined {
+                    participation.assigned = true;
+                    participation.submitted_review |= vote != 0;
+                }
+            }
+            participation.fingerprint =
+                Self::participation_fingerprint(participation.assigned, &mut evidence);
+            return Ok(participation);
+        }
+
+        let mut participation = ReviewerParticipation {
+            assigned: self
+                .reviewers(target, false, true)?
+                .iter()
+                .any(|reviewer| identity.may_match(reviewer)),
+            submitted_review: false,
+            fingerprint: String::new(),
+        };
+        let mut evidence = Vec::new();
+        for review in self
+            .transport
+            .list(&format!("{}/reviews", target.pr_api()))?
+        {
+            let state = text(field(&review, "state")?)?;
+            let Some(user) = review.get("user").filter(|user| !user.is_null()) else {
+                // Deleted GitHub accounts can leave submitted review history with no author.
+                continue;
+            };
+            let reviewer = Identity::from_account(target.platform, user)?;
+            if identity.may_match(&reviewer) {
+                let id = review
+                    .get("id")
+                    .map(identifier)
+                    .transpose()?
+                    .unwrap_or_else(|| "unknown".to_owned());
+                evidence.push(format!("github:{id}:{state}"));
+            }
+            // Pending and dismissed reviews do not count as active participation.
+            // Ref: docs/design/review-selection.md, "Eligibility and ranking".
+            if ["PENDING", "DISMISSED"]
+                .iter()
+                .any(|inactive| state.eq_ignore_ascii_case(inactive))
+            {
+                continue;
+            }
+            if identity.may_match(&reviewer) {
+                participation.assigned = true;
+                participation.submitted_review = true;
+            }
+        }
+        participation.fingerprint =
+            Self::participation_fingerprint(participation.assigned, &mut evidence);
+        Ok(participation)
+    }
+
+    /// Reduces mutable service lists to stable reviewer participation evidence.
+    fn participation_fingerprint(assigned: bool, evidence: &mut [String]) -> String {
+        evidence.sort();
+        let joined = format!("assigned={assigned}\n{}", evidence.join("\n"));
+        format!("{:x}", Sha256::digest(joined.as_bytes()))
     }
 
     /// Resolves bare ADO identifiers before writes and reports the resolved URL.
@@ -490,6 +597,7 @@ impl Provider for Api<'_> {
         target: &Target,
         identity: &Identity,
         now: Timestamp,
+        selection_mode: SelectionMode,
     ) -> Result<Candidate, AppError> {
         let pr = self.transport.request(&target.pr_api(), "GET", None)?;
         let github = target.platform == Platform::GitHub;
@@ -503,6 +611,14 @@ impl Provider for Api<'_> {
         } else {
             pr.get("isDraft").map(boolean).transpose()?.unwrap_or(false)
         };
+        let mut source_commit = if github {
+            pr.pointer("/head/sha")
+                .map(text)
+                .transpose()?
+                .map(str::to_owned)
+        } else {
+            None
+        };
         let mut reason = if status != if github { "open" } else { "active" } {
             Some("closed")
         } else if draft {
@@ -512,39 +628,56 @@ impl Provider for Api<'_> {
         } else {
             None
         };
+        let mut review_fingerprint = None;
         if reason.is_none() {
-            if self
-                .reviewers(target, false, true)?
-                .iter()
-                .any(|reviewer| identity.may_match(reviewer))
-            {
-                reason = Some("alreadyReviewer");
-            }
-            if github {
-                for review in self
-                    .transport
-                    .list(&format!("{}/reviews", target.pr_api()))?
-                {
-                    let state = text(field(&review, "state")?)?;
-                    // Dismissed submissions no longer represent active reviewer participation.
-                    // Ref: docs/design/review-selection.md, "Eligibility and ranking".
-                    if ["PENDING", "DISMISSED"]
-                        .iter()
-                        .any(|inactive| state.eq_ignore_ascii_case(inactive))
-                    {
-                        continue;
-                    }
-                    if identity.may_match(&Identity::from_account(
-                        target.platform,
-                        field(&review, "user")?,
-                    )?) {
-                        reason = Some("alreadyReviewer");
-                    }
+            let participation = self.reviewer_participation(target, identity)?;
+            review_fingerprint = Some(participation.fingerprint.clone());
+            match selection_mode {
+                SelectionMode::Available if participation.submitted_review => {
+                    reason = Some("alreadyReviewed");
                 }
+                SelectionMode::Available if participation.assigned => {
+                    reason = Some("alreadyReviewer");
+                }
+                SelectionMode::Assigned if !participation.assigned => {
+                    reason = Some("notAssignedReviewer");
+                }
+                SelectionMode::Assigned if participation.submitted_review => {
+                    reason = Some("alreadyReviewed");
+                }
+                SelectionMode::Available | SelectionMode::Assigned => {}
             }
         }
         let mut latest = None;
         if reason.is_none() {
+            if !github {
+                let iterations = self
+                    .transport
+                    .ado_list(&format!("{}/iterations", target.pr_api()))?;
+                let mut latest_iteration: Option<(NonZeroU64, String)> = None;
+                let mut seen = HashSet::new();
+                for iteration in iterations {
+                    let id = iteration
+                        .get("id")
+                        .map(identifier)
+                        .transpose()?
+                        .and_then(|id| id.parse::<u64>().ok())
+                        .and_then(NonZeroU64::new)
+                        .ok_or_else(|| fail("service", "Invalid ADO iteration identifier"))?;
+                    if !seen.insert(id) {
+                        return Err(fail("service", "Repeated ADO iteration identifier"));
+                    }
+                    let commit =
+                        text(field(field(&iteration, "sourceRefCommit")?, "commitId")?)?.to_owned();
+                    if latest_iteration
+                        .as_ref()
+                        .is_none_or(|(current, _)| id > *current)
+                    {
+                        latest_iteration = Some((id, commit));
+                    }
+                }
+                source_commit = latest_iteration.map(|(_, commit)| commit);
+            }
             let (time, recent) = self.commit_recency(target, now)?;
             latest = time;
             if !recent {
@@ -555,13 +688,24 @@ impl Provider for Api<'_> {
             target: target.clone(),
             reason: reason.map(str::to_owned),
             latest,
+            source_commit,
+            review_fingerprint,
         })
+    }
+
+    /// Supplies participation evidence even after eligibility changes.
+    fn review_fingerprint(
+        &mut self,
+        target: &Target,
+        identity: &Identity,
+    ) -> Result<String, AppError> {
+        Ok(self.reviewer_participation(target, identity)?.fingerprint)
     }
 
     /// Normalizes undeleted discussion evidence, including resolved Azure threads.
     ///
-    /// Creation timestamps remain distinct from edit times so editing a claim
-    /// cannot renew its lifetime.
+    /// Creation timestamps remain distinct from edit times so editing a reserved
+    /// marker cannot renew its reserved lifetime.
     fn comments(&mut self, target: &Target) -> Result<Vec<Comment>, AppError> {
         let mut comments = Vec::new();
         match target.platform {
@@ -678,6 +822,79 @@ impl Provider for Api<'_> {
                 "ambiguousWrite",
                 "Claim creation response is incomplete; human reconciliation is required"
                     .to_owned(),
+                error.into_std_error(),
+            )
+            .into()
+        })
+    }
+
+    /// Updates an owned claim while preserving its remote comment coordinates.
+    fn update_claim(
+        &mut self,
+        target: &Target,
+        claim: &RemoteClaim,
+        body: &str,
+    ) -> Result<RemoteClaim, AppError> {
+        let outcome = match target.platform {
+            Platform::GitHub => {
+                let response = self.transport.request(
+                    &format!(
+                        "{}/issues/comments/{}",
+                        target.repository_api(),
+                        escape(&claim.id)
+                    ),
+                    "PATCH",
+                    Some(&json!({"body": body})),
+                )?;
+                let parse = || -> Result<RemoteClaim, AppError> {
+                    let updated = text(field(&response, "body")?)?;
+                    if updated != body {
+                        return Err(fail(
+                            "ambiguousWrite",
+                            "GitHub returned different claim content",
+                        ));
+                    }
+                    Ok(RemoteClaim {
+                        id: identifier(field(&response, "id")?)?,
+                        thread_id: None,
+                    })
+                };
+                parse()
+            }
+            Platform::AzureDevOps => {
+                let thread_id = claim.thread_id.as_deref().ok_or_else(|| {
+                    fail("invalidState", "Missing claim thread identifier for update")
+                })?;
+                let response = self.transport.request(
+                    &format!(
+                        "{}/threads/{}/comments/{}",
+                        target.pr_api(),
+                        escape(thread_id),
+                        escape(&claim.id)
+                    ),
+                    "PATCH",
+                    Some(&json!({"content": body})),
+                )?;
+                let parse = || -> Result<RemoteClaim, AppError> {
+                    let updated = text(field(&response, "content")?)?;
+                    if updated != body {
+                        return Err(fail(
+                            "ambiguousWrite",
+                            "Azure DevOps returned different claim content",
+                        ));
+                    }
+                    Ok(RemoteClaim {
+                        id: identifier(field(&response, "id")?)?,
+                        thread_id: Some(thread_id.to_owned()),
+                    })
+                };
+                parse()
+            }
+        };
+        outcome.map_err(|error| {
+            crate::error::caused_by(
+                "ambiguousWrite",
+                "Claim update response is incomplete; human reconciliation is required".to_owned(),
                 error.into_std_error(),
             )
             .into()

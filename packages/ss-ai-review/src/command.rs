@@ -20,7 +20,7 @@ use crate::discovery::{self, DiscoveryInput, WorkAction};
 use crate::error::fail;
 use crate::journal::FileJournal;
 use crate::publication;
-use crate::selection::{self, State, valid_session};
+use crate::selection::{self, Journal, SelectionMode, State, valid_session};
 use crate::target::{Platform, Target, escape};
 use crate::transport::Transport;
 use crate::{Clock, Http, Process};
@@ -364,6 +364,19 @@ enum Review {
     Select(Selection),
     /// Check the reservation after preparation, replacing an invalid candidate.
     Confirm(Selection),
+    /// Verify active ownership immediately before remote publication.
+    Check(Selection),
+    /// Mark a fully completed review without casting a service verdict.
+    Complete(Selection),
+}
+
+/// Selects the reservation operation after command parsing.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum ReviewAction {
+    Select,
+    Confirm,
+    Check,
+    Complete,
 }
 
 /// Groups participation operations that must not cast review verdicts.
@@ -374,10 +387,10 @@ enum Reviewer {
     Register(Registration),
 }
 
-/// Carries the ownership and announcement inputs shared by select and confirm.
+/// Carries the ownership and announcement inputs shared by reservation operations.
 ///
-/// Confirmation supplies the same journal, session, and repository as selection;
-/// the state machine checks them against persisted ownership before acting.
+/// Later operations supply the same journal, session, repository, and mode as
+/// selection; the state machine checks them against persisted ownership.
 #[derive(Debug, Args)]
 #[command(about = None, long_about = None)]
 struct Selection {
@@ -396,6 +409,21 @@ struct Selection {
     /// Selects the Azure tenant for OAuth without persisting credentials.
     #[arg(long, help = None, long_help = None)]
     tenant: Option<String>,
+    /// Selects available PRs or PRs already assigned without a submitted review.
+    #[arg(
+        long = "selection-mode",
+        value_enum,
+        default_value = "available",
+        help = None,
+        long_help = None
+    )]
+    mode: SelectionMode,
+    /// Allows an active reservation to publish after the pull request closes.
+    #[arg(long, help = None, long_help = None)]
+    publish_to_closed_pull_request: bool,
+    /// Supplies the final reviewed revision for a completion transition.
+    #[arg(long, help = None, long_help = None)]
+    reviewed_source_commit: Option<String>,
 }
 
 /// Accepts browser coordinates or explicit registration coordinates.
@@ -687,9 +715,11 @@ fn execute(
             } => discovery::results(&state_path, clock, after.map_or(0, NonZeroU32::get), limit)?,
         },
         Operation::Review { command } => {
-            let (arguments, confirm) = match command {
-                Review::Select(arguments) => (arguments, false),
-                Review::Confirm(arguments) => (arguments, true),
+            let (arguments, action) = match command {
+                Review::Select(arguments) => (arguments, ReviewAction::Select),
+                Review::Confirm(arguments) => (arguments, ReviewAction::Confirm),
+                Review::Check(arguments) => (arguments, ReviewAction::Check),
+                Review::Complete(arguments) => (arguments, ReviewAction::Complete),
             };
             if !arguments.state_path.is_absolute()
                 || !valid_session(&arguments.session_id)
@@ -700,7 +730,35 @@ fn execute(
                     "Supply an absolute state path, valid session identifier, and nonempty claim announcement",
                 ));
             }
+            if action == ReviewAction::Complete && arguments.reviewed_source_commit.is_none() {
+                return Err(fail(
+                    "invalidInput",
+                    "Supply --reviewed-source-commit for completion",
+                ));
+            }
             let repository = Target::repository(&arguments.repository_url)?;
+            let mut journal = FileJournal::open(&arguments.state_path, clock)?;
+            let loaded = journal.load()?;
+            if action == ReviewAction::Select && loaded.is_some() {
+                return Err(fail(
+                    "invalidState",
+                    "The journal already exists; confirm its selection or obtain human reconciliation",
+                ));
+            }
+            if action != ReviewAction::Select {
+                let loaded = loaded
+                    .ok_or_else(|| fail("invalidState", "No journal exists for this operation"))?;
+                let same_repository = loaded.repository_url == repository.web_url;
+                if loaded.session_id != arguments.session_id
+                    || !same_repository
+                    || loaded.selection_mode != arguments.mode
+                {
+                    return Err(fail(
+                        "invalidState",
+                        "The journal does not match this session, repository, or selection mode",
+                    ));
+                }
+            }
             let mut api = Api {
                 transport: Transport::new(
                     &repository,
@@ -717,16 +775,51 @@ fn execute(
                     "Journal path must be representable in UTF-8 JSON",
                 )
             })?;
-            let initial = State::new(&repository, &identity, &arguments.session_id, state_path);
-            let mut journal = FileJournal::open(&arguments.state_path, clock)?;
-            serde_json::to_value(selection::run(
-                &mut api,
-                &mut journal,
-                clock,
-                initial,
-                &arguments.claim_message,
-                confirm,
-            )?)?
+            let initial = State::new(
+                &repository,
+                &identity,
+                &arguments.session_id,
+                state_path,
+                arguments.mode,
+            );
+            let state = match action {
+                ReviewAction::Select => selection::run(
+                    &mut api,
+                    &mut journal,
+                    clock,
+                    initial,
+                    &arguments.claim_message,
+                    false,
+                )?,
+                ReviewAction::Confirm => selection::run(
+                    &mut api,
+                    &mut journal,
+                    clock,
+                    initial,
+                    &arguments.claim_message,
+                    true,
+                )?,
+                ReviewAction::Check => selection::check(
+                    &mut api,
+                    &mut journal,
+                    clock,
+                    initial,
+                    arguments.publish_to_closed_pull_request,
+                )?,
+                ReviewAction::Complete => selection::complete(
+                    &mut api,
+                    &mut journal,
+                    clock,
+                    initial,
+                    arguments.reviewed_source_commit.as_deref().ok_or_else(|| {
+                        fail(
+                            "invalidInput",
+                            "Supply --reviewed-source-commit for completion",
+                        )
+                    })?,
+                )?,
+            };
+            serde_json::to_value(state)?
         }
         Operation::Reviewer {
             command: Reviewer::Register(arguments),

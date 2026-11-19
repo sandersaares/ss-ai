@@ -2,11 +2,11 @@
 
 ## Boundaries
 
-The primary agent owns configuration, local checkout preparation, the skill
-handoff, and human interaction. It may execute the handoff directly or delegate
-the `ss-review` invocation. The shared `ss-ai` executable owns repository
-enumeration, eligibility, ordering, claim writes, the waiting period, and
-revalidation.
+The primary agent owns configuration, selection-mode resolution, local checkout
+preparation, the skill handoff, and human interaction. It may execute the
+handoff directly or delegate the `ss-review` invocation. The shared `ss-ai`
+executable owns repository enumeration, eligibility, ordering, claim writes,
+the waiting period, and revalidation.
 It emits one JSON result and keeps a local journal in session state.
 
 A delegated review returns a complete user-gate handoff rather than question
@@ -43,6 +43,11 @@ original invocation directory, ordered list, active position, exhausted
 repositories, and resolved per-repository configuration unless the user changes
 them, including after learning uses another worktree.
 
+The same invocation-level selection mode is passed to selection and
+confirmation for every candidate and repository. A replacement candidate uses
+the mode persisted in that cycle's selection journal; a mismatched confirmation
+fails before provider writes.
+
 The active repository remains selected across completed reviews. A
 `noCandidate` selection or confirmation marks it exhausted and advances the
 cursor. The agent creates and confirms a fresh cycle for the next repository;
@@ -64,6 +69,12 @@ shared `ss-review` publication data. Before an `ss-review` GitHub summary is
 published, filter proactor diagnostics to the selected pull request's exact
 repository. Do not include other repository URLs, identities, candidates,
 claims, journal paths, exhaustion state, or ordered-list position.
+
+Confirmation journals the activation intent before updating the remote marker
+from reserved to active. The review invokes the read-only `review check`
+operation immediately before publication. After phase 9, the proactor journals
+the completion intent and changes the marker to completed. Interruption in an
+activation or completion update requires human reconciliation.
 
 The primary agent creates a unique temporary checkout subdirectory per cycle under
 session state, or under the checkout parent folder supplied in the user's
@@ -104,22 +115,24 @@ capture calls still reject unexpected continuation. Repeated pages or tokens
 are errors rather than infinite loops. Thread lists include resolved threads
 and ignore deleted threads and comments.
 
-Adapters reduce these payloads to target coordinates, eligibility, the newest
-non-future committer timestamp, and discussion comments. Identity comparison
+Adapters reduce these payloads to target coordinates, assignment and submitted
+review participation, eligibility, the newest non-future committer timestamp,
+and discussion comments. Identity comparison
 uses the shared utility's platform identity rules rather than display names.
 
 Azure DevOps eligibility excludes declined reviewers
 for both selection and confirmation. The native reader filters `hasDeclined`
-before reducing entries to identities, because identity records do not carry
-reviewer state. Registration still includes declined entries so ordinary
-`ss-review` registration preserves existing reviewer state.
+before reducing entries to assignment evidence. A nonzero vote supplies
+submitted-review evidence only for an active assignment. Registration still
+includes declined entries so ordinary `ss-review` registration preserves
+existing reviewer state.
 
 ## Claim lifecycle
 
 The claim marker is a versioned HTML comment:
 
 ```text
-<!-- ss-review-proactor:v1 session=SESSION_TOKEN claim=CLAIM_UUID -->
+<!-- ss-review-proactor:v3 session=SESSION_TOKEN claim=CLAIM_UUID state=STATE revision=SOURCE_COMMIT review=PARTICIPATION_FINGERPRINT -->
 ```
 
 The session token comes from the primary session. A fresh UUID distinguishes
@@ -130,8 +143,8 @@ The primary agent supplies the claim announcement through `--claim-message`,
 applying the current user's communication policy. The helper preserves that
 text and appends the protocol marker; it supplies no attribution of its own.
 
-The journal records the session, repository, authenticated identity, attempted
-pull request numbers, claim token and remote identifiers, and outcome
+The journal records the session, repository, selection mode, authenticated
+identity, attempted pull request numbers, claim token and remote identifiers, and outcome
 diagnostics. It is written before claim creation, then after the remote reply,
 along with the earliest time the final check may start.
 A file left mid-operation is evidence for human reconciliation, not authority
@@ -149,8 +162,10 @@ Ownership checks use the remote comment identifier, author, session token, and
 claim token. Surrounding prose and line-ending normalization do not affect
 ownership. The original body remains in the journal for diagnostics.
 The final check requires the live claim recorded by this cycle's journal,
-not any comment sharing its author or session identifier. Expired claims from
-earlier attempts are ignored.
+not any comment sharing its author or session identifier. Expired reserved
+claims from earlier attempts are ignored. Active claims never expire based on
+their creation time, and completed markers are evidence rather than live
+reservations.
 
 Selection returns `claimed` immediately after posting, without waiting or
 checking the claim. The agent uses the interval to prepare the local PR
@@ -162,10 +177,10 @@ owned comment if present and claims another candidate, excluding all attempted
 candidates. Each replacement gets its own preparation interval and final check.
 
 The journal is not a distributed lock; remote discussion is authoritative.
-Claims are not renewed while waiting for a person. A `confirmed` result is
-handed directly to `ss-review`, without repeated confirmation or changes to
-that skill's registration behavior. A consumed claim may remain in the
-discussion as diagnostics.
+Reserved claims are not renewed while waiting for a person. Confirmation
+changes a valid reserved claim to active before handoff. The publication
+check verifies active ownership, and completion changes the marker only after
+the review finishes. A completed claim remains in the discussion as diagnostics.
 
 ## Verification
 

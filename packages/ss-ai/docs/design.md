@@ -328,14 +328,17 @@ Each skill run uses one installed version of the utility. Different versions
 are not required to share records or locks, even when runs share a session or
 host. An upgrade can change commands, record formats, and storage locations.
 
-Valid schema-2 proactor journals remain readable. A retained sibling lock
-covers the whole transaction, including validation, waiting, and remote
-effects. Readers can retain a complete opened version during atomic
-replacement. Temporary contention receives bounded, contention-specific
-retries; semantic conflicts and unrelated I/O failures remain explicit.
+Proactor readers accept only the current schema-3 journal and reject
+incompatible records without changing stored state or contacting a provider.
+A retained sibling lock covers the whole transaction, including validation,
+waiting, and remote effects. Readers can retain a complete opened version
+during atomic replacement. Temporary contention receives bounded,
+contention-specific retries; semantic conflicts and unrelated I/O failures
+remain explicit.
 
 The utility records intent before claim creation/deletion and outcome after
-the service reply. An interrupted or ambiguous write is not replayable.
+the service reply. Claim activation and completion use the same intent
+discipline. An interrupted or ambiguous write is not replayable.
 Unknown service evidence never becomes an empty successful result. Credentials
 do not enter journals or diagnostics. Authentication and permission errors
 remain visible to the calling skill and its human decision gates.

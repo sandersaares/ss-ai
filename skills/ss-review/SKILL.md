@@ -160,6 +160,11 @@ Prepare every phase-1 step-5/step-6 preparation assignment and phase-2 reviewer 
 
 7. Unless this is self-review, if this is a pull request review, immediately publish the initial overview using `pwsh-calls/publish-content-overview.md`, before dispatching review workers. This automatic preparation post is separate from the later audit and findings publication. The command publishes the Markdown inline as GitHub top-level pull request comments or resolved, unanchored ADO comments. It splits content over 64 KiB into consecutive attributed parts.
 
+   For a proactor handoff, first run the active-reservation `review check`
+   command from the selection journal and continue only when it returns
+   `confirmed`. Append `--publish-to-closed-pull-request` only when the user
+   has already made that explicit publication authorization.
+
    Publication is best-effort. The transport waits and retries explicit rate-limit refusals until success; these are definite rejections, not ambiguous writes. Notify the user of other failures and saved diagnostics, then continue the review without waiting for repair. This publication path does not need report-rendering tools. Never replay ambiguous writes or treat a partially posted multipart report as fully published.
 
    Keep this initial report and comments unchanged, including when later freshness work regenerates the local overview. No PR means no external publication. A review that later has no findings, uses a tracker, or receives no merge approval still has this initial preparation report.
@@ -376,6 +381,14 @@ A pull request run that reached the service is not resolved by filing into a tra
 
 ## Publishing onto a pull request
 
+For a proactor handoff, run the active-reservation `review check` command from
+the handed-off selection journal immediately before the first publication
+write. Use the repository URL, session, journal path, claim message, tenant,
+and selection mode retained in the proactor checkpoint. Append
+`--publish-to-closed-pull-request` only when the user has explicitly authorized
+that destination. Do not recreate the journal or continue if the command does
+not return `confirmed`.
+
 Publish the approved findings. Execute the command in `pwsh-calls/publish-pull-request-review.md`, replacing its placeholders.
 
 Pass `--merge-approval-path` when the run has a merge-decision record. Publication validates the schema and PR/source-commit binding itself and derives the approval flag; the agent must not translate JSON into an approval switch. A true decision submits a GitHub approval or an approving ADO vote alongside findings. Omit the path only when no merge decision exists. A malformed or stale record is an error to resolve through audit or permitted carry-forward, not a reason to bypass validation.
@@ -468,4 +481,9 @@ When proposing chages, keep them minimal. Avoid verbose prose. One-liners are op
 
 Ask the user for approval before creating any pull requests, to avoid noise/chatter (e.g. perhaps the user considers the changes unnecessary because the current review was exceptional in some way).
 
-After this phase completes, a proactor handoff returns to [proactor stage 5](../ss-review-proactor/SKILL.md#stage-5-summary-and-continuation) for its summary and continuation decision. Preserve the latest user loop instruction; a pause, failure, or unanswered learning question is not completion. Standalone `ss-review` invocations finish here without selecting another review.
+After this phase completes, a proactor handoff returns to [proactor stage 5](../ss-review-proactor/SKILL.md#stage-5-summary-and-continuation) to mark the active reservation complete and make its summary and continuation decision. Preserve the latest user loop instruction; a pause, failure, or unanswered learning question is not completion. Standalone `ss-review` invocations finish here without selecting another review.
+
+Retain the exact final reviewed source commit from the last checked capture or
+successful publication result in the handoff checkpoint. Pass it to the
+proactor as its `REVIEWED_SOURCE_COMMIT`; do not re-read the live head for
+completion.

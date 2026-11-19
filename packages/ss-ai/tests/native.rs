@@ -221,6 +221,9 @@ impl Fixture {
                 "--claim-message",
                 "Unicode \u{4e16}\u{754c}; quotes \" and & | % stay in JSON.",
             ]);
+        if operation == "complete" {
+            command.args(["--reviewed-source-commit", "source-10"]);
+        }
         command
     }
 }
@@ -379,6 +382,14 @@ fn executable_github_selection_confirmation_and_registration() {
     assert_eq!(registered["status"], "added");
     assert_eq!(registered["identity"]["id"], "42");
     assert!(fixture.root.path().join("registration.json").exists());
+    assert_eq!(
+        value(&fixture.review("check").output().unwrap())["status"],
+        "confirmed"
+    );
+    assert_eq!(
+        value(&fixture.review("complete").output().unwrap())["status"],
+        "completed"
+    );
 }
 
 #[test]
@@ -748,6 +759,13 @@ impl Http for NoHttp {
     }
 }
 
+struct ForbiddenProvider;
+impl Process for ForbiddenProvider {
+    fn execute(&self, _: &str, _: &[String], _: &[u8]) -> std::io::Result<ProcessOutput> {
+        panic!("Provider access must not precede local journal validation")
+    }
+}
+
 struct EmptyProvider {
     initialized: Option<mpsc::Sender<()>>,
     finish: Option<mpsc::Receiver<()>>,
@@ -798,6 +816,22 @@ fn selection(path: &Path) -> Vec<OsString> {
     .to_vec();
     args.push(path.as_os_str().to_owned());
     args
+}
+
+#[test]
+fn invalid_existing_journal_fails_before_provider_identity_lookup() {
+    let root = TempDir::new().unwrap();
+    let path = root.path().join("state.json");
+    fs::write(&path, br#"{"schemaVersion":2}"#).unwrap();
+    let error = run(
+        &selection(&path),
+        &ForbiddenProvider,
+        &NoHttp,
+        &SystemClock::default(),
+    )
+    .err()
+    .unwrap();
+    assert_eq!(ss_ai::classification(&error), "invalidState");
 }
 
 #[test]
@@ -977,8 +1011,16 @@ impl Http for AdoFlow {
                 | "Project/_apis/git/repositories/Repo/pullRequests/10/reviewers?api-version=7.1",
             ) => json!({"count":0,"value":[]}),
             ("GET", "Project/_apis/git/repositories/Repo/pullRequests/10?api-version=7.1") => {
-                json!({"status":"active","createdBy":{"id":"author"},"isDraft":false})
+                json!({"status":"active","createdBy":{"id":"author"},"isDraft":false,
+                    "lastMergeSourceCommit":{"commitId":"source-10"}})
             }
+            (
+                "GET",
+                "Project/_apis/git/repositories/Repo/pullRequests/10/iterations?api-version=7.1",
+            ) => json!({"count":2,"value":[
+                {"id":1,"sourceRefCommit":{"commitId":"source-older"}},
+                {"id":2,"sourceRefCommit":{"commitId":"source-10"}}
+            ]}),
             (
                 "GET",
                 "Project/_apis/git/repositories/Repo/pullRequests/10/commits?%24top=100&api-version=7.1",
@@ -1010,6 +1052,18 @@ impl Http for AdoFlow {
                 self.writes.borrow_mut().push(value);
                 thread
             }
+            (
+                "PATCH",
+                "Project/_apis/git/repositories/Repo/pullRequests/10/threads/101/comments/55?api-version=7.1",
+            ) => {
+                let value: Value = serde_json::from_slice(body.unwrap()).unwrap();
+                let content = value["content"].as_str().unwrap().to_owned();
+                let thread = json!({"id":101,"status":"fixed","comments":[{"id":55,"content":content,
+                    "publishedDate":"2026-09-28T00:00:00Z","author":{"id":"reviewer-id","descriptor":"aad.reviewer"}}]});
+                self.thread.replace(Some(thread));
+                self.writes.borrow_mut().push(value);
+                json!({"id":55,"content":content})
+            }
             _ => panic!("Unexpected ADO operation: {method} {path}"),
         };
         Ok(HttpResponse::new(
@@ -1034,9 +1088,9 @@ impl Clock for Timeline {
 }
 
 #[test]
-fn ado_command_selection_and_confirmation_preserve_resolved_threads_and_schema_two() {
+fn ado_command_selection_and_confirmation_preserve_resolved_threads_and_schema_three() {
     let _launch = lock_process_launch();
-    for legacy in [false, true] {
+    for preexisting in [false, true] {
         let root = tempfile::tempdir().unwrap();
         // A long path also exercises native Windows extended-path replacement.
         let path = root
@@ -1053,7 +1107,7 @@ fn ado_command_selection_and_confirmation_preserve_resolved_threads_and_schema_t
             "--repository-url",
             "https://dev.azure.com/org/Project/_git/Repo",
             "--session-id",
-            "legacy-session",
+            "review-session",
             "--claim-message",
             "Review \u{4e16}\u{754c}",
             "--tenant",
@@ -1063,11 +1117,11 @@ fn ado_command_selection_and_confirmation_preserve_resolved_threads_and_schema_t
         .map(OsString::from)
         .to_vec();
         args.push(path.as_os_str().to_owned());
-        if legacy {
-            let body = "Review\r\n\r\n<!-- ss-review-proactor:v1 session=legacy-session claim=aaaaaaaa-1234-1234-1234-123456789abc -->";
-            // Schema-2 fields and PowerShell's timestamp precision, including explicit nulls.
+        if preexisting {
+            let body = "Review\r\n\r\n<!-- ss-review-proactor:v3 session=review-session claim=aaaaaaaa-1234-1234-1234-123456789abc state=reserved revision=source-10 review=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa -->";
+            // Schema-3 fields and PowerShell's timestamp precision, including explicit nulls.
             let state = json!({
-                "schemaVersion":2,"sessionId":"legacy-session","repositoryUrl":"https://dev.azure.com/org/Project/_git/Repo",
+                "schemaVersion":3,"sessionId":"review-session","repositoryUrl":"https://dev.azure.com/org/Project/_git/Repo","selectionMode":"available",
                 "identity":{"platform":"azureDevOps","id":"reviewer-id","displayName":"Reviewer","uniqueName":null,"descriptor":"aad.reviewer","accountType":null,"kind":"person","evidence":[]},
                 "status":"claimed","target":{"platform":"azureDevOps","collectionUrl":"https://dev.azure.com/org","organization":"org","project":"Project","repository":"Repo","pullRequestId":10,"webUrl":"https://dev.azure.com/org/Project/_git/Repo/pullrequest/10"},
                 "claim":{"token":"aaaaaaaa-1234-1234-1234-123456789abc","body":body,"id":"55","threadId":"101","checkAfter":"2026-09-28T00:01:00.0000000+00:00"},
@@ -1092,10 +1146,23 @@ fn ado_command_selection_and_confirmation_preserve_resolved_threads_and_schema_t
             confirmed["diagnostics"][0]["reason"],
             "soleLiveClaimAfterPreparation"
         );
-        assert_eq!(service.writes.borrow().len(), usize::from(!legacy));
+        assert_eq!(confirmed["selectionMode"], "available");
+        args[2] = "check".into();
+        let checked: Value =
+            serde_json::from_str(&run(&args, &service, &service, &clock).unwrap()).unwrap();
+        assert_eq!(checked["status"], "confirmed");
+        args[2] = "complete".into();
+        args.extend(["--reviewed-source-commit".into(), "source-10".into()]);
+        let completed: Value =
+            serde_json::from_str(&run(&args, &service, &service, &clock).unwrap()).unwrap();
+        assert_eq!(completed["status"], "completed");
+        assert_eq!(
+            service.writes.borrow().len(),
+            if preexisting { 2 } else { 3 }
+        );
         assert_eq!(
             serde_json::from_slice::<Value>(&fs::read(&path).unwrap()).unwrap(),
-            confirmed
+            completed
         );
     }
 }

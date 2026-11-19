@@ -9,6 +9,7 @@ use std::path::Path;
 use std::sync::LazyLock;
 use std::time::Duration;
 
+use clap::ValueEnum;
 use jiff::Timestamp;
 use ohno::AppError;
 use regex::Regex;
@@ -22,7 +23,47 @@ use crate::identity::Identity;
 use crate::json::required_optional;
 use crate::target::{Platform, Target};
 
-/// Carries schema-2 evidence across command and journal boundaries.
+/// Selects the review assignment policy for the whole journal transaction.
+#[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize, ValueEnum)]
+#[serde(rename_all = "camelCase")]
+pub(crate) enum SelectionMode {
+    /// Finds work that is not already assigned to the authenticated reviewer.
+    #[default]
+    Available,
+    /// Finds assigned work without a submitted review from the authenticated reviewer.
+    Assigned,
+}
+
+/// Supplies parseable ownership and review evidence from a claim marker.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct ClaimMarker<'a> {
+    session: &'a str,
+    token: &'a str,
+    state: ClaimState,
+    revision: &'a str,
+    review_fingerprint: &'a str,
+}
+
+/// Names the externally observable phase of a review reservation.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum ClaimState {
+    Reserved,
+    Active,
+    Completed,
+}
+
+impl ClaimState {
+    /// Supplies the stable protocol label carried in PR discussion.
+    fn label(self) -> &'static str {
+        match self {
+            Self::Reserved => "reserved",
+            Self::Active => "active",
+            Self::Completed => "completed",
+        }
+    }
+}
+
+/// Carries schema-3 evidence across command and journal boundaries.
 ///
 /// Deserialization alone does not establish valid lifecycle state. `validate`
 /// checks relationships between fields before `Workflow` attaches the required
@@ -36,6 +77,8 @@ pub(crate) struct State {
     pub(crate) session_id: String,
     /// Exact selection scope checked again during confirmation.
     pub(crate) repository_url: String,
+    /// Assignment policy fixed for selection and every replacement in this cycle.
+    pub(crate) selection_mode: SelectionMode,
     /// Authenticated account whose ownership must match the next invocation.
     pub(crate) identity: Identity,
     /// Wire-level lifecycle label determining which reservation fields are required.
@@ -53,7 +96,7 @@ pub(crate) struct State {
     /// Absolute publication location carried in the result for the calling skill.
     #[expect(
         clippy::struct_field_names,
-        reason = "The field preserves the schema-2 journal contract"
+        reason = "The field preserves the schema-3 journal contract"
     )]
     pub(crate) state_path: String,
 }
@@ -63,11 +106,18 @@ impl State {
     ///
     /// This is input to a fresh selection transaction, not authorization to
     /// replace an existing journal.
-    pub(crate) fn new(repository: &Target, identity: &Identity, session: &str, path: &str) -> Self {
+    pub(crate) fn new(
+        repository: &Target,
+        identity: &Identity,
+        session: &str,
+        path: &str,
+        selection_mode: SelectionMode,
+    ) -> Self {
         Self {
-            schema_version: 2,
+            schema_version: 3,
             session_id: session.to_owned(),
             repository_url: repository.web_url.clone(),
+            selection_mode,
             identity: identity.clone(),
             status: Status::Selecting,
             target: None,
@@ -80,13 +130,13 @@ impl State {
 
     /// Rejects malformed or contradictory recovery evidence before any side effect.
     pub(crate) fn validate(&self) -> Result<(), AppError> {
-        if self.schema_version != 2
+        if self.schema_version != 3
             || !valid_session(&self.session_id)
             || !Path::new(&self.state_path).is_absolute()
         {
             return Err(fail(
                 "invalidState",
-                "Unsupported or malformed schema-2 journal",
+                "Unsupported or malformed schema-3 journal",
             ));
         }
         self.identity.validate()?;
@@ -114,7 +164,13 @@ impl State {
             (Some(target), Some(claim))
                 if matches!(
                     self.status,
-                    Status::Claiming | Status::Claimed | Status::Confirmed | Status::Discarding
+                    Status::Claiming
+                        | Status::Claimed
+                        | Status::Activating
+                        | Status::Confirmed
+                        | Status::Completing
+                        | Status::Completed
+                        | Status::Discarding
                 ) =>
             {
                 if !NonZeroU32::new(target.pull_request_id)
@@ -140,8 +196,21 @@ impl State {
                 }
                 let marker = marker(&claim.body)
                     .ok_or_else(|| fail("invalidState", "Journal claim has no protocol marker"))?;
-                if marker.0 != self.session_id
-                    || marker.1 != claim.token
+                let same_session = marker.session == self.session_id;
+                let same_token = marker.token == claim.token;
+                if !same_session
+                    || !same_token
+                    || marker.state
+                        != match self.status {
+                            Status::Claiming | Status::Claimed | Status::Discarding => {
+                                ClaimState::Reserved
+                            }
+                            Status::Activating | Status::Confirmed => ClaimState::Active,
+                            Status::Completing | Status::Completed => ClaimState::Completed,
+                            Status::Selecting | Status::NoCandidate => {
+                                return Err(fail("invalidState", "Unexpected claim state"));
+                            }
+                        }
                     || Uuid::parse_str(&claim.token).is_err()
                 {
                     return Err(fail(
@@ -197,6 +266,8 @@ struct Workflow {
     session_id: String,
     /// Immutable scope inherited from the validated journal.
     repository_url: String,
+    /// Assignment policy inherited from the validated journal.
+    selection_mode: SelectionMode,
     /// Account authorized to manage this journal's claim.
     identity: Identity,
     /// Candidates excluded from subsequent attempts within this workflow.
@@ -242,7 +313,10 @@ impl TryFrom<State> for Workflow {
                     };
                     match status {
                         Status::Claimed => Stage::Claimed(reservation),
+                        Status::Activating => Stage::Activating(reservation),
                         Status::Confirmed => Stage::Confirmed(reservation),
+                        Status::Completing => Stage::Completing(reservation),
+                        Status::Completed => Stage::Completed(reservation),
                         Status::Discarding => Stage::Discarding(reservation),
                         _ => return Err(fail("invalidState", "Unexpected reservation stage")),
                     }
@@ -258,6 +332,7 @@ impl TryFrom<State> for Workflow {
         Ok(Self {
             session_id: state.session_id,
             repository_url: state.repository_url,
+            selection_mode: state.selection_mode,
             identity: state.identity,
             attempted: state.attempted,
             diagnostics: state.diagnostics,
@@ -278,8 +353,20 @@ impl Workflow {
                 Status::Claimed,
                 Some((&reservation.intent, Some(reservation))),
             ),
+            Stage::Activating(reservation) => (
+                Status::Activating,
+                Some((&reservation.intent, Some(reservation))),
+            ),
             Stage::Confirmed(reservation) => (
                 Status::Confirmed,
+                Some((&reservation.intent, Some(reservation))),
+            ),
+            Stage::Completing(reservation) => (
+                Status::Completing,
+                Some((&reservation.intent, Some(reservation))),
+            ),
+            Stage::Completed(reservation) => (
+                Status::Completed,
                 Some((&reservation.intent, Some(reservation))),
             ),
             Stage::Discarding(reservation) => (
@@ -288,9 +375,10 @@ impl Workflow {
             ),
         };
         State {
-            schema_version: 2,
+            schema_version: 3,
             session_id: self.session_id.clone(),
             repository_url: self.repository_url.clone(),
+            selection_mode: self.selection_mode,
             identity: self.identity.clone(),
             status,
             target: reservation.map(|(intent, _)| intent.target.clone()),
@@ -334,8 +422,14 @@ enum Stage {
     Claiming(Intent),
     /// Holds the created reservation that a later invocation may confirm.
     Claimed(Reservation),
+    /// Records activation intent before updating the observable claim.
+    Activating(Reservation),
     /// Records the successful sole-live-claim check for skill handoff.
     Confirmed(Reservation),
+    /// Records completion intent before updating the observable claim.
+    Completing(Reservation),
+    /// Records the completed review marker used by later selection.
+    Completed(Reservation),
     /// Records cleanup intent before deleting an ownership-checked comment.
     Discarding(Reservation),
     /// Completes enumeration without eligible unattempted work.
@@ -374,8 +468,14 @@ pub(crate) enum Status {
     Claiming,
     /// Creation succeeded and the preparation deadline is available.
     Claimed,
+    /// The created claim is being changed into a handoff reservation.
+    Activating,
     /// Confirmation succeeded and the caller may perform its existing handoff.
     Confirmed,
+    /// The active reservation is being changed into completion evidence.
+    Completing,
+    /// The review completed and later selection may observe that evidence.
+    Completed,
     /// Deletion intent is durable, but cleanup may need reconciliation.
     Discarding,
     /// Search completed successfully without a claim.
@@ -425,11 +525,25 @@ pub(crate) trait Provider {
         target: &Target,
         identity: &Identity,
         now: Timestamp,
+        selection_mode: SelectionMode,
     ) -> Result<Candidate, AppError>;
     /// Supplies all undeleted discussion evidence needed to discover live claims.
     fn comments(&mut self, target: &Target) -> Result<Vec<Comment>, AppError>;
     /// Performs one journaled creation and returns its remote ownership coordinates.
     fn create_claim(&mut self, target: &Target, body: &str) -> Result<RemoteClaim, AppError>;
+    /// Supplies current reviewer-participation evidence independently of eligibility.
+    fn review_fingerprint(
+        &mut self,
+        target: &Target,
+        identity: &Identity,
+    ) -> Result<String, AppError>;
+    /// Changes a caller-verified claim marker without replacing its remote identity.
+    fn update_claim(
+        &mut self,
+        target: &Target,
+        claim: &RemoteClaim,
+        body: &str,
+    ) -> Result<RemoteClaim, AppError>;
     /// Removes the caller-verified owned comment without deleting its thread.
     fn remove_claim(&mut self, target: &Target, comment: &Comment) -> Result<(), AppError>;
 }
@@ -456,6 +570,10 @@ pub(crate) struct Candidate {
     pub(crate) reason: Option<String>,
     /// Latest non-future commit instant used for deterministic candidate ranking.
     pub(crate) latest: Option<Timestamp>,
+    /// Current source revision bound into completion evidence.
+    pub(crate) source_commit: Option<String>,
+    /// Current reviewer participation bound into completion evidence.
+    pub(crate) review_fingerprint: Option<String>,
 }
 
 /// Normalized discussion evidence includes resolved ADO threads.
@@ -484,7 +602,7 @@ pub(crate) struct RemoteClaim {
 /// Fixed protocol syntax is shared by creation, discovery, and ownership checks.
 static CLAIM_MARKER: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(
-    r"(?m)^<!-- ss-review-proactor:v1 session=([A-Za-z0-9._:-]+) claim=([0-9a-fA-F]{8}(?:-[0-9a-fA-F]{4}){3}-[0-9a-fA-F]{12}) -->\r?$"
+    r"(?m)^<!-- ss-review-proactor:v3 session=([A-Za-z0-9._:-]+) claim=([0-9a-fA-F]{8}(?:-[0-9a-fA-F]{4}){3}-[0-9a-fA-F]{12}) state=(reserved|active|completed) revision=([A-Za-z0-9._:-]+) review=([0-9a-f]{64}) -->\r?$"
 ).expect("fixed claim marker pattern")
 });
 
@@ -521,11 +639,12 @@ pub(crate) fn run(
         let state = Workflow::try_from(state)?;
         if state.session_id != initial.session_id
             || state.repository_url != initial.repository_url
+            || state.selection_mode != initial.selection_mode
             || !state.identity.same_account(&initial.identity)
         {
             return Err(fail(
                 "invalidState",
-                "The journal does not match this session, repository, or authenticated identity",
+                "The journal does not match this session, repository, selection mode, or authenticated identity",
             ));
         }
         initial = confirm_claim(provider, journal, clock, state)?;
@@ -547,7 +666,12 @@ pub(crate) fn run(
         if initial.attempted.contains(&id) {
             continue;
         }
-        let candidate = provider.candidate(&target, &initial.identity, clock.now())?;
+        let candidate = provider.candidate(
+            &target,
+            &initial.identity,
+            clock.now(),
+            initial.selection_mode,
+        )?;
         if let Some(reason) = candidate.reason {
             initial.record(id, reason);
         } else {
@@ -565,12 +689,28 @@ pub(crate) fn run(
         let target = candidate.target;
         let id = candidate_id(&target)?;
         initial.attempted.push(id);
-        let fresh = provider.candidate(&target, &initial.identity, clock.now())?;
+        let fresh = provider.candidate(
+            &target,
+            &initial.identity,
+            clock.now(),
+            initial.selection_mode,
+        )?;
         if let Some(reason) = fresh.reason {
             initial.record(id, reason);
             continue;
         }
         let comments = provider.comments(&target)?;
+        if comments.iter().any(|comment| {
+            comment.author.same_account(&initial.identity)
+                && marker(&comment.body).is_some_and(|marker| {
+                    marker.state == ClaimState::Completed
+                        && fresh.source_commit.as_deref() == Some(marker.revision)
+                        && fresh.review_fingerprint.as_deref() == Some(marker.review_fingerprint)
+                })
+        }) {
+            initial.record(id, "completedReview");
+            continue;
+        }
         let mut has_live_claim = false;
         for comment in &comments {
             // Validate every claim timestamp, even after discovering a live reservation.
@@ -581,9 +721,23 @@ pub(crate) fn run(
             continue;
         }
         let token = Uuid::new_v4().to_string();
-        let body = format!(
-            "{message}\n\n<!-- ss-review-proactor:v1 session={} claim={token} -->",
-            initial.session_id
+        let source_commit = fresh
+            .source_commit
+            .as_deref()
+            .ok_or_else(|| fail("service", "Candidate has no source revision"))?;
+        let review_fingerprint = fresh.review_fingerprint.as_deref().ok_or_else(|| {
+            fail(
+                "service",
+                "Candidate has no reviewer participation evidence",
+            )
+        })?;
+        let body = claim_body(
+            message,
+            &initial.session_id,
+            &token,
+            ClaimState::Reserved,
+            source_commit,
+            review_fingerprint,
         );
         initial.stage = Stage::Claiming(Intent {
             target: target.clone(),
@@ -640,7 +794,8 @@ fn confirm_claim(
             .saturating_add(u64::from(duration.subsec_nanos() > 0));
         clock.wait(Duration::from_secs(seconds))?;
     }
-    let candidate = provider.candidate(target, &state.identity, clock.now())?;
+    let candidate =
+        provider.candidate(target, &state.identity, clock.now(), state.selection_mode)?;
     let comments = provider.comments(target)?;
     let mut own = comments
         .iter()
@@ -653,9 +808,12 @@ fn confirm_claim(
         ));
     }
     if let Some(comment) = owned
-        && (!comment.author.may_match(&state.identity)
-            || marker(&comment.body)
-                != Some((state.session_id.as_str(), claim.intent.token.as_str())))
+        && (!comment.author.same_account(&state.identity)
+            || marker(&comment.body).is_none_or(|marker| {
+                marker.session != state.session_id
+                    || marker.token != claim.intent.token
+                    || marker.state != ClaimState::Reserved
+            }))
     {
         return Err(fail(
             "invalidState",
@@ -685,11 +843,203 @@ fn confirm_claim(
         }
         state.stage = Stage::Selecting;
     } else {
+        let target = target.clone();
+        let body = transition_claim(&claim.intent.body, ClaimState::Active, None, None)?;
+        let remote = RemoteClaim {
+            id: claim.id.clone(),
+            thread_id: claim.thread_id.clone(),
+        };
+        let mut claim = claim;
+        claim.intent.body.clone_from(&body);
+        state.stage = Stage::Activating(claim);
+        state.save(journal)?;
+        let updated = provider.update_claim(&target, &remote, &body)?;
+        if updated.id != remote.id || updated.thread_id != remote.thread_id {
+            return Err(fail(
+                "ambiguousWrite",
+                "Claim activation returned different remote identifiers",
+            ));
+        }
+        let Stage::Activating(claim) = state.stage else {
+            return Err(fail("invalidState", "Activation intent disappeared"));
+        };
         state.stage = Stage::Confirmed(claim);
         state.record(id, "soleLiveClaimAfterPreparation");
     }
     state.save(journal)?;
     Ok(state)
+}
+
+/// Verifies that a confirmed reservation still controls the pull request.
+pub(crate) fn check(
+    provider: &mut dyn Provider,
+    journal: &mut dyn Journal,
+    clock: &dyn Clock,
+    initial: State,
+    publish_to_closed_pull_request: bool,
+) -> Result<State, AppError> {
+    let mut state = owned_workflow(journal, initial)?;
+    let Stage::Confirmed(reservation) = &state.stage else {
+        return Err(fail(
+            "invalidState",
+            "Publication reservation is not confirmed",
+        ));
+    };
+    let id = candidate_id(&reservation.intent.target)?;
+    // Reviewer registration intentionally changes an available candidate's
+    // assignment state after handoff; that expected transition is not stale work.
+    if let Some(reason) = provider
+        .candidate(
+            &reservation.intent.target,
+            &state.identity,
+            clock.now(),
+            state.selection_mode,
+        )?
+        .reason
+        .filter(|reason| {
+            !(state.selection_mode == SelectionMode::Available && reason == "alreadyReviewer")
+                && !(publish_to_closed_pull_request && reason == "closed")
+        })
+    {
+        return Err(fail(
+            "invalidState",
+            format!("Publication reservation is no longer eligible: {reason}"),
+        ));
+    }
+    let comments = provider.comments(&reservation.intent.target)?;
+    verify_active_claim(&state, reservation, &comments, clock.now())?;
+    state.record(id, "activeClaimVerifiedBeforePublication");
+    state.save(journal)?;
+    Ok(state.wire())
+}
+
+/// Marks a successfully completed review as observable completion evidence.
+pub(crate) fn complete(
+    provider: &mut dyn Provider,
+    journal: &mut dyn Journal,
+    clock: &dyn Clock,
+    initial: State,
+    reviewed_source_commit: &str,
+) -> Result<State, AppError> {
+    if !valid_revision(reviewed_source_commit) {
+        return Err(fail(
+            "invalidInput",
+            "Supply the final reviewed source commit from the review artifacts",
+        ));
+    }
+    let mut state = owned_workflow(journal, initial)?;
+    let Stage::Confirmed(reservation) = &state.stage else {
+        return Err(fail(
+            "invalidState",
+            "Completed review reservation is not confirmed",
+        ));
+    };
+    let target = reservation.intent.target.clone();
+    let id = candidate_id(&target)?;
+    let remote = RemoteClaim {
+        id: reservation.id.clone(),
+        thread_id: reservation.thread_id.clone(),
+    };
+    let comments = provider.comments(&target)?;
+    verify_active_claim(&state, reservation, &comments, clock.now())?;
+    let review_fingerprint =
+        provider.review_fingerprint(&reservation.intent.target, &state.identity)?;
+    let body = transition_claim(
+        &reservation.intent.body,
+        ClaimState::Completed,
+        Some(reviewed_source_commit),
+        Some(&review_fingerprint),
+    )?;
+    let Stage::Confirmed(mut reservation) = state.stage else {
+        return Err(fail("invalidState", "Confirmed reservation disappeared"));
+    };
+    reservation.intent.body.clone_from(&body);
+    state.stage = Stage::Completing(reservation);
+    state.save(journal)?;
+    let updated = provider.update_claim(&target, &remote, &body)?;
+    if updated.id != remote.id || updated.thread_id != remote.thread_id {
+        return Err(fail(
+            "ambiguousWrite",
+            "Claim completion returned different remote identifiers",
+        ));
+    }
+    let Stage::Completing(reservation) = state.stage else {
+        return Err(fail("invalidState", "Completion intent disappeared"));
+    };
+    state.stage = Stage::Completed(reservation);
+    state.record(id, "reviewCompleted");
+    state.save(journal)?;
+    Ok(state.wire())
+}
+
+/// Loads ownership evidence without treating malformed journals as absent work.
+fn owned_workflow(journal: &mut dyn Journal, initial: State) -> Result<Workflow, AppError> {
+    let initial = Workflow::try_from(initial)?;
+    let loaded = journal
+        .load()?
+        .ok_or_else(|| fail("invalidState", "No journal exists for this operation"))?;
+    let state = Workflow::try_from(loaded)?;
+    if state.session_id != initial.session_id
+        || state.repository_url != initial.repository_url
+        || state.selection_mode != initial.selection_mode
+        || !state.identity.same_account(&initial.identity)
+    {
+        return Err(fail(
+            "invalidState",
+            "The journal does not match this session, repository, selection mode, or authenticated identity",
+        ));
+    }
+    Ok(state)
+}
+
+/// Verifies the active claim and rejects concurrent observable reservations.
+fn verify_active_claim(
+    state: &Workflow,
+    reservation: &Reservation,
+    comments: &[Comment],
+    now: Timestamp,
+) -> Result<(), AppError> {
+    let mut own = comments.iter().filter(|comment| {
+        comment.id == reservation.id && comment.thread_id == reservation.thread_id
+    });
+    let owned = own.next();
+    if own.next().is_some() {
+        return Err(fail(
+            "service",
+            "The service returned duplicate claim comment identifiers",
+        ));
+    }
+    let owned = owned.ok_or_else(|| {
+        fail(
+            "invalidState",
+            "The active review reservation is missing; human reconciliation is required",
+        )
+    })?;
+    if !owned.author.same_account(&state.identity)
+        || marker(&owned.body).is_none_or(|marker| {
+            marker.session != state.session_id
+                || marker.token != reservation.intent.token
+                || marker.state != ClaimState::Active
+        })
+    {
+        return Err(fail(
+            "invalidState",
+            "The active review reservation no longer matches its owner and tokens",
+        ));
+    }
+    let mut live_count = 0_usize;
+    for comment in comments {
+        if live(comment, now)? {
+            live_count = live_count.saturating_add(1);
+        }
+    }
+    if live_count != 1 {
+        return Err(fail(
+            "invalidState",
+            "The active review reservation is contested",
+        ));
+    }
+    Ok(())
 }
 
 /// Repository-only targets use zero, but attempts and diagnostics require a concrete PR.
@@ -706,18 +1056,84 @@ pub(crate) fn valid_session(session: &str) -> bool {
             .all(|byte| byte.is_ascii_alphanumeric() || b"._:-".contains(&byte))
 }
 
-/// Extracts ownership tokens only from a complete protocol line, not prose fragments.
-fn marker(body: &str) -> Option<(&str, &str)> {
-    let captures = CLAIM_MARKER.captures(body)?;
-    Some((captures.get(1)?.as_str(), captures.get(2)?.as_str()))
+/// Restricts source-revision values to the protocol marker's safe character set.
+fn valid_revision(revision: &str) -> bool {
+    !revision.is_empty()
+        && revision
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || b"._:-".contains(&byte))
 }
 
-/// Interprets marked discussion as a reservation using its service creation time.
+/// Extracts ownership tokens only from a complete protocol line, not prose fragments.
+fn marker(body: &str) -> Option<ClaimMarker<'_>> {
+    let captures = CLAIM_MARKER.captures(body)?;
+    let state = match captures.get(3)?.as_str() {
+        "reserved" => ClaimState::Reserved,
+        "active" => ClaimState::Active,
+        "completed" => ClaimState::Completed,
+        _ => return None,
+    };
+    Some(ClaimMarker {
+        session: captures.get(1)?.as_str(),
+        token: captures.get(2)?.as_str(),
+        state,
+        revision: captures.get(4)?.as_str(),
+        review_fingerprint: captures.get(5)?.as_str(),
+    })
+}
+
+/// Constructs one complete protocol marker with caller-approved prose.
+fn claim_body(
+    message: &str,
+    session: &str,
+    token: &str,
+    state: ClaimState,
+    revision: &str,
+    review_fingerprint: &str,
+) -> String {
+    format!(
+        "{message}\n\n<!-- ss-review-proactor:v3 session={session} claim={token} state={} revision={revision} review={review_fingerprint} -->",
+        state.label()
+    )
+}
+
+/// Changes only the protocol marker while preserving the announced prose.
+fn transition_claim(
+    body: &str,
+    state: ClaimState,
+    revision: Option<&str>,
+    review_fingerprint: Option<&str>,
+) -> Result<String, AppError> {
+    let marker =
+        marker(body).ok_or_else(|| fail("invalidState", "Claim has no protocol marker"))?;
+    Ok(CLAIM_MARKER
+        .replace(
+            body,
+            format!(
+                "<!-- ss-review-proactor:v3 session={} claim={} state={} revision={} review={} -->",
+                marker.session,
+                marker.token,
+                state.label(),
+                revision.unwrap_or(marker.revision),
+                review_fingerprint.unwrap_or(marker.review_fingerprint),
+            ),
+        )
+        .into_owned())
+}
+
+/// Interprets marker state as a live reservation.
 ///
-/// Future-dated claims remain reservations under clock skew; unmarked comments
-/// do not require claim timestamp interpretation.
+/// Active claims remain live through the handoff. Reserved claims use service
+/// creation time so future-dated evidence remains reserved under clock skew.
+/// Completed and unmarked comments do not reserve work.
 fn live(comment: &Comment, now: Timestamp) -> Result<bool, AppError> {
-    if marker(&comment.body).is_none() {
+    let Some(marker) = marker(&comment.body) else {
+        return Ok(false);
+    };
+    if marker.state == ClaimState::Active {
+        return Ok(true);
+    }
+    if marker.state == ClaimState::Completed {
         return Ok(false);
     }
     let created = timestamp(&comment.created_at)?;
@@ -734,7 +1150,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn checked_stages_preserve_schema_two_records() {
+    fn checked_stages_preserve_schema_three_records() {
         for platform in [Platform::GitHub, Platform::AzureDevOps] {
             let repository = Target::repository(if platform == Platform::GitHub {
                 "https://github.com/example/widgets"
@@ -748,7 +1164,10 @@ mod tests {
                 Status::Selecting,
                 Status::Claiming,
                 Status::Claimed,
+                Status::Activating,
                 Status::Confirmed,
+                Status::Completing,
+                Status::Completed,
                 Status::Discarding,
                 Status::NoCandidate,
             ] {
@@ -757,7 +1176,13 @@ mod tests {
                 } else {
                     "/session/state.json"
                 };
-                let mut state = State::new(&repository, &identity, "session", path);
+                let mut state = State::new(
+                    &repository,
+                    &identity,
+                    "session",
+                    path,
+                    SelectionMode::Available,
+                );
                 state.status = status;
                 if !matches!(status, Status::Selecting | Status::NoCandidate) {
                     let id = NonZeroU32::new(10).unwrap();
@@ -768,11 +1193,20 @@ mod tests {
                         pull_request_id: id,
                         reason: "evidence".to_owned(),
                     });
+                    let claim_state = match status {
+                        Status::Claiming | Status::Claimed | Status::Discarding => "reserved",
+                        Status::Activating | Status::Confirmed => "active",
+                        Status::Completing | Status::Completed => "completed",
+                        Status::Selecting | Status::NoCandidate => unreachable!(),
+                    };
                     state.claim = Some(Claim {
                         token: "aaaaaaaa-1234-1234-1234-123456789abc".to_owned(),
-                        body: "<!-- ss-review-proactor:v1 session=session claim=aaaaaaaa-1234-1234-1234-123456789abc -->".to_owned(),
+                        body: format!(
+                            "<!-- ss-review-proactor:v3 session=session claim=aaaaaaaa-1234-1234-1234-123456789abc state={claim_state} revision=source-10 review=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa -->"
+                        ),
                         id: created.then(|| "comment".to_owned()),
-                        thread_id: (created && platform == Platform::AzureDevOps).then(|| "thread".to_owned()),
+                        thread_id: (created && platform == Platform::AzureDevOps)
+                            .then(|| "thread".to_owned()),
                         check_after: created.then(|| "2026-09-28T10:01:00+00:00".to_owned()),
                     });
                 }
@@ -797,6 +1231,10 @@ mod tests {
                     };
                     serde_json::from_value::<State>(invalid).unwrap_err();
                 }
+                let mut incompatible = expected.clone();
+                *incompatible.get_mut("schemaVersion").unwrap() = json!(2);
+                let incompatible = serde_json::from_value::<State>(incompatible).unwrap();
+                assert!(incompatible.validate().is_err());
             }
         }
     }

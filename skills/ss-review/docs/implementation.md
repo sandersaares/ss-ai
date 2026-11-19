@@ -43,9 +43,11 @@ returned by that work, and suspends at user decisions.
 
 Proactor handoffs supply a per-cycle review-state directory for artifacts and
 worker outputs, isolating fixed filenames from other reviews in the same
-session. The review orchestrator keeps the proactor continuation context and
-latest loop instruction in its prose checkpoint. It returns to the proactor
-only after phase 9 completes; that workflow owns further selection.
+session. They also supply the active selection journal. The review orchestrator
+keeps the proactor continuation context and latest loop instruction in its
+prose checkpoint. It verifies that journal immediately before the first
+publication write and returns to the proactor only after phase 9 completes;
+that workflow marks completion and owns further selection.
 
 Model, reasoning-effort, and context-tier choices in `SKILL.md` are passed as
 explicit spawn arguments. Every subagent uses medium reasoning effort,

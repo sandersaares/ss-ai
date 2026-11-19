@@ -83,8 +83,9 @@ text alone.
 A user-authorized `ss-review-proactor` invocation may select and claim a pull
 request before handing it to this skill directly or through delegated execution.
 This scheduled entry retains the same human authority and uses the ordinary
-review workflow. The proactor owns the claim check before handoff; this skill
-adds no claim checks or special reviewer-registration behavior.
+review workflow. The proactor owns activation before handoff. This skill
+verifies the active reservation immediately before publication, and the
+proactor marks the reservation complete after phase 9.
 
 In proactor loop mode, this skill still completes one review at a time before
 returning control to the proactor. A user instruction that the current review

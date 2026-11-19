@@ -12,8 +12,13 @@ and loop control.
 
 The user may specify one or more repositories in the invocation or schedule
 prompt; otherwise use the Git repository where this skill is invoked. Process
-the explicitly ordered repository list sequentially. The user defines the
-schedule. Do not create or modify an automation. By default, each invocation
+the explicitly ordered repository list sequentially. The user may also select
+the `assigned` selection mode when they want only pull requests where the
+signed-in user is assigned as a reviewer and has not submitted a review. The
+default `available` mode finds pull requests not already assigned to that user.
+The selection mode applies to every configured repository for the invocation.
+The user defines the schedule. Do not create or modify an automation. By
+default, each invocation
 continues reviewing the current repository until selection reports no candidate,
 then advances to the next repository. The user can request one-shot mode to stop
 after the first completed review. Both this skill and its sibling `ss-review`
@@ -51,9 +56,10 @@ PR.
 
 Retain the latest loop or one-shot instruction, original invocation directory,
 ordered repository list, current repository, exhausted repositories, resolved
-configuration, current PR, absolute cycle paths, and return point in the
+configuration, selection mode, current PR, absolute cycle paths, and return
+point in the
 primary session's prose checkpoint across handoff, user-input pauses, and
-compaction. A later mode instruction overrides an earlier one; restarting
+compaction. A later loop-mode instruction overrides an earlier one; restarting
 stage 1 must not restore a superseded mode from the original invocation.
 Direct loop-control messages affect this invocation only. A user-authored
 schedule prompt applies its one-shot or loop instruction to each scheduled
@@ -124,6 +130,10 @@ Obtain missing configuration from the user.
 Use session state as the temporary checkout's parent directory by default.
 If the user supplies a checkout parent folder in the invocation or schedule
 prompt, use that parent instead.
+Resolve the selection mode from the invocation or user-authored schedule prompt.
+Use `assigned` only when the user explicitly asks to review pull requests
+assigned to the signed-in reviewer. Otherwise use `available`. Preserve this
+mode across configuration and every cycle in the invocation.
 Pass the active repository's optional tenant to selection and `ss-review`.
 Do not log credentials or request personal access tokens.
 
@@ -134,6 +144,11 @@ select multiple repositories in priority order, example schedule prompts are:
 > Run ss-review-proactor against https://github.com/example/project.
 
 > Run ss-review-proactor against https://github.com/example/project, then https://dev.azure.com/example/team/_git/other.
+
+To select only pull requests already assigned to the signed-in user, use a
+prompt such as:
+
+> Run ss-review-proactor in assigned mode.
 
 # Stage 2: selection and claim
 
@@ -150,13 +165,15 @@ Execute the selection command in `tool-calls/select-pull-request.md` using
 `ss-ai` directly on `PATH`; never reproduce selection logic with ad hoc
 provider CLI calls.
 
-The helper considers all open, non-draft PRs not authored by or already assigned
-to the signed-in user. It orders them by their newest commit timestamp within
-the past 14 days, ignores PRs with live claims, and claims the first eligible
-one. It returns immediately after posting the claim so checkout preparation can
-use the 60-second interval. Claims expire 60 minutes after their
-service-recorded creation time. Ignore expired claims from earlier attempts,
-even when they have the same author or session identifier.
+In `available` mode, the helper considers open, non-draft PRs not authored by
+or already assigned to the signed-in user. In `assigned` mode, it instead
+requires an assignment to the signed-in user and excludes an existing active
+submitted review. It orders qualifying PRs by their newest commit timestamp
+within the past 14 days, ignores PRs with live claims, and claims the first
+eligible one. It returns immediately after posting the claim so checkout
+preparation can use the 60-second interval. Reserved claims expire 60 minutes
+after their service-recorded creation time. Ignore expired reserved claims from
+earlier attempts, even when they have the same author or session identifier.
 
 Let the command finish, even when a shell tool initially returns a running
 handle. Read that handle's eventual output; do not start a second command while
@@ -210,6 +227,9 @@ waits only any remaining portion of the interval, then refreshes the PR and
 discussion once. If this cycle's claim is missing, expired, contested,
 or the PR is no longer eligible, it deletes this cycle's claim if present,
 discards the candidate, and claims the next qualifying PR.
+On success, confirmation changes the reserved marker to an active reservation.
+The active marker remains visible across checkout work, human-input pauses, and
+the complete `ss-review` handoff.
 
 A replacement `claimed` result requires preparation and a final check for that
 new target. `noCandidate` exhausts the active repository and advances to the
@@ -223,16 +243,19 @@ Invoke the `ss-review` skill with `target.webUrl` as the PR scope, either in
 this session or through delegated execution. State that this is a
 user-authorized `ss-review-proactor` handoff, provide the absolute temporary
 checkout and journal paths, the cycle's absolute review-state directory, any
-Azure tenant, and the current loop instruction. Use that review-state directory
+Azure tenant, the resolved repository URL, session identifier, claim message,
+selection mode, and current loop instruction. Use that review-state directory
 for all `ss-review` artifacts and worker outputs that would otherwise go
 directly in session state. Keep the run-control rules above active and return
-here at stage 5 after `ss-review` phase 9 completes. When delegating, require
+here at stage 5 after `ss-review` phase 9 completes. The review workflow
+verifies the active claim immediately before remote publication. When
+delegating, require
 `ss-review` to return the exact question, ordered choices, and complete
 ordinary-session presentation, including complete audit text or document links
 and the PR reminder where applicable. Display that presentation verbatim and in
 order before collecting the user's answer, then relay the exact answer before
-resuming the review. Follow the ordinary `ss-review` workflow without
-additional claim checks or special registration handling. The user's loop
+resuming the review. All other behavior follows the ordinary `ss-review`
+workflow. The user's loop
 request authorizes subsequent handoffs within this invocation, not unrelated
 automatic reviews.
 
@@ -241,19 +264,28 @@ Do not review just the repository's current changes without the selected PR
 scope. Do not skip an unanswered audit, invent finding decisions, or approve a
 pull request on the user's behalf.
 
-After reviewer registration, leave the claim as discussion history; assignment
-now prevents repeat selection. Do not acquire another PR while this review is
-active, paused, failed, cancelled, or awaiting reconciliation. A `confirmed`
+After reviewer registration, leave the claim as discussion history. A resulting
+assignment, an active submitted review, or a matching completed marker prevents
+repeat selection according to the mode. Do not acquire another
+PR while this review is active, paused, failed, cancelled, or awaiting
+reconciliation. A `confirmed`
 selection result or a completed agent turn is not a completed review.
 
 # Stage 5: summary and continuation
 
 Report the ordered resolved repositories and whether the list was explicit or
 defaulted from the invocation checkout, the active and exhausted repositories,
-the selected PR or the absence of qualifying work, the review outcome or
-unanswered question, and the helper's diagnostics (identity, considered and
-discarded candidates, contention and expiration decisions, and journal path)
+the selection mode, the selected PR or the absence of qualifying work, the
+review outcome or unanswered question, and the helper's diagnostics (identity,
+considered and discarded candidates, contention and expiration decisions, and journal path)
 from every repository processed so far.
+For a completed review, run the stage-5 completion command in
+`tool-calls/select-pull-request.md` before considering the next cycle. It
+changes the owned active marker to observable completion evidence bound to the
+exact final revision retained by `ss-review`'s maintained artifacts. Never
+derive that revision from the pull request's live head. If this command fails
+or becomes ambiguous, preserve the journal and stop for reconciliation instead
+of selecting more work.
 State whether looping remains enabled and whether the invocation is continuing,
 finished, or paused, with the reason.
 Keep the cross-repository aggregate only in the primary-session report. If an

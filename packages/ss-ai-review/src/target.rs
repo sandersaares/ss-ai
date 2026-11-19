@@ -12,7 +12,7 @@ use crate::json::required_optional;
 
 /// Provider routing remains explicit in every persisted target and identity.
 ///
-/// Wire names match the command and schema-2 contracts; they are not hostnames.
+/// Wire names match the command and journal contracts; they are not hostnames.
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub(crate) enum Platform {
     /// Uses GitHub account, repository, and pull-request APIs.

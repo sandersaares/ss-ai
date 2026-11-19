@@ -20,7 +20,10 @@ use crate::api::Api;
 use crate::clock::timestamp;
 use crate::error::fail;
 use crate::identity::Identity;
-use crate::selection::{Candidate, Comment, Journal, Provider, RemoteClaim, State, Status, run};
+use crate::selection::{
+    Candidate, Comment, Journal, Provider, RemoteClaim, SelectionMode, State, Status, check,
+    complete, run,
+};
 use crate::target::{Platform, Target};
 use crate::transport::Transport;
 use crate::{
@@ -97,10 +100,13 @@ struct FakeProvider {
     comments: BTreeMap<u32, Vec<Comment>>,
     reasons: BTreeMap<u32, String>,
     creates: Vec<u32>,
+    updates: Vec<(String, String)>,
     deletes: Vec<String>,
     fail_create: bool,
     fail_delete: bool,
     fail_read: bool,
+    source_revision: String,
+    review_fingerprint: String,
 }
 
 impl FakeProvider {
@@ -109,10 +115,13 @@ impl FakeProvider {
             comments: BTreeMap::new(),
             reasons: BTreeMap::new(),
             creates: Vec::new(),
+            updates: Vec::new(),
             deletes: Vec::new(),
             fail_create: false,
             fail_delete: false,
             fail_read: false,
+            source_revision: "source-10".to_owned(),
+            review_fingerprint: "a".repeat(64),
         }
     }
 }
@@ -128,6 +137,7 @@ impl Provider for FakeProvider {
         target: &Target,
         _: &Identity,
         _: Timestamp,
+        _: SelectionMode,
     ) -> Result<Candidate, AppError> {
         if self.fail_read {
             return Err(fail("service", "Injected read failure"));
@@ -136,6 +146,12 @@ impl Provider for FakeProvider {
             target: target.clone(),
             reason: self.reasons.get(&target.pull_request_id).cloned(),
             latest: Some(timestamp("2026-09-27T00:00:00Z").unwrap()),
+            source_commit: Some(if target.pull_request_id == 10 {
+                self.source_revision.clone()
+            } else {
+                format!("source-{}", target.pull_request_id)
+            }),
+            review_fingerprint: Some(self.review_fingerprint.clone()),
         })
     }
     fn comments(&mut self, target: &Target) -> Result<Vec<Comment>, AppError> {
@@ -163,6 +179,31 @@ impl Provider for FakeProvider {
                 author: identity(target.platform),
             });
         Ok(RemoteClaim { id, thread_id })
+    }
+    fn review_fingerprint(&mut self, _: &Target, _: &Identity) -> Result<String, AppError> {
+        Ok(self.review_fingerprint.clone())
+    }
+    fn update_claim(
+        &mut self,
+        target: &Target,
+        claim: &RemoteClaim,
+        body: &str,
+    ) -> Result<RemoteClaim, AppError> {
+        let comment = self
+            .comments
+            .get_mut(&target.pull_request_id)
+            .and_then(|comments| {
+                comments
+                    .iter_mut()
+                    .find(|comment| comment.id == claim.id && comment.thread_id == claim.thread_id)
+            })
+            .ok_or_else(|| fail("service", "Claim missing during update"))?;
+        comment.body = body.to_owned();
+        self.updates.push((claim.id.clone(), body.to_owned()));
+        Ok(RemoteClaim {
+            id: claim.id.clone(),
+            thread_id: claim.thread_id.clone(),
+        })
     }
     fn remove_claim(&mut self, target: &Target, comment: &Comment) -> Result<(), AppError> {
         if self.fail_delete {
@@ -203,6 +244,7 @@ fn initial(platform: Platform) -> State {
         &identity(platform),
         "session-a",
         path,
+        SelectionMode::Available,
     )
 }
 
@@ -225,7 +267,7 @@ fn select(
 
 fn competing() -> Comment {
     Comment { id: "competitor".to_owned(), thread_id: None, author: identity(Platform::GitHub),
-        body: "Comment\n\n<!-- ss-review-proactor:v1 session=session-b claim=aaaaaaaa-1234-1234-1234-123456789abc -->".to_owned(),
+        body: "Comment\n\n<!-- ss-review-proactor:v3 session=session-b claim=aaaaaaaa-1234-1234-1234-123456789abc state=reserved revision=source-10 review=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa -->".to_owned(),
         created_at: "2026-09-28T09:59:00Z".to_owned() }
 }
 
@@ -300,6 +342,8 @@ fn selection_and_confirmation_preserve_both_provider_journals() {
         )
         .unwrap();
         assert_eq!(state.status, Status::Claimed);
+        assert_eq!(state.schema_version, 3);
+        assert_eq!(state.selection_mode, SelectionMode::Available);
         assert_eq!(state.target.unwrap().pull_request_id, 10);
         assert!(clock.waits.borrow().is_empty());
         assert_eq!(
@@ -324,6 +368,255 @@ fn selection_and_confirmation_preserve_both_provider_journals() {
         assert_eq!(provider.creates, [10]);
         assert!(provider.deletes.is_empty());
     }
+}
+
+#[test]
+fn confirmation_rejects_a_different_selection_mode() {
+    let clock = FakeClock::new();
+    let mut provider = FakeProvider::new();
+    let mut journal = MemoryJournal::default();
+    select(&mut provider, &mut journal, &clock, false);
+    let mut mismatched = initial(Platform::GitHub);
+    mismatched.selection_mode = SelectionMode::Assigned;
+    let error = run(
+        &mut provider,
+        &mut journal,
+        &clock,
+        mismatched,
+        "Reserving for review.",
+        true,
+    )
+    .err()
+    .unwrap();
+    assert_eq!(crate::classification(&error), "invalidState");
+    assert!(provider.deletes.is_empty());
+}
+
+#[test]
+fn active_claim_survives_preparation_expiration_until_explicit_completion() {
+    let clock = FakeClock::new();
+    let mut provider = FakeProvider::new();
+    let mut journal = MemoryJournal::default();
+    select(&mut provider, &mut journal, &clock, false);
+    select(&mut provider, &mut journal, &clock, true);
+    clock.advance(Duration::from_hours(2));
+    provider.reasons.insert(10, "alreadyReviewer".to_owned());
+
+    let checked = check(
+        &mut provider,
+        &mut journal,
+        &clock,
+        initial(Platform::GitHub),
+        false,
+    )
+    .unwrap();
+    assert_eq!(checked.status, Status::Confirmed);
+    assert!(marker_has_state(&provider.comments[&10][0].body, "active"));
+
+    let completed = complete(
+        &mut provider,
+        &mut journal,
+        &clock,
+        initial(Platform::GitHub),
+        "source-10",
+    )
+    .unwrap();
+    assert_eq!(completed.status, Status::Completed);
+    assert!(marker_has_state(
+        &provider.comments[&10][0].body,
+        "completed"
+    ));
+}
+
+#[test]
+fn publication_check_allows_only_explicit_closed_pull_request_authorization() {
+    let clock = FakeClock::new();
+    let mut provider = FakeProvider::new();
+    let mut journal = MemoryJournal::default();
+    select(&mut provider, &mut journal, &clock, false);
+    select(&mut provider, &mut journal, &clock, true);
+    provider.reasons.insert(10, "closed".to_owned());
+
+    let refused = check(
+        &mut provider,
+        &mut journal,
+        &clock,
+        initial(Platform::GitHub),
+        false,
+    )
+    .unwrap_err();
+    assert_eq!(crate::classification(&refused), "invalidState");
+    assert_eq!(
+        check(
+            &mut provider,
+            &mut journal,
+            &clock,
+            initial(Platform::GitHub),
+            true,
+        )
+        .unwrap()
+        .status,
+        Status::Confirmed
+    );
+}
+
+#[test]
+fn completed_available_review_is_not_selected_again() {
+    let clock = FakeClock::new();
+    let mut provider = FakeProvider::new();
+    let mut journal = MemoryJournal::default();
+    let state = initial(Platform::GitHub);
+    select(&mut provider, &mut journal, &clock, false);
+    select(&mut provider, &mut journal, &clock, true);
+    complete(
+        &mut provider,
+        &mut journal,
+        &clock,
+        state.clone(),
+        "source-10",
+    )
+    .unwrap();
+
+    let mut next_journal = MemoryJournal::default();
+    let next = run(
+        &mut provider,
+        &mut next_journal,
+        &clock,
+        state,
+        "Reserving",
+        false,
+    )
+    .unwrap();
+    assert_eq!(next.status, Status::Claimed);
+    assert_eq!(next.target.unwrap().pull_request_id, 11);
+    assert_eq!(next.diagnostics[0].reason, "completedReview");
+}
+
+#[test]
+fn completion_preserves_the_reviewed_revision_when_source_changes() {
+    let clock = FakeClock::new();
+    let mut provider = FakeProvider::new();
+    let mut journal = MemoryJournal::default();
+    let mut state = initial(Platform::GitHub);
+    state.selection_mode = SelectionMode::Assigned;
+    run(
+        &mut provider,
+        &mut journal,
+        &clock,
+        state.clone(),
+        "Reserving",
+        false,
+    )
+    .unwrap();
+    run(
+        &mut provider,
+        &mut journal,
+        &clock,
+        state.clone(),
+        "Reserving",
+        true,
+    )
+    .unwrap();
+    provider.source_revision = "source-11".to_owned();
+    complete(
+        &mut provider,
+        &mut journal,
+        &clock,
+        state.clone(),
+        "source-10",
+    )
+    .unwrap();
+
+    let mut next_journal = MemoryJournal::default();
+    let next = run(
+        &mut provider,
+        &mut next_journal,
+        &clock,
+        state,
+        "Reserving",
+        false,
+    )
+    .unwrap();
+    assert_eq!(next.target.unwrap().pull_request_id, 10);
+    assert!(
+        !next
+            .diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.reason == "completedReview")
+    );
+}
+
+#[test]
+fn completed_assigned_review_is_not_selected_again() {
+    let clock = FakeClock::new();
+    let mut provider = FakeProvider::new();
+    let mut journal = MemoryJournal::default();
+    let mut assigned = initial(Platform::GitHub);
+    assigned.selection_mode = SelectionMode::Assigned;
+    let claimed = run(
+        &mut provider,
+        &mut journal,
+        &clock,
+        assigned.clone(),
+        "Reserving",
+        false,
+    )
+    .unwrap();
+    assert_eq!(claimed.target.unwrap().pull_request_id, 10);
+    let confirmed = run(
+        &mut provider,
+        &mut journal,
+        &clock,
+        assigned.clone(),
+        "Reserving",
+        true,
+    )
+    .unwrap();
+    assert_eq!(confirmed.status, Status::Confirmed);
+    complete(
+        &mut provider,
+        &mut journal,
+        &clock,
+        assigned.clone(),
+        "source-10",
+    )
+    .unwrap();
+
+    let mut next_journal = MemoryJournal::default();
+    let next = run(
+        &mut provider,
+        &mut next_journal,
+        &clock,
+        assigned,
+        "Reserving",
+        false,
+    )
+    .unwrap();
+    assert_eq!(next.status, Status::Claimed);
+    assert_eq!(next.target.unwrap().pull_request_id, 11);
+    assert_eq!(next.diagnostics[0].reason, "completedReview");
+
+    provider.review_fingerprint = "b".repeat(64);
+    let mut rerequested_journal = MemoryJournal::default();
+    let mut rerequested_state = initial(Platform::GitHub);
+    rerequested_state.selection_mode = SelectionMode::Assigned;
+    let rerequested = run(
+        &mut provider,
+        &mut rerequested_journal,
+        &clock,
+        rerequested_state,
+        "Reserving",
+        false,
+    )
+    .unwrap();
+    assert_eq!(rerequested.target.unwrap().pull_request_id, 10);
+}
+
+fn marker_has_state(body: &str, expected: &str) -> bool {
+    body.lines().any(|line| {
+        line.starts_with("<!-- ss-review-proactor:v3 ")
+            && line.contains(&format!("state={expected}"))
+    })
 }
 
 #[test]
@@ -506,7 +799,7 @@ fn live_claim_checks_still_validate_later_timestamp_evidence() {
 
 #[test]
 fn tampered_owner_body_or_duplicate_identifiers_cannot_delete_claims() {
-    for mutation in ["author", "body", "duplicate"] {
+    for mutation in ["author", "conflict", "body", "duplicate"] {
         let clock = FakeClock::new();
         let mut provider = FakeProvider::new();
         let mut journal = MemoryJournal::default();
@@ -517,6 +810,7 @@ fn tampered_owner_body_or_duplicate_identifiers_cannot_delete_claims() {
                 comments[0].author.id = Some("other".to_owned());
                 comments[0].author.unique_name = None;
             }
+            "conflict" => comments[0].author.id = Some("other".to_owned()),
             "body" => comments[0].body = "Replaced body".to_owned(),
             _ => comments.push(comments[0].clone()),
         }
@@ -1494,6 +1788,10 @@ fn ado_selection_excludes_only_declined_reviewer_assignments() {
         ];
         if declined == Some(true) {
             steps.push(Step::read(
+                &ado(&format!("{path}/iterations"), ""),
+                json!({"value":[{"id":2,"sourceRefCommit":{"commitId":"source-2"}},{"id":7,"sourceRefCommit":{"commitId":"source-7"}}]}),
+            ));
+            steps.push(Step::read(
                 &ado(&format!("{path}/commits"), "%24top=100&"),
                 json!({"value":[{"committer":{"date":"2026-09-27T00:00:00Z"}}]}),
             ));
@@ -1505,6 +1803,7 @@ fn ado_selection_excludes_only_declined_reviewer_assignments() {
                 &repository(Platform::AzureDevOps).candidate(10.try_into().unwrap()),
                 &identity(Platform::AzureDevOps),
                 clock.now(),
+                SelectionMode::Available,
             )
             .unwrap();
         assert_eq!(
@@ -1515,8 +1814,155 @@ fn ado_selection_excludes_only_declined_reviewer_assignments() {
                 Some("alreadyReviewer")
             }
         );
+        if declined == Some(true) {
+            assert_eq!(candidate.source_commit.as_deref(), Some("source-7"));
+        }
         script.done();
     }
+}
+
+#[test]
+fn assigned_mode_requires_an_assignment_without_a_submitted_ado_review() {
+    for (reviewer, expected) in [
+        (
+            json!({"id":"reviewer-id","uniqueName":"reviewer@example.com"}),
+            None,
+        ),
+        (
+            json!({"id":"reviewer-id","uniqueName":"reviewer@example.com","vote":0}),
+            None,
+        ),
+        (
+            json!({"id":"reviewer-id","uniqueName":"reviewer@example.com","vote":10}),
+            Some("alreadyReviewed"),
+        ),
+        (
+            json!({"id":"other","uniqueName":"other@example.com","vote":0}),
+            Some("notAssignedReviewer"),
+        ),
+        (
+            json!({"id":"reviewer-id","uniqueName":"reviewer@example.com","vote":10,"hasDeclined":true}),
+            Some("notAssignedReviewer"),
+        ),
+    ] {
+        let path = "A%20Project/_apis/git/repositories/A%20Repo/pullRequests/10";
+        let mut steps = vec![
+            Step::read(
+                &ado(path, ""),
+                json!({"status":"active","isDraft":false,"createdBy":{"id":"author"}}),
+            ),
+            Step::read(
+                &ado(&format!("{path}/reviewers"), ""),
+                json!({"value":[reviewer]}),
+            ),
+        ];
+        if expected.is_none() {
+            steps.push(Step::read(
+                &ado(&format!("{path}/iterations"), ""),
+                json!({"value":[{"id":7,"sourceRefCommit":{"commitId":"source-7"}}]}),
+            ));
+            steps.push(Step::read(
+                &ado(&format!("{path}/commits"), "%24top=100&"),
+                json!({"value":[{"committer":{"date":"2026-09-27T00:00:00Z"}}]}),
+            ));
+        }
+        let script = Script::new(steps);
+        let clock = FakeClock::new();
+        let candidate = api(Platform::AzureDevOps, &script, &clock)
+            .candidate(
+                &repository(Platform::AzureDevOps).candidate(10.try_into().unwrap()),
+                &identity(Platform::AzureDevOps),
+                clock.now(),
+                SelectionMode::Assigned,
+            )
+            .unwrap();
+        assert_eq!(candidate.reason.as_deref(), expected);
+        if expected.is_none() {
+            assert_eq!(candidate.source_commit.as_deref(), Some("source-7"));
+        }
+        script.done();
+    }
+}
+
+#[test]
+fn assigned_mode_requires_a_request_without_a_submitted_github_review() {
+    for (requested, submitted, expected) in [
+        (true, false, None),
+        (true, true, Some("alreadyReviewed")),
+        (false, true, Some("alreadyReviewed")),
+        (false, false, Some("notAssignedReviewer")),
+    ] {
+        let mut steps = vec![
+            Step::read(
+                "repos/example/widgets/pulls/10",
+                json!({"state":"open","draft":false,"user":{"id":99}}),
+            ),
+            Step::read(
+                "repos/example/widgets/pulls/10/requested_reviewers?per_page=100",
+                json!([{"users":if requested {json!([{"id":42}])} else {json!([])},"teams":[]}]),
+            ),
+            Step::read(
+                "repos/example/widgets/pulls/10/reviews?per_page=100",
+                json!([if submitted {
+                    json!([{"state":"COMMENTED","user":{"id":42}}])
+                } else {
+                    json!([])
+                }]),
+            ),
+        ];
+        if expected.is_none() {
+            steps.push(Step::write(
+                "graphql",
+                "POST",
+                json!({"query":crate::api::COMMIT_QUERY,"variables":{"owner":"example","repo":"widgets","num":10,"cur":null,"size":100}}),
+                json!({"data":{"repository":{"pullRequest":{"commits":{"nodes":[{"commit":{"committedDate":"2026-09-27T00:00:00Z"}}],"pageInfo":{"hasNextPage":false}}}}}}),
+            ));
+        }
+        let script = Script::new(steps);
+        let clock = FakeClock::new();
+        let candidate = api(Platform::GitHub, &script, &clock)
+            .candidate(
+                &repository(Platform::GitHub).candidate(10.try_into().unwrap()),
+                &identity(Platform::GitHub),
+                clock.now(),
+                SelectionMode::Assigned,
+            )
+            .unwrap();
+        assert_eq!(candidate.reason.as_deref(), expected);
+        script.done();
+    }
+
+    let script = Script::new(vec![
+        Step::read(
+            "repos/example/widgets/pulls/10",
+            json!({"state":"open","draft":false,"user":{"id":99}}),
+        ),
+        Step::read(
+            "repos/example/widgets/pulls/10/requested_reviewers?per_page=100",
+            json!([{"users":[{"id":42}],"teams":[]}]),
+        ),
+        Step::read(
+            "repos/example/widgets/pulls/10/reviews?per_page=100",
+            json!([[{"state":"DISMISSED","user":null}]]),
+        ),
+        Step::write(
+            "graphql",
+            "POST",
+            json!({"query":crate::api::COMMIT_QUERY,"variables":{"owner":"example","repo":"widgets","num":10,"cur":null,"size":100}}),
+            json!({"data":{"repository":{"pullRequest":{"commits":{"nodes":[{"commit":{"committedDate":"2026-09-27T00:00:00Z"}}],"pageInfo":{"hasNextPage":false}}}}}}),
+        ),
+    ]);
+    let clock = FakeClock::new();
+    let candidate = api(Platform::GitHub, &script, &clock)
+        .candidate(
+            &repository(Platform::GitHub).candidate(10.try_into().unwrap()),
+            &identity(Platform::GitHub),
+            clock.now(),
+            SelectionMode::Assigned,
+        )
+        .unwrap();
+    assert!(candidate.reason.is_none());
+    script.done();
 }
 
 #[test]
@@ -1559,7 +2005,7 @@ fn eligibility_exclusions_avoid_commit_reads_and_ignore_pending_reviews_or_teams
                             "A%20Project/_apis/git/repositories/A%20Repo/pullRequests/10/reviewers",
                             "",
                         ),
-                        json!({"value":[{"id":"reviewer-id","vote":-10}]}),
+                        json!({"value":[{"id":"reviewer-id","vote":0}]}),
                     ));
                 }
             }
@@ -1570,6 +2016,7 @@ fn eligibility_exclusions_avoid_commit_reads_and_ignore_pending_reviews_or_teams
                     &repository(platform).candidate(10.try_into().unwrap()),
                     &identity(platform),
                     clock.now(),
+                    SelectionMode::Available,
                 )
                 .unwrap();
             assert_eq!(candidate.reason.as_deref(), Some(exclusion));
@@ -1603,7 +2050,8 @@ fn eligibility_exclusions_avoid_commit_reads_and_ignore_pending_reviews_or_teams
                 .candidate(
                     &repository(Platform::GitHub).candidate(10.try_into().unwrap()),
                     &identity(Platform::GitHub),
-                    clock.now()
+                    clock.now(),
+                    SelectionMode::Available,
                 )
                 .unwrap()
                 .reason
