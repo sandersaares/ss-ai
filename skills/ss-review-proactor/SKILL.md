@@ -281,9 +281,11 @@ considered and discarded candidates, contention and expiration decisions, and jo
 from every repository processed so far.
 For a completed review, run the stage-5 completion command in
 `tool-calls/select-pull-request.md` before considering the next cycle. It
-changes the owned active marker to observable completion evidence. If this
-command fails or becomes ambiguous, preserve the journal and stop for
-reconciliation instead of selecting more work.
+changes the owned active marker to observable completion evidence bound to the
+exact final revision retained by `ss-review`'s maintained artifacts. Never
+derive that revision from the pull request's live head. If this command fails
+or becomes ambiguous, preserve the journal and stop for reconciliation instead
+of selecting more work.
 State whether looping remains enabled and whether the invocation is continuing,
 finished, or paused, with the reason.
 Keep the cross-repository aggregate only in the primary-session report. If an

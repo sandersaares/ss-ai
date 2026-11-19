@@ -221,6 +221,9 @@ impl Fixture {
                 "--claim-message",
                 "Unicode \u{4e16}\u{754c}; quotes \" and & | % stay in JSON.",
             ]);
+        if operation == "complete" {
+            command.args(["--reviewed-source-commit", "source-10"]);
+        }
         command
     }
 }
@@ -1142,6 +1145,7 @@ fn ado_command_selection_and_confirmation_preserve_resolved_threads_and_schema_t
             serde_json::from_str(&run(&args, &service, &service, &clock).unwrap()).unwrap();
         assert_eq!(checked["status"], "confirmed");
         args[2] = "complete".into();
+        args.extend(["--reviewed-source-commit".into(), "source-10".into()]);
         let completed: Value =
             serde_json::from_str(&run(&args, &service, &service, &clock).unwrap()).unwrap();
         assert_eq!(completed["status"], "completed");

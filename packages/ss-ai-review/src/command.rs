@@ -421,6 +421,9 @@ struct Selection {
     /// Allows an active reservation to publish after the pull request closes.
     #[arg(long, help = None, long_help = None)]
     publish_to_closed_pull_request: bool,
+    /// Supplies the final reviewed revision for a completion transition.
+    #[arg(long, help = None, long_help = None)]
+    reviewed_source_commit: Option<String>,
 }
 
 /// Accepts browser coordinates or explicit registration coordinates.
@@ -727,6 +730,12 @@ fn execute(
                     "Supply an absolute state path, valid session identifier, and nonempty claim announcement",
                 ));
             }
+            if action == ReviewAction::Complete && arguments.reviewed_source_commit.is_none() {
+                return Err(fail(
+                    "invalidInput",
+                    "Supply --reviewed-source-commit for completion",
+                ));
+            }
             let repository = Target::repository(&arguments.repository_url)?;
             let mut journal = FileJournal::open(&arguments.state_path, clock)?;
             let loaded = journal.load()?;
@@ -797,9 +806,18 @@ fn execute(
                     initial,
                     arguments.publish_to_closed_pull_request,
                 )?,
-                ReviewAction::Complete => {
-                    selection::complete(&mut api, &mut journal, clock, initial)?
-                }
+                ReviewAction::Complete => selection::complete(
+                    &mut api,
+                    &mut journal,
+                    clock,
+                    initial,
+                    arguments.reviewed_source_commit.as_deref().ok_or_else(|| {
+                        fail(
+                            "invalidInput",
+                            "Supply --reviewed-source-commit for completion",
+                        )
+                    })?,
+                )?,
             };
             serde_json::to_value(state)?
         }

@@ -180,6 +180,9 @@ impl Provider for FakeProvider {
             });
         Ok(RemoteClaim { id, thread_id })
     }
+    fn review_fingerprint(&mut self, _: &Target, _: &Identity) -> Result<String, AppError> {
+        Ok(self.review_fingerprint.clone())
+    }
     fn update_claim(
         &mut self,
         target: &Target,
@@ -415,6 +418,7 @@ fn active_claim_survives_preparation_expiration_until_explicit_completion() {
         &mut journal,
         &clock,
         initial(Platform::GitHub),
+        "source-10",
     )
     .unwrap();
     assert_eq!(completed.status, Status::Completed);
@@ -464,7 +468,14 @@ fn completed_available_review_is_not_selected_again() {
     let state = initial(Platform::GitHub);
     select(&mut provider, &mut journal, &clock, false);
     select(&mut provider, &mut journal, &clock, true);
-    complete(&mut provider, &mut journal, &clock, state.clone()).unwrap();
+    complete(
+        &mut provider,
+        &mut journal,
+        &clock,
+        state.clone(),
+        "source-10",
+    )
+    .unwrap();
 
     let mut next_journal = MemoryJournal::default();
     let next = run(
@@ -507,7 +518,14 @@ fn completion_preserves_the_reviewed_revision_when_source_changes() {
     )
     .unwrap();
     provider.source_revision = "source-11".to_owned();
-    complete(&mut provider, &mut journal, &clock, state.clone()).unwrap();
+    complete(
+        &mut provider,
+        &mut journal,
+        &clock,
+        state.clone(),
+        "source-10",
+    )
+    .unwrap();
 
     let mut next_journal = MemoryJournal::default();
     let next = run(
@@ -555,7 +573,14 @@ fn completed_assigned_review_is_not_selected_again() {
     )
     .unwrap();
     assert_eq!(confirmed.status, Status::Confirmed);
-    complete(&mut provider, &mut journal, &clock, assigned.clone()).unwrap();
+    complete(
+        &mut provider,
+        &mut journal,
+        &clock,
+        assigned.clone(),
+        "source-10",
+    )
+    .unwrap();
 
     let mut next_journal = MemoryJournal::default();
     let next = run(

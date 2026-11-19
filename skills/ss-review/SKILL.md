@@ -482,3 +482,8 @@ When proposing chages, keep them minimal. Avoid verbose prose. One-liners are op
 Ask the user for approval before creating any pull requests, to avoid noise/chatter (e.g. perhaps the user considers the changes unnecessary because the current review was exceptional in some way).
 
 After this phase completes, a proactor handoff returns to [proactor stage 5](../ss-review-proactor/SKILL.md#stage-5-summary-and-continuation) to mark the active reservation complete and make its summary and continuation decision. Preserve the latest user loop instruction; a pause, failure, or unanswered learning question is not completion. Standalone `ss-review` invocations finish here without selecting another review.
+
+Retain the exact final reviewed source commit from the last checked capture or
+successful publication result in the handoff checkpoint. Pass it to the
+proactor as its `REVIEWED_SOURCE_COMMIT`; do not re-read the live head for
+completion.

@@ -17,6 +17,7 @@ Placeholders to replace:
 | `STATE_PATH` | Fresh absolute path to a JSON journal in the current cycle's session-state subdirectory. Reuse this exact path for confirmation, never for a new cycle or selection run. |
 | `CLAIM_MESSAGE` | Standard announcement from stage 2 of `SKILL.md`, adapted to the current user's communication policy, without protocol markers. Pass it as one literal string argument, escaping for the invoking shell if one is used. Reuse it for confirmation. |
 | `SELECTION_MODE` | Resolved mode for the complete invocation: `available` by default, or `assigned` to require an assignment without an active submitted review. |
+| `REVIEWED_SOURCE_COMMIT` | Exact final source revision the review evaluated, retained from its maintained artifacts. Required only for completion. |
 | `TENANT` | Optional user-configured Azure tenant for the active repository. |
 
 For Azure DevOps, optionally append `--tenant "{{TENANT}}"`. Use the same tenant
@@ -37,10 +38,12 @@ pull request closed and the user explicitly authorized closed-PR publication in
 `ss-review`, append `--publish-to-closed-pull-request` only for this check.
 
 After `ss-review` completes phase 9, replace `review select` with
-`review complete` and preserve all argument values except the closed-PR switch.
-The command changes the
-active marker to `completed` and returns `completed`. Do not select another
-pull request until this command succeeds.
+`review complete`, preserve all argument values except the closed-PR switch,
+and append `--reviewed-source-commit "{{REVIEWED_SOURCE_COMMIT}}"`. Resolve
+that placeholder from the final checked review capture or publication result;
+never use the live provider head at completion. The command changes the active
+marker to `completed` and returns `completed`. Do not select another pull
+request until this command succeeds.
 
 The command writes the journal and emits one JSON object. Read `status`,
 `target`, and `diagnostics` as described in `SKILL.md`. On a nonzero exit or error,

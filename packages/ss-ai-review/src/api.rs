@@ -665,6 +665,15 @@ impl Provider for Api<'_> {
         })
     }
 
+    /// Supplies participation evidence even after eligibility changes.
+    fn review_fingerprint(
+        &mut self,
+        target: &Target,
+        identity: &Identity,
+    ) -> Result<String, AppError> {
+        Ok(self.reviewer_participation(target, identity)?.fingerprint)
+    }
+
     /// Normalizes undeleted discussion evidence, including resolved Azure threads.
     ///
     /// Creation timestamps remain distinct from edit times so editing a reserved

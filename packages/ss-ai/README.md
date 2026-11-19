@@ -44,7 +44,8 @@ ss-ai review check --repository-url "{{REPOSITORY_URL}}" `
   [--publish-to-closed-pull-request]
 ss-ai review complete --repository-url "{{REPOSITORY_URL}}" `
   --session-id "{{SESSION_ID}}" --state-path "{{STATE_PATH}}" `
-  --claim-message "{{CLAIM_MESSAGE}}" --selection-mode "{{SELECTION_MODE}}"
+  --claim-message "{{CLAIM_MESSAGE}}" --selection-mode "{{SELECTION_MODE}}" `
+  --reviewed-source-commit "{{REVIEWED_SOURCE_COMMIT}}"
 ss-ai reviewer register --url "{{PR_URL}}"
 ```
 
@@ -56,6 +57,7 @@ ss-ai reviewer register --url "{{PR_URL}}"
 | `CLAIM_MESSAGE` | Nonempty announcement following the caller's communication policy, without a protocol marker. |
 | `SELECTION_MODE` | `available` selects unassigned work and is the default. `assigned` requires an assignment without an active submitted review. Use the same value for confirmation. |
 | `PUBLISH_TO_CLOSED_PULL_REQUEST` | Optional `review check` authorization after the ordinary review workflow has explicitly approved publication onto a closed pull request. |
+| `REVIEWED_SOURCE_COMMIT` | Exact final reviewed source revision from the maintained review artifacts. Required for `review complete`. |
 | `PR_URL` | Browser URL of the pull request to register on. |
 
 Azure DevOps accepts optional `--tenant "{{TENANT}}"`; `TENANT` is the
@@ -74,7 +76,8 @@ requires its own preparation. `confirmed` proceeds directly to `ss-review`.
 `check` verifies the active reservation immediately before publication without
 changing it. `--publish-to-closed-pull-request` relaxes only the closed-state
 eligibility check; ownership and source-bound evidence remain required.
-`complete` changes the owned active marker to completion evidence
+`complete` changes the owned active marker to completion evidence bound to the
+exact final reviewed source revision
 after the full review workflow finishes. `noCandidate` means this single-repository selection operation has no candidate;
 an orchestrating skill can run a fresh operation for another repository.
 Errors require the calling skill's human-input procedure; do not automatically

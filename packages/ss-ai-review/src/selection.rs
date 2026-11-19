@@ -531,6 +531,12 @@ pub(crate) trait Provider {
     fn comments(&mut self, target: &Target) -> Result<Vec<Comment>, AppError>;
     /// Performs one journaled creation and returns its remote ownership coordinates.
     fn create_claim(&mut self, target: &Target, body: &str) -> Result<RemoteClaim, AppError>;
+    /// Supplies current reviewer-participation evidence independently of eligibility.
+    fn review_fingerprint(
+        &mut self,
+        target: &Target,
+        identity: &Identity,
+    ) -> Result<String, AppError>;
     /// Changes a caller-verified claim marker without replacing its remote identity.
     fn update_claim(
         &mut self,
@@ -913,7 +919,14 @@ pub(crate) fn complete(
     journal: &mut dyn Journal,
     clock: &dyn Clock,
     initial: State,
+    reviewed_source_commit: &str,
 ) -> Result<State, AppError> {
+    if !valid_revision(reviewed_source_commit) {
+        return Err(fail(
+            "invalidInput",
+            "Supply the final reviewed source commit from the review artifacts",
+        ));
+    }
     let mut state = owned_workflow(journal, initial)?;
     let Stage::Confirmed(reservation) = &state.stage else {
         return Err(fail(
@@ -929,22 +942,13 @@ pub(crate) fn complete(
     };
     let comments = provider.comments(&target)?;
     verify_active_claim(&state, reservation, &comments, clock.now())?;
-    let current_marker = marker(&reservation.intent.body)
-        .ok_or_else(|| fail("invalidState", "Active claim has no protocol marker"))?;
-    let candidate = provider.candidate(
-        &reservation.intent.target,
-        &state.identity,
-        clock.now(),
-        state.selection_mode,
-    )?;
+    let review_fingerprint =
+        provider.review_fingerprint(&reservation.intent.target, &state.identity)?;
     let body = transition_claim(
         &reservation.intent.body,
         ClaimState::Completed,
-        Some(current_marker.revision),
-        candidate
-            .review_fingerprint
-            .as_deref()
-            .or(Some(current_marker.review_fingerprint)),
+        Some(reviewed_source_commit),
+        Some(&review_fingerprint),
     )?;
     let Stage::Confirmed(mut reservation) = state.stage else {
         return Err(fail("invalidState", "Confirmed reservation disappeared"));
@@ -1048,6 +1052,14 @@ fn candidate_id(target: &Target) -> Result<NonZeroU32, AppError> {
 pub(crate) fn valid_session(session: &str) -> bool {
     !session.is_empty()
         && session
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || b"._:-".contains(&byte))
+}
+
+/// Restricts source-revision values to the protocol marker's safe character set.
+fn valid_revision(revision: &str) -> bool {
+    !revision.is_empty()
+        && revision
             .bytes()
             .all(|byte| byte.is_ascii_alphanumeric() || b"._:-".contains(&byte))
 }

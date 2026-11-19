@@ -82,6 +82,8 @@ Describe 'Multi-repository skill contracts' {
             Should -Match 'Append\s+`--publish-to-closed-pull-request` only when the user'
         $script:ProactorCommands |
             Should -Match 'append `--publish-to-closed-pull-request` only for this check'
+        $script:ProactorCommands |
+            Should -Match '--reviewed-source-commit "\{\{REVIEWED_SOURCE_COMMIT\}\}"'
         $script:ProactorDesign |
             Should -Match 'One resolved mode applies to every\s+configured repository'
     }
