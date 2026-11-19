@@ -122,11 +122,14 @@ follows the current user's communication policy; the skill prescribes no
 attribution prefix. An Azure DevOps claim is posted in a resolved thread.
 Resolution does not invalidate a claim.
 
-A claim is live for 60 minutes from the service's comment creation timestamp;
-editing it does not extend its lifetime. Deleted comments do not hold claims.
-All sessions respect all live claims, including claims from another identity.
-Expired claims from earlier attempts are ignored, including those posted
-by the current user or from the same session.
+A reserved claim is live for 60 minutes from the service's comment creation
+timestamp; editing it does not extend that interval. Confirmation changes it
+to an active claim that remains live across review work and user pauses.
+Completion changes the same comment to evidence used by later `assigned`
+selection. Deleted comments do not hold claims. All sessions respect live
+reserved and active claims, including claims from another identity. Expired
+reserved claims from earlier attempts are ignored, including those posted by
+the current user or from the same session.
 
 After posting a claim, the primary agent prepares the checkout or clone and
 completes any required user interaction. This work counts toward the 60-second
@@ -144,8 +147,10 @@ eligible, the candidate is also discarded.
 If the claim holds, the primary agent hands off directly to the ordinary
 `ss-review` workflow. Reviewer registration consumes the reservation in
 `available` mode through the resulting assignment. Submitting an active review
-consumes it in `assigned` mode. There are no additional proactor checks inside
-`ss-review`.
+does not release the active marker: the skill verifies the marker immediately
+before publication and marks it completed after the full review, including
+learning. Clean reviews and reviews that publish only ADO comments therefore
+also produce completion evidence without inventing an approval vote.
 
 This is a cooperative comment protocol, not an atomic service-side lock.
 It relies on discussion reads exposing competing claims and accepts the small

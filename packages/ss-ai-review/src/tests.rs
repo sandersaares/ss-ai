@@ -21,7 +21,8 @@ use crate::clock::timestamp;
 use crate::error::fail;
 use crate::identity::Identity;
 use crate::selection::{
-    Candidate, Comment, Journal, Provider, RemoteClaim, SelectionMode, State, Status, run,
+    Candidate, Comment, Journal, Provider, RemoteClaim, SelectionMode, State, Status, check,
+    complete, run,
 };
 use crate::target::{Platform, Target};
 use crate::transport::Transport;
@@ -99,6 +100,7 @@ struct FakeProvider {
     comments: BTreeMap<u32, Vec<Comment>>,
     reasons: BTreeMap<u32, String>,
     creates: Vec<u32>,
+    updates: Vec<(String, String)>,
     deletes: Vec<String>,
     fail_create: bool,
     fail_delete: bool,
@@ -111,6 +113,7 @@ impl FakeProvider {
             comments: BTreeMap::new(),
             reasons: BTreeMap::new(),
             creates: Vec::new(),
+            updates: Vec::new(),
             deletes: Vec::new(),
             fail_create: false,
             fail_delete: false,
@@ -166,6 +169,28 @@ impl Provider for FakeProvider {
                 author: identity(target.platform),
             });
         Ok(RemoteClaim { id, thread_id })
+    }
+    fn update_claim(
+        &mut self,
+        target: &Target,
+        claim: &RemoteClaim,
+        body: &str,
+    ) -> Result<RemoteClaim, AppError> {
+        let comment = self
+            .comments
+            .get_mut(&target.pull_request_id)
+            .and_then(|comments| {
+                comments
+                    .iter_mut()
+                    .find(|comment| comment.id == claim.id && comment.thread_id == claim.thread_id)
+            })
+            .ok_or_else(|| fail("service", "Claim missing during update"))?;
+        comment.body = body.to_owned();
+        self.updates.push((claim.id.clone(), body.to_owned()));
+        Ok(RemoteClaim {
+            id: claim.id.clone(),
+            thread_id: claim.thread_id.clone(),
+        })
     }
     fn remove_claim(&mut self, target: &Target, comment: &Comment) -> Result<(), AppError> {
         if self.fail_delete {
@@ -229,7 +254,7 @@ fn select(
 
 fn competing() -> Comment {
     Comment { id: "competitor".to_owned(), thread_id: None, author: identity(Platform::GitHub),
-        body: "Comment\n\n<!-- ss-review-proactor:v1 session=session-b claim=aaaaaaaa-1234-1234-1234-123456789abc -->".to_owned(),
+        body: "Comment\n\n<!-- ss-review-proactor:v2 session=session-b claim=aaaaaaaa-1234-1234-1234-123456789abc state=reserved -->".to_owned(),
         created_at: "2026-09-28T09:59:00Z".to_owned() }
 }
 
@@ -352,6 +377,91 @@ fn confirmation_rejects_a_different_selection_mode() {
     .unwrap();
     assert_eq!(crate::classification(&error), "invalidState");
     assert!(provider.deletes.is_empty());
+}
+
+#[test]
+fn active_claim_survives_preparation_expiration_until_explicit_completion() {
+    let clock = FakeClock::new();
+    let mut provider = FakeProvider::new();
+    let mut journal = MemoryJournal::default();
+    select(&mut provider, &mut journal, &clock, false);
+    select(&mut provider, &mut journal, &clock, true);
+    clock.advance(Duration::from_hours(2));
+    provider.reasons.insert(10, "alreadyReviewer".to_owned());
+
+    let checked = check(
+        &mut provider,
+        &mut journal,
+        &clock,
+        initial(Platform::GitHub),
+    )
+    .unwrap();
+    assert_eq!(checked.status, Status::Confirmed);
+    assert!(marker_has_state(&provider.comments[&10][0].body, "active"));
+
+    let completed = complete(
+        &mut provider,
+        &mut journal,
+        &clock,
+        initial(Platform::GitHub),
+    )
+    .unwrap();
+    assert_eq!(completed.status, Status::Completed);
+    assert!(marker_has_state(
+        &provider.comments[&10][0].body,
+        "completed"
+    ));
+}
+
+#[test]
+fn completed_assigned_review_is_not_selected_again() {
+    let clock = FakeClock::new();
+    let mut provider = FakeProvider::new();
+    let mut journal = MemoryJournal::default();
+    let mut assigned = initial(Platform::GitHub);
+    assigned.selection_mode = SelectionMode::Assigned;
+    let claimed = run(
+        &mut provider,
+        &mut journal,
+        &clock,
+        assigned.clone(),
+        "Reserving",
+        false,
+    )
+    .unwrap();
+    assert_eq!(claimed.target.unwrap().pull_request_id, 10);
+    let confirmed = run(
+        &mut provider,
+        &mut journal,
+        &clock,
+        assigned.clone(),
+        "Reserving",
+        true,
+    )
+    .unwrap();
+    assert_eq!(confirmed.status, Status::Confirmed);
+    complete(&mut provider, &mut journal, &clock, assigned.clone()).unwrap();
+
+    let mut next_journal = MemoryJournal::default();
+    let next = run(
+        &mut provider,
+        &mut next_journal,
+        &clock,
+        assigned,
+        "Reserving",
+        false,
+    )
+    .unwrap();
+    assert_eq!(next.status, Status::Claimed);
+    assert_eq!(next.target.unwrap().pull_request_id, 11);
+    assert_eq!(next.diagnostics[0].reason, "completedReview");
+}
+
+fn marker_has_state(body: &str, expected: &str) -> bool {
+    body.lines().any(|line| {
+        line.starts_with("<!-- ss-review-proactor:v2 ")
+            && line.contains(&format!("state={expected}"))
+    })
 }
 
 #[test]
@@ -1693,7 +1803,7 @@ fn eligibility_exclusions_avoid_commit_reads_and_ignore_pending_reviews_or_teams
                             "A%20Project/_apis/git/repositories/A%20Repo/pullRequests/10/reviewers",
                             "",
                         ),
-                        json!({"value":[{"id":"reviewer-id","vote":-10}]}),
+                        json!({"value":[{"id":"reviewer-id","vote":0}]}),
                     ));
                 }
             }

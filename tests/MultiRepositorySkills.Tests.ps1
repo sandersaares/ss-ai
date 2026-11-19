@@ -15,6 +15,9 @@ BeforeAll {
     $script:ProactorCommands = [IO.File]::ReadAllText(
         (Join-Path $root 'skills\ss-review-proactor\tool-calls\select-pull-request.md')
     )
+    $script:ReviewSkill = [IO.File]::ReadAllText(
+        (Join-Path $root 'skills\ss-review\SKILL.md')
+    )
     $script:AutoreapproveSkill = [IO.File]::ReadAllText(
         (Join-Path $root 'skills\ss-autoreapprove\SKILL.md')
     )
@@ -71,6 +74,10 @@ Describe 'Multi-repository skill contracts' {
             Should -Match '--selection-mode "\{\{SELECTION_MODE\}\}"'
         $script:ProactorCommands |
             Should -Match '`assigned` to require an assignment without an active submitted review'
+        $script:ProactorCommands |
+            Should -Match 'replace `review select` with\s+`review complete`'
+        $script:ReviewSkill |
+            Should -Match 'run the active-reservation `review check` command'
         $script:ProactorDesign |
             Should -Match 'One resolved mode applies to every\s+configured repository'
     }

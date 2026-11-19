@@ -30,6 +30,15 @@ portion of the claim's 60-second interval, and checks the claim once. A
 `confirmed` result proceeds directly to `ss-review`; a replacement `claimed`
 result needs its own preparation before confirmation.
 
+Immediately before `ss-review` publishes, replace `review select` with
+`review check` and preserve all argument values. The command verifies the
+active reservation and returns `confirmed` without extending a deadline.
+
+After `ss-review` completes phase 9, replace `review select` with
+`review complete` and preserve all argument values. The command changes the
+active marker to `completed` and returns `completed`. Do not select another
+pull request until this command succeeds.
+
 The command writes the journal and emits one JSON object. Read `status`,
 `target`, and `diagnostics` as described in `SKILL.md`. On a nonzero exit or error,
 apply the shared [error-recovery policy](../../ss-review/error-recovery.md).

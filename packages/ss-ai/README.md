@@ -38,6 +38,12 @@ ss-ai review select --repository-url "{{REPOSITORY_URL}}" `
 ss-ai review confirm --repository-url "{{REPOSITORY_URL}}" `
   --session-id "{{SESSION_ID}}" --state-path "{{STATE_PATH}}" `
   --claim-message "{{CLAIM_MESSAGE}}" --selection-mode "{{SELECTION_MODE}}"
+ss-ai review check --repository-url "{{REPOSITORY_URL}}" `
+  --session-id "{{SESSION_ID}}" --state-path "{{STATE_PATH}}" `
+  --claim-message "{{CLAIM_MESSAGE}}" --selection-mode "{{SELECTION_MODE}}"
+ss-ai review complete --repository-url "{{REPOSITORY_URL}}" `
+  --session-id "{{SESSION_ID}}" --state-path "{{STATE_PATH}}" `
+  --claim-message "{{CLAIM_MESSAGE}}" --selection-mode "{{SELECTION_MODE}}"
 ss-ai reviewer register --url "{{PR_URL}}"
 ```
 
@@ -63,7 +69,9 @@ missing project/repository from collection and pull request identifier.
 Read selection results' `status`, `target`, and `diagnostics`. `claimed`
 requires checkout preparation, then confirmation. A replacement `claimed`
 requires its own preparation. `confirmed` proceeds directly to `ss-review`.
-`noCandidate` means this single-repository selection operation has no candidate;
+`check` verifies the active reservation immediately before publication without
+changing it. `complete` changes the owned active marker to completion evidence
+after the full review workflow finishes. `noCandidate` means this single-repository selection operation has no candidate;
 an orchestrating skill can run a fresh operation for another repository.
 Errors require the calling skill's human-input procedure; do not automatically
 repeat a possibly successful write.
@@ -947,7 +955,8 @@ attempt. Notice and review-selection recovery follow their own contracts.
 
 ## Journal and result schema
 
-Selection and confirmation return the complete persisted schema-3 journal.
+Selection, confirmation, verification, and completion return the complete
+persisted schema-3 journal.
 All named fields below are required unless explicitly state-dependent.
 Collections are JSON arrays, including when empty. Unknown schemas and
 malformed or incomplete records are errors.
@@ -958,7 +967,7 @@ malformed or incomplete records are errors.
 | `sessionId`, `repositoryUrl`, `statePath` | Strings identifying the invocation, repository, and absolute journal path. |
 | `selectionMode` | `available` or `assigned`; fixed for selection and confirmation. |
 | `identity` | Authenticated identity object described below. |
-| `status` | `selecting`, `claiming`, `claimed`, `confirmed`, `discarding`, or `noCandidate`. |
+| `status` | `selecting`, `claiming`, `claimed`, `activating`, `confirmed`, `completing`, `completed`, `discarding`, or `noCandidate`. |
 | `target` | Null without a current reservation; otherwise the pull request target below. |
 | `claim` | Null without a current reservation; otherwise the claim below. |
 | `attempted` | Array of distinct positive pull request identifiers already attempted. |
@@ -979,21 +988,25 @@ descriptor, account identifier, and unique name rather than display name.
 A claim contains `token` (UUID), `body` (announcement and marker), `id`
 (remote comment identifier string or null), and `threadId` (Azure DevOps
 thread identifier string, or null for GitHub). `claiming` has null remote
-identifiers. `claimed`, `confirmed`, and `discarding` also require `checkAfter`,
-an offset-bearing timestamp, and complete remote identifiers. The target's
-pull request identifier must appear in `attempted`.
+identifiers. Every later reservation status also requires `checkAfter`, an
+offset-bearing timestamp, and complete remote identifiers. The target's pull
+request identifier must appear in `attempted`.
 
 The marker is a complete line, accepting LF and CRLF:
 
 ```text
-<!-- ss-review-proactor:v1 session=SESSION_ID claim=CLAIM_UUID -->
+<!-- ss-review-proactor:v2 session=SESSION_ID claim=CLAIM_UUID state=STATE -->
 ```
 
-The fixed preparation interval is 60 seconds; claim lifetime is 60 minutes
-from service creation time. Diagnostic reasons include `closed`, `draft`,
-`selfAuthored`, `alreadyReviewer`, `noRecentCommit`, `liveClaim`,
-`claimMissingOrExpired`, `competingClaims`, and
-`soleLiveClaimAfterPreparation`.
+`STATE` is `reserved`, `active`, or `completed`. The fixed preparation interval
+is 60 seconds. A reserved claim lives for 60 minutes from service creation.
+Confirmation changes the marker to `active`, which remains observable across
+review pauses and expires only through explicit completion or cleanup.
+Diagnostic reasons include `closed`, `draft`, `selfAuthored`,
+`alreadyReviewer`, `alreadyReviewed`, `notAssignedReviewer`, `completedReview`,
+`noRecentCommit`, `liveClaim`, `claimMissingOrExpired`, `competingClaims`,
+`soleLiveClaimAfterPreparation`, `activeClaimVerifiedBeforePublication`, and
+`reviewCompleted`.
 
 ## Development
 

@@ -337,7 +337,8 @@ contention-specific retries; semantic conflicts and unrelated I/O failures
 remain explicit.
 
 The utility records intent before claim creation/deletion and outcome after
-the service reply. An interrupted or ambiguous write is not replayable.
+the service reply. Claim activation and completion use the same intent
+discipline. An interrupted or ambiguous write is not replayable.
 Unknown service evidence never becomes an empty successful result. Credentials
 do not enter journals or diagnostics. Authentication and permission errors
 remain visible to the calling skill and its human decision gates.

@@ -592,6 +592,9 @@ impl Provider for Api<'_> {
         if reason.is_none() {
             let participation = self.reviewer_participation(target, identity)?;
             match selection_mode {
+                SelectionMode::Available if participation.submitted_review => {
+                    reason = Some("alreadyReviewed");
+                }
                 SelectionMode::Available if participation.assigned => {
                     reason = Some("alreadyReviewer");
                 }
@@ -621,8 +624,8 @@ impl Provider for Api<'_> {
 
     /// Normalizes undeleted discussion evidence, including resolved Azure threads.
     ///
-    /// Creation timestamps remain distinct from edit times so editing a claim
-    /// cannot renew its lifetime.
+    /// Creation timestamps remain distinct from edit times so editing a reserved
+    /// marker cannot renew its reserved lifetime.
     fn comments(&mut self, target: &Target) -> Result<Vec<Comment>, AppError> {
         let mut comments = Vec::new();
         match target.platform {
@@ -739,6 +742,79 @@ impl Provider for Api<'_> {
                 "ambiguousWrite",
                 "Claim creation response is incomplete; human reconciliation is required"
                     .to_owned(),
+                error.into_std_error(),
+            )
+            .into()
+        })
+    }
+
+    /// Updates an owned claim while preserving its remote comment coordinates.
+    fn update_claim(
+        &mut self,
+        target: &Target,
+        claim: &RemoteClaim,
+        body: &str,
+    ) -> Result<RemoteClaim, AppError> {
+        let outcome = match target.platform {
+            Platform::GitHub => {
+                let response = self.transport.request(
+                    &format!(
+                        "{}/issues/comments/{}",
+                        target.repository_api(),
+                        escape(&claim.id)
+                    ),
+                    "PATCH",
+                    Some(&json!({"body": body})),
+                )?;
+                let parse = || -> Result<RemoteClaim, AppError> {
+                    let updated = text(field(&response, "body")?)?;
+                    if updated != body {
+                        return Err(fail(
+                            "ambiguousWrite",
+                            "GitHub returned different claim content",
+                        ));
+                    }
+                    Ok(RemoteClaim {
+                        id: identifier(field(&response, "id")?)?,
+                        thread_id: None,
+                    })
+                };
+                parse()
+            }
+            Platform::AzureDevOps => {
+                let thread_id = claim.thread_id.as_deref().ok_or_else(|| {
+                    fail("invalidState", "Missing claim thread identifier for update")
+                })?;
+                let response = self.transport.request(
+                    &format!(
+                        "{}/threads/{}/comments/{}",
+                        target.pr_api(),
+                        escape(thread_id),
+                        escape(&claim.id)
+                    ),
+                    "PATCH",
+                    Some(&json!({"content": body})),
+                )?;
+                let parse = || -> Result<RemoteClaim, AppError> {
+                    let updated = text(field(&response, "content")?)?;
+                    if updated != body {
+                        return Err(fail(
+                            "ambiguousWrite",
+                            "Azure DevOps returned different claim content",
+                        ));
+                    }
+                    Ok(RemoteClaim {
+                        id: identifier(field(&response, "id")?)?,
+                        thread_id: Some(thread_id.to_owned()),
+                    })
+                };
+                parse()
+            }
+        };
+        outcome.map_err(|error| {
+            crate::error::caused_by(
+                "ambiguousWrite",
+                "Claim update response is incomplete; human reconciliation is required".to_owned(),
                 error.into_std_error(),
             )
             .into()

@@ -38,23 +38,31 @@ live claim excludes the candidate, including one from the same session.
 
 ## Reservations and confirmation
 
-A claim is a discussion comment with a session token and fresh UUID. It lives
-for 60 minutes from the service creation timestamp, regardless of edits.
-Future-dated claims remain reservations under clock skew. Deleted comments
-do not reserve a pull request; resolved Azure DevOps threads do.
+A claim is a discussion comment with a session token, fresh UUID, and state.
+A reserved claim lives for 60 minutes from the service creation timestamp,
+regardless of edits. Future-dated reserved claims remain reservations under
+clock skew. Active claims do not use the reserved-claim deadline, while
+completed markers do not reserve a pull request. Deleted comments reserve
+nothing; resolved Azure DevOps threads still contribute claim evidence.
 
-Selection returns immediately after creating a claim. Checkout preparation
-and human interaction count toward its 60-second preparation interval.
-Confirmation waits only the remaining interval, rounded up to whole seconds,
-and rechecks once. It requires this journal's ownership-checked claim to be
-the sole live claim and the pull request to remain eligible.
+Selection returns immediately after creating a reserved claim. Checkout
+preparation and human interaction count toward its 60-second preparation
+interval. Confirmation waits only the remaining interval, rounded up to whole
+seconds, rechecks once, and changes the owned marker to active. It requires
+this journal's ownership-checked claim to be the sole live claim and the pull
+request to remain eligible.
 
-An invalid reservation is discarded. The utility deletes only its verified
+An active claim remains observable through review work and user pauses. The
+review workflow verifies it immediately before publication and changes it to
+completed only after the full workflow succeeds. Completed markers block later
+`assigned` selection by the same reviewer without creating an approval vote.
+
+An invalid reserved claim is discarded. The utility deletes only its verified
 own comment, never another claim or an Azure DevOps thread. It then selects
 again without revisiting attempted candidates. Each new claim receives a new
 preparation interval. A successful confirmation authorizes only the existing
 skill handoff, not a review verdict.
 
 The remote protocol is cooperative rather than an atomic service-side lock.
-Discussion visibility and the interval between confirmation and registration
-remain its boundaries.
+Discussion visibility and the interval between the publication-time check and
+the remote publication effect remain its boundaries.

@@ -169,9 +169,9 @@ requires an assignment to the signed-in user and excludes an existing active
 submitted review. It orders qualifying PRs by their newest commit timestamp
 within the past 14 days, ignores PRs with live claims, and claims the first
 eligible one. It returns immediately after posting the claim so checkout
-preparation can use the 60-second interval. Claims expire 60 minutes after
-their service-recorded creation time. Ignore expired claims from earlier
-attempts, even when they have the same author or session identifier.
+preparation can use the 60-second interval. Reserved claims expire 60 minutes
+after their service-recorded creation time. Ignore expired reserved claims from
+earlier attempts, even when they have the same author or session identifier.
 
 Let the command finish, even when a shell tool initially returns a running
 handle. Read that handle's eventual output; do not start a second command while
@@ -225,6 +225,9 @@ waits only any remaining portion of the interval, then refreshes the PR and
 discussion once. If this cycle's claim is missing, expired, contested,
 or the PR is no longer eligible, it deletes this cycle's claim if present,
 discards the candidate, and claims the next qualifying PR.
+On success, confirmation changes the reserved marker to an active reservation.
+The active marker remains visible across checkout work, human-input pauses, and
+the complete `ss-review` handoff.
 
 A replacement `claimed` result requires preparation and a final check for that
 new target. `noCandidate` exhausts the active repository and advances to the
@@ -237,12 +240,14 @@ post-claim check for that candidate.
 Invoke the `ss-review` skill directly in this same primary session with
 `target.webUrl` as the PR scope. State that this is a user-authorized
 `ss-review-proactor` handoff, provide the absolute temporary checkout and journal
-paths, the cycle's absolute review-state directory, any Azure tenant, and the
-current loop instruction. Use that review-state directory for all `ss-review`
+paths, the resolved repository URL, session identifier, claim message,
+selection mode, the cycle's absolute review-state directory, any Azure tenant,
+and the current loop instruction. Use that review-state directory for all `ss-review`
 artifacts and worker outputs that would otherwise go directly in session state.
 Keep the run-control rules above active and return here at stage 5 after
-`ss-review` phase 9 completes. Follow the ordinary `ss-review` workflow without
-additional claim checks or special registration handling. The user's loop
+`ss-review` phase 9 completes. The review workflow verifies the active claim
+immediately before publication; all other behavior remains the ordinary
+`ss-review` workflow. The user's loop
 request authorizes subsequent handoffs within this invocation, not unrelated
 automatic reviews.
 
@@ -266,6 +271,11 @@ the selection mode, the selected PR or the absence of qualifying work, the
 review outcome or unanswered question, and the helper's diagnostics (identity,
 considered and discarded candidates, contention and expiration decisions, and journal path)
 from every repository processed so far.
+For a completed review, run the stage-5 completion command in
+`tool-calls/select-pull-request.md` before considering the next cycle. It
+changes the owned active marker to observable completion evidence. If this
+command fails or becomes ambiguous, preserve the journal and stop for
+reconciliation instead of selecting more work.
 State whether looping remains enabled and whether the invocation is continuing,
 finished, or paused, with the reason.
 Keep the cross-repository aggregate only in the primary-session report. If an

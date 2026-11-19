@@ -63,6 +63,12 @@ published, filter proactor diagnostics to the selected pull request's exact
 repository. Do not include other repository URLs, identities, candidates,
 claims, journal paths, exhaustion state, or ordered-list position.
 
+Confirmation journals the activation intent before updating the remote marker
+from reserved to active. The review invokes the read-only `review check`
+operation immediately before publication. After phase 9, the proactor journals
+the completion intent and changes the marker to completed. Interruption in an
+activation or completion update requires human reconciliation.
+
 The primary agent creates a unique temporary checkout subdirectory per cycle under
 session state, or under the checkout parent folder supplied in the user's
 prompt. It passes that checkout's absolute path to `ss-review` and keeps it
@@ -119,7 +125,7 @@ existing reviewer state.
 The claim marker is a versioned HTML comment:
 
 ```text
-<!-- ss-review-proactor:v1 session=SESSION_TOKEN claim=CLAIM_UUID -->
+<!-- ss-review-proactor:v2 session=SESSION_TOKEN claim=CLAIM_UUID state=STATE -->
 ```
 
 The session token comes from the primary session. A fresh UUID distinguishes
@@ -149,8 +155,10 @@ Ownership checks use the remote comment identifier, author, session token, and
 claim token. Surrounding prose and line-ending normalization do not affect
 ownership. The original body remains in the journal for diagnostics.
 The final check requires the live claim recorded by this cycle's journal,
-not any comment sharing its author or session identifier. Expired claims from
-earlier attempts are ignored.
+not any comment sharing its author or session identifier. Expired reserved
+claims from earlier attempts are ignored. Active claims never expire based on
+their creation time, and completed markers are evidence rather than live
+reservations.
 
 Selection returns `claimed` immediately after posting, without waiting or
 checking the claim. The agent uses the interval to prepare the local PR
@@ -162,10 +170,10 @@ owned comment if present and claims another candidate, excluding all attempted
 candidates. Each replacement gets its own preparation interval and final check.
 
 The journal is not a distributed lock; remote discussion is authoritative.
-Claims are not renewed while waiting for a person. A `confirmed` result is
-handed directly to `ss-review`, without repeated confirmation or changes to
-that skill's registration behavior. A consumed claim may remain in the
-discussion as diagnostics.
+Reserved claims are not renewed while waiting for a person. Confirmation
+changes a valid reserved claim to active before handoff. The publication
+check verifies active ownership, and completion changes the marker only after
+the review finishes. A completed claim remains in the discussion as diagnostics.
 
 ## Verification
 

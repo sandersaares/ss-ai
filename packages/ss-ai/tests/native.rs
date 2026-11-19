@@ -379,6 +379,14 @@ fn executable_github_selection_confirmation_and_registration() {
     assert_eq!(registered["status"], "added");
     assert_eq!(registered["identity"]["id"], "42");
     assert!(fixture.root.path().join("registration.json").exists());
+    assert_eq!(
+        value(&fixture.review("check").output().unwrap())["status"],
+        "confirmed"
+    );
+    assert_eq!(
+        value(&fixture.review("complete").output().unwrap())["status"],
+        "completed"
+    );
 }
 
 #[test]
@@ -748,6 +756,13 @@ impl Http for NoHttp {
     }
 }
 
+struct ForbiddenProvider;
+impl Process for ForbiddenProvider {
+    fn execute(&self, _: &str, _: &[String], _: &[u8]) -> std::io::Result<ProcessOutput> {
+        panic!("Provider access must not precede local journal validation")
+    }
+}
+
 struct EmptyProvider {
     initialized: Option<mpsc::Sender<()>>,
     finish: Option<mpsc::Receiver<()>>,
@@ -798,6 +813,22 @@ fn selection(path: &Path) -> Vec<OsString> {
     .to_vec();
     args.push(path.as_os_str().to_owned());
     args
+}
+
+#[test]
+fn invalid_existing_journal_fails_before_provider_identity_lookup() {
+    let root = TempDir::new().unwrap();
+    let path = root.path().join("state.json");
+    fs::write(&path, br#"{"schemaVersion":2}"#).unwrap();
+    let error = run(
+        &selection(&path),
+        &ForbiddenProvider,
+        &NoHttp,
+        &SystemClock::default(),
+    )
+    .err()
+    .unwrap();
+    assert_eq!(ss_ai::classification(&error), "invalidState");
 }
 
 #[test]
@@ -1010,6 +1041,18 @@ impl Http for AdoFlow {
                 self.writes.borrow_mut().push(value);
                 thread
             }
+            (
+                "PATCH",
+                "Project/_apis/git/repositories/Repo/pullRequests/10/threads/101/comments/55?api-version=7.1",
+            ) => {
+                let value: Value = serde_json::from_slice(body.unwrap()).unwrap();
+                let content = value["content"].as_str().unwrap().to_owned();
+                let thread = json!({"id":101,"status":"fixed","comments":[{"id":55,"content":content,
+                    "publishedDate":"2026-09-28T00:00:00Z","author":{"id":"reviewer-id","descriptor":"aad.reviewer"}}]});
+                self.thread.replace(Some(thread));
+                self.writes.borrow_mut().push(value);
+                json!({"id":55,"content":content})
+            }
             _ => panic!("Unexpected ADO operation: {method} {path}"),
         };
         Ok(HttpResponse::new(
@@ -1064,7 +1107,7 @@ fn ado_command_selection_and_confirmation_preserve_resolved_threads_and_schema_t
         .to_vec();
         args.push(path.as_os_str().to_owned());
         if preexisting {
-            let body = "Review\r\n\r\n<!-- ss-review-proactor:v1 session=review-session claim=aaaaaaaa-1234-1234-1234-123456789abc -->";
+            let body = "Review\r\n\r\n<!-- ss-review-proactor:v2 session=review-session claim=aaaaaaaa-1234-1234-1234-123456789abc state=reserved -->";
             // Schema-3 fields and PowerShell's timestamp precision, including explicit nulls.
             let state = json!({
                 "schemaVersion":3,"sessionId":"review-session","repositoryUrl":"https://dev.azure.com/org/Project/_git/Repo","selectionMode":"available",
@@ -1093,10 +1136,21 @@ fn ado_command_selection_and_confirmation_preserve_resolved_threads_and_schema_t
             "soleLiveClaimAfterPreparation"
         );
         assert_eq!(confirmed["selectionMode"], "available");
-        assert_eq!(service.writes.borrow().len(), usize::from(!preexisting));
+        args[2] = "check".into();
+        let checked: Value =
+            serde_json::from_str(&run(&args, &service, &service, &clock).unwrap()).unwrap();
+        assert_eq!(checked["status"], "confirmed");
+        args[2] = "complete".into();
+        let completed: Value =
+            serde_json::from_str(&run(&args, &service, &service, &clock).unwrap()).unwrap();
+        assert_eq!(completed["status"], "completed");
+        assert_eq!(
+            service.writes.borrow().len(),
+            if preexisting { 2 } else { 3 }
+        );
         assert_eq!(
             serde_json::from_slice::<Value>(&fs::read(&path).unwrap()).unwrap(),
-            confirmed
+            completed
         );
     }
 }
