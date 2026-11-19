@@ -9,6 +9,7 @@ use std::path::Path;
 use std::sync::LazyLock;
 use std::time::Duration;
 
+use clap::ValueEnum;
 use jiff::Timestamp;
 use ohno::AppError;
 use regex::Regex;
@@ -22,7 +23,18 @@ use crate::identity::Identity;
 use crate::json::required_optional;
 use crate::target::{Platform, Target};
 
-/// Carries schema-2 evidence across command and journal boundaries.
+/// Selects the review assignment policy for the whole journal transaction.
+#[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize, ValueEnum)]
+#[serde(rename_all = "camelCase")]
+pub(crate) enum SelectionMode {
+    /// Finds work that is not already assigned to the authenticated reviewer.
+    #[default]
+    Available,
+    /// Finds assigned work without a submitted review from the authenticated reviewer.
+    Assigned,
+}
+
+/// Carries schema-3 evidence across command and journal boundaries.
 ///
 /// Deserialization alone does not establish valid lifecycle state. `validate`
 /// checks relationships between fields before `Workflow` attaches the required
@@ -36,6 +48,8 @@ pub(crate) struct State {
     pub(crate) session_id: String,
     /// Exact selection scope checked again during confirmation.
     pub(crate) repository_url: String,
+    /// Assignment policy fixed for selection and every replacement in this cycle.
+    pub(crate) selection_mode: SelectionMode,
     /// Authenticated account whose ownership must match the next invocation.
     pub(crate) identity: Identity,
     /// Wire-level lifecycle label determining which reservation fields are required.
@@ -53,7 +67,7 @@ pub(crate) struct State {
     /// Absolute publication location carried in the result for the calling skill.
     #[expect(
         clippy::struct_field_names,
-        reason = "The field preserves the schema-2 journal contract"
+        reason = "The field preserves the schema-3 journal contract"
     )]
     pub(crate) state_path: String,
 }
@@ -63,11 +77,18 @@ impl State {
     ///
     /// This is input to a fresh selection transaction, not authorization to
     /// replace an existing journal.
-    pub(crate) fn new(repository: &Target, identity: &Identity, session: &str, path: &str) -> Self {
+    pub(crate) fn new(
+        repository: &Target,
+        identity: &Identity,
+        session: &str,
+        path: &str,
+        selection_mode: SelectionMode,
+    ) -> Self {
         Self {
-            schema_version: 2,
+            schema_version: 3,
             session_id: session.to_owned(),
             repository_url: repository.web_url.clone(),
+            selection_mode,
             identity: identity.clone(),
             status: Status::Selecting,
             target: None,
@@ -80,13 +101,13 @@ impl State {
 
     /// Rejects malformed or contradictory recovery evidence before any side effect.
     pub(crate) fn validate(&self) -> Result<(), AppError> {
-        if self.schema_version != 2
+        if self.schema_version != 3
             || !valid_session(&self.session_id)
             || !Path::new(&self.state_path).is_absolute()
         {
             return Err(fail(
                 "invalidState",
-                "Unsupported or malformed schema-2 journal",
+                "Unsupported or malformed schema-3 journal",
             ));
         }
         self.identity.validate()?;
@@ -197,6 +218,8 @@ struct Workflow {
     session_id: String,
     /// Immutable scope inherited from the validated journal.
     repository_url: String,
+    /// Assignment policy inherited from the validated journal.
+    selection_mode: SelectionMode,
     /// Account authorized to manage this journal's claim.
     identity: Identity,
     /// Candidates excluded from subsequent attempts within this workflow.
@@ -258,6 +281,7 @@ impl TryFrom<State> for Workflow {
         Ok(Self {
             session_id: state.session_id,
             repository_url: state.repository_url,
+            selection_mode: state.selection_mode,
             identity: state.identity,
             attempted: state.attempted,
             diagnostics: state.diagnostics,
@@ -288,9 +312,10 @@ impl Workflow {
             ),
         };
         State {
-            schema_version: 2,
+            schema_version: 3,
             session_id: self.session_id.clone(),
             repository_url: self.repository_url.clone(),
+            selection_mode: self.selection_mode,
             identity: self.identity.clone(),
             status,
             target: reservation.map(|(intent, _)| intent.target.clone()),
@@ -425,6 +450,7 @@ pub(crate) trait Provider {
         target: &Target,
         identity: &Identity,
         now: Timestamp,
+        selection_mode: SelectionMode,
     ) -> Result<Candidate, AppError>;
     /// Supplies all undeleted discussion evidence needed to discover live claims.
     fn comments(&mut self, target: &Target) -> Result<Vec<Comment>, AppError>;
@@ -521,11 +547,12 @@ pub(crate) fn run(
         let state = Workflow::try_from(state)?;
         if state.session_id != initial.session_id
             || state.repository_url != initial.repository_url
+            || state.selection_mode != initial.selection_mode
             || !state.identity.same_account(&initial.identity)
         {
             return Err(fail(
                 "invalidState",
-                "The journal does not match this session, repository, or authenticated identity",
+                "The journal does not match this session, repository, selection mode, or authenticated identity",
             ));
         }
         initial = confirm_claim(provider, journal, clock, state)?;
@@ -547,7 +574,12 @@ pub(crate) fn run(
         if initial.attempted.contains(&id) {
             continue;
         }
-        let candidate = provider.candidate(&target, &initial.identity, clock.now())?;
+        let candidate = provider.candidate(
+            &target,
+            &initial.identity,
+            clock.now(),
+            initial.selection_mode,
+        )?;
         if let Some(reason) = candidate.reason {
             initial.record(id, reason);
         } else {
@@ -565,7 +597,12 @@ pub(crate) fn run(
         let target = candidate.target;
         let id = candidate_id(&target)?;
         initial.attempted.push(id);
-        let fresh = provider.candidate(&target, &initial.identity, clock.now())?;
+        let fresh = provider.candidate(
+            &target,
+            &initial.identity,
+            clock.now(),
+            initial.selection_mode,
+        )?;
         if let Some(reason) = fresh.reason {
             initial.record(id, reason);
             continue;
@@ -640,7 +677,8 @@ fn confirm_claim(
             .saturating_add(u64::from(duration.subsec_nanos() > 0));
         clock.wait(Duration::from_secs(seconds))?;
     }
-    let candidate = provider.candidate(target, &state.identity, clock.now())?;
+    let candidate =
+        provider.candidate(target, &state.identity, clock.now(), state.selection_mode)?;
     let comments = provider.comments(target)?;
     let mut own = comments
         .iter()
@@ -757,7 +795,13 @@ mod tests {
                 } else {
                     "/session/state.json"
                 };
-                let mut state = State::new(&repository, &identity, "session", path);
+                let mut state = State::new(
+                    &repository,
+                    &identity,
+                    "session",
+                    path,
+                    SelectionMode::Available,
+                );
                 state.status = status;
                 if !matches!(status, Status::Selecting | Status::NoCandidate) {
                     let id = NonZeroU32::new(10).unwrap();
@@ -797,6 +841,10 @@ mod tests {
                     };
                     serde_json::from_value::<State>(invalid).unwrap_err();
                 }
+                let mut incompatible = expected.clone();
+                *incompatible.get_mut("schemaVersion").unwrap() = json!(2);
+                let incompatible = serde_json::from_value::<State>(incompatible).unwrap();
+                assert!(incompatible.validate().is_err());
             }
         }
     }

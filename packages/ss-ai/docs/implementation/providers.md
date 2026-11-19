@@ -79,13 +79,15 @@ accepts any matching identifier to protect existing votes and metadata.
 
 GitHub reviewer evidence combines requested users and submitted review
 authors without expanding teams or treating pending and dismissed reviews as
-participation.
+participation. Selection retains assignment and submitted-review evidence
+separately so `available` and `assigned` modes can apply distinct rules.
 Registration preserves team requests and adds only the authenticated login.
 Azure DevOps registration leaves any matching existing reviewer untouched and
 creates a neutral reviewer only when none matches.
-Selection and confirmation exclude entries with `hasDeclined: true` before
-reducing reviewer payloads to identities. Registration includes those entries
-so it preserves their votes, decline flags, and other metadata.
+Selection and confirmation exclude entries with `hasDeclined: true` from
+assignment evidence. A nonzero vote on an active assignment identifies a
+submitted review. Registration includes declined entries so it preserves their
+votes, decline flags, and other metadata.
 
 Discussion records preserve service creation timestamps and comment/thread
 identifiers. Claim ownership requires these identifiers, the author, session,

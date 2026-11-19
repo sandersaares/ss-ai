@@ -34,10 +34,10 @@ also emit durable partial outcomes when a transaction needs intervention.
 ```powershell
 ss-ai review select --repository-url "{{REPOSITORY_URL}}" `
   --session-id "{{SESSION_ID}}" --state-path "{{STATE_PATH}}" `
-  --claim-message "{{CLAIM_MESSAGE}}"
+  --claim-message "{{CLAIM_MESSAGE}}" --selection-mode "{{SELECTION_MODE}}"
 ss-ai review confirm --repository-url "{{REPOSITORY_URL}}" `
   --session-id "{{SESSION_ID}}" --state-path "{{STATE_PATH}}" `
-  --claim-message "{{CLAIM_MESSAGE}}"
+  --claim-message "{{CLAIM_MESSAGE}}" --selection-mode "{{SELECTION_MODE}}"
 ss-ai reviewer register --url "{{PR_URL}}"
 ```
 
@@ -47,6 +47,7 @@ ss-ai reviewer register --url "{{PR_URL}}"
 | `SESSION_ID` | Nonempty primary-session identifier containing only ASCII letters, digits, `.`, `_`, `:`, and `-`. |
 | `STATE_PATH` | Absolute path to a fresh session-state journal for selection; the same path for confirmation. |
 | `CLAIM_MESSAGE` | Nonempty announcement following the caller's communication policy, without a protocol marker. |
+| `SELECTION_MODE` | `available` selects unassigned work and is the default. `assigned` requires an assignment without an active submitted review. Use the same value for confirmation. |
 | `PR_URL` | Browser URL of the pull request to register on. |
 
 Azure DevOps accepts optional `--tenant "{{TENANT}}"`; `TENANT` is the
@@ -946,15 +947,16 @@ attempt. Notice and review-selection recovery follow their own contracts.
 
 ## Journal and result schema
 
-Selection and confirmation return the complete persisted schema-2 journal.
+Selection and confirmation return the complete persisted schema-3 journal.
 All named fields below are required unless explicitly state-dependent.
 Collections are JSON arrays, including when empty. Unknown schemas and
 malformed or incomplete records are errors.
 
 | Field | Value |
 | --- | --- |
-| `schemaVersion` | Integer `2`. |
+| `schemaVersion` | Integer `3`. |
 | `sessionId`, `repositoryUrl`, `statePath` | Strings identifying the invocation, repository, and absolute journal path. |
+| `selectionMode` | `available` or `assigned`; fixed for selection and confirmation. |
 | `identity` | Authenticated identity object described below. |
 | `status` | `selecting`, `claiming`, `claimed`, `confirmed`, `discarding`, or `noCandidate`. |
 | `target` | Null without a current reservation; otherwise the pull request target below. |

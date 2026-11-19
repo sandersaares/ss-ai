@@ -1034,9 +1034,9 @@ impl Clock for Timeline {
 }
 
 #[test]
-fn ado_command_selection_and_confirmation_preserve_resolved_threads_and_schema_two() {
+fn ado_command_selection_and_confirmation_preserve_resolved_threads_and_schema_three() {
     let _launch = lock_process_launch();
-    for legacy in [false, true] {
+    for preexisting in [false, true] {
         let root = tempfile::tempdir().unwrap();
         // A long path also exercises native Windows extended-path replacement.
         let path = root
@@ -1053,7 +1053,7 @@ fn ado_command_selection_and_confirmation_preserve_resolved_threads_and_schema_t
             "--repository-url",
             "https://dev.azure.com/org/Project/_git/Repo",
             "--session-id",
-            "legacy-session",
+            "review-session",
             "--claim-message",
             "Review \u{4e16}\u{754c}",
             "--tenant",
@@ -1063,11 +1063,11 @@ fn ado_command_selection_and_confirmation_preserve_resolved_threads_and_schema_t
         .map(OsString::from)
         .to_vec();
         args.push(path.as_os_str().to_owned());
-        if legacy {
-            let body = "Review\r\n\r\n<!-- ss-review-proactor:v1 session=legacy-session claim=aaaaaaaa-1234-1234-1234-123456789abc -->";
-            // Schema-2 fields and PowerShell's timestamp precision, including explicit nulls.
+        if preexisting {
+            let body = "Review\r\n\r\n<!-- ss-review-proactor:v1 session=review-session claim=aaaaaaaa-1234-1234-1234-123456789abc -->";
+            // Schema-3 fields and PowerShell's timestamp precision, including explicit nulls.
             let state = json!({
-                "schemaVersion":2,"sessionId":"legacy-session","repositoryUrl":"https://dev.azure.com/org/Project/_git/Repo",
+                "schemaVersion":3,"sessionId":"review-session","repositoryUrl":"https://dev.azure.com/org/Project/_git/Repo","selectionMode":"available",
                 "identity":{"platform":"azureDevOps","id":"reviewer-id","displayName":"Reviewer","uniqueName":null,"descriptor":"aad.reviewer","accountType":null,"kind":"person","evidence":[]},
                 "status":"claimed","target":{"platform":"azureDevOps","collectionUrl":"https://dev.azure.com/org","organization":"org","project":"Project","repository":"Repo","pullRequestId":10,"webUrl":"https://dev.azure.com/org/Project/_git/Repo/pullrequest/10"},
                 "claim":{"token":"aaaaaaaa-1234-1234-1234-123456789abc","body":body,"id":"55","threadId":"101","checkAfter":"2026-09-28T00:01:00.0000000+00:00"},
@@ -1092,7 +1092,8 @@ fn ado_command_selection_and_confirmation_preserve_resolved_threads_and_schema_t
             confirmed["diagnostics"][0]["reason"],
             "soleLiveClaimAfterPreparation"
         );
-        assert_eq!(service.writes.borrow().len(), usize::from(!legacy));
+        assert_eq!(confirmed["selectionMode"], "available");
+        assert_eq!(service.writes.borrow().len(), usize::from(!preexisting));
         assert_eq!(
             serde_json::from_slice::<Value>(&fs::read(&path).unwrap()).unwrap(),
             confirmed

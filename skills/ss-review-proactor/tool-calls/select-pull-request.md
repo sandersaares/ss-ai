@@ -1,5 +1,5 @@
 ```text
-ss-ai review select --repository-url "{{REPOSITORY_URL}}" --session-id "{{SESSION_ID}}" --state-path "{{STATE_PATH}}" --claim-message "{{CLAIM_MESSAGE}}"
+ss-ai review select --repository-url "{{REPOSITORY_URL}}" --session-id "{{SESSION_ID}}" --state-path "{{STATE_PATH}}" --claim-message "{{CLAIM_MESSAGE}}" --selection-mode "{{SELECTION_MODE}}"
 ```
 
 Run this command once for the active repository in the ordered repository list.
@@ -16,6 +16,7 @@ Placeholders to replace:
 | `SESSION_ID` | Identifier of the primary user-facing session executing this invocation. |
 | `STATE_PATH` | Fresh absolute path to a JSON journal in the current cycle's session-state subdirectory. Reuse this exact path for confirmation, never for a new cycle or selection run. |
 | `CLAIM_MESSAGE` | Standard announcement from stage 2 of `SKILL.md`, adapted to the current user's communication policy, without protocol markers. Pass it as one literal string argument, escaping for the invoking shell if one is used. Reuse it for confirmation. |
+| `SELECTION_MODE` | Resolved mode for the complete invocation: `available` by default, or `assigned` to require an assignment without an active submitted review. |
 | `TENANT` | Optional user-configured Azure tenant for the active repository. |
 
 For Azure DevOps, optionally append `--tenant "{{TENANT}}"`. Use the same tenant

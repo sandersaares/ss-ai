@@ -15,7 +15,7 @@ use crate::clock::{is_recent, latest_commit};
 use crate::error::fail;
 use crate::identity::Identity;
 use crate::json::{array, boolean, field, identifier, text};
-use crate::selection::{Candidate, Comment, Provider, RemoteClaim};
+use crate::selection::{Candidate, Comment, Provider, RemoteClaim, SelectionMode};
 use crate::target::{Platform, Target, escape};
 use crate::transport::{Transport, ado_items};
 
@@ -27,6 +27,12 @@ use crate::transport::{Transport, ado_items};
 pub(crate) struct Api<'a> {
     /// Executes requests and recovery policy without leaking credentials into state.
     pub(crate) transport: Transport<'a>,
+}
+
+/// Separates assignment evidence from completion of a submitted review.
+struct ReviewerParticipation {
+    assigned: bool,
+    submitted_review: bool,
 }
 
 /// GitHub's commits connection avoids the REST pull-request commit result cap.
@@ -205,6 +211,76 @@ impl Api<'_> {
             }
         }
         Ok(identities)
+    }
+
+    /// Distinguishes an active assignment from a submitted review by this account.
+    fn reviewer_participation(
+        &mut self,
+        target: &Target,
+        identity: &Identity,
+    ) -> Result<ReviewerParticipation, AppError> {
+        if target.platform == Platform::AzureDevOps {
+            let mut participation = ReviewerParticipation {
+                assigned: false,
+                submitted_review: false,
+            };
+            for value in self
+                .transport
+                .list(&format!("{}/reviewers", target.pr_api()))?
+            {
+                if value
+                    .get("hasDeclined")
+                    .map(boolean)
+                    .transpose()?
+                    .unwrap_or(false)
+                    || !identity.may_match(&Identity::from_account(target.platform, &value)?)
+                {
+                    continue;
+                }
+                participation.assigned = true;
+                let vote = value
+                    .get("vote")
+                    .map(|vote| {
+                        vote.as_i64()
+                            .filter(|vote| matches!(vote, -10 | -5 | 0 | 5 | 10))
+                            .ok_or_else(|| fail("service", "Invalid ADO vote value"))
+                    })
+                    .transpose()?
+                    .unwrap_or(0);
+                participation.submitted_review |= vote != 0;
+            }
+            return Ok(participation);
+        }
+
+        let mut participation = ReviewerParticipation {
+            assigned: self
+                .reviewers(target, false, true)?
+                .iter()
+                .any(|reviewer| identity.may_match(reviewer)),
+            submitted_review: false,
+        };
+        for review in self
+            .transport
+            .list(&format!("{}/reviews", target.pr_api()))?
+        {
+            let state = text(field(&review, "state")?)?;
+            // Pending and dismissed reviews do not count as active participation.
+            // Ref: docs/design/review-selection.md, "Eligibility and ranking".
+            if ["PENDING", "DISMISSED"]
+                .iter()
+                .any(|inactive| state.eq_ignore_ascii_case(inactive))
+            {
+                continue;
+            }
+            if identity.may_match(&Identity::from_account(
+                target.platform,
+                field(&review, "user")?,
+            )?) {
+                participation.assigned = true;
+                participation.submitted_review = true;
+            }
+        }
+        Ok(participation)
     }
 
     /// Resolves bare ADO identifiers before writes and reports the resolved URL.
@@ -490,6 +566,7 @@ impl Provider for Api<'_> {
         target: &Target,
         identity: &Identity,
         now: Timestamp,
+        selection_mode: SelectionMode,
     ) -> Result<Candidate, AppError> {
         let pr = self.transport.request(&target.pr_api(), "GET", None)?;
         let github = target.platform == Platform::GitHub;
@@ -513,34 +590,18 @@ impl Provider for Api<'_> {
             None
         };
         if reason.is_none() {
-            if self
-                .reviewers(target, false, true)?
-                .iter()
-                .any(|reviewer| identity.may_match(reviewer))
-            {
-                reason = Some("alreadyReviewer");
-            }
-            if github {
-                for review in self
-                    .transport
-                    .list(&format!("{}/reviews", target.pr_api()))?
-                {
-                    let state = text(field(&review, "state")?)?;
-                    // Dismissed submissions no longer represent active reviewer participation.
-                    // Ref: docs/design/review-selection.md, "Eligibility and ranking".
-                    if ["PENDING", "DISMISSED"]
-                        .iter()
-                        .any(|inactive| state.eq_ignore_ascii_case(inactive))
-                    {
-                        continue;
-                    }
-                    if identity.may_match(&Identity::from_account(
-                        target.platform,
-                        field(&review, "user")?,
-                    )?) {
-                        reason = Some("alreadyReviewer");
-                    }
+            let participation = self.reviewer_participation(target, identity)?;
+            match selection_mode {
+                SelectionMode::Available if participation.assigned => {
+                    reason = Some("alreadyReviewer");
                 }
+                SelectionMode::Assigned if !participation.assigned => {
+                    reason = Some("notAssignedReviewer");
+                }
+                SelectionMode::Assigned if participation.submitted_review => {
+                    reason = Some("alreadyReviewed");
+                }
+                SelectionMode::Available | SelectionMode::Assigned => {}
             }
         }
         let mut latest = None;

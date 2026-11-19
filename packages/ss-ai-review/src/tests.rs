@@ -20,7 +20,9 @@ use crate::api::Api;
 use crate::clock::timestamp;
 use crate::error::fail;
 use crate::identity::Identity;
-use crate::selection::{Candidate, Comment, Journal, Provider, RemoteClaim, State, Status, run};
+use crate::selection::{
+    Candidate, Comment, Journal, Provider, RemoteClaim, SelectionMode, State, Status, run,
+};
 use crate::target::{Platform, Target};
 use crate::transport::Transport;
 use crate::{
@@ -128,6 +130,7 @@ impl Provider for FakeProvider {
         target: &Target,
         _: &Identity,
         _: Timestamp,
+        _: SelectionMode,
     ) -> Result<Candidate, AppError> {
         if self.fail_read {
             return Err(fail("service", "Injected read failure"));
@@ -203,6 +206,7 @@ fn initial(platform: Platform) -> State {
         &identity(platform),
         "session-a",
         path,
+        SelectionMode::Available,
     )
 }
 
@@ -300,6 +304,8 @@ fn selection_and_confirmation_preserve_both_provider_journals() {
         )
         .unwrap();
         assert_eq!(state.status, Status::Claimed);
+        assert_eq!(state.schema_version, 3);
+        assert_eq!(state.selection_mode, SelectionMode::Available);
         assert_eq!(state.target.unwrap().pull_request_id, 10);
         assert!(clock.waits.borrow().is_empty());
         assert_eq!(
@@ -324,6 +330,28 @@ fn selection_and_confirmation_preserve_both_provider_journals() {
         assert_eq!(provider.creates, [10]);
         assert!(provider.deletes.is_empty());
     }
+}
+
+#[test]
+fn confirmation_rejects_a_different_selection_mode() {
+    let clock = FakeClock::new();
+    let mut provider = FakeProvider::new();
+    let mut journal = MemoryJournal::default();
+    select(&mut provider, &mut journal, &clock, false);
+    let mut mismatched = initial(Platform::GitHub);
+    mismatched.selection_mode = SelectionMode::Assigned;
+    let error = run(
+        &mut provider,
+        &mut journal,
+        &clock,
+        mismatched,
+        "Reserving for review.",
+        true,
+    )
+    .err()
+    .unwrap();
+    assert_eq!(crate::classification(&error), "invalidState");
+    assert!(provider.deletes.is_empty());
 }
 
 #[test]
@@ -1505,6 +1533,7 @@ fn ado_selection_excludes_only_declined_reviewer_assignments() {
                 &repository(Platform::AzureDevOps).candidate(10.try_into().unwrap()),
                 &identity(Platform::AzureDevOps),
                 clock.now(),
+                SelectionMode::Available,
             )
             .unwrap();
         assert_eq!(
@@ -1515,6 +1544,111 @@ fn ado_selection_excludes_only_declined_reviewer_assignments() {
                 Some("alreadyReviewer")
             }
         );
+        script.done();
+    }
+}
+
+#[test]
+fn assigned_mode_requires_an_assignment_without_a_submitted_ado_review() {
+    for (reviewer, expected) in [
+        (
+            json!({"id":"reviewer-id","uniqueName":"reviewer@example.com"}),
+            None,
+        ),
+        (
+            json!({"id":"reviewer-id","uniqueName":"reviewer@example.com","vote":0}),
+            None,
+        ),
+        (
+            json!({"id":"reviewer-id","uniqueName":"reviewer@example.com","vote":10}),
+            Some("alreadyReviewed"),
+        ),
+        (
+            json!({"id":"other","uniqueName":"other@example.com","vote":0}),
+            Some("notAssignedReviewer"),
+        ),
+        (
+            json!({"id":"reviewer-id","uniqueName":"reviewer@example.com","vote":10,"hasDeclined":true}),
+            Some("notAssignedReviewer"),
+        ),
+    ] {
+        let path = "A%20Project/_apis/git/repositories/A%20Repo/pullRequests/10";
+        let mut steps = vec![
+            Step::read(
+                &ado(path, ""),
+                json!({"status":"active","isDraft":false,"createdBy":{"id":"author"}}),
+            ),
+            Step::read(
+                &ado(&format!("{path}/reviewers"), ""),
+                json!({"value":[reviewer]}),
+            ),
+        ];
+        if expected.is_none() {
+            steps.push(Step::read(
+                &ado(&format!("{path}/commits"), "%24top=100&"),
+                json!({"value":[{"committer":{"date":"2026-09-27T00:00:00Z"}}]}),
+            ));
+        }
+        let script = Script::new(steps);
+        let clock = FakeClock::new();
+        let candidate = api(Platform::AzureDevOps, &script, &clock)
+            .candidate(
+                &repository(Platform::AzureDevOps).candidate(10.try_into().unwrap()),
+                &identity(Platform::AzureDevOps),
+                clock.now(),
+                SelectionMode::Assigned,
+            )
+            .unwrap();
+        assert_eq!(candidate.reason.as_deref(), expected);
+        script.done();
+    }
+}
+
+#[test]
+fn assigned_mode_requires_a_request_without_a_submitted_github_review() {
+    for (requested, submitted, expected) in [
+        (true, false, None),
+        (true, true, Some("alreadyReviewed")),
+        (false, true, Some("alreadyReviewed")),
+        (false, false, Some("notAssignedReviewer")),
+    ] {
+        let mut steps = vec![
+            Step::read(
+                "repos/example/widgets/pulls/10",
+                json!({"state":"open","draft":false,"user":{"id":99}}),
+            ),
+            Step::read(
+                "repos/example/widgets/pulls/10/requested_reviewers?per_page=100",
+                json!([{"users":if requested {json!([{"id":42}])} else {json!([])},"teams":[]}]),
+            ),
+            Step::read(
+                "repos/example/widgets/pulls/10/reviews?per_page=100",
+                json!([if submitted {
+                    json!([{"state":"COMMENTED","user":{"id":42}}])
+                } else {
+                    json!([])
+                }]),
+            ),
+        ];
+        if expected.is_none() {
+            steps.push(Step::write(
+                "graphql",
+                "POST",
+                json!({"query":crate::api::COMMIT_QUERY,"variables":{"owner":"example","repo":"widgets","num":10,"cur":null,"size":100}}),
+                json!({"data":{"repository":{"pullRequest":{"commits":{"nodes":[{"commit":{"committedDate":"2026-09-27T00:00:00Z"}}],"pageInfo":{"hasNextPage":false}}}}}}),
+            ));
+        }
+        let script = Script::new(steps);
+        let clock = FakeClock::new();
+        let candidate = api(Platform::GitHub, &script, &clock)
+            .candidate(
+                &repository(Platform::GitHub).candidate(10.try_into().unwrap()),
+                &identity(Platform::GitHub),
+                clock.now(),
+                SelectionMode::Assigned,
+            )
+            .unwrap();
+        assert_eq!(candidate.reason.as_deref(), expected);
         script.done();
     }
 }
@@ -1570,6 +1704,7 @@ fn eligibility_exclusions_avoid_commit_reads_and_ignore_pending_reviews_or_teams
                     &repository(platform).candidate(10.try_into().unwrap()),
                     &identity(platform),
                     clock.now(),
+                    SelectionMode::Available,
                 )
                 .unwrap();
             assert_eq!(candidate.reason.as_deref(), Some(exclusion));
@@ -1603,7 +1738,8 @@ fn eligibility_exclusions_avoid_commit_reads_and_ignore_pending_reviews_or_teams
                 .candidate(
                     &repository(Platform::GitHub).candidate(10.try_into().unwrap()),
                     &identity(Platform::GitHub),
-                    clock.now()
+                    clock.now(),
+                    SelectionMode::Available,
                 )
                 .unwrap()
                 .reason

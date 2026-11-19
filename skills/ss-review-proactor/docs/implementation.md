@@ -2,7 +2,7 @@
 
 ## Boundaries
 
-The primary agent owns configuration, local checkout preparation, the skill
+The primary agent owns configuration, selection-mode resolution, local checkout preparation, the skill
 handoff, and human interaction. The shared `ss-ai` executable owns repository enumeration,
 eligibility, ordering, claim writes, the waiting period, and revalidation.
 It emits one JSON result and keeps a local journal in session state.
@@ -35,6 +35,11 @@ than inferring scope again from a temporary checkout. Later cycles retain the
 original invocation directory, ordered list, active position, exhausted
 repositories, and resolved per-repository configuration unless the user changes
 them, including after learning uses another worktree.
+
+The same invocation-level selection mode is passed to selection and
+confirmation for every candidate and repository. A replacement candidate uses
+the mode persisted in that cycle's selection journal; a mismatched confirmation
+fails before provider writes.
 
 The active repository remains selected across completed reviews. A
 `noCandidate` selection or confirmation marks it exhausted and advances the
@@ -97,15 +102,17 @@ capture calls still reject unexpected continuation. Repeated pages or tokens
 are errors rather than infinite loops. Thread lists include resolved threads
 and ignore deleted threads and comments.
 
-Adapters reduce these payloads to target coordinates, eligibility, the newest
-non-future committer timestamp, and discussion comments. Identity comparison
+Adapters reduce these payloads to target coordinates, assignment and submitted
+review participation, eligibility, the newest non-future committer timestamp,
+and discussion comments. Identity comparison
 uses the shared utility's platform identity rules rather than display names.
 
 Azure DevOps eligibility excludes declined reviewers
 for both selection and confirmation. The native reader filters `hasDeclined`
-before reducing entries to identities, because identity records do not carry
-reviewer state. Registration still includes declined entries so ordinary
-`ss-review` registration preserves existing reviewer state.
+before reducing entries to assignment evidence. A nonzero vote supplies
+submitted-review evidence only for an active assignment. Registration still
+includes declined entries so ordinary `ss-review` registration preserves
+existing reviewer state.
 
 ## Claim lifecycle
 
@@ -123,8 +130,8 @@ The primary agent supplies the claim announcement through `--claim-message`,
 applying the current user's communication policy. The helper preserves that
 text and appends the protocol marker; it supplies no attribution of its own.
 
-The journal records the session, repository, authenticated identity, attempted
-pull request numbers, claim token and remote identifiers, and outcome
+The journal records the session, repository, selection mode, authenticated
+identity, attempted pull request numbers, claim token and remote identifiers, and outcome
 diagnostics. It is written before claim creation, then after the remote reply,
 along with the earliest time the final check may start.
 A file left mid-operation is evidence for human reconciliation, not authority

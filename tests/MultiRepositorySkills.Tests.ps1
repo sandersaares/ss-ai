@@ -12,6 +12,9 @@ BeforeAll {
     $script:ProactorDesign = [IO.File]::ReadAllText(
         (Join-Path $root 'skills\ss-review-proactor\docs\design.md')
     )
+    $script:ProactorCommands = [IO.File]::ReadAllText(
+        (Join-Path $root 'skills\ss-review-proactor\tool-calls\select-pull-request.md')
+    )
     $script:AutoreapproveSkill = [IO.File]::ReadAllText(
         (Join-Path $root 'skills\ss-autoreapprove\SKILL.md')
     )
@@ -55,6 +58,21 @@ Describe 'Multi-repository skill contracts' {
             Should -Match 'The native commands accept one repository per run'
         $script:AutoreapproveCommands |
             Should -Match 'Use a separate path for every repository'
+    }
+
+    It 'supports assignment-filtered proactor selection' {
+        $script:ProactorSkill |
+            Should -Match 'Use `assigned` only when the user explicitly asks'
+        $script:ProactorSkill |
+            Should -Match 'requires an assignment to the signed-in user and excludes an existing active\s+submitted review'
+        $script:ProactorSkill |
+            Should -Match 'submitting an active review prevents repeat selection'
+        $script:ProactorCommands |
+            Should -Match '--selection-mode "\{\{SELECTION_MODE\}\}"'
+        $script:ProactorCommands |
+            Should -Match '`assigned` to require an assignment without an active submitted review'
+        $script:ProactorDesign |
+            Should -Match 'One resolved mode applies to every\s+configured repository'
     }
 
     It 'aggregates autoreapproval results across repository runs' {

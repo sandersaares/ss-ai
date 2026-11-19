@@ -33,7 +33,7 @@ The user can say "the current review is the last one" to disable looping while
 letting the current review finish. This remains available during `ss-review`
 and its user-input pauses. The instruction controls future selection, not
 finding decisions, merge approval, or cancellation. The latest instruction survives workflow handoffs and compaction and overrides
-an earlier mode request.
+an earlier loop-mode request.
 Direct messages do not change the schedule or future invocations. A
 user-authored schedule prompt can specify one-shot mode for its scheduled
 invocations.
@@ -51,6 +51,15 @@ exhausted repository is not revisited during the invocation. Each cycle has
 separate review artifacts, a fresh claim journal, and a unique checkout, so
 earlier reviews remain available and no audit decisions or publication state
 carry into the next review or repository.
+
+## Selection mode
+
+The default `available` mode finds pull requests that are not already assigned
+to the signed-in user. The explicit `assigned` mode instead requires the pull
+request to list the signed-in user as a reviewer and excludes it after that
+user has submitted an active review. One resolved mode applies to every
+configured repository in the invocation and remains fixed through selection,
+replacement, and confirmation.
 
 ## Repository scope
 
@@ -81,18 +90,23 @@ the identity or selection details of an earlier private repository.
 
 ## Selection
 
-A qualifying pull request is open, is not a draft, was not authored by the
-current user, does not already list that user as a reviewer, contains a commit
-made in the past 14 days, and has no unexpired proactor claim. On GitHub,
-reviewers include requested reviewers and authors of active submitted reviews,
-because submitting a review removes the pending request. Pending and dismissed
-reviews do not count as assignments. Team assignments do not imply an
-individual assignment.
+In `available` mode, a qualifying pull request is open, is not a draft, was not
+authored by the current user, is not already assigned to that user, contains a
+commit made in the past 14 days, and has no unexpired proactor claim. In
+`assigned` mode, the assignment condition is reversed: the user must be assigned
+and must not already have submitted an active review.
+
+On GitHub, assignment includes requested users and authors of active submitted
+reviews because submitting a review removes the pending request. Pending and
+dismissed reviews do not count as active submitted reviews. Team assignments do
+not imply an individual assignment.
 
 On Azure DevOps, a reviewer entry with `hasDeclined: true` does not count as
 an assignment. The user can use the GUI's decline action to make a pull request
-eligible again, subject to the other selection rules. Entries with a false or
-absent `hasDeclined` flag still count as assignments, regardless of vote.
+ineligible in `assigned` mode or eligible in `available` mode, subject to the
+other selection rules. Entries with a false or absent `hasDeclined` flag count
+as assignments. A nonzero vote is a submitted review; a neutral or absent vote
+is not.
 
 Commit recency means the committer timestamp of a commit in the pull request,
 not the pull request's creation time, discussion activity, or push time. The
@@ -128,9 +142,10 @@ this cycle is missing or has expired, or the pull request is no longer
 eligible, the candidate is also discarded.
 
 If the claim holds, the primary agent hands off directly to the ordinary
-`ss-review` workflow. Its reviewer registration consumes the reservation:
-the reviewer assignment, rather than the comment, then prevents another review.
-There are no additional proactor checks inside `ss-review`.
+`ss-review` workflow. Reviewer registration consumes the reservation in
+`available` mode through the resulting assignment. Submitting an active review
+consumes it in `assigned` mode. There are no additional proactor checks inside
+`ss-review`.
 
 This is a cooperative comment protocol, not an atomic service-side lock.
 It relies on discussion reads exposing competing claims and accepts the small

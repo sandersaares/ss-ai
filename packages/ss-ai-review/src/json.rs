@@ -25,7 +25,7 @@ pub(crate) fn project(value: &Value, names: &[&str]) -> Value {
 
 /// Requires nullable record fields to be present rather than silently defaulting.
 ///
-/// Use as a Serde field deserializer where schema 2 requires a named field even
+/// Use as a Serde field deserializer where a persisted contract requires a named field even
 /// when its value is null.
 pub(crate) fn required_optional<'de, D, T>(deserializer: D) -> Result<Option<T>, D::Error>
 where

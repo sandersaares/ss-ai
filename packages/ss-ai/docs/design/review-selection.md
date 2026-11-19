@@ -11,13 +11,20 @@ inputs and journal records are defined in the [package reference](../../README.m
 
 ## Eligibility and ranking
 
-Selection considers all open pull requests in the supplied repository. A
-candidate must not be a draft, self-authored, or already assigned to the
-authenticated user. GitHub assignment includes requested users and authors of
-active submitted reviews, but not team membership, pending reviews, or
-dismissed reviews.
+Selection considers all open pull requests in the supplied repository. The
+`available` mode excludes drafts, self-authored pull requests, and pull requests
+assigned to the authenticated user. The `assigned` mode reverses the assignment
+filter and additionally excludes a pull request where that user has submitted
+an active review.
+
+GitHub assignment includes requested users and authors of active submitted
+reviews, but not team membership, pending reviews, or dismissed reviews.
 Azure DevOps entries with `hasDeclined: true` do not count as assignments.
-Entries with a false or absent flag still count, regardless of vote.
+Entries with a false or absent flag count as assignments. A nonzero Azure
+DevOps vote represents a submitted review; a neutral or absent vote does not.
+
+The mode is fixed for the entire reservation cycle. Confirmation uses the
+persisted mode and rejects a command that attempts to select with another mode.
 
 Commit recency uses every commit page and the latest non-future committer
 timestamp, normalized to UTC. The fixed 14-day cutoff is inclusive. Older

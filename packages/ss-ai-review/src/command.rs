@@ -20,7 +20,7 @@ use crate::discovery::{self, DiscoveryInput, WorkAction};
 use crate::error::fail;
 use crate::journal::FileJournal;
 use crate::publication;
-use crate::selection::{self, State, valid_session};
+use crate::selection::{self, SelectionMode, State, valid_session};
 use crate::target::{Platform, Target, escape};
 use crate::transport::Transport;
 use crate::{Clock, Http, Process};
@@ -396,6 +396,15 @@ struct Selection {
     /// Selects the Azure tenant for OAuth without persisting credentials.
     #[arg(long, help = None, long_help = None)]
     tenant: Option<String>,
+    /// Selects available PRs or PRs already assigned without a submitted review.
+    #[arg(
+        long = "selection-mode",
+        value_enum,
+        default_value = "available",
+        help = None,
+        long_help = None
+    )]
+    mode: SelectionMode,
 }
 
 /// Accepts browser coordinates or explicit registration coordinates.
@@ -717,7 +726,13 @@ fn execute(
                     "Journal path must be representable in UTF-8 JSON",
                 )
             })?;
-            let initial = State::new(&repository, &identity, &arguments.session_id, state_path);
+            let initial = State::new(
+                &repository,
+                &identity,
+                &arguments.session_id,
+                state_path,
+                arguments.mode,
+            );
             let mut journal = FileJournal::open(&arguments.state_path, clock)?;
             serde_json::to_value(selection::run(
                 &mut api,
