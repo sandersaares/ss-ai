@@ -62,8 +62,10 @@ missing project/repository from collection and pull request identifier.
 Read selection results' `status`, `target`, and `diagnostics`. `claimed`
 requires checkout preparation, then confirmation. A replacement `claimed`
 requires its own preparation. `confirmed` proceeds directly to `ss-review`.
-`noCandidate` finishes without review. Errors require the calling skill's
-human-input procedure; do not automatically repeat a possibly successful write.
+`noCandidate` means this single-repository selection operation has no candidate;
+an orchestrating skill can run a fresh operation for another repository.
+Errors require the calling skill's human-input procedure; do not automatically
+repeat a possibly successful write.
 
 Registration returns `platform`, `pullRequestUrl`, `status`, and `identity`.
 Status is `added`, `alreadyRegistered`, or `selfIsAuthor` (GitHub only).
@@ -473,6 +475,9 @@ without refreshing completed recency checks or the enumerated inventory.
 Use a new run path for a fresh scan. A discovery candidate still requires
 approval assessment and freshness checks; discovery is not authorization to
 publish.
+The native run is repository-scoped. A multi-repository skill invocation creates
+a separate fresh run path for each repository and processes those runs
+sequentially.
 
 For a direct assessment, `assessmentProgress` reports judged changed paths
 and completed required documents and requested context ranges. A required
@@ -856,8 +861,9 @@ Only a strictly later approval by the authenticated account expires older
 markers. Another account's approval does not.
 Dry runs never post notices or change approvals.
 
-Final skill output lists every in-range candidate as a linked PR number and
-title with its decision. `reviewNotice` distinguishes retained refusals.
+Final skill output lists every in-range candidate with its repository, linked
+PR number and title, and decision. `reviewNotice` distinguishes retained
+refusals.
 
 ### Assessment records
 

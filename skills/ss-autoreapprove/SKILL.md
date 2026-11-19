@@ -1,6 +1,6 @@
 ---
 name: ss-autoreapprove
-description: Renew the authenticated user's invalidated GitHub or Azure DevOps approvals when cumulative PR source changes fit the significance policy. Use only when explicitly invoked or by a user-configured schedule. Supports read-only dry runs.
+description: Renew the authenticated user's invalidated GitHub or Azure DevOps approvals across one or more repositories when cumulative PR source changes fit the significance policy. Use only when explicitly invoked or by a user-configured schedule. Supports read-only dry runs.
 ---
 
 # Assessment worker entry
@@ -41,12 +41,14 @@ user's checkout for content preparation.
 
 # Stage 1: establish the run
 
-An explicit repository in the invocation or user-authored schedule prompt
-takes precedence. Otherwise, default to the Git repository containing the
-invocation's working directory, including a linked worktree or a subdirectory
-of a checkout. Use the repository identity supplied by the session when
-available. Do not use the skill's installation directory or a temporary
-checkout created later in this workflow to determine this default.
+One or more explicit repositories in the invocation or user-authored schedule
+prompt take precedence. Resolve all of them before remote work, preserve the
+user's order, and process an exact duplicate URL only once at its first
+occurrence. Otherwise, form a one-entry repository list from the Git repository
+containing the invocation's working directory, including a linked worktree or
+a subdirectory of a checkout. Use the repository identity supplied by the
+session when available. Do not use the skill's installation directory or a
+temporary checkout created later in this workflow to determine this default.
 
 When the session does not supply the repository identity, inspect the
 invocation checkout's remotes:
@@ -72,23 +74,31 @@ Supported browser URL forms are `https://github.com/OWNER/REPO`,
 `https://dev.azure.com/ORG/PROJECT/_git/REPO`, and
 `https://ORG.visualstudio.com/PROJECT/_git/REPO`.
 
-Do not ask the user to supply or confirm the repository URL when it resolves
-from the invocation's Git repository. Ask for a repository URL only when no
-supported repository can be resolved, such as outside a Git checkout, after
-a failed remote inspection, or with ambiguous remotes. Do not silently replace
-an invalid explicit repository with the current checkout.
-Keep the resolved URL fixed throughout the run, even if the working directory
-changes during content preparation.
+Do not ask the user to supply or confirm the repository URL when the one-entry
+list resolves from the invocation's Git repository. Ask for repository URLs only
+when no supported repository can be resolved, such as outside a Git checkout,
+after a failed remote inspection, or with ambiguous remotes. Do not silently
+replace an invalid explicit repository with the current checkout. Keep every
+resolved URL fixed for its repository run, even if the working directory changes
+during content preparation.
 
-Resolve a fresh absolute run path in session state, the absolute installed
-policy path, the requested dry-run mode, and any Azure tenant.
+Resolve an Azure tenant for each Azure DevOps repository. A tenant explicitly
+associated with one repository applies only to that repository; a clearly
+stated shared tenant applies to repositories that have no specific value.
+Resolve the absolute installed policy path and requested dry-run mode once for
+the invocation. For each repository, create a fresh absolute run path in session
+state and process that repository from discovery through final results before
+advancing to the next one. Never reuse one repository's run state, inspection,
+worker reservation, or assessment for another repository.
 Use the [command recipes](commands.md).
 
 A user-configured schedule running in a Git repository can simply invoke
-`ss-autoreapprove`. To select another repository, or run outside a checkout,
-an example schedule prompt is:
+`ss-autoreapprove`. To select another repository, run outside a checkout, or
+select multiple repositories in priority order, example schedule prompts are:
 
 > Run ss-autoreapprove against https://github.com/example/project.
+
+> Run ss-autoreapprove against https://github.com/example/project, then https://dev.azure.com/example/team/_git/other.
 
 The utility enumerates complete open-PR metadata, discards drafts, and applies
 the proactor's inclusive 14-day committer-time window before any history or content work.
@@ -97,7 +107,8 @@ approval history or the cumulative comparison.
 
 # Stage 2: inspect eligible history
 
-Page through discovery results and process one candidate at a time. For an
+Run this stage for the active repository only. Page through discovery results
+and process one candidate at a time. For an
 `assessmentRequired` entry without an inspection snapshot, inspect it and
 continue through stages 3 and 4, including any required recovery, before
 inspecting the next candidate. Inspection starts that PR's persisted time
@@ -111,6 +122,13 @@ not an acceptable terminal result. Do not interpret failed or partial discovery
 as no work.
 If inspection, refresh, publication, or notification removes a PR that became
 a draft, skip it without further work or reporting.
+
+After the active repository reaches a terminal result and has no active worker
+or unfinished in-scope recovery or ambiguous external write, continue with the
+next repository. Record a repository-scoped failure and continue after it is
+terminal; do not erase the remaining repository list. An active worker, pending
+recovery, or ambiguous external write keeps the active repository in place and
+blocks advancement.
 
 An account-owned needs-review comment short-circuits source assessment and
 returns `needsReview`, including when a previous invocation posted it. Only
@@ -145,8 +163,8 @@ authority or conduct additional service experiments.
 
 # Stage 3: assess exact source changes
 
-Apply this stage to the candidate just inspected, not to a separate pass over
-all inspected candidates.
+Apply this stage to the candidate just inspected in the active repository, not
+to another repository or to a separate pass over all inspected candidates.
 
 For each eligible snapshot, run native `prepare` to capture the exact comparison
 and obtain the preflight progress counts. Reserve a worker with `start-worker`
@@ -306,18 +324,30 @@ auto-merge. The utility does not promise atomic source fencing on ADO or
 exactly-once publication. Never clear or dismiss a vote as rollback of an
 approval request; clearing an existing approval belongs only to native `notify`.
 
+After all candidates and final `results` pages for the active repository reach
+their terminal outcomes, create a fresh run path for the next repository and
+run stage 1 `discover` with that repository's URL and tenant, the invocation's
+policy, and the invocation's dry-run mode. Continue at stage 2 only after
+discovery succeeds. Repeat stages 1 through 4 until every configured repository
+is terminal. Do not overlap repository runs or carry a candidate, budget,
+worker, or stale-recovery count into the next repository.
+
 # Stage 5: report
 
-Report the resolved repository and whether it was explicit or defaulted from
-the invocation checkout, PR links and outcomes, actionable significance/uncertainty reasons,
-partial or failed scope, aggregate recency exclusions, and the absolute run
-path. Highlight any failed or unknown publication. Include stale-recovery attempts and explicit retry exhaustion
-where applicable, the policy digest, and whether this was a dry run.
+Report the ordered resolved repositories and whether the list was explicit or
+defaulted from the invocation checkout, active and completed repositories, PR
+links and outcomes, actionable significance/uncertainty reasons, partial or
+failed scope, aggregate recency exclusions by repository, and each absolute
+run path. Highlight any failed or unknown publication. Include stale-recovery
+attempts and explicit retry exhaustion where applicable, the policy digest, and
+whether this was a dry run. Separate diagnostic details by repository so a
+failure in one repository cannot obscure another repository's outcomes.
 The final report MUST include a Markdown table with one row for every in-range
-candidate returned across all final `results` pages. Include retained decisions,
+candidate returned across all final `results` pages from every repository.
+Include retained decisions,
 already-valid approvals, no-prior-approval and ineligible outcomes, and failures;
 do not limit the table to PRs assessed or changed during this invocation. The
-table must have `PR`, `Decision`, and `Required detail` columns. Use
+table must have `Repository`, `PR`, `Decision`, and `Required detail` columns. Use
 `[PR number + title](PR URL)` in the `PR` column (use `PR 123`, not `#123`,
 for Azure DevOps) and an explicit decision:
 
