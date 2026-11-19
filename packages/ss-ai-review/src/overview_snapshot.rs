@@ -250,8 +250,8 @@ fn split_comment_bodies(report: &str, prefix: &str) -> Result<Vec<String>, Snaps
         .collect()
 }
 
-/// Preserves exact report text while favoring paragraph and line boundaries.
-fn split_at_boundaries(mut remaining: &str, capacity: usize) -> Result<Vec<&str>, SnapshotError> {
+/// Preserves Markdown fences while preferring paragraph and line boundaries.
+fn split_at_boundaries(mut remaining: &str, capacity: usize) -> Result<Vec<String>, SnapshotError> {
     let mut chunks = Vec::new();
     while remaining.len() > capacity {
         let mut end = capacity;
@@ -280,12 +280,189 @@ fn split_at_boundaries(mut remaining: &str, capacity: usize) -> Result<Vec<&str>
                 "Overview Markdown made no splitting progress",
             ));
         }
+        if let Some(fence_start) = open_fence_start(remaining, end) {
+            if fence_start > 0 {
+                let (chunk, rest) = remaining.split_at(fence_start);
+                chunks.push(chunk.to_owned());
+                remaining = rest;
+                continue;
+            }
+            let opening_end = remaining
+                .find('\n')
+                .and_then(|position| position.checked_add('\n'.len_utf8()))
+                .ok_or_else(|| {
+                    SnapshotError::invalid_input("Fenced overview block has no content")
+                })?;
+            let opening = remaining
+                .get(..opening_end)
+                .ok_or_else(|| SnapshotError::invalid_state("Overview fence opening is invalid"))?;
+            let (opening_marker, _) = fence_marker(opening)
+                .ok_or_else(|| SnapshotError::invalid_input("Invalid overview fence"))?;
+            if let Some((_, fence_end)) = find_fence_end(remaining, opening_end, opening_marker)
+                && fence_end <= capacity
+            {
+                let (chunk, rest) = remaining.split_at(fence_end);
+                chunks.push(chunk.to_owned());
+                remaining = rest;
+                continue;
+            }
+            let (parts, fence_end) = split_oversized_fence(remaining, capacity)?;
+            chunks.extend(parts);
+            remaining = remaining.get(fence_end..).ok_or_else(|| {
+                SnapshotError::invalid_state("Overview fence boundary is invalid")
+            })?;
+            continue;
+        }
         let (chunk, rest) = remaining.split_at(end);
-        chunks.push(chunk);
+        chunks.push(chunk.to_owned());
         remaining = rest;
     }
-    chunks.push(remaining);
+    if !remaining.is_empty() {
+        chunks.push(remaining.to_owned());
+    }
     Ok(chunks)
+}
+
+/// Returns the byte offset of a fence that remains open at the proposed split.
+fn open_fence_start(text: &str, end: usize) -> Option<usize> {
+    let mut offset = 0_usize;
+    let mut open: Option<(usize, &str)> = None;
+    for line in text.split_inclusive('\n') {
+        let line_start = offset;
+        offset = offset.checked_add(line.len())?;
+        if line_start >= end {
+            break;
+        }
+        if let Some((marker, rest)) = fence_marker(line) {
+            if let Some((_, open_marker)) = &open {
+                if marker.as_bytes().first() == open_marker.as_bytes().first()
+                    && marker.len() >= open_marker.len()
+                    && rest.trim().is_empty()
+                {
+                    open = None;
+                }
+            } else {
+                open = Some((line_start, marker));
+            }
+        }
+    }
+    open.map(|(start, _)| start)
+}
+
+/// Balances each part of a fenced block that is larger than one comment.
+fn split_oversized_fence(
+    text: &str,
+    capacity: usize,
+) -> Result<(Vec<String>, usize), SnapshotError> {
+    let opening_end = text
+        .find('\n')
+        .and_then(|position| position.checked_add('\n'.len_utf8()))
+        .ok_or_else(|| SnapshotError::invalid_input("Fenced overview block has no content"))?;
+    let opening = text
+        .get(..opening_end)
+        .ok_or_else(|| SnapshotError::invalid_state("Overview fence opening is invalid"))?;
+    let (opening_marker, _) = fence_marker(opening)
+        .ok_or_else(|| SnapshotError::invalid_input("Invalid overview fence"))?;
+    let indentation = opening
+        .get(..opening.len().saturating_sub(opening.trim_start().len()))
+        .ok_or_else(|| SnapshotError::invalid_state("Overview fence indentation is invalid"))?;
+    let closing = format!("{indentation}{opening_marker}");
+    let (block_close_start, closing_end) = find_fence_end(text, opening_end, opening_marker)
+        .ok_or_else(|| SnapshotError::invalid_input("Overview has an unclosed fenced block"))?;
+    let original_close = text
+        .get(block_close_start..closing_end)
+        .ok_or_else(|| SnapshotError::invalid_state("Overview fence close is invalid"))?;
+    let content = text
+        .get(opening_end..block_close_start)
+        .ok_or_else(|| SnapshotError::invalid_state("Overview fence content is invalid"))?;
+    let separator = if opening.ends_with("\r\n") {
+        "\r\n"
+    } else {
+        "\n"
+    };
+    let overhead = opening
+        .len()
+        .checked_add(closing.len())
+        .and_then(|length| length.checked_add(separator.len()))
+        .ok_or_else(|| SnapshotError::invalid_input("Overview fence metadata is too large"))?;
+    let content_capacity = capacity
+        .checked_sub(overhead)
+        .filter(|value| *value > 0)
+        .ok_or_else(|| {
+            SnapshotError::invalid_input("Overview fence cannot fit within a comment part")
+        })?;
+
+    let mut parts = Vec::new();
+    let mut remaining = content;
+    while remaining.len() > content_capacity {
+        let end = preferred_boundary(remaining, content_capacity)?;
+        let (piece, rest) = remaining.split_at(end);
+        let mut part = String::with_capacity(capacity);
+        part.push_str(opening);
+        part.push_str(piece);
+        if !piece.ends_with('\n') {
+            part.push_str(separator);
+        }
+        part.push_str(&closing);
+        part.push_str(separator);
+        parts.push(part);
+        remaining = rest;
+    }
+    let mut last = String::with_capacity(capacity);
+    last.push_str(opening);
+    last.push_str(remaining);
+    if !remaining.is_empty() && !remaining.ends_with('\n') {
+        last.push_str(separator);
+    }
+    last.push_str(original_close);
+    if last.len() > capacity {
+        return Err(SnapshotError::invalid_state(
+            "Oversized overview fence part exceeded the comment limit",
+        ));
+    }
+    parts.push(last);
+    Ok((parts, closing_end))
+}
+
+/// Finds the first closing fence with at least the opening marker's length.
+fn find_fence_end(text: &str, start: usize, opening: &str) -> Option<(usize, usize)> {
+    let mut offset = start;
+    for line in text.get(start..)?.split_inclusive('\n') {
+        let line_start = offset;
+        offset = offset.checked_add(line.len())?;
+        if let Some((marker, rest)) = fence_marker(line)
+            && marker.as_bytes().first() == opening.as_bytes().first()
+            && marker.len() >= opening.len()
+            && rest.trim().is_empty()
+        {
+            return Some((line_start, offset));
+        }
+    }
+    None
+}
+
+/// Selects a bounded UTF-8 boundary, preferring complete paragraphs or lines.
+fn preferred_boundary(text: &str, capacity: usize) -> Result<usize, SnapshotError> {
+    let mut end = capacity;
+    while !text.is_char_boundary(end) {
+        end = end
+            .checked_sub(1)
+            .ok_or_else(|| SnapshotError::invalid_state("Cannot split overview Markdown"))?;
+    }
+    let candidate = text
+        .get(..end)
+        .ok_or_else(|| SnapshotError::invalid_state("Cannot split overview Markdown"))?;
+    let paragraph_end = candidate
+        .rfind("\n\n")
+        .and_then(|position| position.checked_add("\n\n".len()));
+    let line_end = candidate
+        .rfind('\n')
+        .and_then(|position| position.checked_add('\n'.len_utf8()));
+    paragraph_end
+        .or(line_end)
+        .filter(|position| *position > 0)
+        .or(Some(end))
+        .ok_or_else(|| SnapshotError::invalid_state("Overview Markdown made no splitting progress"))
 }
 
 /// Supplies a structurally valid frozen snapshot to transaction boundary tests.
@@ -713,7 +890,7 @@ mod tests {
     use super::{
         FrozenSnapshot, InvalidInput, InvalidState, MAX_COMMENT_BYTES, SnapshotError, SnapshotIo,
         commit, frozen_snapshot_for_test, hash, hash_shape, make_report, parse_json,
-        split_comment_bodies, validate_context, validate_overview,
+        split_at_boundaries, split_comment_bodies, validate_context, validate_overview,
     };
     use crate::OverviewInput;
 
@@ -1051,6 +1228,36 @@ mod tests {
         assert_eq!(
             bodies,
             ["[Copilot speaking]\n\n# Content overview\n\nRésumé"]
+        );
+    }
+
+    #[test]
+    fn comment_boundaries_keep_fitting_fenced_blocks_whole() {
+        let report = "Before\n\n```mermaid\nA --> B\n```\n\nAfter\n";
+        let chunks = split_at_boundaries(report, 24).unwrap();
+        assert_eq!(
+            chunks,
+            ["Before\n\n", "```mermaid\nA --> B\n```\n\n", "After\n"]
+        );
+        for chunk in chunks {
+            let openings = chunk
+                .lines()
+                .filter(|line| line.trim_start().starts_with("```"))
+                .count();
+            assert_eq!(openings % 2, 0);
+        }
+    }
+
+    #[test]
+    fn oversized_fenced_blocks_are_balanced_in_each_comment_part() {
+        let report = "```text\nabcdefghij\nklmnopqrst\nuvwxyz\n```\n";
+        let chunks = split_at_boundaries(report, 24).unwrap();
+        assert!(chunks.len() > 1);
+        assert!(chunks.iter().all(|chunk| chunk.len() <= 24));
+        assert!(
+            chunks
+                .iter()
+                .all(|chunk| chunk.starts_with("```text\n") && chunk.ends_with("```\n"))
         );
     }
 }

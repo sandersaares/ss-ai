@@ -464,27 +464,42 @@ fn invalid_capture_and_inaccessible_output_do_not_write_comments() {
 }
 
 #[test]
-fn unpublished_private_paths_and_malformed_sections_never_post() {
-    for source in [
-        format!(
-            "## Mission\n{}\n",
-            std::env::current_dir().unwrap().display()
-        ),
-        "# Content overview\n\n## Mission\nContent\n".to_owned(),
-    ] {
-        let fixture = fixture();
-        let arguments = arguments(fixture.path(), false);
-        fs::write(fixture.path().join("overview 雪.md"), source).unwrap();
-        let provider = GitHub::default();
-        let result = publish(&arguments, &provider, &provider, &SystemClock::default());
-        assert_eq!(result["status"], "failed");
-        assert_eq!(result["stage"], "freeze");
-        assert_eq!(provider.comments.borrow().len(), 0);
-        assert_eq!(
-            provider.requests.borrow().as_slice(),
-            ["GET repos/owner/repo/pulls/42"]
-        );
-    }
+fn unpublished_private_paths_never_post() {
+    let fixture = fixture();
+    let arguments = arguments(fixture.path(), false);
+    let private = fixture.path().join("output 雪");
+    let source = format!("{}\n{}", overview(), private.display());
+    fs::write(fixture.path().join("overview 雪.md"), source).unwrap();
+    let provider = GitHub::default();
+    let result = publish(&arguments, &provider, &provider, &SystemClock::default());
+    assert_eq!(result["status"], "failed");
+    assert_eq!(result["stage"], "freeze");
+    assert!(result["error"].as_str().unwrap().contains("private path"));
+    assert_eq!(provider.comments.borrow().len(), 0);
+    assert_eq!(
+        provider.requests.borrow().as_slice(),
+        ["GET repos/owner/repo/pulls/42"]
+    );
+}
+
+#[test]
+fn malformed_sections_never_post() {
+    let fixture = fixture();
+    let arguments = arguments(fixture.path(), false);
+    fs::write(
+        fixture.path().join("overview 雪.md"),
+        "# Content overview\n\n## Mission\nContent\n",
+    )
+    .unwrap();
+    let provider = GitHub::default();
+    let result = publish(&arguments, &provider, &provider, &SystemClock::default());
+    assert_eq!(result["status"], "failed");
+    assert_eq!(result["stage"], "freeze");
+    assert_eq!(provider.comments.borrow().len(), 0);
+    assert_eq!(
+        provider.requests.borrow().as_slice(),
+        ["GET repos/owner/repo/pulls/42"]
+    );
 }
 
 #[test]
