@@ -73,21 +73,30 @@ impl Process for GitHub {
                 json!({"id": self.account.get(), "login": "reviewer", "type": "User"})
             }
             ("GET", "repos/example/widgets") => json!({"id": 123}),
-            ("GET", "repos/example/widgets/pulls?state=open&per_page=100") => {
+            (
+                "GET",
+                "search/issues?q=repo%3Aexample%2Fwidgets%20is%3Apr%20is%3Aopen%20reviewed-by%3Areviewer&per_page=100",
+            ) => {
                 if self.empty {
-                    json!([[]])
+                    json!([{"total_count": 0, "incomplete_results": false, "items": []}])
                 } else if self.draft_only {
-                    json!([[{"number": 5, "draft": true}]])
+                    json!([{"total_count": 1, "incomplete_results": false, "items": [
+                        {"number": 5, "draft": true}
+                    ]}])
                 } else if self.invalid_listing {
-                    json!([[{"number": 1}], "truncated page"])
+                    json!([{"items": [{"number": 1}]}, "truncated page"])
                 } else {
                     json!([
-                        [{"number": 1, "state": "open", "draft": false, "title": "excluded old"},
-                         {"number": 2, "state": "open", "draft": false, "title": "cutoff"}],
-                        [{"number": 3, "state": "open", "draft": false, "title": "excluded future"},
-                         {"number": 4, "state": "open", "draft": false, "title": "malformed"},
-                         {"number": 5, "state": "open", "draft": true, "title": "draft"},
-                         {"number": 6, "state": "open", "draft": false, "title": "paged recent"}]
+                        {"total_count": 6, "incomplete_results": false, "items": [
+                            {"number": 1, "state": "open", "draft": false, "title": "excluded old"},
+                            {"number": 2, "state": "open", "draft": false, "title": "cutoff"}
+                        ]},
+                        {"total_count": 6, "incomplete_results": false, "items": [
+                            {"number": 3, "state": "open", "draft": false, "title": "excluded future"},
+                            {"number": 4, "state": "open", "draft": false, "title": "malformed"},
+                            {"number": 5, "state": "open", "draft": true, "title": "draft"},
+                            {"number": 6, "state": "open", "draft": false, "title": "paged recent"}
+                        ]}
                     ])
                 }
             }
@@ -619,7 +628,7 @@ fn interrupted_discovery_resumes_only_pending_entries() {
             .calls
             .borrow()
             .iter()
-            .any(|call| call.contains("pulls?"))
+            .any(|call| call.contains("search/issues?"))
     );
 }
 
@@ -677,9 +686,9 @@ impl Process for BrokenEvidence {
     ) -> StdIoResult<ProcessOutput> {
         let output = self.provider.execute(program, arguments, input)?;
         let mut value: Value = serde_json::from_slice(&output.stdout).unwrap();
-        if arguments[1].contains("pulls?") {
+        if arguments[1].contains("search/issues?") {
             match self.fault {
-                Fault::EmptyTitle => value[0][0]["title"] = json!(" "),
+                Fault::EmptyTitle => value[0]["items"][0]["title"] = json!(" "),
                 Fault::RepeatedPr => value[1] = value[0].clone(),
                 _ => {}
             }
@@ -1829,10 +1838,17 @@ impl Process for GitHubApproval {
                 json!({"id": id, "login": "reviewer", "type": "User"})
             }
             "repos/example/widgets" => json!({"id": 123}),
-            "repos/example/widgets/pulls?state=open&per_page=100" => json!([[
-                {"number": 1, "state": "open", "draft": false, "title": "recent"},
-                {"number": 2, "state": "open", "draft": false, "title": "excluded old"}
-            ]]),
+            "search/issues?q=repo%3Aexample%2Fwidgets%20is%3Apr%20is%3Aopen%20reviewed-by%3Areviewer&per_page=100" =>
+            {
+                json!([{
+                    "total_count": 2,
+                    "incomplete_results": false,
+                    "items": [
+                        {"number": 1, "state": "open", "draft": false, "title": "recent"},
+                        {"number": 2, "state": "open", "draft": false, "title": "excluded old"}
+                    ]
+                }])
+            }
             "repos/example/widgets/pulls/1" => {
                 self.pr_reads.set(self.pr_reads.get() + 1);
                 let mut pr = self.evidence["pullRequest"].clone();
@@ -2325,7 +2341,7 @@ impl Process for PausedMetadata {
         arguments: &[String],
         input: &[u8],
     ) -> StdIoResult<ProcessOutput> {
-        if arguments[1].contains("pulls?") {
+        if arguments[1].contains("search/issues?") {
             self.signal.send(Signal::Enumerating).unwrap();
             self.release.recv().unwrap();
         }

@@ -661,7 +661,8 @@ impl Process for Provider {
                 json!({"id": if self.fault.get() == "auth" { 99 } else { 42 }, "login": "reviewer", "type": "User"})
             }
             "repos/example/widgets" => json!({"id": 123}),
-            "repos/example/widgets/pulls?state=open&per_page=100" => {
+            "search/issues?q=repo%3Aexample%2Fwidgets%20is%3Apr%20is%3Aopen%20reviewed-by%3Areviewer&per_page=100" =>
+            {
                 let mut candidates = self.candidates.iter().map(|number| json!({
                     "number": number, "state": "open", "draft": false, "title": "Recent source"
                 })).collect::<Vec<_>>();
@@ -669,7 +670,11 @@ impl Process for Provider {
                     "number": self.candidates.iter().max().unwrap() + 1,
                     "state": "open", "draft": false, "title": "Excluded old"
                 }));
-                json!([candidates])
+                json!([{
+                    "total_count": candidates.len(),
+                    "incomplete_results": false,
+                    "items": candidates
+                }])
             }
             "repos/example/widgets/pulls/1" => {
                 self.target_reads.set(self.target_reads.get() + 1);

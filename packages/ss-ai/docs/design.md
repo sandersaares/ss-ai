@@ -28,9 +28,11 @@ incompatible record format.
 
 ## Reapproval discovery
 
-Discovery ignores draft PRs and narrows the supplied repository's other open
-PRs using the shared commit-recency rule before reading approval history,
-discussions, or Git content. It does not reuse the proactor's exclusion of already-reviewed PRs.
+Discovery limits the supplied repository to open PRs with review history from the
+authenticated account, ignores drafts, and narrows that set using the shared
+commit-recency rule before reading approval authority, discussions, or Git content.
+PRs without any review by that account do not enter the run. A review without an
+approval remains eligible for inspection and receives its corresponding decision.
 Old PRs require no per-PR agent work; output exposes aggregate exclusion counts
 and bounded pages of recent candidates or explicit failures.
 

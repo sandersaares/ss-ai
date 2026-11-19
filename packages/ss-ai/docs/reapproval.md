@@ -50,9 +50,14 @@ Approval snapshots require complete policy evidence.
 
 ## Evidence and publication
 
-Discovery applies the shared inclusive 14-day UTC committer-time rule before
-history, discussion, or Git content work. It reads complete pages and reports
-excluded PRs as counts. The window limits candidates, not approval history.
+Discovery first limits open PRs to those with review history from the
+authenticated account. GitHub uses its `reviewed-by` search qualifier; Azure
+DevOps uses its reviewer filter. PRs without any account-owned review do not
+enter the inventory. Discovery then applies the shared inclusive 14-day UTC
+committer-time rule before history, discussion, or Git content work. It reads
+complete pages and reports excluded PRs as counts. The window limits candidates,
+not approval history. Reviewed PRs without a usable approval remain available
+for the corresponding inspection decision.
 
 Isolated Git-object access supplies exact paths, modes and content without executing
 reviewed code. Typed, snapshot-bound judgments cover every change and the cumulative

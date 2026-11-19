@@ -374,6 +374,86 @@ impl Api<'_> {
         }
         Ok(result)
     }
+
+    /// Enumerates open PRs with an account-owned review history for reapproval.
+    pub(crate) fn reviewed_pull_requests(
+        &mut self,
+        repository: &Target,
+        identity: &Identity,
+    ) -> Result<Vec<(NonZeroU32, Value)>, AppError> {
+        let mut result = Vec::new();
+        let mut seen = HashSet::new();
+        match repository.platform {
+            Platform::GitHub => {
+                let login = identity
+                    .unique_name
+                    .as_deref()
+                    .ok_or_else(|| fail("authentication", "GitHub account has no login"))?;
+                let query = format!(
+                    "repo:{}/{} is:pr is:open reviewed-by:{}",
+                    repository.organization, repository.repository, login
+                );
+                for pr in self
+                    .transport
+                    .search_issues(&format!("search/issues?q={}", escape(&query)))?
+                {
+                    let id = pr_id(field(&pr, "number")?)?;
+                    if !seen.insert(id) {
+                        return Err(fail(
+                            "service",
+                            "GitHub repeated a reviewed pull request while paging",
+                        ));
+                    }
+                    result.push((id, pr));
+                }
+            }
+            Platform::AzureDevOps => {
+                let account_id = identity
+                    .id
+                    .as_deref()
+                    .ok_or_else(|| fail("authentication", "ADO account has no stable ID"))?;
+                let mut skip = 0_usize;
+                loop {
+                    let page = self.transport.ado(
+                        &format!("{}/pullRequests", repository.repository_api()),
+                        "GET",
+                        None,
+                        &[
+                            ("searchCriteria.status", "active".to_owned()),
+                            ("searchCriteria.reviewerId", account_id.to_owned()),
+                            ("$top", "100".to_owned()),
+                            ("$skip", skip.to_string()),
+                        ],
+                        "7.1",
+                    )?;
+                    if page.continuation.is_some() {
+                        return Err(fail(
+                            "service",
+                            "Unexpected continuation in offset reviewed PR listing",
+                        ));
+                    }
+                    let values = ado_items(&page.payload)?;
+                    if values.is_empty() {
+                        break;
+                    }
+                    skip = skip
+                        .checked_add(values.len())
+                        .ok_or_else(|| fail("service", "Reviewed PR offset overflow"))?;
+                    for pr in values {
+                        let id = pr_id(field(&pr, "pullRequestId")?)?;
+                        if !seen.insert(id) {
+                            return Err(fail(
+                                "service",
+                                "Azure DevOps repeated a reviewed pull request while paging",
+                            ));
+                        }
+                        result.push((id, pr));
+                    }
+                }
+            }
+        }
+        Ok(result)
+    }
 }
 
 impl Provider for Api<'_> {

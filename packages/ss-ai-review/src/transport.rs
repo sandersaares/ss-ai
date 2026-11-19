@@ -16,7 +16,7 @@ use reqwest::redirect::Policy;
 use serde_json::{Value, json};
 
 use crate::error::fail;
-use crate::json::{array, field};
+use crate::json::{array, boolean, field};
 use crate::target::{Platform, Target, escape};
 use crate::tracker_target::TrackerTarget;
 use crate::{Clock, Process};
@@ -463,6 +463,52 @@ impl<'a> Transport<'a> {
             }
             Platform::AzureDevOps => ado_items(&self.request(path, "GET", None)?),
         }
+    }
+
+    /// Reads every page of a GitHub issue-search response as one checked list.
+    pub(crate) fn search_issues(&mut self, path: &str) -> Result<Vec<Value>, AppError> {
+        if self.platform != Platform::GitHub {
+            return Err(fail(
+                "invalidInput",
+                "GitHub issue search is unavailable for this provider",
+            ));
+        }
+        let separator = if path.contains('?') { '&' } else { '?' };
+        let pages = self.github(
+            &format!("{path}{separator}per_page=100"),
+            "GET",
+            None,
+            true,
+            RequestPolicy::Standard,
+        )?;
+        let pages = array(&pages)?;
+        if pages.is_empty() {
+            return Err(fail("service", "GitHub search has no response pages"));
+        }
+
+        let mut result = Vec::new();
+        let mut expected_total = None;
+        for page in pages {
+            if boolean(field(page, "incomplete_results")?)? {
+                return Err(fail("service", "GitHub returned incomplete search results"));
+            }
+            let total = field(page, "total_count")?
+                .as_u64()
+                .and_then(|total| usize::try_from(total).ok())
+                .ok_or_else(|| fail("service", "Invalid GitHub search total count"))?;
+            if expected_total.is_some_and(|expected| expected != total) {
+                return Err(fail("service", "GitHub search total changed while paging"));
+            }
+            expected_total = Some(total);
+            result.extend_from_slice(array(field(page, "items")?)?);
+        }
+        if expected_total != Some(result.len()) {
+            return Err(fail(
+                "service",
+                "GitHub search did not return the complete result set",
+            ));
+        }
+        Ok(result)
     }
 
     /// Reads every Azure DevOps list page and rejects continuation cycles.
