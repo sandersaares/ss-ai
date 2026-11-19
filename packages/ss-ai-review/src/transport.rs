@@ -471,7 +471,7 @@ impl<'a> Transport<'a> {
     }
 
     /// Reads a GitHub issue search's total without paging through its capped results.
-    fn search_issue_total(&mut self, query: &str) -> Result<usize, AppError> {
+    fn search_issue_total(&self, query: &str) -> Result<usize, AppError> {
         if self.platform != Platform::GitHub {
             return Err(fail(
                 "invalidInput",
@@ -496,7 +496,7 @@ impl<'a> Transport<'a> {
 
     /// Reads a complete GitHub issue search below the service's result cap.
     fn search_issue_page_set(
-        &mut self,
+        &self,
         query: &str,
         expected_total: usize,
     ) -> Result<Vec<Value>, AppError> {
