@@ -8,6 +8,8 @@ use std::collections::{BTreeMap, HashSet};
 use std::sync::LazyLock;
 use std::time::Duration;
 
+use jiff::ToSpan;
+use jiff::civil::Date;
 use ohno::AppError;
 use regex::Regex;
 use reqwest::Method;
@@ -16,10 +18,13 @@ use reqwest::redirect::Policy;
 use serde_json::{Value, json};
 
 use crate::error::fail;
-use crate::json::{array, field};
+use crate::json::{array, boolean, field};
 use crate::target::{Platform, Target, escape};
 use crate::tracker_target::TrackerTarget;
 use crate::{Clock, Process};
+
+/// GitHub Search exposes only this many results for one query.
+const GITHUB_SEARCH_RESULT_LIMIT: usize = 1000;
 
 /// Provides an injectable HTTP boundary for Azure DevOps.
 ///
@@ -463,6 +468,130 @@ impl<'a> Transport<'a> {
             }
             Platform::AzureDevOps => ado_items(&self.request(path, "GET", None)?),
         }
+    }
+
+    /// Reads a GitHub issue search's total without paging through its capped results.
+    fn search_issue_total(&self, query: &str) -> Result<usize, AppError> {
+        if self.platform != Platform::GitHub {
+            return Err(fail(
+                "invalidInput",
+                "GitHub issue search is unavailable for this provider",
+            ));
+        }
+        let page = self.github(
+            &format!("search/issues?q={}&per_page=1", escape(query)),
+            "GET",
+            None,
+            false,
+            RequestPolicy::Standard,
+        )?;
+        if boolean(field(&page, "incomplete_results")?)? {
+            return Err(fail("service", "GitHub returned incomplete search results"));
+        }
+        field(&page, "total_count")?
+            .as_u64()
+            .and_then(|total| usize::try_from(total).ok())
+            .ok_or_else(|| fail("service", "Invalid GitHub search total count"))
+    }
+
+    /// Reads a complete GitHub issue search below the service's result cap.
+    fn search_issue_page_set(
+        &self,
+        query: &str,
+        expected_total: usize,
+    ) -> Result<Vec<Value>, AppError> {
+        let pages = self.github(
+            &format!("search/issues?q={}&per_page=100", escape(query)),
+            "GET",
+            None,
+            true,
+            RequestPolicy::Standard,
+        )?;
+        let pages = array(&pages)?;
+        if pages.is_empty() {
+            return Err(fail("service", "GitHub search has no response pages"));
+        }
+
+        let mut result = Vec::new();
+        let mut observed_total = None;
+        for page in pages {
+            if boolean(field(page, "incomplete_results")?)? {
+                return Err(fail("service", "GitHub returned incomplete search results"));
+            }
+            let total = field(page, "total_count")?
+                .as_u64()
+                .and_then(|total| usize::try_from(total).ok())
+                .ok_or_else(|| fail("service", "Invalid GitHub search total count"))?;
+            if observed_total.is_some_and(|expected| expected != total) {
+                return Err(fail("service", "GitHub search total changed while paging"));
+            }
+            observed_total = Some(total);
+            result.extend_from_slice(array(field(page, "items")?)?);
+        }
+        let total = observed_total.expect("At least one GitHub search page is required");
+        if total != expected_total {
+            return Err(fail(
+                "service",
+                "GitHub search total changed before pagination",
+            ));
+        }
+        if result.len() != total {
+            return Err(fail(
+                "service",
+                "GitHub search did not return the complete result set",
+            ));
+        }
+        Ok(result)
+    }
+
+    /// Partitions a GitHub issue search into complete disjoint date ranges.
+    fn search_issue_range(
+        &mut self,
+        query: &str,
+        start: Date,
+        end: Date,
+        result: &mut Vec<Value>,
+    ) -> Result<(), AppError> {
+        let range = format!("{query} created:{start}..{end}");
+        let total = self.search_issue_total(&range)?;
+        if total <= GITHUB_SEARCH_RESULT_LIMIT {
+            result.extend(self.search_issue_page_set(&range, total)?);
+            return Ok(());
+        }
+        if start == end {
+            return Err(fail(
+                "service",
+                "GitHub search has more than 1000 results on one creation date",
+            ));
+        }
+
+        let days = end.since(start)?.get_days().div_euclid(2).max(0);
+        let middle = start.checked_add(i64::from(days).days())?;
+        let after = middle.tomorrow()?;
+        self.search_issue_range(query, start, middle, result)?;
+        self.search_issue_range(query, after, end, result)
+    }
+
+    /// Reads every page of a GitHub issue search, partitioning the result cap.
+    pub(crate) fn search_issues(&mut self, query: &str) -> Result<Vec<Value>, AppError> {
+        let total = self.search_issue_total(query)?;
+        if total <= GITHUB_SEARCH_RESULT_LIMIT {
+            return self.search_issue_page_set(query, total);
+        }
+
+        let mut result = Vec::new();
+        // GitHub did not exist before this lower bound, so the first range covers
+        // every possible pull request while remaining independent of repository age.
+        let start: Date = "1970-01-01".parse()?;
+        let end: Date = self.clock.now().strftime("%Y-%m-%d").to_string().parse()?;
+        self.search_issue_range(query, start, end, &mut result)?;
+        if result.len() != total {
+            return Err(fail(
+                "service",
+                "Partitioned GitHub search did not return the complete result set",
+            ));
+        }
+        Ok(result)
     }
 
     /// Reads every Azure DevOps list page and rejects continuation cycles.

@@ -661,7 +661,16 @@ impl Process for Provider {
                 json!({"id": if self.fault.get() == "auth" { 99 } else { 42 }, "login": "reviewer", "type": "User"})
             }
             "repos/example/widgets" => json!({"id": 123}),
-            "repos/example/widgets/pulls?state=open&per_page=100" => {
+            "search/issues?q=repo%3Aexample%2Fwidgets%20is%3Apr%20is%3Aopen%20reviewed-by%3Areviewer%20-author%3Areviewer&per_page=1" =>
+            {
+                json!({
+                    "total_count": self.candidates.len() + 1,
+                    "incomplete_results": false,
+                    "items": []
+                })
+            }
+            "search/issues?q=repo%3Aexample%2Fwidgets%20is%3Apr%20is%3Aopen%20reviewed-by%3Areviewer%20-author%3Areviewer&per_page=100" =>
+            {
                 let mut candidates = self.candidates.iter().map(|number| json!({
                     "number": number, "state": "open", "draft": false, "title": "Recent source"
                 })).collect::<Vec<_>>();
@@ -669,7 +678,11 @@ impl Process for Provider {
                     "number": self.candidates.iter().max().unwrap() + 1,
                     "state": "open", "draft": false, "title": "Excluded old"
                 }));
-                json!([candidates])
+                json!([{
+                    "total_count": candidates.len(),
+                    "incomplete_results": false,
+                    "items": candidates
+                }])
             }
             "repos/example/widgets/pulls/1" => {
                 self.target_reads.set(self.target_reads.get() + 1);
@@ -915,8 +928,8 @@ impl Http for Provider {
         } else if path.ends_with("/pullRequests") {
             if query.get("$skip").unwrap() == "0" {
                 values(
-                    &json!([{"pullRequestId": 1, "status": "active", "isDraft": false, "title": "Recent"},
-                    {"pullRequestId": 2, "status": "active", "isDraft": false, "title": "Old"}]),
+                    &json!([{"pullRequestId": 1, "status": "active", "isDraft": false, "title": "Recent", "createdBy": {"id": "author"}, "reviewers": [{"id": "10000000-0000-4000-8000-000000000001", "vote": 10}]},
+                    {"pullRequestId": 2, "status": "active", "isDraft": false, "title": "Old", "createdBy": {"id": "author"}, "reviewers": [{"id": "10000000-0000-4000-8000-000000000001", "vote": 10}]}]),
                 )
             } else {
                 values(&json!([]))

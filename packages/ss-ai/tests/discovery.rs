@@ -73,21 +73,38 @@ impl Process for GitHub {
                 json!({"id": self.account.get(), "login": "reviewer", "type": "User"})
             }
             ("GET", "repos/example/widgets") => json!({"id": 123}),
-            ("GET", "repos/example/widgets/pulls?state=open&per_page=100") => {
+            (
+                "GET",
+                "search/issues?q=repo%3Aexample%2Fwidgets%20is%3Apr%20is%3Aopen%20reviewed-by%3Areviewer%20-author%3Areviewer&per_page=1",
+            ) => json!({
+                "total_count": if self.empty { 0 } else if self.draft_only { 1 } else { 6 },
+                "incomplete_results": false,
+                "items": []
+            }),
+            (
+                "GET",
+                "search/issues?q=repo%3Aexample%2Fwidgets%20is%3Apr%20is%3Aopen%20reviewed-by%3Areviewer%20-author%3Areviewer&per_page=100",
+            ) => {
                 if self.empty {
-                    json!([[]])
+                    json!([{"total_count": 0, "incomplete_results": false, "items": []}])
                 } else if self.draft_only {
-                    json!([[{"number": 5, "draft": true}]])
+                    json!([{"total_count": 1, "incomplete_results": false, "items": [
+                        {"number": 5, "draft": true}
+                    ]}])
                 } else if self.invalid_listing {
-                    json!([[{"number": 1}], "truncated page"])
+                    json!([{"items": [{"number": 1}]}, "truncated page"])
                 } else {
                     json!([
-                        [{"number": 1, "state": "open", "draft": false, "title": "excluded old"},
-                         {"number": 2, "state": "open", "draft": false, "title": "cutoff"}],
-                        [{"number": 3, "state": "open", "draft": false, "title": "excluded future"},
-                         {"number": 4, "state": "open", "draft": false, "title": "malformed"},
-                         {"number": 5, "state": "open", "draft": true, "title": "draft"},
-                         {"number": 6, "state": "open", "draft": false, "title": "paged recent"}]
+                        {"total_count": 6, "incomplete_results": false, "items": [
+                            {"number": 1, "state": "open", "draft": false, "title": "excluded old"},
+                            {"number": 2, "state": "open", "draft": false, "title": "cutoff"}
+                        ]},
+                        {"total_count": 6, "incomplete_results": false, "items": [
+                            {"number": 3, "state": "open", "draft": false, "title": "excluded future"},
+                            {"number": 4, "state": "open", "draft": false, "title": "malformed"},
+                            {"number": 5, "state": "open", "draft": true, "title": "draft"},
+                            {"number": 6, "state": "open", "draft": false, "title": "paged recent"}
+                        ]}
                     ])
                 }
             }
@@ -619,7 +636,7 @@ fn interrupted_discovery_resumes_only_pending_entries() {
             .calls
             .borrow()
             .iter()
-            .any(|call| call.contains("pulls?"))
+            .any(|call| call.contains("search/issues?"))
     );
 }
 
@@ -677,10 +694,10 @@ impl Process for BrokenEvidence {
     ) -> StdIoResult<ProcessOutput> {
         let output = self.provider.execute(program, arguments, input)?;
         let mut value: Value = serde_json::from_slice(&output.stdout).unwrap();
-        if arguments[1].contains("pulls?") {
+        if arguments[1].contains("search/issues?") && arguments[1].ends_with("per_page=100") {
             match self.fault {
-                Fault::EmptyTitle => value[0][0]["title"] = json!(" "),
-                Fault::RepeatedPr => value[1] = value[0].clone(),
+                Fault::EmptyTitle => value[0]["items"][0]["title"] = json!(" "),
+                Fault::RepeatedPr => value[1]["items"][0] = value[0]["items"][0].clone(),
                 _ => {}
             }
         } else if arguments[1] == "graphql" {
@@ -804,21 +821,80 @@ impl Http for AzureMetadata {
         } else if url.path().ends_with("/pullRequests") {
             let entries = if query.get("$skip").unwrap() == "0" {
                 vec![
-                    json!({"pullRequestId": 2, "status": "active", "isDraft": false, "title": "cutoff"}),
+                    json!({"pullRequestId": 2, "status": "active", "isDraft": false, "title": "cutoff", "createdBy": {"id": "author"}, "reviewers": [{"id": "account", "vote": 10}]}),
                     json!({"pullRequestId": 3, "isDraft": true}),
+                    json!({"pullRequestId": 4, "status": "active", "isDraft": false, "title": "self-authored", "createdBy": {"id": "ACCOUNT"}, "reviewers": [{"id": "account", "vote": 10}]}),
+                    json!({"pullRequestId": 5, "status": "active", "isDraft": false, "title": "assigned only", "createdBy": {"id": "author"}, "reviewers": [{"id": "account", "vote": 0}]}),
+                    json!({"pullRequestId": 6, "status": "active", "isDraft": false, "title": "reset approval", "createdBy": {"id": "author"}, "reviewers": [{"id": "account", "vote": 0}]}),
+                    json!({"pullRequestId": 7, "status": "active", "isDraft": false, "title": "deleted discussion", "createdBy": {"id": "author"}, "reviewers": [{"id": "account", "vote": 0}]}),
+                    json!({"pullRequestId": 8, "status": "active", "isDraft": false, "title": "system activity", "createdBy": {"id": "author"}, "reviewers": [{"id": "account", "vote": 0}]}),
+                    json!({"pullRequestId": 9, "status": "active", "isDraft": false, "title": "decline history", "createdBy": {"id": "author"}, "reviewers": [{"id": "account", "vote": 0}]}),
                 ]
             } else {
                 Vec::new()
             };
             json!({"count": entries.len(), "value": entries})
-        } else if url.path().ends_with("/pullRequests/2/commits") {
-            let date = if query.contains_key("continuationToken") {
+        } else if url.path().ends_with("/pullRequests/2/commits")
+            || url.path().ends_with("/pullRequests/6/commits")
+            || url.path().ends_with("/pullRequests/9/commits")
+        {
+            let reset = url.path().ends_with("/6/commits") || url.path().ends_with("/9/commits");
+            let date = if reset {
+                "2026-01-01T00:00:00Z"
+            } else if query.contains_key("continuationToken") {
                 "2026-10-01T00:00:00Z"
             } else {
                 headers.insert("x-ms-continuationtoken".to_owned(), "next".to_owned());
                 "2026-09-14T10:00:00Z"
             };
             json!({"count": 1, "value": [{"committer": {"date": date}}]})
+        } else if url.path().ends_with("/pullRequests/5/threads") {
+            json!({"count": 0, "value": []})
+        } else if url.path().ends_with("/pullRequests/6/threads") {
+            json!({"count": 1, "value": [{
+                "id": 6,
+                "comments": [{"id": 1, "commentType": "system"}],
+                "properties": {
+                    "CodeReviewThreadType": {"$type": "System.String", "$value": "VoteUpdate"},
+                    "CodeReviewVotedByIdentity": {"$type": "System.String", "$value": "1"},
+                    "CodeReviewVotedByInitiatorIdentity": {"$type": "System.String", "$value": "1"}
+                },
+                "identities": {"1": {"id": "account"}},
+                "publishedDate": "2026-01-01T00:00:00Z"
+            }]})
+        } else if url.path().ends_with("/pullRequests/7/threads") {
+            json!({"count": 1, "value": [{
+                "id": 7,
+                "isDeleted": true,
+                "comments": [{
+                    "id": 1,
+                    "commentType": "text",
+                    "author": {"id": "account"}
+                }]
+            }]})
+        } else if url.path().ends_with("/pullRequests/8/threads") {
+            json!({"count": 1, "value": [{
+                "id": 8,
+                "comments": [{
+                    "id": 1,
+                    "commentType": "system",
+                    "author": {"id": "account"}
+                }],
+                "publishedDate": "2026-01-01T00:00:00Z"
+            }]})
+        } else if url.path().ends_with("/pullRequests/9/threads") {
+            json!({"count": 1, "value": [{
+                "id": 9,
+                "comments": [{"id": 1, "commentType": "system"}],
+                "properties": {
+                    "CodeReviewThreadType": {"$type": "System.String", "$value": "ReviewersUpdate"},
+                    "CodeReviewReviewersUpdatedNumDeclined": {"$type": "System.Int32", "$value": 1},
+                    "CodeReviewReviewersUpdatedChangedIdentity": {"$type": "System.String", "$value": "1"},
+                    "CodeReviewReviewersUpdatedChangedDecline": {"$type": "System.String", "$value": "False"}
+                },
+                "identities": {"1": {"id": "account"}},
+                "publishedDate": "2026-01-01T00:00:00Z"
+            }]})
         } else {
             panic!("Unexpected Azure history, content or write endpoint: {url}")
         };
@@ -831,7 +907,7 @@ impl Http for AzureMetadata {
 }
 
 #[test]
-fn azure_metadata_and_commit_pages_preserve_tenant_and_do_not_collect_vote_history() {
+fn azure_metadata_and_commit_pages_filter_review_activity_before_vote_history() {
     let root = fixture();
     let mut args = arguments(
         root.path(),
@@ -847,20 +923,36 @@ fn azure_metadata_and_commit_pages_preserve_tenant_and_do_not_collect_vote_histo
     assert_eq!(summary["counts"]["assessmentRequired"], 1);
     assert_eq!(summary["counts"]["failed"], 0);
     let calls = provider.calls.borrow();
-    assert_eq!(calls.len(), 6);
+    assert_eq!(calls.len(), 13);
     assert!(
         calls
             .iter()
             .any(|call| call.contains("continuationToken=next"))
     );
-    assert!(calls.iter().any(|call| call.contains("%24skip=2")));
-    assert_eq!(summary["counts"]["open"], 1);
+    assert!(calls.iter().any(|call| call.contains("%24skip=8")));
+    assert_eq!(summary["counts"]["open"], 3);
     assert!(summary["counts"].get("draft").is_none());
     assert_eq!(
         record(root.path())["inventory"].as_array().unwrap().len(),
-        1
+        3
     );
     assert!(!calls.iter().any(|call| call.contains("/pullRequests/3/")));
+    assert!(!calls.iter().any(|call| call.contains("/pullRequests/4/")));
+    assert!(
+        !calls
+            .iter()
+            .any(|call| call.contains("/pullRequests/5/commits"))
+    );
+    assert!(
+        !calls
+            .iter()
+            .any(|call| call.contains("/pullRequests/7/commits"))
+    );
+    assert!(
+        !calls
+            .iter()
+            .any(|call| call.contains("/pullRequests/8/commits"))
+    );
 }
 
 /// Real captured provider shapes with injected transport, never live approvals.
@@ -945,8 +1037,8 @@ impl Http for AzureApproval {
         } else if url.path().ends_with("/pullRequests") {
             if query.get("$skip").unwrap() == "0" {
                 values(&json!([
-                    {"pullRequestId": 1, "status": "active", "isDraft": false, "title": "recent"},
-                    {"pullRequestId": 2, "status": "active", "isDraft": false, "title": "excluded old"}
+                    {"pullRequestId": 1, "status": "active", "isDraft": false, "title": "recent", "createdBy": {"id": "author"}, "reviewers": [{"id": "10000000-0000-4000-8000-000000000001", "vote": 10}]},
+                    {"pullRequestId": 2, "status": "active", "isDraft": false, "title": "excluded old", "createdBy": {"id": "author"}, "reviewers": [{"id": "10000000-0000-4000-8000-000000000001", "vote": 10}]}
                 ]))
             } else {
                 values(&json!([]))
@@ -1829,10 +1921,25 @@ impl Process for GitHubApproval {
                 json!({"id": id, "login": "reviewer", "type": "User"})
             }
             "repos/example/widgets" => json!({"id": 123}),
-            "repos/example/widgets/pulls?state=open&per_page=100" => json!([[
-                {"number": 1, "state": "open", "draft": false, "title": "recent"},
-                {"number": 2, "state": "open", "draft": false, "title": "excluded old"}
-            ]]),
+            "search/issues?q=repo%3Aexample%2Fwidgets%20is%3Apr%20is%3Aopen%20reviewed-by%3Areviewer%20-author%3Areviewer&per_page=1" =>
+            {
+                json!({
+                    "total_count": 2,
+                    "incomplete_results": false,
+                    "items": []
+                })
+            }
+            "search/issues?q=repo%3Aexample%2Fwidgets%20is%3Apr%20is%3Aopen%20reviewed-by%3Areviewer%20-author%3Areviewer&per_page=100" =>
+            {
+                json!([{
+                    "total_count": 2,
+                    "incomplete_results": false,
+                    "items": [
+                        {"number": 1, "state": "open", "draft": false, "title": "recent"},
+                        {"number": 2, "state": "open", "draft": false, "title": "excluded old"}
+                    ]
+                }])
+            }
             "repos/example/widgets/pulls/1" => {
                 self.pr_reads.set(self.pr_reads.get() + 1);
                 let mut pr = self.evidence["pullRequest"].clone();
@@ -2325,7 +2432,7 @@ impl Process for PausedMetadata {
         arguments: &[String],
         input: &[u8],
     ) -> StdIoResult<ProcessOutput> {
-        if arguments[1].contains("pulls?") {
+        if arguments[1].contains("search/issues?") && arguments[1].ends_with("per_page=1") {
             self.signal.send(Signal::Enumerating).unwrap();
             self.release.recv().unwrap();
         }
