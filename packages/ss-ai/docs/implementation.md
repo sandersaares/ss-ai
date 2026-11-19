@@ -41,9 +41,8 @@ so normalization does not change the stored schema or approval authority.
 Report commands take the active skill root explicitly, keeping the locked
 dependencies and template tied to the skill that invokes them.
 Initial overview publication keeps provider effects and the publication journal
-in `ss-ai-review`. The command composition supplies local report rendering from
-`ss-ai-review-workflow`, so provider transactions do not depend on presentation
-tools and the package dependencies remain one-way.
+in `ss-ai-review`. The command posts bounded Markdown comment bodies directly,
+so provider transactions do not depend on report rendering or attachment tools.
 Audit and projection operations share the captured-evidence serializer and
 exact Git comparison with other review commands. Final review publication
 combines these local operations with provider effects and a retained journal

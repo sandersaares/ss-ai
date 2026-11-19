@@ -83,7 +83,6 @@ impl fmt::Debug for ValidatedContext<'_> {
 /// come from a snapshot validated before any publication intent is journaled.
 pub(crate) struct FrozenSnapshot {
     record: Map<String, Value>,
-    run_id: String,
     markdown_path: String,
     markdown_hash: String,
     source_commit: String,
@@ -95,11 +94,6 @@ impl FrozenSnapshot {
     /// Returns the unchanged JSON record used by the publication journal.
     pub(crate) fn record(&self) -> Value {
         Value::Object(self.record.clone())
-    }
-
-    /// Returns the frozen report's run identity.
-    pub(crate) fn run_id(&self) -> &str {
-        &self.run_id
     }
 
     /// Returns the path of the immutable Markdown bytes.
@@ -133,12 +127,11 @@ impl FrozenSnapshot {
         let Value::Object(record) = record else {
             return Err(invalid());
         };
-        let run_id = record
+        record
             .get("runId")
             .and_then(Value::as_str)
             .filter(|value| value.len() == 32 && value.bytes().all(|byte| byte.is_ascii_hexdigit()))
-            .ok_or_else(invalid)?
-            .to_owned();
+            .ok_or_else(invalid)?;
         let markdown_path = record
             .get("markdownPath")
             .and_then(Value::as_str)
@@ -171,7 +164,6 @@ impl FrozenSnapshot {
             .to_owned();
         Ok(Self {
             record,
-            run_id,
             markdown_path,
             markdown_hash,
             source_commit,
@@ -181,83 +173,321 @@ impl FrozenSnapshot {
     }
 }
 
-/// Carries a frozen snapshot only after the ADO HTML and archive are prepared.
-pub(crate) struct PreparedAdoSnapshot {
-    frozen: FrozenSnapshot,
-    html_path: String,
-    html_hash: String,
-    archive_path: String,
-    archive_hash: String,
+// A conservative common UTF-8 ceiling keeps every GitHub and ADO body within 64 KiB.
+const MAX_COMMENT_BYTES: usize = 64 * 1024;
+
+/// Reserves enough bytes for the largest part label that a `usize` counter can produce.
+const MAX_PART_LABEL_BYTES: usize =
+    "**Pull request overview (auto-generated, part 18446744073709551615 of 18446744073709551615).**\n\n"
+        .len();
+
+/// Tells pull request participants where not to direct a reply.
+const PR_COMMENT_SUFFIX: &str =
+    "ℹ️ Replies are not monitored. To discuss the finding, reach out via Teams.";
+
+/// Builds exact, attributed inline comments from the frozen Markdown report.
+pub(crate) fn comment_bodies(
+    snapshot: &FrozenSnapshot,
+    prefix: &str,
+    clock: &dyn Clock,
+) -> Result<Vec<String>, SnapshotError> {
+    let bytes = required_bytes(Path::new(snapshot.markdown_path()), clock)?;
+    let actual_hash = hash(&bytes);
+    if actual_hash != snapshot.markdown_hash() {
+        return Err(SnapshotError::invalid_state(
+            "Frozen overview Markdown was modified",
+        ));
+    }
+    let report = str::from_utf8(&bytes).map_err(|error| {
+        SnapshotError::invalid_state_caused_by("Frozen overview is not UTF-8", error)
+    })?;
+    split_comment_bodies(report, prefix)
 }
 
-impl PreparedAdoSnapshot {
-    /// Adds the renderer's complete artifact identity to the interoperable record.
-    pub(crate) fn from_render(
-        frozen: FrozenSnapshot,
-        html_path: String,
-        html_hash: String,
-        archive_path: String,
-        archive_hash: String,
-    ) -> Result<Self, SnapshotError> {
-        let invalid = || SnapshotError::invalid_state("Invalid prepared overview artifacts");
-        if html_path.is_empty()
-            || archive_path.is_empty()
-            || !hash_shape(&html_hash)
-            || !hash_shape(&archive_hash)
-        {
-            return Err(invalid());
-        }
-        Ok(Self {
-            frozen,
-            html_path,
-            html_hash,
-            archive_path,
-            archive_hash,
+/// Adds the required attribution and splits Markdown only at UTF-8 boundaries.
+fn split_comment_bodies(report: &str, prefix: &str) -> Result<Vec<String>, SnapshotError> {
+    let attribution = if prefix.is_empty() {
+        "[Copilot speaking]".to_owned()
+    } else if prefix.starts_with("[Copilot speaking]") {
+        prefix.to_owned()
+    } else {
+        format!("[Copilot speaking]\n\n{prefix}")
+    };
+    let report = report
+        .strip_prefix("[Copilot speaking]\n\n")
+        .unwrap_or(report);
+    let single = format!("{attribution}\n\n{report}\n\n{PR_COMMENT_SUFFIX}");
+    if single.len() <= MAX_COMMENT_BYTES {
+        return Ok(vec![single]);
+    }
+
+    let overhead = attribution
+        .len()
+        .checked_add("\n\n".len())
+        .and_then(|length| length.checked_add(MAX_PART_LABEL_BYTES))
+        .and_then(|length| length.checked_add("\n\n".len()))
+        .and_then(|length| length.checked_add(PR_COMMENT_SUFFIX.len()))
+        .ok_or_else(|| SnapshotError::invalid_input("Overview attribution is too large"))?;
+    let capacity = MAX_COMMENT_BYTES
+        .checked_sub(overhead)
+        .filter(|capacity| *capacity > 0)
+        .ok_or_else(|| {
+            SnapshotError::invalid_input("Overview attribution leaves no comment content space")
+        })?;
+    let chunks = split_at_boundaries(report, capacity)?;
+    let count = chunks.len();
+    chunks
+        .into_iter()
+        .enumerate()
+        .map(|(index, chunk)| {
+            let part = index.checked_add(1).ok_or_else(|| {
+                SnapshotError::invalid_state("Overview has too many comment parts")
+            })?;
+            let label =
+                format!("**Pull request overview (auto-generated, part {part} of {count}).**\n\n");
+            let body = format!("{attribution}\n\n{label}{chunk}\n\n{PR_COMMENT_SUFFIX}");
+            if body.len() > MAX_COMMENT_BYTES {
+                return Err(SnapshotError::invalid_state(
+                    "Overview comment chunk exceeded the provider limit",
+                ));
+            }
+            Ok(body)
         })
-    }
-
-    /// Returns the frozen Markdown snapshot used by GitHub-side checks.
-    pub(crate) fn frozen(&self) -> &FrozenSnapshot {
-        &self.frozen
-    }
-
-    /// Returns the unchanged journal record plus ADO artifact identity.
-    pub(crate) fn record(&self) -> Value {
-        let mut record = self.frozen.record.clone();
-        record.insert("htmlPath".into(), json!(&self.html_path));
-        record.insert("htmlHash".into(), json!(&self.html_hash));
-        record.insert("archivePath".into(), json!(&self.archive_path));
-        record.insert("archiveHash".into(), json!(&self.archive_hash));
-        Value::Object(record)
-    }
-
-    /// Returns the prepared archive path.
-    pub(crate) fn archive_path(&self) -> &str {
-        &self.archive_path
-    }
-
-    /// Returns the prepared archive digest.
-    pub(crate) fn archive_hash(&self) -> &str {
-        &self.archive_hash
-    }
+        .collect()
 }
 
-/// Distinguishes provider-ready snapshots while retaining one journal record shape.
-pub(crate) enum PreparedSnapshot {
-    /// A frozen Markdown report is sufficient for GitHub publication.
-    GitHub(FrozenSnapshot),
-    /// Azure DevOps requires both rendered HTML and its prepared archive.
-    AzureDevOps(PreparedAdoSnapshot),
+/// Preserves Markdown fences while preferring paragraph and line boundaries.
+fn split_at_boundaries(mut remaining: &str, capacity: usize) -> Result<Vec<String>, SnapshotError> {
+    let mut chunks = Vec::new();
+    while remaining.len() > capacity {
+        let mut end = capacity;
+        while !remaining.is_char_boundary(end) {
+            // `capacity` is positive and a smaller boundary always exists at zero.
+            end = end
+                .checked_sub(1)
+                .ok_or_else(|| SnapshotError::invalid_state("Cannot split overview Markdown"))?;
+        }
+        let candidate = remaining
+            .get(..end)
+            .ok_or_else(|| SnapshotError::invalid_state("Cannot split overview Markdown"))?;
+        let paragraph_end = candidate
+            .rfind("\n\n")
+            .and_then(|position| position.checked_add("\n\n".len()));
+        let line_end = match candidate.rfind('\n') {
+            Some(position) => position.checked_add('\n'.len_utf8()),
+            None => None,
+        };
+        let end = paragraph_end
+            .or(line_end)
+            .filter(|position| *position > 0)
+            .unwrap_or(end);
+        if end == 0 {
+            return Err(SnapshotError::invalid_state(
+                "Overview Markdown made no splitting progress",
+            ));
+        }
+        if let Some(fence_start) = open_fence_start(remaining, end) {
+            if fence_start > 0 {
+                let (chunk, rest) = remaining.split_at(fence_start);
+                chunks.push(chunk.to_owned());
+                remaining = rest;
+                continue;
+            }
+            let opening_end = remaining
+                .find('\n')
+                .and_then(|position| position.checked_add('\n'.len_utf8()))
+                .ok_or_else(|| {
+                    SnapshotError::invalid_input("Fenced overview block has no content")
+                })?;
+            let opening = remaining
+                .get(..opening_end)
+                .ok_or_else(|| SnapshotError::invalid_state("Overview fence opening is invalid"))?;
+            let (opening_marker, _) = fence_marker(opening)
+                .ok_or_else(|| SnapshotError::invalid_input("Invalid overview fence"))?;
+            if let Some((_, fence_end)) = find_fence_end(remaining, opening_end, opening_marker)
+                && fence_end <= capacity
+            {
+                let (chunk, rest) = remaining.split_at(fence_end);
+                chunks.push(chunk.to_owned());
+                remaining = rest;
+                continue;
+            }
+            let (parts, fence_end) = split_oversized_fence(remaining, capacity)?;
+            chunks.extend(parts);
+            remaining = remaining.get(fence_end..).ok_or_else(|| {
+                SnapshotError::invalid_state("Overview fence boundary is invalid")
+            })?;
+            continue;
+        }
+        let (chunk, rest) = remaining.split_at(end);
+        chunks.push(chunk.to_owned());
+        remaining = rest;
+    }
+    if !remaining.is_empty() {
+        chunks.push(remaining.to_owned());
+    }
+    Ok(chunks)
 }
 
-impl PreparedSnapshot {
-    /// Returns the exact record to persist at the existing JSON boundary.
-    pub(crate) fn record(&self) -> Value {
-        match self {
-            Self::GitHub(snapshot) => snapshot.record(),
-            Self::AzureDevOps(snapshot) => snapshot.record(),
+/// Returns the byte offset of a fence that remains open at the proposed split.
+fn open_fence_start(text: &str, end: usize) -> Option<usize> {
+    let mut offset = 0_usize;
+    let mut open: Option<(usize, &str)> = None;
+    for line in text.split_inclusive('\n') {
+        let line_start = offset;
+        offset = offset.checked_add(line.len())?;
+        if line_start >= end {
+            break;
+        }
+        if let Some((marker, rest)) = fence_marker(line) {
+            if let Some((_, open_marker)) = &open {
+                if marker.as_bytes().first() == open_marker.as_bytes().first()
+                    && marker.len() >= open_marker.len()
+                    && rest.trim().is_empty()
+                {
+                    open = None;
+                }
+            } else {
+                open = Some((line_start, marker));
+            }
         }
     }
+    open.map(|(start, _)| start)
+}
+
+/// Balances each part of a fenced block that is larger than one comment.
+fn split_oversized_fence(
+    text: &str,
+    capacity: usize,
+) -> Result<(Vec<String>, usize), SnapshotError> {
+    let opening_end = text
+        .find('\n')
+        .and_then(|position| position.checked_add('\n'.len_utf8()))
+        .ok_or_else(|| SnapshotError::invalid_input("Fenced overview block has no content"))?;
+    let opening = text
+        .get(..opening_end)
+        .ok_or_else(|| SnapshotError::invalid_state("Overview fence opening is invalid"))?;
+    let (opening_marker, opening_info) = fence_marker(opening)
+        .ok_or_else(|| SnapshotError::invalid_input("Invalid overview fence"))?;
+    let indentation = opening
+        .get(..opening.len().saturating_sub(opening.trim_start().len()))
+        .ok_or_else(|| SnapshotError::invalid_state("Overview fence indentation is invalid"))?;
+    let closing = format!("{indentation}{opening_marker}");
+    let (block_close_start, closing_end) = find_fence_end(text, opening_end, opening_marker)
+        .ok_or_else(|| SnapshotError::invalid_input("Overview has an unclosed fenced block"))?;
+    let original_close = text
+        .get(block_close_start..closing_end)
+        .ok_or_else(|| SnapshotError::invalid_state("Overview fence close is invalid"))?;
+    let content = text
+        .get(opening_end..block_close_start)
+        .ok_or_else(|| SnapshotError::invalid_state("Overview fence content is invalid"))?;
+    let separator = if opening.ends_with("\r\n") {
+        "\r\n"
+    } else {
+        "\n"
+    };
+    let part_opening = if opening_info.trim().eq_ignore_ascii_case("mermaid") {
+        format!("{indentation}{opening_marker}text{separator}")
+    } else {
+        opening.to_owned()
+    };
+    let generated_close_overhead = closing
+        .len()
+        .checked_add(separator.len())
+        .and_then(|length| length.checked_add(separator.len()))
+        .ok_or_else(|| SnapshotError::invalid_input("Overview fence metadata is too large"))?;
+    let original_close_overhead = original_close
+        .len()
+        .checked_add(separator.len())
+        .ok_or_else(|| SnapshotError::invalid_input("Overview fence metadata is too large"))?;
+    let fence_overhead = generated_close_overhead.max(original_close_overhead);
+    let overhead = part_opening
+        .len()
+        .checked_add(fence_overhead)
+        .ok_or_else(|| SnapshotError::invalid_input("Overview fence metadata is too large"))?;
+    let content_capacity = capacity
+        .checked_sub(overhead)
+        .filter(|value| *value > 0)
+        .ok_or_else(|| {
+            SnapshotError::invalid_input("Overview fence cannot fit within a comment part")
+        })?;
+
+    let mut parts = Vec::new();
+    let mut remaining = content;
+    while remaining.len() > content_capacity {
+        let end = preferred_boundary(remaining, content_capacity)?;
+        let (piece, rest) = remaining.split_at(end);
+        let mut part = String::with_capacity(capacity);
+        part.push_str(&part_opening);
+        part.push_str(piece);
+        if !piece.ends_with('\n') {
+            part.push_str(separator);
+        }
+        part.push_str(&closing);
+        part.push_str(separator);
+        parts.push(part);
+        remaining = rest;
+    }
+    let mut last = String::with_capacity(capacity);
+    last.push_str(&part_opening);
+    last.push_str(remaining);
+    if !remaining.is_empty() && !remaining.ends_with('\n') {
+        last.push_str(separator);
+    }
+    last.push_str(original_close);
+    if last.len() > capacity {
+        return Err(SnapshotError::invalid_state(
+            "Oversized overview fence part exceeded the comment limit",
+        ));
+    }
+    parts.push(last);
+    Ok((parts, closing_end))
+}
+
+/// Finds the first closing fence with at least the opening marker's length.
+fn find_fence_end(text: &str, start: usize, opening: &str) -> Option<(usize, usize)> {
+    let mut offset = start;
+    for line in text.get(start..)?.split_inclusive('\n') {
+        let line_start = offset;
+        offset = offset.checked_add(line.len())?;
+        if let Some((marker, rest)) = fence_marker(line)
+            && marker.as_bytes().first() == opening.as_bytes().first()
+            && marker.len() >= opening.len()
+            && rest.trim().is_empty()
+        {
+            return Some((line_start, offset));
+        }
+    }
+    None
+}
+
+/// Selects a bounded UTF-8 boundary, preferring complete paragraphs or lines.
+fn preferred_boundary(text: &str, capacity: usize) -> Result<usize, SnapshotError> {
+    let mut end = capacity;
+    while !text.is_char_boundary(end) {
+        end = end
+            .checked_sub(1)
+            .ok_or_else(|| SnapshotError::invalid_state("Cannot split overview Markdown"))?;
+    }
+    let candidate = text
+        .get(..end)
+        .ok_or_else(|| SnapshotError::invalid_state("Cannot split overview Markdown"))?;
+    let paragraph_end = candidate
+        .rfind("\n\n")
+        .and_then(|position| position.checked_add("\n\n".len()));
+    let line_end = candidate
+        .rfind('\n')
+        .and_then(|position| position.checked_add('\n'.len_utf8()));
+    let boundary = paragraph_end
+        .or(line_end)
+        .filter(|position| *position > 0)
+        .unwrap_or(end);
+    if boundary == 0 {
+        return Err(SnapshotError::invalid_state(
+            "Overview Markdown made no splitting progress",
+        ));
+    }
+    Ok(boundary)
 }
 
 /// Supplies a structurally valid frozen snapshot to transaction boundary tests.
@@ -277,25 +507,6 @@ pub(crate) fn frozen_snapshot_for_test(
         "sourceHash": "c".repeat(64),
     }))
     .expect("test frozen snapshot has valid identity fields")
-}
-
-/// Supplies a fully prepared ADO snapshot to provider boundary tests.
-#[cfg(test)]
-pub(crate) fn prepared_ado_snapshot_for_test(
-    run_id: &str,
-    markdown_path: &str,
-    markdown_hash: &str,
-    archive_path: &str,
-    archive_hash: &str,
-) -> PreparedAdoSnapshot {
-    PreparedAdoSnapshot::from_render(
-        frozen_snapshot_for_test(run_id, markdown_path, markdown_hash),
-        format!("{archive_path}.html"),
-        "0".repeat(64),
-        archive_path.to_owned(),
-        archive_hash.to_owned(),
-    )
-    .expect("test ADO snapshot has complete artifact identities")
 }
 
 /// Publishes or reuses the immutable report under the caller's retained lock.
@@ -702,14 +913,14 @@ mod tests {
     use serde_json::{Error as JsonError, Value, json};
 
     use super::{
-        FrozenSnapshot, InvalidInput, InvalidState, PreparedAdoSnapshot, SnapshotError, SnapshotIo,
-        commit, frozen_snapshot_for_test, hash, hash_shape, make_report, parse_json,
+        FrozenSnapshot, InvalidInput, InvalidState, MAX_COMMENT_BYTES, MAX_PART_LABEL_BYTES,
+        PR_COMMENT_SUFFIX, SnapshotError, SnapshotIo, commit, frozen_snapshot_for_test, hash,
+        hash_shape, make_report, parse_json, split_at_boundaries, split_comment_bodies,
         validate_context, validate_overview,
     };
-    use crate::{OverviewInput, OverviewRender};
+    use crate::OverviewInput;
 
     static_assertions::assert_impl_all!(OverviewInput<'static>: UnwindSafe, RefUnwindSafe);
-    static_assertions::assert_impl_all!(OverviewRender: UnwindSafe, RefUnwindSafe);
 
     fn overview() -> String {
         [
@@ -860,126 +1071,11 @@ mod tests {
             "report.md",
             &"0".repeat(64),
         );
-        assert_eq!(snapshot.run_id(), "0123456789abcdef0123456789abcdef");
         assert_eq!(snapshot.markdown_path(), "report.md");
         assert_eq!(snapshot.markdown_hash(), "0".repeat(64));
         assert_eq!(snapshot.source_commit(), "a".repeat(40));
         assert_eq!(snapshot.merge_base_commit(), "b".repeat(40));
         assert_eq!(snapshot.source_hash(), "c".repeat(64));
-    }
-
-    #[test]
-    fn ado_preparation_requires_complete_artifact_identity_and_keeps_journal_shape() {
-        let frozen = frozen_snapshot_for_test(
-            "0123456789abcdef0123456789abcdef",
-            "report.md",
-            &"0".repeat(64),
-        );
-        for (html_path, html_hash, archive_path, archive_hash) in [
-            (
-                String::new(),
-                "0".repeat(64),
-                "report.zip".to_owned(),
-                "1".repeat(64),
-            ),
-            (
-                "report.html".to_owned(),
-                "bad".to_owned(),
-                "report.zip".to_owned(),
-                "1".repeat(64),
-            ),
-            (
-                "report.html".to_owned(),
-                "0".repeat(64),
-                String::new(),
-                "1".repeat(64),
-            ),
-            (
-                "report.html".to_owned(),
-                "0".repeat(64),
-                "report.zip".to_owned(),
-                "bad".to_owned(),
-            ),
-        ] {
-            let frozen = FrozenSnapshot::from_record(json!({
-                "schemaVersion": 1,
-                "runId": "0123456789abcdef0123456789abcdef",
-                "markdownPath": "report.md",
-                "markdownHash": "0".repeat(64),
-                "sourceCommit": "a".repeat(40),
-                "mergeBaseCommit": "b".repeat(40),
-                "sourceHash": "c".repeat(64),
-            }))
-            .unwrap();
-            assert!(
-                PreparedAdoSnapshot::from_render(
-                    frozen,
-                    html_path,
-                    html_hash,
-                    archive_path,
-                    archive_hash,
-                )
-                .is_err()
-            );
-        }
-
-        let prepared = PreparedAdoSnapshot::from_render(
-            frozen,
-            "report.html".to_owned(),
-            "0".repeat(64),
-            "report.zip".to_owned(),
-            "1".repeat(64),
-        )
-        .unwrap();
-        let record = prepared.record();
-        assert_eq!(
-            record
-                .get("schemaVersion")
-                .expect("schema version is recorded"),
-            1
-        );
-        assert_eq!(
-            record
-                .get("markdownPath")
-                .and_then(Value::as_str)
-                .expect("Markdown path is recorded"),
-            "report.md"
-        );
-        assert_eq!(
-            record
-                .get("markdownHash")
-                .and_then(Value::as_str)
-                .expect("Markdown hash is recorded"),
-            "0".repeat(64)
-        );
-        assert_eq!(
-            record
-                .get("htmlPath")
-                .and_then(Value::as_str)
-                .expect("HTML path is recorded"),
-            "report.html"
-        );
-        assert_eq!(
-            record
-                .get("htmlHash")
-                .and_then(Value::as_str)
-                .expect("HTML hash is recorded"),
-            "0".repeat(64)
-        );
-        assert_eq!(
-            record
-                .get("archivePath")
-                .and_then(Value::as_str)
-                .expect("archive path is recorded"),
-            "report.zip"
-        );
-        assert_eq!(
-            record
-                .get("archiveHash")
-                .and_then(Value::as_str)
-                .expect("archive hash is recorded"),
-            "1".repeat(64)
-        );
     }
 
     #[test]
@@ -1074,22 +1170,6 @@ mod tests {
             tenant: Some("tenant"),
         };
         drop(format!("{input:?}"));
-        drop(format!(
-            "{:?}",
-            OverviewRender::MissingTools {
-                missing: vec!["tool".into()],
-                diagnostics: vec!["diagnostic".into()],
-            }
-        ));
-        drop(format!(
-            "{:?}",
-            OverviewRender::Ready {
-                html_path: "/report.html".into(),
-                html_hash: "hash".into(),
-                archive_path: "/report.zip".into(),
-                archive_hash: "hash".into(),
-            }
-        ));
     }
 
     #[test]
@@ -1134,5 +1214,125 @@ mod tests {
         let report = make_report("https://github.com/o/r/pull/1", "source", "base", overview);
         assert!(report.ends_with(overview.trim_end()));
         assert!(report.contains("```mermaid\r\nA[\"ö\"] --> B\r\n```"));
+    }
+
+    #[test]
+    fn inline_comments_preserve_attribution_and_exact_unicode_report_bytes() {
+        let report = format!(
+            "[Copilot speaking]\n\nGenerated\n\n{}",
+            "Résumé 雪 🦀\n\n".repeat(12000)
+        );
+        let bodies = split_comment_bodies(&report, "Attribution\nexact").unwrap();
+        assert!(bodies.len() > 1);
+        assert!(bodies.iter().all(|body| body.len() <= MAX_COMMENT_BYTES));
+        assert!(
+            bodies
+                .iter()
+                .all(|body| { body.starts_with("[Copilot speaking]\n\nAttribution\nexact\n\n") })
+        );
+
+        let prefix = "[Copilot speaking]\n\nAttribution\nexact\n\n";
+        let mut restored = String::new();
+        for body in &bodies {
+            let content = body.strip_prefix(prefix).unwrap();
+            let end = content.find(").**\n\n").unwrap() + ").**\n\n".len();
+            restored.push_str(
+                content
+                    .get(end..)
+                    .unwrap()
+                    .strip_suffix(&format!("\n\n{PR_COMMENT_SUFFIX}"))
+                    .unwrap(),
+            );
+        }
+        assert_eq!(
+            restored,
+            report.strip_prefix("[Copilot speaking]\n\n").unwrap()
+        );
+    }
+
+    #[test]
+    fn single_inline_comment_uses_one_attributed_body() {
+        let bodies = split_comment_bodies(
+            "[Copilot speaking]\n\n# Content overview\n\nRésumé",
+            "[Copilot speaking]",
+        )
+        .unwrap();
+        assert_eq!(
+            bodies,
+            [format!(
+                "[Copilot speaking]\n\n# Content overview\n\nRésumé\n\n{PR_COMMENT_SUFFIX}"
+            )]
+        );
+    }
+
+    #[test]
+    fn comment_boundaries_keep_fitting_fenced_blocks_whole() {
+        let report = "Before\n\n```mermaid\nA --> B\n```\n\nAfter\n";
+        let chunks = split_at_boundaries(report, 24).unwrap();
+        assert_eq!(
+            chunks,
+            ["Before\n\n", "```mermaid\nA --> B\n```\n\n", "After\n"]
+        );
+        for chunk in chunks {
+            let openings = chunk
+                .lines()
+                .filter(|line| line.trim_start().starts_with("```"))
+                .count();
+            assert_eq!(openings % 2, 0);
+        }
+    }
+
+    #[test]
+    fn oversized_fenced_blocks_are_balanced_in_each_comment_part() {
+        let report = "```text\nabcdefghij\nklmnopqrst\nuvwxyz\n```\n";
+        let chunks = split_at_boundaries(report, 24).unwrap();
+        assert!(chunks.len() > 1);
+        assert!(chunks.iter().all(|chunk| chunk.len() <= 24));
+        assert!(
+            chunks
+                .iter()
+                .all(|chunk| chunk.starts_with("```text\n") && chunk.ends_with("```\n"))
+        );
+    }
+
+    #[test]
+    fn oversized_fences_reserve_original_closing_marker_space() {
+        let report = "```text\nabcdefghij\n``````  \n";
+        let chunks = split_at_boundaries(report, 24).unwrap();
+        assert!(chunks.len() > 1);
+        assert!(chunks.iter().all(|chunk| chunk.len() <= 24));
+        assert_eq!(chunks.last().unwrap(), "```text\nghij\n``````  \n");
+    }
+
+    #[test]
+    fn oversized_mermaid_blocks_render_as_literal_source() {
+        let report = "```mermaid\nflowchart LR\nA --> B\nC --> D\nE --> F\n```\n";
+        let chunks = split_at_boundaries(report, 38).unwrap();
+        assert!(chunks.len() > 1);
+        assert!(
+            chunks
+                .iter()
+                .all(|chunk| chunk.starts_with("```text\n") && chunk.ends_with("```\n"))
+        );
+        assert!(chunks.iter().all(|chunk| !chunk.contains("```mermaid")));
+    }
+
+    #[test]
+    fn near_limit_attribution_rejects_zero_progress_multibyte_fences() {
+        let capacity = 14;
+        let prefix_length = MAX_COMMENT_BYTES
+            .checked_sub("[Copilot speaking]\n\n".len())
+            .and_then(|value| value.checked_sub("\n\n".len()))
+            .and_then(|value| value.checked_sub(MAX_PART_LABEL_BYTES))
+            .and_then(|value| value.checked_sub("\n\n".len()))
+            .and_then(|value| value.checked_sub(PR_COMMENT_SUFFIX.len()))
+            .and_then(|value| value.checked_sub(capacity))
+            .unwrap();
+        let prefix = "p".repeat(prefix_length);
+        let report = format!("```text\n{}\n```\n", "🦀".repeat(100));
+        let Err(error) = split_comment_bodies(&report, &prefix) else {
+            panic!("near-limit multibyte fence unexpectedly split")
+        };
+        assert!(error.to_string().contains("no splitting progress"));
     }
 }

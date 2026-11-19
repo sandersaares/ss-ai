@@ -27,5 +27,5 @@ permission from an unanswered question. Apply the skill's user-decision rules.
 Rerun this check after installation or repair. Record the user's choice and readiness outcome
 in the session's prose checkpoint so a declined installation does not cause repeated questions.
 If the user declines, or setup fails, report the specific limitation and continue with Markdown
-audit documents. GitHub overview publication does not need the HTML tools; ADO HTML publication
-reports its limitation. Never describe a failed probe or a partially completed install as success.
+audit documents. Initial overview publication posts Markdown comments inline and does not need
+these HTML tools. Never describe a failed probe or a partially completed install as success.

@@ -14,7 +14,6 @@ pub mod focus_cache;
 pub mod instruction_sources;
 pub mod markdown;
 pub mod markdown_preparation;
-pub mod overview_artifact;
 pub mod overview_validation;
 pub mod report_html;
 pub mod report_tools;
