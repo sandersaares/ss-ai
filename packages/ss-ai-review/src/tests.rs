@@ -102,6 +102,8 @@ struct FakeProvider {
     creates: Vec<u32>,
     updates: Vec<(String, String)>,
     deletes: Vec<String>,
+    target_logins: Vec<Option<String>>,
+    candidate_logins: Vec<(u32, Option<String>)>,
     fail_create: bool,
     fail_delete: bool,
     fail_read: bool,
@@ -117,6 +119,8 @@ impl FakeProvider {
             creates: Vec::new(),
             updates: Vec::new(),
             deletes: Vec::new(),
+            target_logins: Vec::new(),
+            candidate_logins: Vec::new(),
             fail_create: false,
             fail_delete: false,
             fail_read: false,
@@ -130,9 +134,10 @@ impl Provider for FakeProvider {
     fn targets(
         &mut self,
         repository: &Target,
-        _: &Identity,
+        identity: &Identity,
         _: SelectionMode,
     ) -> Result<Vec<Target>, AppError> {
+        self.target_logins.push(identity.unique_name.clone());
         Ok([11, 10]
             .map(|id| repository.candidate(id.try_into().unwrap()))
             .to_vec())
@@ -140,10 +145,12 @@ impl Provider for FakeProvider {
     fn candidate(
         &mut self,
         target: &Target,
-        _: &Identity,
+        identity: &Identity,
         _: Timestamp,
         _: SelectionMode,
     ) -> Result<Candidate, AppError> {
+        self.candidate_logins
+            .push((target.pull_request_id, identity.unique_name.clone()));
         if self.fail_read {
             return Err(fail("service", "Injected read failure"));
         }
@@ -373,6 +380,57 @@ fn selection_and_confirmation_preserve_both_provider_journals() {
         assert_eq!(provider.creates, [10]);
         assert!(provider.deletes.is_empty());
     }
+}
+
+#[test]
+fn confirmation_discovers_replacements_with_the_current_account_login() {
+    let clock = FakeClock::new();
+    let mut provider = FakeProvider::new();
+    let mut journal = MemoryJournal::default();
+    let mut reserved = initial(Platform::GitHub);
+    reserved.selection_mode = SelectionMode::Assigned;
+    run(
+        &mut provider,
+        &mut journal,
+        &clock,
+        reserved.clone(),
+        "Reserving for review.",
+        false,
+    )
+    .unwrap();
+
+    let mut authenticated = reserved;
+    authenticated.identity = Identity::from_account(
+        Platform::GitHub,
+        &json!({"id":42,"login":"renamed-reviewer","type":"User"}),
+    )
+    .unwrap();
+    provider.reasons.insert(10, "alreadyReviewer".to_owned());
+
+    let replacement = run(
+        &mut provider,
+        &mut journal,
+        &clock,
+        authenticated,
+        "Reserving for review.",
+        true,
+    )
+    .unwrap();
+
+    assert_eq!(replacement.target.unwrap().pull_request_id, 11);
+    assert_eq!(
+        provider.target_logins,
+        [
+            Some("reviewer".to_owned()),
+            Some("renamed-reviewer".to_owned())
+        ]
+    );
+    assert!(
+        provider
+            .candidate_logins
+            .iter()
+            .all(|(_, login)| login.as_deref() == Some("reviewer"))
+    );
 }
 
 #[test]
@@ -1045,7 +1103,10 @@ impl Process for Script {
             .unwrap()
             + 1];
         let step = self.next(path, method, Some(input));
-        if path.contains("per_page=") && !path.contains("per_page=1") {
+        let is_single_item_probe = path
+            .split(['?', '&'])
+            .any(|parameter| parameter == "per_page=1");
+        if path.contains("per_page=") && !is_single_item_probe {
             assert!(arguments.contains(&"--paginate".to_owned()));
             assert!(arguments.contains(&"--slurp".to_owned()));
         }

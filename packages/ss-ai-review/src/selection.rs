@@ -636,6 +636,7 @@ pub(crate) fn run(
         ));
     }
     let mut initial = Workflow::try_from(initial)?;
+    let authenticated_identity = initial.identity.clone();
     let repository = Target::repository(&initial.repository_url)?;
     let loaded = journal.load()?;
     if confirm {
@@ -666,7 +667,8 @@ pub(crate) fn run(
         initial.save(journal)?;
     }
     let mut candidates = Vec::new();
-    for target in provider.targets(&repository, &initial.identity, initial.selection_mode)? {
+    // Keep reservation checks on the journal identity; discovery needs the current account login.
+    for target in provider.targets(&repository, &authenticated_identity, initial.selection_mode)? {
         let id = candidate_id(&target)?;
         if initial.attempted.contains(&id) {
             continue;
