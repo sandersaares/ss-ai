@@ -183,7 +183,7 @@ const MAX_PART_LABEL_BYTES: usize =
 
 /// Tells pull request participants where not to direct a reply.
 const PR_COMMENT_SUFFIX: &str =
-    "ℹ️ Replies are not monitored. To discuss the finding, reach out via Teams.";
+    "ℹ️ Replies are not monitored. To discuss the comment, reach out via Teams.";
 
 /// Builds exact, attributed inline comments from the frozen Markdown report.
 pub(crate) fn comment_bodies(

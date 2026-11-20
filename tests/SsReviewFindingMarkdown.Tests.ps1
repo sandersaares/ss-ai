@@ -235,7 +235,7 @@ Describe 'Finding rendering' {
             '- `src/retry.rs:40-44`'
             '- `src/legacy.rs`'
             ''
-            'ℹ️ Replies are not monitored. To discuss the finding, reach out via Teams.'
+            'ℹ️ Replies are not monitored. To discuss the comment, reach out via Teams.'
         ) -join "`n"
 
         $text | Should -BeExactly $expected
@@ -1351,7 +1351,7 @@ Describe 'Approved set delivery' {
         foreach ($findingId in @('F2', 'F1')) {
             $body = [System.IO.File]::ReadAllText((Join-Path $script:MarkdownRoot "$findingId.md"))
             $body = $body.Substring($body.IndexOf('# '))
-            $body = $body.Substring(0, $body.Length - ("`n`nℹ️ Replies are not monitored. To discuss the finding, reach out via Teams.").Length)
+            $body = $body.Substring(0, $body.Length - ("`n`nℹ️ Replies are not monitored. To discuss the comment, reach out via Teams.").Length)
 
             $index = $combined.IndexOf($body)
             $index | Should -BeGreaterThan $lastIndex -Because $findingId
