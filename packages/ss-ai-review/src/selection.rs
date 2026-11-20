@@ -517,8 +517,13 @@ pub(crate) struct Diagnostic {
 /// missing service data into successful empty work. The workflow owns ordering,
 /// journal intent, claim ownership checks, and whether to try another candidate.
 pub(crate) trait Provider {
-    /// Enumerates every open PR in the explicit repository scope.
-    fn targets(&mut self, repository: &Target) -> Result<Vec<Target>, AppError>;
+    /// Enumerates mode-specific PR candidates in the explicit repository scope.
+    fn targets(
+        &mut self,
+        repository: &Target,
+        identity: &Identity,
+        selection_mode: SelectionMode,
+    ) -> Result<Vec<Target>, AppError>;
     /// Evaluates non-claim eligibility against the supplied account and instant.
     fn candidate(
         &mut self,
@@ -661,7 +666,7 @@ pub(crate) fn run(
         initial.save(journal)?;
     }
     let mut candidates = Vec::new();
-    for target in provider.targets(&repository)? {
+    for target in provider.targets(&repository, &initial.identity, initial.selection_mode)? {
         let id = candidate_id(&target)?;
         if initial.attempted.contains(&id) {
             continue;

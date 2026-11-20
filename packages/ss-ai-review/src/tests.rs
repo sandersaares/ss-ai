@@ -127,7 +127,12 @@ impl FakeProvider {
 }
 
 impl Provider for FakeProvider {
-    fn targets(&mut self, repository: &Target) -> Result<Vec<Target>, AppError> {
+    fn targets(
+        &mut self,
+        repository: &Target,
+        _: &Identity,
+        _: SelectionMode,
+    ) -> Result<Vec<Target>, AppError> {
         Ok([11, 10]
             .map(|id| repository.candidate(id.try_into().unwrap()))
             .to_vec())
@@ -1040,7 +1045,7 @@ impl Process for Script {
             .unwrap()
             + 1];
         let step = self.next(path, method, Some(input));
-        if path.contains("per_page=") {
+        if path.contains("per_page=") && !path.contains("per_page=1") {
             assert!(arguments.contains(&"--paginate".to_owned()));
             assert!(arguments.contains(&"--slurp".to_owned()));
         }
@@ -1337,8 +1342,11 @@ fn ado_short_pr_pages_continue_until_empty_and_repeated_prs_fail() {
         }
         let script = Script::new(steps);
         let clock = FakeClock::new();
-        let result =
-            api(Platform::AzureDevOps, &script, &clock).targets(&repository(Platform::AzureDevOps));
+        let result = api(Platform::AzureDevOps, &script, &clock).targets(
+            &repository(Platform::AzureDevOps),
+            &identity(Platform::AzureDevOps),
+            SelectionMode::Available,
+        );
         if repeated {
             result.err().unwrap();
         } else {
@@ -1346,6 +1354,69 @@ fn ado_short_pr_pages_continue_until_empty_and_repeated_prs_fail() {
         }
         script.done();
     }
+}
+
+#[test]
+fn github_assigned_targets_use_complete_outstanding_request_search() {
+    let path = "search/issues?q=repo%3Aexample%2Fwidgets%20is%3Apr%20is%3Aopen%20review-requested%3Areviewer%20-author%3Areviewer";
+    let script = Script::new(vec![
+        Step::read(
+            &format!("{path}&per_page=1"),
+            json!({"total_count":2,"incomplete_results":false,"items":[]}),
+        ),
+        Step::read(
+            &format!("{path}&per_page=100"),
+            json!([{"total_count":2,"incomplete_results":false,"items":[{"number":12},{"number":10}]}]),
+        ),
+    ]);
+    let clock = FakeClock::new();
+    let targets = api(Platform::GitHub, &script, &clock)
+        .targets(
+            &repository(Platform::GitHub),
+            &identity(Platform::GitHub),
+            SelectionMode::Assigned,
+        )
+        .unwrap();
+    assert_eq!(
+        targets
+            .iter()
+            .map(|target| target.pull_request_id)
+            .collect::<Vec<_>>(),
+        [12, 10]
+    );
+    script.done();
+}
+
+#[test]
+fn ado_assigned_targets_use_reviewer_filtered_offset_paging() {
+    let path = "A%20Project/_apis/git/repositories/A%20Repo/pullRequests";
+    let script = Script::new(vec![
+        Step::read(
+            &ado(
+                path,
+                "%24skip=0&%24top=100&searchCriteria.reviewerId=reviewer-id&searchCriteria.status=active&",
+            ),
+            json!({"count":1,"value":[{"pullRequestId":10}]}),
+        ),
+        Step::read(
+            &ado(
+                path,
+                "%24skip=1&%24top=100&searchCriteria.reviewerId=reviewer-id&searchCriteria.status=active&",
+            ),
+            json!({"count":0,"value":[]}),
+        ),
+    ]);
+    let clock = FakeClock::new();
+    let targets = api(Platform::AzureDevOps, &script, &clock)
+        .targets(
+            &repository(Platform::AzureDevOps),
+            &identity(Platform::AzureDevOps),
+            SelectionMode::Assigned,
+        )
+        .unwrap();
+    assert_eq!(targets.len(), 1);
+    assert_eq!(targets[0].pull_request_id, 10);
+    script.done();
 }
 
 #[test]

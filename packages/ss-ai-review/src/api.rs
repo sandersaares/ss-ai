@@ -439,45 +439,100 @@ impl Api<'_> {
                     result.push((id, pr));
                 }
             }
-            Platform::AzureDevOps => {
-                let mut skip = 0_usize;
-                loop {
-                    let page = self.transport.ado(
-                        &format!("{}/pullRequests", repository.repository_api()),
-                        "GET",
-                        None,
-                        &[
-                            ("searchCriteria.status", "active".to_owned()),
-                            ("$top", "100".to_owned()),
-                            ("$skip", skip.to_string()),
-                        ],
-                        "7.1",
-                    )?;
-                    if page.continuation.is_some() {
-                        return Err(fail(
-                            "service",
-                            "Unexpected continuation in offset PR listing",
-                        ));
-                    }
-                    let values = ado_items(&page.payload)?;
-                    if values.is_empty() {
-                        break;
-                    }
-                    skip = skip
-                        .checked_add(values.len())
-                        .ok_or_else(|| fail("service", "PR offset overflow"))?;
-                    for pr in values {
-                        let id = pr_id(field(&pr, "pullRequestId")?)?;
-                        if !seen.insert(id) {
-                            return Err(fail(
-                                "service",
-                                "Azure DevOps repeated a pull request while paging",
-                            ));
-                        }
-                        result.push((id, pr));
-                    }
-                }
+            Platform::AzureDevOps => return self.ado_open_pull_requests(repository, None),
+        }
+        Ok(result)
+    }
+
+    /// Enumerates active Azure DevOps PRs, optionally narrowed to one reviewer.
+    ///
+    /// The provider criterion is only candidate discovery; selection still
+    /// verifies the current reviewer and vote evidence for each returned PR.
+    fn ado_open_pull_requests(
+        &mut self,
+        repository: &Target,
+        reviewer_id: Option<&str>,
+    ) -> Result<Vec<(NonZeroU32, Value)>, AppError> {
+        let mut result = Vec::new();
+        let mut seen = HashSet::new();
+        let mut skip = 0_usize;
+        loop {
+            let mut query = vec![("searchCriteria.status", "active".to_owned())];
+            if let Some(reviewer_id) = reviewer_id {
+                query.push(("searchCriteria.reviewerId", reviewer_id.to_owned()));
             }
+            query.extend([("$top", "100".to_owned()), ("$skip", skip.to_string())]);
+            let page = self.transport.ado(
+                &format!("{}/pullRequests", repository.repository_api()),
+                "GET",
+                None,
+                &query,
+                "7.1",
+            )?;
+            if page.continuation.is_some() {
+                return Err(fail(
+                    "service",
+                    "Unexpected continuation in offset PR listing",
+                ));
+            }
+            let values = ado_items(&page.payload)?;
+            if values.is_empty() {
+                return Ok(result);
+            }
+            skip = skip
+                .checked_add(values.len())
+                .ok_or_else(|| fail("service", "PR offset overflow"))?;
+            for pr in values {
+                let id = pr_id(field(&pr, "pullRequestId")?)?;
+                if !seen.insert(id) {
+                    return Err(fail(
+                        "service",
+                        "Azure DevOps repeated a pull request while paging",
+                    ));
+                }
+                result.push((id, pr));
+            }
+        }
+    }
+
+    /// Narrows assigned selection before expensive per-PR evidence reads.
+    ///
+    /// GitHub uses a complete paginated outstanding-request search. Azure
+    /// DevOps supplies its reviewer criterion directly to the pull-request
+    /// listing. Neither result establishes eligibility until `candidate`
+    /// validates current participation, submission state, and commit recency.
+    fn assigned_pull_requests(
+        &mut self,
+        repository: &Target,
+        identity: &Identity,
+    ) -> Result<Vec<(NonZeroU32, Value)>, AppError> {
+        if repository.platform == Platform::AzureDevOps {
+            let account_id = identity
+                .id
+                .as_deref()
+                .ok_or_else(|| fail("authentication", "ADO account has no stable ID"))?;
+            return self.ado_open_pull_requests(repository, Some(account_id));
+        }
+
+        let login = identity
+            .unique_name
+            .as_deref()
+            .ok_or_else(|| fail("authentication", "GitHub account has no login"))?;
+        let query = format!(
+            "repo:{}/{} is:pr is:open review-requested:{} -author:{}",
+            repository.organization, repository.repository, login, login
+        );
+        let mut result = Vec::new();
+        let mut seen = HashSet::new();
+        for pr in self.transport.search_issues(&query)? {
+            let id = pr_id(field(&pr, "number")?)?;
+            if !seen.insert(id) {
+                return Err(fail(
+                    "service",
+                    "GitHub repeated an assigned pull request while paging",
+                ));
+            }
+            result.push((id, pr));
         }
         Ok(result)
     }
@@ -579,10 +634,18 @@ impl Api<'_> {
 }
 
 impl Provider for Api<'_> {
-    /// Enumerates open PR coordinates completely before selection ranks evidence.
-    fn targets(&mut self, repository: &Target) -> Result<Vec<Target>, AppError> {
-        Ok(self
-            .open_pull_requests(repository)?
+    /// Enumerates mode-specific candidates before selection ranks fresh evidence.
+    fn targets(
+        &mut self,
+        repository: &Target,
+        identity: &Identity,
+        selection_mode: SelectionMode,
+    ) -> Result<Vec<Target>, AppError> {
+        let pull_requests = match selection_mode {
+            SelectionMode::Available => self.open_pull_requests(repository)?,
+            SelectionMode::Assigned => self.assigned_pull_requests(repository, identity)?,
+        };
+        Ok(pull_requests
             .into_iter()
             .map(|(id, _)| repository.candidate(id))
             .collect())

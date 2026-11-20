@@ -11,11 +11,18 @@ inputs and journal records are defined in the [package reference](../../README.m
 
 ## Eligibility and ranking
 
-Selection considers all open pull requests in the supplied repository. The
-`available` mode excludes drafts, self-authored pull requests, and pull requests
-assigned to the authenticated user. The `assigned` mode reverses the assignment
-filter and additionally excludes a pull request where that user has submitted
-an active review.
+The `available` mode considers all open pull requests in the supplied
+repository and excludes drafts, self-authored pull requests, and pull requests
+assigned to the authenticated user. The `assigned` mode first narrows provider
+enumeration to outstanding requests for that user. It then reverses the
+assignment filter and additionally excludes a pull request where that user has
+submitted an active review.
+
+Provider-side narrowing discovers candidates but never proves eligibility.
+Selection validates every candidate's current identity, participation, commits,
+and claim discussion before reserving it. Active submitted reviews are
+ineligible in `assigned` mode, so narrowing discovery to outstanding requests
+does not remove any eligible assignment.
 
 The selected source revision comes from the GitHub pull request head or the
 highest-numbered Azure DevOps iteration's `sourceRefCommit`. This matches the

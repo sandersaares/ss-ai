@@ -22,11 +22,19 @@ capped REST commits endpoint. Azure DevOps open-PR enumeration continues
 offset paging through an empty page; commit reads follow continuation tokens.
 Other endpoints reject unexpected continuation rather than reporting
 incomplete evidence. Repeated identifiers and cursors are errors.
-
 Required arrays and fields have no success-shaped defaults. JSON readers
 check shapes at the provider boundary so missing or malformed data cannot
 become an empty successful search. Commit recency consumes every commit page
 before ranking a candidate.
+
+Review selection narrows `assigned` enumeration at the provider. GitHub uses
+the complete `review-requested` issue search and partitions results when the
+service search cap requires it. Azure DevOps supplies the authenticated
+account to the active-PR reviewer criterion. The resulting targets are only a
+candidate set: selection still reads fresh pull-request, review, commit, and
+discussion evidence before a claim. `available` selection retains complete
+open-PR enumeration because that mode needs evidence for PRs without the
+account's request.
 
 Automatic reapproval separates enumeration completeness from retained material
 evidence. Provider-specific projections in `ado_approval.rs` and
