@@ -18,6 +18,9 @@ BeforeAll {
     $script:ReviewSkill = [IO.File]::ReadAllText(
         (Join-Path $root 'skills\ss-review\SKILL.md')
     )
+    $script:ReviewImplementation = [IO.File]::ReadAllText(
+        (Join-Path $root 'skills\ss-review\docs\implementation.md')
+    )
     $script:ProactorImplementation = [IO.File]::ReadAllText(
         (Join-Path $root 'skills\ss-review-proactor\docs\implementation.md')
     )
@@ -103,12 +106,15 @@ Describe 'Multi-repository skill contracts' {
     }
 
     It 'binds resumed work to exactly one active review cycle' {
+        $script:ProactorSkill | Should -Match 'one \*\*active review cycle\*\*'
         $script:ProactorSkill |
-            Should -Match 'single active cycle'
+            Should -Match 'Stages 1 through 3 may construct and populate a pending identity'
         $script:ProactorSkill |
-            Should -Match 'Do not\s+combine paths or queued actions from different cycles'
+            Should -Match 'From stage 4 onward, require an existing, matching\s+identity'
         $script:ProactorSkill |
-            Should -Match 'run the read-only\s+active-reservation `review check` command from the active cycle'
+            Should -Match 'Do\s+not\s+combine paths or queued actions from different cycles'
+        $script:ProactorSkill |
+            Should -Match 'run the read-only\s+active-reservation `review check` command from\s+the active cycle'
         $script:ProactorImplementation |
             Should -Match 'one active-cycle identity'
         $script:ProactorImplementation |
@@ -116,7 +122,27 @@ Describe 'Multi-repository skill contracts' {
         $script:ReviewSkill |
             Should -Match 'bind this invocation to one review identity'
         $script:ReviewSkill |
-            Should -Match 'Never reuse an artifact from a completed earlier cycle'
+            Should -Match 'Never reuse an artifact from a completed earlier\s+cycle'
+    }
+
+    It 'uses stage-aware review identity and ownership validation' {
+        $script:ProactorSkill |
+            Should -Match 'before final review\s+publication'
+        $script:ProactorSkill |
+            Should -Match 'do not rerun\s+`review check`'
+        $script:ProactorSkill | Should -Match 'produces `alreadyReviewed`'
+        $script:ProactorSkill |
+            Should -Match '`review complete`\s+command performs the remaining remote ownership'
+        $script:ProactorCommands |
+            Should -Match 'After interruption or compaction before final review publication'
+        $script:ProactorCommands |
+            Should -Match 'Do not run this check to resume phase 9'
+        $script:ReviewSkill |
+            Should -Match 'After phase 8 completes'
+        $script:ReviewImplementation |
+            Should -Match 'After phase 8 completes'
+        $script:ReviewImplementation |
+            Should -Match 'does not rerun the\s+candidate-eligibility check'
     }
 
     It 'aggregates autoreapproval results across repository runs' {

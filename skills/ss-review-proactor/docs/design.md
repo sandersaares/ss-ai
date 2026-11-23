@@ -51,10 +51,15 @@ exhausted repository is not revisited during the invocation. Each cycle has
 separate review artifacts, a fresh claim journal, and a unique checkout, so
 earlier reviews remain available and no audit decisions or publication state
 carry into the next review or repository. Exactly one cycle is active in the
-owning session. Its pull request, journal, review-state directory, and checkout
-form one identity that the agent verifies after interruption or compaction.
-Completed cycles become immutable history before selection begins another
-cycle, and a stale result cannot reopen or advance work for a completed cycle.
+owning session. Stages 1 through 3 may establish a pending identity from the
+repository and fresh artifact paths, then populate it from selection and
+confirmation. Once stage 4 starts, the pull request, journal, review-state
+directory, and checkout form the established identity that the agent verifies
+after interruption or compaction. Completed cycles become immutable history
+before selection begins another cycle, and a stale result cannot reopen or
+advance work for a completed cycle. Pre-publication resumption verifies candidate
+eligibility and active ownership; phase-9 resumption preserves that identity
+without requiring the submitted review to remain selection-eligible.
 
 ## Selection mode
 

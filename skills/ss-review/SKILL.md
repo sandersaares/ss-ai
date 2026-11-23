@@ -38,11 +38,18 @@ For a proactor handoff, bind this invocation to one review identity: the exact
 pull request URL, selection journal, review-state directory, checkout directory,
 and initial capture path. On interruption or compaction, verify that every
 retained capture, assignment, finding, and rendered document belongs to that
-identity before using it. Use the active-reservation `review check` before
-resuming retained work and require its target to match the review identity.
+identity before using it. Before final review publication, use the
+active-reservation `review check` before resuming retained work and require its
+target to match the review identity. After phase 8 completes, do not rerun
+`review check`: a submitted GitHub review is intentionally ineligible as
+`alreadyReviewed`. Resume phase 9 only after matching the cycle's journal and
+review-state paths to its durable phase-8 completion record; the proactor's
+later completion command validates the active reservation's ownership. A
+phase-8 failure or ambiguous outcome still requires publication recovery.
 Never reuse an artifact from a completed earlier cycle merely because it has a
-familiar fixed filename such as `findings.json`. If the identities do not match,
-stop and request resolution; do not replay stale actions against either cycle.
+familiar fixed filename such as `findings.json`. If the identities do not
+match, stop and request resolution; do not replay stale actions against either
+cycle.
 
 A question directed to the user is a hard suspension point. Ask it through the available user-input interface when possible. A delegated review that cannot ask the user must stop that dependent work and return one complete handoff to its caller: the exact question, every choice in the required order, the complete ordinary-session presentation that must precede the question, and any rendered files or links needed by that presentation. For an audit, include the complete destination-specific finding text or document links and the applicable PR reminder; do not hand off only the question text. The caller must display the presentation verbatim and in order before collecting the answer. A caller may relay the user's direct answer to the review, but no caller, parent agent, subagent, tool fallback, or other intermediary may answer on the user's behalf. In particular, a response saying that the user is unavailable, will review later, or wants the agent to decide autonomously is not an answer. Treat a skipped, dismissed, cancelled, timed-out, or unrecognized response, including `[Skipped by user]`, as no answer. Do not interpret such a response as approval, rejection, feedback, confirmation, or permission; do not write decision state, start a new phase, or perform any dependent side effect. Leave the review paused at the unanswered question, report it, and do not retry the question in a loop.
 
@@ -468,6 +475,13 @@ Persist the findings for the user to deliver manually. Execute the command in `p
 Report the path of the combined document to the user.
 
 # Phase 9: learning
+
+If interruption or compaction pauses this phase, validate the durable phase-8
+outcome and every retained artifact against the handoff's established review
+identity. Do not rerun the pre-publication `review check`; a submitted review
+must not be required to remain selection-eligible. Return the exact final
+reviewed source commit and the phase-8 outcome to the proactor for stage-5
+reservation completion.
 
 Analyze the audit feedback to identify:
 

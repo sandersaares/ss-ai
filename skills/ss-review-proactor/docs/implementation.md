@@ -68,12 +68,25 @@ The primary agent's checkpoint contains one active-cycle identity with the
 pull request URL and number, repository URL, cycle directory, selection
 journal, review-state directory, checkout directory, and current stage. Every
 resumed or newly dispatched action must derive all of its pull request and
-artifact paths from that record. The agent never mixes two cycle roots in a
-command, worker batch, or turn. Before consuming retained review work after
-interruption or compaction, it runs the read-only `review check` command and
-requires a `confirmed` result for the active pull request. It records completed
-cycles as immutable history before selecting again, so a familiar fixed
-filename or a late worker result cannot make an earlier cycle active.
+artifact paths from that record. Stages 1 through 3 progressively construct
+the record as a pending identity: configuration establishes the repository
+and fresh paths, selection supplies the pull request, and confirmation supplies
+the checkout and established active state. Those stages can create the record
+when no previous active cycle remains; stage 4 and later require an existing
+matching identity. The agent never mixes two cycle roots in a command, worker
+batch, or turn.
+
+Before final review publication, a resumed cycle runs the read-only
+`review check` command and requires a `confirmed` result for the active pull
+request. That check enforces candidate eligibility and active-claim ownership.
+After phase 8 completes, phase 9 does not repeat the eligibility check because
+GitHub reports a submitted review as `alreadyReviewed`. It instead validates
+the exact cycle's journal and durable phase-8 completion record. A failed or
+ambiguous phase-8 outcome remains in publication recovery and cannot enter
+phase 9. The stage-5 `review complete` command then validates the active claim
+and ownership without candidate eligibility. Completed cycles become immutable
+history before selection begins again, so a familiar fixed filename or a late
+worker result cannot make an earlier cycle active.
 
 The stage-5 aggregate remains in primary-session prose and must not become
 shared `ss-review` publication data. Before an `ss-review` GitHub summary is

@@ -47,15 +47,23 @@ session. They also supply the active selection journal. The review orchestrator
 keeps the proactor continuation context and latest loop instruction in its
 prose checkpoint. Its retained review identity binds the pull request URL,
 journal, review-state directory, checkout, and initial capture. On interruption
-or compaction, it verifies that binding with the active-reservation check and
-requires the result to match the handoff before consuming any retained artifact.
-This check prevents a completed prior cycle's `findings.json`, rendered audit,
-or other fixed-name artifact from being mistaken for current work.
+or compaction before final publication, it verifies that binding with the
+active-reservation check and requires the result to match the handoff before
+consuming any retained artifact. After phase 8 completes, it does not rerun the
+candidate-eligibility check: submitting the GitHub review intentionally
+produces `alreadyReviewed`. Phase 9 instead verifies the selection journal,
+review-state paths, and durable phase-8 completion record against the same
+established identity. A failed or ambiguous phase-8 outcome remains in
+publication recovery. These stage-aware checks prevent a completed prior
+cycle's `findings.json`, rendered audit, or other fixed-name artifact from
+being mistaken for current work.
 
 It verifies that journal immediately before the first publication write and
 returns to the proactor only after phase 9 completes; that workflow marks
-completion and owns further selection. A skipped or otherwise unrecognized
-user-input result leaves dependent state unchanged and suspends the review.
+completion and owns further selection. The proactor's `review complete`
+operation validates the active claim and ownership after learning without
+requiring selection eligibility. A skipped or otherwise unrecognized user-input
+result leaves dependent state unchanged and suspends the review.
 
 Model, reasoning-effort, and context-tier choices in `SKILL.md` are passed as
 explicit spawn arguments. Every subagent uses medium reasoning effort,
