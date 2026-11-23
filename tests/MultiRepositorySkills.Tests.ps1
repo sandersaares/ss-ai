@@ -162,7 +162,7 @@ Describe 'Multi-repository skill contracts' {
         $script:ReviewSkill |
             Should -Match 'Standalone `ss-review` invocations resume from their own review checkpoint'
         $script:ReviewImplementation |
-            Should -Match 'Standalone\s+reviews have no proactor\s+journal, handoff identity, or source-commit requirement'
+            Should -Match 'Standalone\s+reviews\s+have no proactor\s+journal, handoff identity, or source-commit requirement'
         $script:ReviewImplementation |
             Should -Match 'A\s+standalone\s+review\s+finishes phase 9 without a handoff'
     }
