@@ -149,7 +149,7 @@ Describe 'Multi-repository skill contracts' {
         $script:ReviewSkill |
             Should -Match 'record a durable\s+completion entry in the maintained review checkpoint'
         $script:ReviewSkill |
-            Should -Match '`nothingToPublish` completion entry is valid'
+            Should -Match '`nothingToPublish`\s+entry, or its successful\s+tracker-completion entry is valid\s+phase-8 evidence'
         $script:ReviewImplementation |
             Should -Match 'publication result or a maintained\s+checkpoint entry'
         $script:ProactorImplementation |
@@ -162,9 +162,9 @@ Describe 'Multi-repository skill contracts' {
         $script:ReviewSkill |
             Should -Match 'Standalone `ss-review` invocations resume from their own review checkpoint'
         $script:ReviewImplementation |
-            Should -Match 'Standalone reviews have no proactor\s+journal or handoff identity requirement'
+            Should -Match 'Standalone\s+reviews have no proactor\s+journal, handoff identity, or source-commit requirement'
         $script:ReviewImplementation |
-            Should -Match 'A standalone review\s+finishes phase 9 without a handoff'
+            Should -Match 'A\s+standalone\s+review\s+finishes phase 9 without a handoff'
     }
 
     It 'keeps no-write checkpoints usable outside Git' {
@@ -180,7 +180,7 @@ Describe 'Multi-repository skill contracts' {
         $script:ReviewSkill |
             Should -Match 'After a tracker run returns `succeeded`'
         $script:ReviewSkill |
-            Should -Match 'successful tracker-completion entry is valid phase-8 evidence'
+            Should -Match 'successful\s+tracker-completion entry is valid\s+phase-8 evidence'
         $script:ReviewImplementation |
             Should -Match 'successful tracker publication records a corresponding\s+checkpoint'
         $script:ProactorImplementation |
