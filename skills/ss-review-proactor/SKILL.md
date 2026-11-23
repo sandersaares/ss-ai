@@ -33,6 +33,11 @@ will review later, or wants autonomous decisions is not an answer to the
 question: leave the work paused, report the unresolved question, and end the
 turn. Do not retry the question in a loop or advance a dependent action.
 If the environment cannot obtain real user input, stop rather than infer it.
+Treat a skipped, dismissed, cancelled, timed-out, or unrecognized response,
+including an explicit `[Skipped by user]` result, as no answer. After asking
+any question, do not start another cycle or perform a dependent review,
+publication, or state-transition action until the real user supplies an exact
+recognized answer.
 This also applies to evaluation of findings and pull request approval inside
 `ss-review`; its explicitly defined question-free policy approvals still apply.
 
@@ -57,10 +62,22 @@ PR.
 Retain the latest loop or one-shot instruction, original invocation directory,
 ordered repository list, current repository, exhausted repositories, resolved
 configuration, selection mode, current PR, absolute cycle paths, and return
-point in the
-primary session's prose checkpoint across handoff, user-input pauses, and
-compaction. A later loop-mode instruction overrides an earlier one; restarting
-stage 1 must not restore a superseded mode from the original invocation.
+point in the primary session's prose checkpoint across handoff, user-input
+pauses, and compaction. Represent one **active review cycle** with the pull
+request URL and number, repository URL, cycle directory, selection journal,
+review-state directory, checkout directory, and current stage. Keep completed
+cycle records as immutable history, never as the active cycle.
+
+Before resuming, dispatching work, or running a command, verify that every pull
+request identity and artifact path belongs to that single active cycle. Do not
+combine paths or queued actions from different cycles in one command, worker
+batch, or turn. If the checkpoint and cycle journal disagree, the active cycle
+is missing, or more than one cycle could be current, stop; perform only read-only
+diagnostics and ask the user to resolve the identity if needed. A skipped or
+unanswered identity question blocks all review work.
+
+A later loop-mode instruction overrides an earlier one; restarting stage 1
+must not restore a superseded mode from the original invocation.
 Direct loop-control messages affect this invocation only. A user-authored
 schedule prompt applies its one-shot or loop instruction to each scheduled
 invocation.
@@ -264,6 +281,13 @@ Do not review just the repository's current changes without the selected PR
 scope. Do not skip an unanswered audit, invent finding decisions, or approve a
 pull request on the user's behalf.
 
+When resuming this stage after interruption or compaction, run the read-only
+active-reservation `review check` command from the active cycle before using
+any retained review artifact or dispatching a worker. Require `confirmed` and
+require its `target.webUrl` to match the pull request in the active-cycle
+record. A refusal, mismatch, or completed result means the cycle is not safely
+resumable; stop instead of substituting another cycle's artifacts.
+
 After reviewer registration, leave the claim as discussion history. A resulting
 assignment, an active submitted review, or a matching completed marker prevents
 repeat selection according to the mode. Do not acquire another
@@ -298,7 +322,10 @@ collapsible section. Do not post a separate summary comment just for selection.
 Restart only after `ss-review` completes all phases, including publication
 (or its defined nothing-to-publish outcome) and learning, with no unresolved
 question or failure. Apply the latest user instruction before selecting more
-work. If loop mode remains enabled, return to stage 1 in this same primary session.
+work. Mark the previous cycle completed and immutable in the checkpoint before
+calling stage 2 again. Do not leave its capture, journal, findings, or audit
+artifacts as the active paths. If loop mode remains enabled, return to stage 1
+in this same primary session.
 While the active repository has not returned `noCandidate`, run another fresh
 selection, claim, checkout, confirmation, and review cycle against that same
 repository. On `noCandidate`, switch to the next repository and continue there.

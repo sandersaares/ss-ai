@@ -45,9 +45,17 @@ Proactor handoffs supply a per-cycle review-state directory for artifacts and
 worker outputs, isolating fixed filenames from other reviews in the same
 session. They also supply the active selection journal. The review orchestrator
 keeps the proactor continuation context and latest loop instruction in its
-prose checkpoint. It verifies that journal immediately before the first
-publication write and returns to the proactor only after phase 9 completes;
-that workflow marks completion and owns further selection.
+prose checkpoint. Its retained review identity binds the pull request URL,
+journal, review-state directory, checkout, and initial capture. On interruption
+or compaction, it verifies that binding with the active-reservation check and
+requires the result to match the handoff before consuming any retained artifact.
+This check prevents a completed prior cycle's `findings.json`, rendered audit,
+or other fixed-name artifact from being mistaken for current work.
+
+It verifies that journal immediately before the first publication write and
+returns to the proactor only after phase 9 completes; that workflow marks
+completion and owns further selection. A skipped or otherwise unrecognized
+user-input result leaves dependent state unchanged and suspends the review.
 
 Model, reasoning-effort, and context-tier choices in `SKILL.md` are passed as
 explicit spawn arguments. Every subagent uses medium reasoning effort,

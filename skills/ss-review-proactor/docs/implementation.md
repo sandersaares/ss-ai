@@ -64,6 +64,17 @@ to one review, including decision logs and publication records. The selection
 executable's journal schema and lifecycle remain unchanged: a new cycle uses a
 fresh journal, while confirmation reuses its own cycle's journal.
 
+The primary agent's checkpoint contains one active-cycle identity with the
+pull request URL and number, repository URL, cycle directory, selection
+journal, review-state directory, checkout directory, and current stage. Every
+resumed or newly dispatched action must derive all of its pull request and
+artifact paths from that record. The agent never mixes two cycle roots in a
+command, worker batch, or turn. Before consuming retained review work after
+interruption or compaction, it runs the read-only `review check` command and
+requires a `confirmed` result for the active pull request. It records completed
+cycles as immutable history before selecting again, so a familiar fixed
+filename or a late worker result cannot make an earlier cycle active.
+
 The stage-5 aggregate remains in primary-session prose and must not become
 shared `ss-review` publication data. Before an `ss-review` GitHub summary is
 published, filter proactor diagnostics to the selected pull request's exact
@@ -98,6 +109,9 @@ Intermediate claim states remain subject to human reconciliation. Recovery
 does not erase journals, choose another PR to bypass a failed review, cancel
 independent preparation workers, or answer human gates. Permission denials and
 other unrecoverable external failures still stop the affected workflow.
+A skipped, dismissed, cancelled, timed-out, or unrecognized user-input result
+is an unanswered gate. The agent stops the current workflow before any
+dependent state transition rather than interpreting the result.
 
 ## Platform reads
 
@@ -187,8 +201,9 @@ the review finishes. A completed claim remains in the discussion as diagnostics.
 Instruction contract tests cover default looping, explicit one-shot control,
 the latest-user-instruction boundary, completion-only continuation,
 same-repository continuation, ordered `noCandidate` advancement,
-all-repositories-empty termination, and per-cycle state isolation across the
-proactor and review handoff. Recovery
+all-repositories-empty termination, skipped-question suspension, active-cycle
+resume validation, and per-cycle state isolation across the proactor and review
+handoff. Recovery
 contracts cover corrected invocations, bounded transient retries, preserved
 human gates, and reconciliation before replaying ambiguous external writes.
 

@@ -50,7 +50,11 @@ repository. A `noCandidate` result advances the repository cursor and an
 exhausted repository is not revisited during the invocation. Each cycle has
 separate review artifacts, a fresh claim journal, and a unique checkout, so
 earlier reviews remain available and no audit decisions or publication state
-carry into the next review or repository.
+carry into the next review or repository. Exactly one cycle is active in the
+owning session. Its pull request, journal, review-state directory, and checkout
+form one identity that the agent verifies after interruption or compaction.
+Completed cycles become immutable history before selection begins another
+cycle, and a stale result cannot reopen or advance work for a completed cycle.
 
 ## Selection mode
 
@@ -179,6 +183,8 @@ Unrecoverable external failures, such as permission denial or authentication
 requiring user action, stop the run with an explicit diagnostic. Exhausted or
 unsafe recovery is reported as a blocker. No error is treated as an empty
 candidate list.
+Skipped, dismissed, cancelled, timed-out, or unrecognized user prompts remain
+unanswered. They stop dependent work and do not authorize a state transition.
 Ambiguous writes are not retried automatically. A claim left by an interrupted
 run expires naturally; another invocation cannot resume its ownership merely
 by reusing a session token.

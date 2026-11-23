@@ -78,7 +78,8 @@ choices, and complete presentation required before the question. The caller
 shows that presentation before obtaining and relaying the user's exact answer.
 Audit handoffs preserve the destination-specific finding text or document links
 and the pull request reminder instead of reducing the decision to question
-text alone.
+text alone. A skipped, dismissed, cancelled, timed-out, or unrecognized prompt
+is still unanswered and cannot resume a dependent operation.
 
 A user-authorized `ss-review-proactor` invocation may select and claim a pull
 request before handing it to this skill directly or through delegated execution.
@@ -90,7 +91,10 @@ proactor marks the reservation complete after phase 9.
 In proactor loop mode, this skill still completes one review at a time before
 returning control to the proactor. A user instruction that the current review
 is the last one disables future cycles without interrupting the review or
-answering any pending question. Each handoff has separate review state.
+answering any pending question. Each handoff has separate review state. After
+interruption or compaction, the orchestrator binds retained artifacts to the
+active pull request, journal, review-state directory, and checkout; a completed
+earlier cycle can never become the source of current findings or decisions.
 
 Automation is permitted only where the review contract already defines the
 decision. In particular, the narrow auto-approval categories are policy, not a

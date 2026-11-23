@@ -36,6 +36,10 @@ Immediately before `ss-review` publishes, replace `review select` with
 active reservation and returns `confirmed` without extending a deadline. If the
 pull request closed and the user explicitly authorized closed-PR publication in
 `ss-review`, append `--publish-to-closed-pull-request` only for this check.
+After interruption or compaction, also run this read-only check before resuming
+any retained review artifact or dispatching a review worker. Require `confirmed`
+and the checked target URL to match the active-cycle checkpoint; a mismatch or
+a completed result is not a resumption signal.
 
 After `ss-review` completes phase 9, replace `review select` with
 `review complete`, preserve all argument values except the closed-PR switch,

@@ -18,6 +18,9 @@ BeforeAll {
     $script:ReviewSkill = [IO.File]::ReadAllText(
         (Join-Path $root 'skills\ss-review\SKILL.md')
     )
+    $script:ProactorImplementation = [IO.File]::ReadAllText(
+        (Join-Path $root 'skills\ss-review-proactor\docs\implementation.md')
+    )
     $script:AutoreapproveSkill = [IO.File]::ReadAllText(
         (Join-Path $root 'skills\ss-autoreapprove\SKILL.md')
     )
@@ -86,6 +89,34 @@ Describe 'Multi-repository skill contracts' {
             Should -Match '--reviewed-source-commit "\{\{REVIEWED_SOURCE_COMMIT\}\}"'
         $script:ProactorDesign |
             Should -Match 'One resolved mode applies to every\s+configured repository'
+    }
+
+    It 'suspends when a user prompt is skipped or otherwise unanswered' {
+        foreach ($content in @($script:ProactorSkill, $script:ReviewSkill)) {
+            $content | Should -Match 'skipped, dismissed, cancelled, timed-out, or unrecognized'
+            $content | Should -Match '\[Skipped by user\]'
+        }
+        $script:ProactorSkill | Should -Match 'do not start another cycle'
+        $script:ReviewSkill | Should -Match 'do not write decision state, start a new phase'
+        $script:ProactorDesign |
+            Should -Match 'Skipped, dismissed, cancelled, timed-out, or unrecognized user prompts remain\s+unanswered'
+    }
+
+    It 'binds resumed work to exactly one active review cycle' {
+        $script:ProactorSkill |
+            Should -Match 'single active cycle'
+        $script:ProactorSkill |
+            Should -Match 'Do not\s+combine paths or queued actions from different cycles'
+        $script:ProactorSkill |
+            Should -Match 'run the read-only\s+active-reservation `review check` command from the active cycle'
+        $script:ProactorImplementation |
+            Should -Match 'one active-cycle identity'
+        $script:ProactorImplementation |
+            Should -Match 'The agent never mixes two cycle roots'
+        $script:ReviewSkill |
+            Should -Match 'bind this invocation to one review identity'
+        $script:ReviewSkill |
+            Should -Match 'Never reuse an artifact from a completed earlier cycle'
     }
 
     It 'aggregates autoreapproval results across repository runs' {
