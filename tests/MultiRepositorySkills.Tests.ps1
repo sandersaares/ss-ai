@@ -18,6 +18,12 @@ BeforeAll {
     $script:ReviewSkill = [IO.File]::ReadAllText(
         (Join-Path $root 'skills\ss-review\SKILL.md')
     )
+    $script:ReviewImplementation = [IO.File]::ReadAllText(
+        (Join-Path $root 'skills\ss-review\docs\implementation.md')
+    )
+    $script:ProactorImplementation = [IO.File]::ReadAllText(
+        (Join-Path $root 'skills\ss-review-proactor\docs\implementation.md')
+    )
     $script:AutoreapproveSkill = [IO.File]::ReadAllText(
         (Join-Path $root 'skills\ss-autoreapprove\SKILL.md')
     )
@@ -86,6 +92,99 @@ Describe 'Multi-repository skill contracts' {
             Should -Match '--reviewed-source-commit "\{\{REVIEWED_SOURCE_COMMIT\}\}"'
         $script:ProactorDesign |
             Should -Match 'One resolved mode applies to every\s+configured repository'
+    }
+
+    It 'suspends when a user prompt is skipped or otherwise unanswered' {
+        foreach ($content in @($script:ProactorSkill, $script:ReviewSkill)) {
+            $content | Should -Match 'skipped, dismissed, cancelled, timed-out, or unrecognized'
+            $content | Should -Match '\[Skipped by user\]'
+        }
+        $script:ProactorSkill | Should -Match 'do not start another cycle'
+        $script:ReviewSkill | Should -Match 'do not write decision state, start a new phase'
+        $script:ProactorDesign |
+            Should -Match 'Skipped, dismissed, cancelled, timed-out, or unrecognized user prompts remain\s+unanswered'
+    }
+
+    It 'binds resumed work to exactly one active review cycle' {
+        $script:ProactorSkill | Should -Match 'one \*\*active review cycle\*\*'
+        $script:ProactorSkill |
+            Should -Match 'Stages 1 through 3 may construct and populate a pending identity'
+        $script:ProactorSkill |
+            Should -Match 'From stage 4 onward, require an existing, matching\s+identity'
+        $script:ProactorSkill |
+            Should -Match 'Do\s+not\s+combine paths or queued actions from different cycles'
+        $script:ProactorSkill |
+            Should -Match 'run the read-only\s+active-reservation `review check` command from\s+the active cycle'
+        $script:ProactorImplementation |
+            Should -Match 'one active-cycle identity'
+        $script:ProactorImplementation |
+            Should -Match 'The agent never mixes two cycle roots'
+        $script:ReviewSkill |
+            Should -Match 'bind this invocation to one review identity'
+        $script:ReviewSkill |
+            Should -Match 'Never reuse an artifact from a completed earlier\s+cycle'
+    }
+
+    It 'uses stage-aware review identity and ownership validation' {
+        $script:ProactorSkill |
+            Should -Match 'before final review\s+publication'
+        $script:ProactorSkill |
+            Should -Match 'do not rerun\s+`review check`'
+        $script:ProactorSkill | Should -Match 'produces `alreadyReviewed`'
+        $script:ProactorSkill |
+            Should -Match '`review complete`\s+command performs the remaining remote ownership'
+        $script:ProactorCommands |
+            Should -Match 'After interruption or compaction before final review publication'
+        $script:ProactorCommands |
+            Should -Match 'Do not run this check to resume phase 9'
+        $script:ReviewSkill |
+            Should -Match 'After phase 8 completes'
+        $script:ReviewImplementation |
+            Should -Match 'After phase 8 completes'
+        $script:ReviewImplementation |
+            Should -Match 'does not rerun the\s+candidate-eligibility check'
+    }
+
+    It 'records no-write outcomes as phase-8 completion evidence' {
+        $script:ReviewSkill |
+            Should -Match 'record a durable\s+completion entry in the maintained review checkpoint'
+        $script:ReviewSkill |
+            Should -Match '`nothingToPublish`\s+entry, or its successful\s+tracker-completion entry is valid\s+phase-8 evidence'
+        $script:ReviewImplementation |
+            Should -Match 'publication result or a maintained\s+checkpoint entry'
+        $script:ProactorImplementation |
+            Should -Match 'maintained checkpoint entry that binds the cycle\s+identity'
+    }
+
+    It 'limits proactor handoff evidence to proactor reviews' {
+        $script:ReviewSkill |
+            Should -Match 'For a proactor handoff, if interruption or compaction pauses this phase'
+        $script:ReviewSkill |
+            Should -Match 'Standalone `ss-review` invocations resume from their own review checkpoint'
+        $script:ReviewImplementation |
+            Should -Match 'Standalone\s+reviews\s+have no proactor\s+journal, handoff identity, or source-commit requirement'
+        $script:ReviewImplementation |
+            Should -Match 'A\s+standalone\s+review\s+finishes phase 9 without a handoff'
+    }
+
+    It 'keeps no-write checkpoints usable outside Git' {
+        $script:ReviewSkill |
+            Should -Match 'Standalone reviews do not require a\s+source commit or established cycle identity'
+        $script:ReviewImplementation |
+            Should -Match 'Standalone reviews\s+have no proactor journal, handoff identity, or source-commit requirement'
+        $script:ReviewImplementation |
+            Should -Match 'Standalone no-write checkpoints omit unavailable identity and\s+commit fields'
+    }
+
+    It 'records successful tracker publication as phase-8 completion evidence' {
+        $script:ReviewSkill |
+            Should -Match 'After a tracker run returns `succeeded`'
+        $script:ReviewSkill |
+            Should -Match 'successful\s+tracker-completion entry is valid\s+phase-8 evidence'
+        $script:ReviewImplementation |
+            Should -Match 'successful tracker publication records a corresponding\s+checkpoint'
+        $script:ProactorImplementation |
+            Should -Match 'After successful tracker publication, a checkpoint entry binds the'
     }
 
     It 'aggregates autoreapproval results across repository runs' {

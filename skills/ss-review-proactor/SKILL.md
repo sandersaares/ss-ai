@@ -33,6 +33,11 @@ will review later, or wants autonomous decisions is not an answer to the
 question: leave the work paused, report the unresolved question, and end the
 turn. Do not retry the question in a loop or advance a dependent action.
 If the environment cannot obtain real user input, stop rather than infer it.
+Treat a skipped, dismissed, cancelled, timed-out, or unrecognized response,
+including an explicit `[Skipped by user]` result, as no answer. After asking
+any question, do not start another cycle or perform a dependent review,
+publication, or state-transition action until the real user supplies an exact
+recognized answer.
 This also applies to evaluation of findings and pull request approval inside
 `ss-review`; its explicitly defined question-free policy approvals still apply.
 
@@ -57,10 +62,28 @@ PR.
 Retain the latest loop or one-shot instruction, original invocation directory,
 ordered repository list, current repository, exhausted repositories, resolved
 configuration, selection mode, current PR, absolute cycle paths, and return
-point in the
-primary session's prose checkpoint across handoff, user-input pauses, and
-compaction. A later loop-mode instruction overrides an earlier one; restarting
-stage 1 must not restore a superseded mode from the original invocation.
+point in the primary session's prose checkpoint across handoff, user-input
+pauses, and compaction. Represent one **active review cycle** in the checkpoint.
+Stages 1 through 3 may construct and populate a pending identity: stage 1 binds
+the repository URL and fresh cycle paths, stage 2 adds the selected pull
+request URL and number, and stage 3 adds the checkout and confirmation result.
+The fully established identity also contains the selection journal,
+review-state directory, and current stage. Keep completed cycle records as
+immutable history, never as the active cycle.
+
+Stages 1 through 3 may start when no active cycle exists, but they must first
+create the pending identity and update that same record from selection and
+confirmation results. From stage 4 onward, require an existing, matching
+identity before resuming, dispatching work, or running a command. Verify that
+every pull request identity and artifact path belongs to that single cycle. Do
+not combine paths or queued actions from different cycles in one command,
+worker batch, or turn. If the checkpoint and established cycle journal disagree,
+or more than one cycle could be current, stop; perform only read-only
+diagnostics and ask the user to resolve the identity if needed. A skipped or
+unanswered identity question blocks all review work.
+
+A later loop-mode instruction overrides an earlier one; restarting stage 1
+must not restore a superseded mode from the original invocation.
 Direct loop-control messages affect this invocation only. A user-authored
 schedule prompt applies its one-shot or loop instruction to each scheduled
 invocation.
@@ -122,7 +145,10 @@ the working directory changes during checkout preparation.
 Resolve the primary session identifier and create a fresh cycle subdirectory
 in that session's state directory. Put a fresh absolute journal path and a
 separate review-state subdirectory there. Use new paths for every cycle; never
-overwrite a previous cycle's journal or review artifacts.
+overwrite a previous cycle's journal or review artifacts. If no active cycle
+exists, record this repository and these fresh paths as the pending cycle
+identity before issuing any selection command. An interrupted stage 1 may
+establish this record before it retries its remaining preparation.
 Resolve an Azure tenant for each Azure DevOps repository. A tenant explicitly
 associated with one repository applies only to that repository; a clearly
 stated shared tenant applies to repositories that have no specific value.
@@ -187,6 +213,12 @@ Interpret the JSON result:
 | `claimed` | Use `target.webUrl` as the exact PR scope and continue to stage 3. |
 | `confirmed` | Emitted only by confirmation in stage 3. |
 
+On `claimed`, update the pending cycle identity with the result's exact pull
+request URL and number before preparing its checkout. Do not replace that
+identity while confirming a replacement candidate; update the same pending
+cycle from the replacement result, then refresh its checkout and retained
+candidate-specific artifact paths before using the replacement target.
+
 On command failure, apply the shared error-recovery policy; an error is not
 evidence that no PR qualifies. A corrected invocation may be retried only when
 no remote write was attempted and the helper's journal lifecycle permits it.
@@ -235,7 +267,9 @@ A replacement `claimed` result requires preparation and a final check for that
 new target. `noCandidate` exhausts the active repository and advances to the
 next repository; it finishes the invocation only after every repository is
 exhausted. On `confirmed`, proceed directly to stage 4. This is the only
-post-claim check for that candidate.
+post-claim check for that candidate. Add the confirmation result and checkout
+path to the pending cycle identity, making it the established active review
+identity for stage 4.
 
 # Stage 4: review handoff
 
@@ -263,6 +297,21 @@ Apply `ss-review` in full, including its ownership and human decision rules.
 Do not review just the repository's current changes without the selected PR
 scope. Do not skip an unanswered audit, invent finding decisions, or approve a
 pull request on the user's behalf.
+
+When resuming this stage after interruption or compaction before final review
+publication, run the read-only active-reservation `review check` command from
+the active cycle before using any retained review artifact or dispatching a
+worker. Require `confirmed` and require its `target.webUrl` to match the pull
+request in the active-cycle record. A refusal or mismatch means the cycle is
+not safely resumable; stop instead of substituting another cycle's artifacts.
+
+After phase 8 has completed and the review is in phase 9, do not rerun
+`review check`: a submitted GitHub review correctly produces `alreadyReviewed`.
+Validate the exact cycle identity against the handoff's journal, review-state
+paths, and durable phase-8 outcome instead. The stage-5 `review complete`
+command performs the remaining remote ownership and active-reservation
+validation after learning completes. A phase-8 failure or ambiguous outcome
+still follows publication recovery before learning can start.
 
 After reviewer registration, leave the claim as discussion history. A resulting
 assignment, an active submitted review, or a matching completed marker prevents
@@ -298,7 +347,10 @@ collapsible section. Do not post a separate summary comment just for selection.
 Restart only after `ss-review` completes all phases, including publication
 (or its defined nothing-to-publish outcome) and learning, with no unresolved
 question or failure. Apply the latest user instruction before selecting more
-work. If loop mode remains enabled, return to stage 1 in this same primary session.
+work. Mark the previous cycle completed and immutable in the checkpoint before
+calling stage 2 again. Do not leave its capture, journal, findings, or audit
+artifacts as the active paths. If loop mode remains enabled, return to stage 1
+in this same primary session.
 While the active repository has not returned `noCandidate`, run another fresh
 selection, claim, checkout, confirmation, and review cycle against that same
 repository. On `noCandidate`, switch to the next repository and continue there.

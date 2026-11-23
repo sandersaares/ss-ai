@@ -45,9 +45,36 @@ Proactor handoffs supply a per-cycle review-state directory for artifacts and
 worker outputs, isolating fixed filenames from other reviews in the same
 session. They also supply the active selection journal. The review orchestrator
 keeps the proactor continuation context and latest loop instruction in its
-prose checkpoint. It verifies that journal immediately before the first
-publication write and returns to the proactor only after phase 9 completes;
-that workflow marks completion and owns further selection.
+prose checkpoint. Its retained review identity binds the pull request URL,
+journal, review-state directory, checkout, and initial capture. On interruption
+or compaction before final publication, it verifies that binding with the
+active-reservation check and requires the result to match the handoff before
+consuming any retained artifact. After phase 8 completes, it does not rerun the
+candidate-eligibility check: submitting the GitHub review intentionally
+produces `alreadyReviewed`. Phase 9 instead verifies the selection journal,
+review-state paths, and durable phase-8 completion record against the same
+established identity. That record can be the publication result or a maintained
+checkpoint entry for a `nothingToPublish` or successful tracker outcome; either
+binds the exact final reviewed source commit and review identity. A failed or
+ambiguous phase-8 outcome remains in publication recovery. Standalone reviews
+have no proactor journal, handoff identity, or source-commit requirement and
+resume from their own review checkpoint and artifacts. These stage-aware
+checks prevent a completed prior cycle's `findings.json`, rendered audit, or
+other fixed-name artifact from being mistaken for current work.
+
+It verifies that journal immediately before the first publication write. A
+phase-8 path with no remote write records its identity, final source commit,
+destination, outcome, and reason in the maintained review checkpoint before
+learning starts. A successful tracker publication records a corresponding
+checkpoint that binds its result to the cycle identity and final checked
+source commit. Standalone no-write checkpoints omit unavailable identity and
+commit fields. A proactor review returns to the proactor only after phase 9
+completes; that workflow marks completion and owns further selection. The
+proactor's `review complete` operation validates the active claim and
+ownership after learning without requiring selection eligibility. A standalone
+review finishes phase 9 without a handoff. A skipped or otherwise
+unrecognized user-input result leaves dependent state unchanged and suspends
+the review.
 
 Model, reasoning-effort, and context-tier choices in `SKILL.md` are passed as
 explicit spawn arguments. Every subagent uses medium reasoning effort,

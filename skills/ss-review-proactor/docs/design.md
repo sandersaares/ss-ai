@@ -39,7 +39,8 @@ user-authored schedule prompt can specify one-shot mode for its scheduled
 invocations.
 
 The next cycle begins only after all review phases, including publication and
-learning, finish. A review with nothing to publish still completes normally.
+learning, finish. A review with nothing to publish records a durable phase-8
+completion checkpoint and then completes normally.
 Unanswered questions, failures, and cancelled reviews do not advance the loop.
 An active repository with no qualifying pull request advances the repository
 cursor. Exhausting every repository ends the invocation without polling.
@@ -50,7 +51,16 @@ repository. A `noCandidate` result advances the repository cursor and an
 exhausted repository is not revisited during the invocation. Each cycle has
 separate review artifacts, a fresh claim journal, and a unique checkout, so
 earlier reviews remain available and no audit decisions or publication state
-carry into the next review or repository.
+carry into the next review or repository. Exactly one cycle is active in the
+owning session. Stages 1 through 3 may establish a pending identity from the
+repository and fresh artifact paths, then populate it from selection and
+confirmation. Once stage 4 starts, the pull request, journal, review-state
+directory, and checkout form the established identity that the agent verifies
+after interruption or compaction. Completed cycles become immutable history
+before selection begins another cycle, and a stale result cannot reopen or
+advance work for a completed cycle. Pre-publication resumption verifies candidate
+eligibility and active ownership; phase-9 resumption preserves that identity
+without requiring the submitted review to remain selection-eligible.
 
 ## Selection mode
 
@@ -179,6 +189,8 @@ Unrecoverable external failures, such as permission denial or authentication
 requiring user action, stop the run with an explicit diagnostic. Exhausted or
 unsafe recovery is reported as a blocker. No error is treated as an empty
 candidate list.
+Skipped, dismissed, cancelled, timed-out, or unrecognized user prompts remain
+unanswered. They stop dependent work and do not authorize a state transition.
 Ambiguous writes are not retried automatically. A claim left by an interrupted
 run expires naturally; another invocation cannot resume its ownership merely
 by reusing a session token.

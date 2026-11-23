@@ -34,7 +34,24 @@ The only scheduled entry is a confirmed `ss-review-proactor` handoff authorized 
 
 For a proactor handoff, use its absolute review-state directory for all review artifacts and worker outputs otherwise placed directly in session state. Retain its continuation context in the review invocation's checkpoint and apply its [run-control rules](../ss-review-proactor/SKILL.md#run-control), including a direct request to make the current review the last one. That request disables further cycles without ending this review or answering a pending audit or merge question. Do not start another review from within this workflow.
 
-A question directed to the user is a hard suspension point. Ask it through the available user-input interface when possible. A delegated review that cannot ask the user must stop that dependent work and return one complete handoff to its caller: the exact question, every choice in the required order, the complete ordinary-session presentation that must precede the question, and any rendered files or links needed by that presentation. For an audit, include the complete destination-specific finding text or document links and the applicable PR reminder; do not hand off only the question text. The caller must display the presentation verbatim and in order before collecting the answer. A caller may relay the user's direct answer to the review, but no caller, parent agent, subagent, tool fallback, or other intermediary may answer on the user's behalf. In particular, a response saying that the user is unavailable, will review later, or wants the agent to decide autonomously is not an answer. Do not interpret such a response as approval, rejection, feedback, confirmation, or permission; do not write decision state or perform any dependent side effect. Leave the review paused at the unanswered question, report it, and do not retry the question in a loop.
+For a proactor handoff, bind this invocation to one review identity: the exact
+pull request URL, selection journal, review-state directory, checkout directory,
+and initial capture path. On interruption or compaction, verify that every
+retained capture, assignment, finding, and rendered document belongs to that
+identity before using it. Before final review publication, use the
+active-reservation `review check` before resuming retained work and require its
+target to match the review identity. After phase 8 completes, do not rerun
+`review check`: a submitted GitHub review is intentionally ineligible as
+`alreadyReviewed`. Resume phase 9 only after matching the cycle's journal and
+review-state paths to its durable phase-8 completion record; the proactor's
+later completion command validates the active reservation's ownership. A
+phase-8 failure or ambiguous outcome still requires publication recovery.
+Never reuse an artifact from a completed earlier cycle merely because it has a
+familiar fixed filename such as `findings.json`. If the identities do not
+match, stop and request resolution; do not replay stale actions against either
+cycle.
+
+A question directed to the user is a hard suspension point. Ask it through the available user-input interface when possible. A delegated review that cannot ask the user must stop that dependent work and return one complete handoff to its caller: the exact question, every choice in the required order, the complete ordinary-session presentation that must precede the question, and any rendered files or links needed by that presentation. For an audit, include the complete destination-specific finding text or document links and the applicable PR reminder; do not hand off only the question text. The caller must display the presentation verbatim and in order before collecting the answer. A caller may relay the user's direct answer to the review, but no caller, parent agent, subagent, tool fallback, or other intermediary may answer on the user's behalf. In particular, a response saying that the user is unavailable, will review later, or wants the agent to decide autonomously is not an answer. Treat a skipped, dismissed, cancelled, timed-out, or unrecognized response, including `[Skipped by user]`, as no answer. Do not interpret such a response as approval, rejection, feedback, confirmation, or permission; do not write decision state, start a new phase, or perform any dependent side effect. Leave the review paused at the unanswered question, report it, and do not retry the question in a loop.
 
 Subagents dispatched by this workflow must not ask user-facing questions or make decisions reserved for the user. When a bounded subagent needs user input, it reports the unresolved question to the review orchestrator and stops its work. The review orchestrator obtains the user's direct answer through its user-facing interface or caller and decides how to resume the bounded work.
 
@@ -377,6 +394,15 @@ Every comment the review posts to a pull request ends with the line
 
 Ask the user which they want whenever the review has no pull request, and whenever the choice is otherwise unclear. Do not file into a tracker without being asked to.
 
+A phase-8 path that completes without a remote write must record a durable
+completion entry in the maintained review checkpoint before entering phase 9.
+Record the destination and a `nothingToPublish` outcome with the reason no
+write was needed. For a proactor handoff, also record the exact final reviewed
+source commit and established review identity. Phase 9 accepts that
+identity-bound entry as durable phase-8 completion evidence alongside the
+selection journal and review-state paths. Standalone reviews do not require a
+source commit or established cycle identity.
+
 A pull request run that reached the service is not resolved by filing into a tracker. Reconcile it against the pull request first, as the pull request destination describes. The tracker is where a review that was never published goes, not a way around one that half was.
 
 ## Publishing onto a pull request
@@ -451,6 +477,13 @@ An approved set holding no findings is refused, and it is not an error to escala
 
 The summary is returned in the standard output object rather than filed as an item of its own. Report it to the user.
 
+After a tracker run returns `succeeded`, record a durable phase-8 completion
+entry in the maintained review checkpoint before entering phase 9. Record the
+tracker result path, destination, and successful outcome. For a proactor
+handoff, also bind the entry to the established review identity and exact final
+checked source commit. Phase 9 validates that entry instead of requiring a
+pull-request publication result.
+
 ## Delivering a Markdown document
 
 Persist the findings for the user to deliver manually. Execute the command in `pwsh-calls/render-findings-to-document.md`, replacing its placeholders.
@@ -458,6 +491,18 @@ Persist the findings for the user to deliver manually. Execute the command in `p
 Report the path of the combined document to the user.
 
 # Phase 9: learning
+
+For a proactor handoff, if interruption or compaction pauses this phase,
+validate the durable phase-8 outcome and every retained artifact against the
+handoff's established review identity. A successful `publication-result.json`
+the maintained checkpoint's `nothingToPublish` entry, or its successful
+tracker-completion entry is valid phase-8 evidence when its identity and final
+source commit match. Do not rerun the pre-publication `review check`; a
+submitted review must not be required to remain selection-eligible. Return the
+exact final reviewed source commit and the phase-8 outcome to the proactor for
+stage-5 reservation completion.
+Standalone `ss-review` invocations resume from their own review checkpoint and
+artifacts without proactor identity, journal, or handoff evidence.
 
 Analyze the audit feedback to identify:
 
@@ -483,7 +528,7 @@ Ask the user for approval before creating any pull requests, to avoid noise/chat
 
 After this phase completes, a proactor handoff returns to [proactor stage 5](../ss-review-proactor/SKILL.md#stage-5-summary-and-continuation) to mark the active reservation complete and make its summary and continuation decision. Preserve the latest user loop instruction; a pause, failure, or unanswered learning question is not completion. Standalone `ss-review` invocations finish here without selecting another review.
 
-Retain the exact final reviewed source commit from the last checked capture or
-successful publication result in the handoff checkpoint. Pass it to the
-proactor as its `REVIEWED_SOURCE_COMMIT`; do not re-read the live head for
-completion.
+For a proactor handoff, retain the exact final reviewed source commit from the
+last checked capture, successful publication result, or `nothingToPublish`
+checkpoint entry in the handoff checkpoint. Pass it to the proactor as its
+`REVIEWED_SOURCE_COMMIT`; do not re-read the live head for completion.

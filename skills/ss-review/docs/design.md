@@ -78,19 +78,35 @@ choices, and complete presentation required before the question. The caller
 shows that presentation before obtaining and relaying the user's exact answer.
 Audit handoffs preserve the destination-specific finding text or document links
 and the pull request reminder instead of reducing the decision to question
-text alone.
+text alone. A skipped, dismissed, cancelled, timed-out, or unrecognized prompt
+is still unanswered and cannot resume a dependent operation.
 
 A user-authorized `ss-review-proactor` invocation may select and claim a pull
 request before handing it to this skill directly or through delegated execution.
 This scheduled entry retains the same human authority and uses the ordinary
 review workflow. The proactor owns activation before handoff. This skill
-verifies the active reservation immediately before publication, and the
-proactor marks the reservation complete after phase 9.
+verifies candidate eligibility and the active reservation before final
+publication. After publication, a submitted review is no longer expected to be
+selection-eligible; phase 9 preserves the exact established review identity
+and durable phase-8 completion record instead. A phase-8 outcome that requires
+no remote write records its identity, final source commit, destination,
+`nothingToPublish` outcome, and reason in the maintained checkpoint; that entry
+is completion evidence for phase 9. The proactor's completion command then
+verifies reservation ownership and marks the cycle complete. Standalone reviews
+record the same outcome without requiring a source commit or proactor handoff
+identity. Successful tracker publication also records an identity-bound
+completion checkpoint for proactor phase-9 resumption.
 
 In proactor loop mode, this skill still completes one review at a time before
 returning control to the proactor. A user instruction that the current review
 is the last one disables future cycles without interrupting the review or
-answering any pending question. Each handoff has separate review state.
+answering any pending question. Each handoff has separate review state. After
+interruption or compaction, the orchestrator binds retained artifacts to the
+active pull request, journal, review-state directory, and checkout; a completed
+earlier cycle can never become the source of current findings or decisions.
+Pre-publication and post-publication resumptions use the identity checks
+appropriate to their stage, so a valid learning phase is not blocked by the
+review it just submitted.
 
 Automation is permitted only where the review contract already defines the
 decision. In particular, the narrow auto-approval categories are policy, not a

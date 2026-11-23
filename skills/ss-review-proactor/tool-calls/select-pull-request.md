@@ -36,6 +36,23 @@ Immediately before `ss-review` publishes, replace `review select` with
 active reservation and returns `confirmed` without extending a deadline. If the
 pull request closed and the user explicitly authorized closed-PR publication in
 `ss-review`, append `--publish-to-closed-pull-request` only for this check.
+After interruption or compaction before final review publication, also run this
+read-only check before resuming any retained review artifact or dispatching a
+review worker. Require `confirmed` and the checked target URL to match the
+active-cycle checkpoint; a mismatch is not a resumption signal.
+
+Do not run this check to resume phase 9 or any later post-publication work. A
+submitted GitHub review makes the candidate ineligible and the command correctly
+returns `alreadyReviewed`. Validate the established cycle against the exact
+selection journal, review-state paths, and durable phase-8 outcome instead. A
+maintained checkpoint entry that records the matching cycle identity, final
+source commit, destination, `nothingToPublish` outcome, and reason satisfies
+that evidence requirement when no remote write was needed.
+For successful tracker publication, use the completion checkpoint that binds
+`tracker-publication-result.json` to the matching cycle identity and final
+checked source commit.
+After learning, `review complete` validates the active reservation and its
+ownership without reapplying candidate eligibility.
 
 After `ss-review` completes phase 9, replace `review select` with
 `review complete`, preserve all argument values except the closed-PR switch,
