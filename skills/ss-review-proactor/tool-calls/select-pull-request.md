@@ -48,6 +48,9 @@ selection journal, review-state paths, and durable phase-8 outcome instead. A
 maintained checkpoint entry that records the matching cycle identity, final
 source commit, destination, `nothingToPublish` outcome, and reason satisfies
 that evidence requirement when no remote write was needed.
+For successful tracker publication, use the completion checkpoint that binds
+`tracker-publication-result.json` to the matching cycle identity and final
+checked source commit.
 After learning, `review complete` validates the active reservation and its
 ownership without reapplying candidate eligibility.
 

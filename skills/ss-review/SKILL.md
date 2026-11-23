@@ -396,10 +396,12 @@ Ask the user which they want whenever the review has no pull request, and whenev
 
 A phase-8 path that completes without a remote write must record a durable
 completion entry in the maintained review checkpoint before entering phase 9.
-Record the exact final reviewed source commit, the established review identity,
-the destination, and a `nothingToPublish` outcome with the reason no write was
-needed. For a proactor handoff, phase 9 accepts this entry as durable phase-8
-completion evidence alongside the selection journal and review-state paths.
+Record the destination and a `nothingToPublish` outcome with the reason no
+write was needed. For a proactor handoff, also record the exact final reviewed
+source commit and established review identity. Phase 9 accepts that
+identity-bound entry as durable phase-8 completion evidence alongside the
+selection journal and review-state paths. Standalone reviews do not require a
+source commit or established cycle identity.
 
 A pull request run that reached the service is not resolved by filing into a tracker. Reconcile it against the pull request first, as the pull request destination describes. The tracker is where a review that was never published goes, not a way around one that half was.
 
@@ -475,6 +477,13 @@ An approved set holding no findings is refused, and it is not an error to escala
 
 The summary is returned in the standard output object rather than filed as an item of its own. Report it to the user.
 
+After a tracker run returns `succeeded`, record a durable phase-8 completion
+entry in the maintained review checkpoint before entering phase 9. Record the
+tracker result path, destination, and successful outcome. For a proactor
+handoff, also bind the entry to the established review identity and exact final
+checked source commit. Phase 9 validates that entry instead of requiring a
+pull-request publication result.
+
 ## Delivering a Markdown document
 
 Persist the findings for the user to deliver manually. Execute the command in `pwsh-calls/render-findings-to-document.md`, replacing its placeholders.
@@ -486,11 +495,12 @@ Report the path of the combined document to the user.
 For a proactor handoff, if interruption or compaction pauses this phase,
 validate the durable phase-8 outcome and every retained artifact against the
 handoff's established review identity. A successful `publication-result.json`
-or the maintained checkpoint's `nothingToPublish` completion entry is valid
-phase-8 evidence when its identity and final source commit match. Do not rerun
-the pre-publication `review check`; a submitted review must not be required to
-remain selection-eligible. Return the exact final reviewed source commit and
-the phase-8 outcome to the proactor for stage-5 reservation completion.
+the maintained checkpoint's `nothingToPublish` entry, or its successful
+tracker-completion entry is valid phase-8 evidence when its identity and final
+source commit match. Do not rerun the pre-publication `review check`; a
+submitted review must not be required to remain selection-eligible. Return the
+exact final reviewed source commit and the phase-8 outcome to the proactor for
+stage-5 reservation completion.
 Standalone `ss-review` invocations resume from their own review checkpoint and
 artifacts without proactor identity, journal, or handoff evidence.
 

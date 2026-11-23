@@ -93,7 +93,9 @@ no remote write records its identity, final source commit, destination,
 `nothingToPublish` outcome, and reason in the maintained checkpoint; that entry
 is completion evidence for phase 9. The proactor's completion command then
 verifies reservation ownership and marks the cycle complete. Standalone reviews
-do not require proactor handoff evidence.
+record the same outcome without requiring a source commit or proactor handoff
+identity. Successful tracker publication also records an identity-bound
+completion checkpoint for proactor phase-9 resumption.
 
 In proactor loop mode, this skill still completes one review at a time before
 returning control to the proactor. A user instruction that the current review

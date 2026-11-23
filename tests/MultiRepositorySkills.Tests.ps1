@@ -167,6 +167,26 @@ Describe 'Multi-repository skill contracts' {
             Should -Match 'A standalone review\s+finishes phase 9 without a handoff'
     }
 
+    It 'keeps no-write checkpoints usable outside Git' {
+        $script:ReviewSkill |
+            Should -Match 'Standalone reviews do not require a\s+source commit or established cycle identity'
+        $script:ReviewImplementation |
+            Should -Match 'Standalone reviews\s+have no proactor journal, handoff identity, or source-commit requirement'
+        $script:ReviewImplementation |
+            Should -Match 'Standalone no-write checkpoints omit unavailable identity and\s+commit fields'
+    }
+
+    It 'records successful tracker publication as phase-8 completion evidence' {
+        $script:ReviewSkill |
+            Should -Match 'After a tracker run returns `succeeded`'
+        $script:ReviewSkill |
+            Should -Match 'successful tracker-completion entry is valid phase-8 evidence'
+        $script:ReviewImplementation |
+            Should -Match 'successful tracker publication records a corresponding\s+checkpoint'
+        $script:ProactorImplementation |
+            Should -Match 'After successful tracker publication, a checkpoint entry binds the'
+    }
+
     It 'aggregates autoreapproval results across repository runs' {
         $script:AutoreapproveSkill |
             Should -Match 'from every repository'
