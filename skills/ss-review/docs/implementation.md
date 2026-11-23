@@ -53,17 +53,24 @@ consuming any retained artifact. After phase 8 completes, it does not rerun the
 candidate-eligibility check: submitting the GitHub review intentionally
 produces `alreadyReviewed`. Phase 9 instead verifies the selection journal,
 review-state paths, and durable phase-8 completion record against the same
-established identity. A failed or ambiguous phase-8 outcome remains in
-publication recovery. These stage-aware checks prevent a completed prior
+established identity. That record can be the publication result or a maintained
+checkpoint entry for a `nothingToPublish` outcome; either binds the exact final
+reviewed source commit and review identity. A failed or ambiguous phase-8
+outcome remains in publication recovery. Standalone reviews have no proactor
+journal or handoff identity requirement and resume from their own review
+checkpoint and artifacts. These stage-aware checks prevent a completed prior
 cycle's `findings.json`, rendered audit, or other fixed-name artifact from
 being mistaken for current work.
 
-It verifies that journal immediately before the first publication write and
-returns to the proactor only after phase 9 completes; that workflow marks
-completion and owns further selection. The proactor's `review complete`
-operation validates the active claim and ownership after learning without
-requiring selection eligibility. A skipped or otherwise unrecognized user-input
-result leaves dependent state unchanged and suspends the review.
+It verifies that journal immediately before the first publication write. A
+phase-8 path with no remote write records its identity, final source commit,
+destination, outcome, and reason in the maintained review checkpoint before
+learning starts. A proactor review returns to the proactor only after phase 9
+completes; that workflow marks completion and owns further selection. The
+proactor's `review complete` operation validates the active claim and ownership
+after learning without requiring selection eligibility. A standalone review
+finishes phase 9 without a handoff. A skipped or otherwise unrecognized
+user-input result leaves dependent state unchanged and suspends the review.
 
 Model, reasoning-effort, and context-tier choices in `SKILL.md` are passed as
 explicit spawn arguments. Every subagent uses medium reasoning effort,

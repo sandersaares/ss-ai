@@ -39,7 +39,8 @@ user-authored schedule prompt can specify one-shot mode for its scheduled
 invocations.
 
 The next cycle begins only after all review phases, including publication and
-learning, finish. A review with nothing to publish still completes normally.
+learning, finish. A review with nothing to publish records a durable phase-8
+completion checkpoint and then completes normally.
 Unanswered questions, failures, and cancelled reviews do not advance the loop.
 An active repository with no qualifying pull request advances the repository
 cursor. Exhausting every repository ends the invocation without polling.

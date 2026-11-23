@@ -394,6 +394,13 @@ Every comment the review posts to a pull request ends with the line
 
 Ask the user which they want whenever the review has no pull request, and whenever the choice is otherwise unclear. Do not file into a tracker without being asked to.
 
+A phase-8 path that completes without a remote write must record a durable
+completion entry in the maintained review checkpoint before entering phase 9.
+Record the exact final reviewed source commit, the established review identity,
+the destination, and a `nothingToPublish` outcome with the reason no write was
+needed. For a proactor handoff, phase 9 accepts this entry as durable phase-8
+completion evidence alongside the selection journal and review-state paths.
+
 A pull request run that reached the service is not resolved by filing into a tracker. Reconcile it against the pull request first, as the pull request destination describes. The tracker is where a review that was never published goes, not a way around one that half was.
 
 ## Publishing onto a pull request
@@ -476,12 +483,16 @@ Report the path of the combined document to the user.
 
 # Phase 9: learning
 
-If interruption or compaction pauses this phase, validate the durable phase-8
-outcome and every retained artifact against the handoff's established review
-identity. Do not rerun the pre-publication `review check`; a submitted review
-must not be required to remain selection-eligible. Return the exact final
-reviewed source commit and the phase-8 outcome to the proactor for stage-5
-reservation completion.
+For a proactor handoff, if interruption or compaction pauses this phase,
+validate the durable phase-8 outcome and every retained artifact against the
+handoff's established review identity. A successful `publication-result.json`
+or the maintained checkpoint's `nothingToPublish` completion entry is valid
+phase-8 evidence when its identity and final source commit match. Do not rerun
+the pre-publication `review check`; a submitted review must not be required to
+remain selection-eligible. Return the exact final reviewed source commit and
+the phase-8 outcome to the proactor for stage-5 reservation completion.
+Standalone `ss-review` invocations resume from their own review checkpoint and
+artifacts without proactor identity, journal, or handoff evidence.
 
 Analyze the audit feedback to identify:
 
@@ -507,7 +518,7 @@ Ask the user for approval before creating any pull requests, to avoid noise/chat
 
 After this phase completes, a proactor handoff returns to [proactor stage 5](../ss-review-proactor/SKILL.md#stage-5-summary-and-continuation) to mark the active reservation complete and make its summary and continuation decision. Preserve the latest user loop instruction; a pause, failure, or unanswered learning question is not completion. Standalone `ss-review` invocations finish here without selecting another review.
 
-Retain the exact final reviewed source commit from the last checked capture or
-successful publication result in the handoff checkpoint. Pass it to the
-proactor as its `REVIEWED_SOURCE_COMMIT`; do not re-read the live head for
-completion.
+For a proactor handoff, retain the exact final reviewed source commit from the
+last checked capture, successful publication result, or `nothingToPublish`
+checkpoint entry in the handoff checkpoint. Pass it to the proactor as its
+`REVIEWED_SOURCE_COMMIT`; do not re-read the live head for completion.

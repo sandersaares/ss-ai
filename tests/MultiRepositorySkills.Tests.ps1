@@ -145,6 +145,28 @@ Describe 'Multi-repository skill contracts' {
             Should -Match 'does not rerun the\s+candidate-eligibility check'
     }
 
+    It 'records no-write outcomes as phase-8 completion evidence' {
+        $script:ReviewSkill |
+            Should -Match 'record a durable\s+completion entry in the maintained review checkpoint'
+        $script:ReviewSkill |
+            Should -Match '`nothingToPublish` completion entry is valid'
+        $script:ReviewImplementation |
+            Should -Match 'publication result or a maintained\s+checkpoint entry'
+        $script:ProactorImplementation |
+            Should -Match 'maintained checkpoint entry that binds the cycle\s+identity'
+    }
+
+    It 'limits proactor handoff evidence to proactor reviews' {
+        $script:ReviewSkill |
+            Should -Match 'For a proactor handoff, if interruption or compaction pauses this phase'
+        $script:ReviewSkill |
+            Should -Match 'Standalone `ss-review` invocations resume from their own review checkpoint'
+        $script:ReviewImplementation |
+            Should -Match 'Standalone reviews have no proactor\s+journal or handoff identity requirement'
+        $script:ReviewImplementation |
+            Should -Match 'A standalone review\s+finishes phase 9 without a handoff'
+    }
+
     It 'aggregates autoreapproval results across repository runs' {
         $script:AutoreapproveSkill |
             Should -Match 'from every repository'

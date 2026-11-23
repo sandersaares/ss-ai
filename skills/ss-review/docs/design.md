@@ -88,8 +88,12 @@ review workflow. The proactor owns activation before handoff. This skill
 verifies candidate eligibility and the active reservation before final
 publication. After publication, a submitted review is no longer expected to be
 selection-eligible; phase 9 preserves the exact established review identity
-and durable phase-8 completion record instead. The proactor's completion
-command then verifies reservation ownership and marks the cycle complete.
+and durable phase-8 completion record instead. A phase-8 outcome that requires
+no remote write records its identity, final source commit, destination,
+`nothingToPublish` outcome, and reason in the maintained checkpoint; that entry
+is completion evidence for phase 9. The proactor's completion command then
+verifies reservation ownership and marks the cycle complete. Standalone reviews
+do not require proactor handoff evidence.
 
 In proactor loop mode, this skill still completes one review at a time before
 returning control to the proactor. A user instruction that the current review
