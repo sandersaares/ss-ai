@@ -427,7 +427,7 @@ mod tests {
                     .starts_with("[Copilot speaking]\n\n")
             );
             assert!(item["body"].as_str().unwrap().ends_with(
-                "\n\nℹ️ Replies are not monitored. To discuss the finding, reach out via Teams."
+                "\n\nℹ️ Replies are not monitored. To discuss the comment, reach out via Teams."
             ));
         }
         let summary = result["summaryBody"].as_str().unwrap();
@@ -437,7 +437,7 @@ mod tests {
         assert!(summary.contains("| User instruction files | 2 |"));
         assert!(summary.contains("<details>"));
         assert!(summary.ends_with(
-            "ℹ️ Replies are not monitored. To discuss the finding, reach out via Teams."
+            "ℹ️ Replies are not monitored. To discuss the comment, reach out via Teams."
         ));
     }
 
@@ -547,7 +547,7 @@ mod tests {
         assert!(summary.contains("This review raises no findings."));
         assert!(!summary.contains("<details>"));
         assert!(summary.ends_with(
-            "ℹ️ Replies are not monitored. To discuss the finding, reach out via Teams."
+            "ℹ️ Replies are not monitored. To discuss the comment, reach out via Teams."
         ));
     }
 

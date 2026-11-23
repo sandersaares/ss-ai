@@ -696,7 +696,7 @@ diagnostics without restating the findings.
 
 Every pull request comment, including initial-overview links, finding comments,
 follow-up replies, and the final summary, ends with
-`ℹ️ Replies are not monitored. To discuss the finding, reach out via Teams.`
+`ℹ️ Replies are not monitored. To discuss the comment, reach out via Teams.`
 This line tells readers to use the direct support channels instead of opening a
 discussion that the reviewer will not monitor.
 

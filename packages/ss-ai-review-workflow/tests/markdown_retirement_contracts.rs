@@ -10,7 +10,7 @@ use ss_ai_review_workflow::markdown::render;
 
 /// Names the required footer in pull request publication expectations.
 const PR_COMMENT_SUFFIX: &str =
-    "ℹ️ Replies are not monitored. To discuss the finding, reach out via Teams.";
+    "ℹ️ Replies are not monitored. To discuss the comment, reach out via Teams.";
 
 /// Supplies complete authored prose while allowing each test to vary one field.
 fn finding() -> Value {

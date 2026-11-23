@@ -20,7 +20,7 @@ use url::Url;
 
 /// Names the required footer in pull request publication expectations.
 const PR_COMMENT_SUFFIX: &str =
-    "ℹ️ Replies are not monitored. To discuss the finding, reach out via Teams.";
+    "ℹ️ Replies are not monitored. To discuss the comment, reach out via Teams.";
 
 /// Avoids real waits while exercising atomic file publication.
 struct TestClock;
@@ -201,7 +201,7 @@ fn comment_preserves_all_prose_and_block_boundaries() {
             "**Recommended action**:\n\n```rust\ncount += 1;\n```\n\n",
             "**References**:\n\n- docs/design.md\n- [RFC](https://example.invalid/rfc)\n\n",
             "**Impacted locations**:\n\n- `src/retry.rs:40-44`\n- `src/legacy.rs`\n\n",
-            "ℹ️ Replies are not monitored. To discuss the finding, reach out via Teams."
+            "ℹ️ Replies are not monitored. To discuss the comment, reach out via Teams."
         ))
     );
 }
