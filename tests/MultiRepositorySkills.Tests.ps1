@@ -41,6 +41,17 @@ Describe 'Multi-repository skill contracts' {
         }
     }
 
+    It 'discovers optional Azure tenant configuration without prompting' {
+        $script:ProactorSkill | Should -Match 'Do not ask the user for a value that those sources can provide'
+        $script:ProactorSkill | Should -Match 'az account show --query tenantId --output tsv'
+        $script:ProactorSkill | Should -Match 'Never ask the\s+user to provide or confirm a\s+tenant'
+        $script:ProactorSkill | Should -Not -Match 'Obtain missing configuration from the user'
+        $script:ProactorCommands | Should -Match 'omit this optional\s+argument'
+        $script:ProactorCommands | Should -Match 'Do not ask the user to\s+supply a tenant'
+        $script:ProactorDesign | Should -Match 'does not request a tenant from the\s+user'
+        $script:ProactorImplementation | Should -Match 'resolves Azure tenant configuration without a user prompt'
+    }
+
     It 'keeps proactor reviews in one repository until it is exhausted' {
         $script:ProactorSkill |
             Should -Match 'continues reviewing the current repository until selection reports no candidate'

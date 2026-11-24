@@ -43,6 +43,14 @@ original invocation directory, ordered list, active position, exhausted
 repositories, and resolved per-repository configuration unless the user changes
 them, including after learning uses another worktree.
 
+The primary agent resolves Azure tenant configuration without a user prompt.
+Explicit per-repository values take precedence over a shared explicit value.
+Otherwise, the agent reads the active tenant from `az account show` and omits
+the optional `--tenant` argument when discovery produces no usable value. The
+same value or absence reaches selection, confirmation, and the review handoff.
+Native authentication failures remain the authority when the authenticated
+Azure CLI account cannot access the selected organization.
+
 The same invocation-level selection mode is passed to selection and
 confirmation for every candidate and repository. A replacement candidate uses
 the mode persisted in that cycle's selection journal; a mismatched confirmation

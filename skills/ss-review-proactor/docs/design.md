@@ -88,9 +88,12 @@ configuration requires user input.
 
 Every resolved repository remains fixed throughout its selection and
 confirmation cycles. An Azure tenant can be associated with each repository
-independently. Defaulting the repository does not authorize reuse or
-modification of the invocation checkout; review preparation still uses a
-separate temporary checkout.
+independently. When no tenant override exists, the skill discovers the active
+tenant from the authenticated Azure CLI account. It treats a missing discovery
+result as an optional absent override and does not request a tenant from the
+user. Defaulting the repository does not authorize reuse or modification of the
+invocation checkout; review preparation still uses a separate temporary
+checkout.
 
 The primary session retains the aggregate list and diagnostics for operator
 visibility. Remote review summaries never contain cross-repository data: when a
