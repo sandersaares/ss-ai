@@ -17,6 +17,9 @@ A finding is obvious when it matches any of these categories:
 * It recommends addressing a possible panic/exception that may be raised and cause unexpected logic flow.
 * It recommends adding inlining hints to code.
 * It recommends aligning an individual project's configuration/setup to the configuration/setup of the workspace, or documenting the differences to ensure they are justified.
+* It recommends a documentation change to make the content more maintainable (e.g. by removing duplication/restatement/trivia).
+* It recommends clarification of a comment or dev-tooling related attribute in the code (e.g. improving an explanation of why a rule is ignored).
+* It recommends aligning the assertions in a test with the documented API contract the code is meant to implement.
 
 Every other finding is important. When in doubt, treat a finding as important and leave it for the user's audit.
 
