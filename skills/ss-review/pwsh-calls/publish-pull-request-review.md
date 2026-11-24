@@ -20,6 +20,7 @@ The command accepts `--discard-pending-review`, `--publish-to-closed-pull-reques
 Use the switches only under the authority described in phase 8.
 
 The command consumes the full refreshed capture programmatically. Any agent inspection of its metadata or discussion uses `query-pr-context.md`; do not open the capture or substitute query results for `--context-path`. Handle the publication status and errors as phase 8 describes, without blindly replaying a write.
+For GitHub, an ambiguous submission response triggers read-only completed-review reconciliation inside this command. It verifies the submitted summary, verdict, findings, and thread identities, then checks follow-up thread state before any reopen. Do not ask the user to inspect the review or threads unless this command reports that reconciliation could not establish the outcome.
 
 The last preflight read checks both live commits and discussion before any remote write. Changed evidence refuses publication; return to phase 7, revalidate the intervening delta and renew human approval when required. Never replace the checked capture just to satisfy this guard.
 
