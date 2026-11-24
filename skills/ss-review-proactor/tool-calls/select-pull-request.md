@@ -18,10 +18,13 @@ Placeholders to replace:
 | `CLAIM_MESSAGE` | Standard announcement from stage 2 of `SKILL.md`, adapted to the current user's communication policy, without protocol markers. Pass it as one literal string argument, escaping for the invoking shell if one is used. Reuse it for confirmation. |
 | `SELECTION_MODE` | Resolved mode for the complete invocation: `available` by default, or `assigned` to require an assignment without an active submitted review. |
 | `REVIEWED_SOURCE_COMMIT` | Exact final source revision the review evaluated, retained from its maintained artifacts. Required only for completion. |
-| `TENANT` | Optional user-configured Azure tenant for the active repository. |
+| `TENANT` | Optional Azure tenant for the active repository, resolved from an explicit value or the authenticated Azure CLI account in stage 1. |
 
-For Azure DevOps, optionally append `--tenant "{{TENANT}}"`. Use the same tenant
-during `ss-review`.
+For Azure DevOps, append `--tenant "{{TENANT}}"` when stage 1 resolved a
+nonempty tenant. If tenant discovery was unavailable, omit this optional
+argument so Azure CLI uses its authenticated default. Use the same resolved
+tenant, including the absence of one, during `ss-review`. Do not ask the user to
+supply a tenant solely because discovery did not produce one.
 
 For stage 3, replace `review select` with `review confirm` and preserve all
 argument values from stage 2.

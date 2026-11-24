@@ -141,6 +141,9 @@ after a failed remote inspection, or with ambiguous remotes. Do not silently
 replace an invalid explicit repository with the current checkout. Keep every
 resolved URL and the active URL fixed for selection and confirmation, even if
 the working directory changes during checkout preparation.
+Discover configuration from the invocation, session metadata, checkout,
+environment, and authenticated provider tools before considering user input.
+Do not ask the user for a value that those sources can provide.
 
 Resolve the primary session identifier and create a fresh cycle subdirectory
 in that session's state directory. Put a fresh absolute journal path and a
@@ -149,10 +152,34 @@ overwrite a previous cycle's journal or review artifacts. If no active cycle
 exists, record this repository and these fresh paths as the pending cycle
 identity before issuing any selection command. An interrupted stage 1 may
 establish this record before it retries its remaining preparation.
-Resolve an Azure tenant for each Azure DevOps repository. A tenant explicitly
-associated with one repository applies only to that repository; a clearly
-stated shared tenant applies to repositories that have no specific value.
-Obtain missing configuration from the user.
+Resolve an optional Azure tenant for each Azure DevOps repository. A tenant
+explicitly associated with one repository applies only to that repository; a
+clearly stated shared tenant applies to repositories that have no specific
+value. When neither value exists, discover the active Azure CLI tenant:
+
+```powershell
+#Requires -Version 7.6
+
+Set-StrictMode -Version Latest
+$ErrorActionPreference = 'Stop'
+$PSNativeCommandUseErrorActionPreference = $true
+
+az account show --query tenantId --output tsv
+```
+
+Placeholders to replace:
+
+| Placeholder | Description |
+|-------------|-------------|
+| None | This read-only command has no placeholders. |
+
+Use a nonempty trimmed output as the tenant for Azure DevOps repositories
+without an explicit or shared value. Run this discovery once per invocation.
+If Azure CLI is unavailable, the command fails, or its output is empty, record
+that the tenant is unresolved, omit `--tenant`, and continue. Never ask the
+user to provide or confirm a tenant merely because no explicit value is
+available. Let the native command report any missing-tool or authentication
+failure.
 Use session state as the temporary checkout's parent directory by default.
 If the user supplies a checkout parent folder in the invocation or schedule
 prompt, use that parent instead.
