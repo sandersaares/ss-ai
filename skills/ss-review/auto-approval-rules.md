@@ -16,7 +16,7 @@ A finding is obvious when it matches any of these categories:
 * It recommends fixing an order of operations where the existing order has clearly identifiable defects.
 * It recommends addressing a possible panic/exception that may be raised and cause unexpected logic flow.
 * It recommends adding inlining hints to code.
-* It recommends aligning an individual project's configuration/setup to the configuration/setup or the workspace, or documenting the differences to ensure they are justified.
+* It recommends aligning an individual project's configuration/setup to the configuration/setup of the workspace, or documenting the differences to ensure they are justified.
 
 Every other finding is important. When in doubt, treat a finding as important and leave it for the user's audit.
 
