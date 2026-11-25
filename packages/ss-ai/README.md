@@ -143,6 +143,12 @@ and lines. Evidence kinds are `documentation`, `publicDeclaration`,
 snapshot, unique assertion IDs, category-specific evidence, indexed citations,
 and known or explained shared callers. Identical records are idempotent.
 
+Rust caller attribution comes from direct syntax in test functions. Production
+invariants and method names are not promoted to shared assertions, while
+free helpers called by tests and test-owned callbacks remain inventoried.
+Recognized panic-expectation helper calls count once without counting the
+deliberately triggered panic inside their argument.
+
 `report` rejects incomplete classification, then writes `reports/trace.json`,
 `reports/test-inventory.json`, and `reports/summary.md` under the state
 directory. The trace has one row per assertion. The test inventory retains

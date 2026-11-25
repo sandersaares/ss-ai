@@ -47,13 +47,16 @@ Compare the native inventory with an independent repository test-discovery metho
 Reconcile discrepancies before classification:
 
 - parser-backed Rust records `#[test]`, recognized test attributes, rustdoc code blocks, assertions, panic expectations, compile-time static assertions, and direct failure branches;
+- recognized panic expectation helpers such as `assert_panics` count once, while a panic deliberately triggered inside that expectation does not count again;
 - C#, Java, JavaScript, TypeScript, Python, Go, Kotlin, and PowerShell use deliberately narrow text patterns;
 - unsupported source language text remains searchable but receives no assertion or test inventory;
 - syntax rejected by the Rust parser uses a Rust text fallback and carries a diagnostic.
 
 Ordinary traversal skips generated and tool-state directories such as `.git`, `target`, `node_modules`, and build-output directories. Select such a directory explicitly if it is part of the requested source scope. The native tool rejects a symbolic link used as the scope and does not follow nested symbolic links; nested omissions receive a diagnostic.
 
-Shared helpers, callbacks, and destructors count once at their definition. Preserve every native caller link and add semantically confirmed `callingTestIds` in the classification record when static text cannot identify a call. Supply `unlinkedReason` rather than guessing when no calling test can be established.
+Shared helpers, callbacks, and destructors count once at their definition. Production assertions and defensive branches do not become test assertions merely because tests call a same-named method. The Rust inventory links a shared assertion only from direct AST-visible free-function or qualified-path calls in a test; it does not infer callers from comments, function declarations, method calls, trait callbacks, or substring matches. Preserve every native caller link and add semantically confirmed `callingTestIds` in the classification record when static syntax cannot identify a call. Supply `unlinkedReason` rather than guessing when no calling test can be established.
+
+Panic sites in test-owned `Drop` implementations do not count when they exist only to drive an expected unwind. Assertions in such callbacks remain countable and may require agent-owned caller confirmation.
 
 # Stage 3: classify assertions in batches
 

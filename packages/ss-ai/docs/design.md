@@ -30,6 +30,11 @@ narrow documented patterns and do not claim exhaustive syntax coverage. Other
 indexed languages remain available for contract evidence without an assertion
 inventory.
 
+Rust caller attribution uses direct test syntax, not same-name source text.
+Production invariants are not assertion sites unless a test calls their free
+helper directly. Recognized panic-expectation helpers count once and suppress
+their deliberately triggered panic expression.
+
 Assertions count once at their source site. Tests with no counted predicate and
 shared helper assertions remain visible in the test inventory. Every accepted
 classification is bound to the same audit token and source snapshot. A report

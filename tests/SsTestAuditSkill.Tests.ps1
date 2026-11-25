@@ -19,6 +19,8 @@ Describe 'ss-test-audit skill contract' {
         $skill | Should -Match 'No public-contract check = incidental only'
         $skill | Should -Match 'Classified C of T assertions'
         $skill | Should -Match 'classification-batch\.schema\.json'
+        $skill | Should -Match 'direct AST-visible free-function'
+        $skill | Should -Match 'assert_panics'
     }
 
     It 'keeps executable behavior in native command recipes' {

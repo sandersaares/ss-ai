@@ -83,6 +83,7 @@ pub fn ready() -> bool {
     true
 }
 
+#[cfg(test)]
 fn shared(value: usize) {
     assert_eq!(value, 2);
 }
@@ -356,6 +357,112 @@ fn inventories_narrow_common_language_profiles() {
             .unwrap()
             .iter()
             .any(|diagnostic| diagnostic["kind"] == "heuristicLanguage")
+    );
+}
+
+#[test]
+fn excludes_production_invariants_and_links_only_bare_test_helpers() {
+    let root = TempDir::new().unwrap();
+    let repository = root.path().join("repository");
+    let state = root.path().join("state");
+    fs::create_dir_all(repository.join("src")).unwrap();
+    fs::write(
+        repository.join("src/lib.rs"),
+        r#"pub fn poll() {
+    assert!(false, "production invariant");
+    panic!("production failure");
+}
+
+fn main() {
+    unreachable!("example failure");
+}
+
+#[cfg(debug_assertions)]
+fn debug_helper() {
+    assert_eq!(3, 3);
+}
+
+#[cfg(test)]
+fn checker() {
+    assert_eq!(2, 2);
+}
+
+fn exploding() {
+    panic!("expected production panic");
+}
+
+struct Other;
+
+impl Other {
+    fn checker(&self) {}
+}
+
+#[cfg(test)]
+struct Trigger;
+
+#[cfg(test)]
+impl Drop for Trigger {
+    fn drop(&mut self) {
+        assert!(std::thread::panicking());
+        panic!("deliberately triggered");
+    }
+}
+
+#[test]
+fn calls_real_helper() {
+    debug_helper();
+    checker();
+    assert_panics(|| panic!("expected"));
+    assert_panics(|| exploding());
+}
+
+#[test]
+fn calls_same_named_method_only() {
+    let other = Other;
+    other.checker();
+    let trigger = Trigger;
+    drop(trigger);
+}
+"#,
+    )
+    .unwrap();
+    let summary = initialize(&repository, &[], &state, &NoProcess, &FixedClock).unwrap();
+    let summary: Value = serde_json::from_str(&summary).unwrap();
+    assert_eq!(summary["testCount"], 2);
+    assert_eq!(summary["assertionCount"], 5);
+
+    let inventory: Value =
+        serde_json::from_slice(&fs::read(state.join("inventory.json")).unwrap()).unwrap();
+    let assertions = inventory["assertions"].as_array().unwrap();
+    assert!(!assertions.iter().any(|assertion| {
+        assertion["expression"]
+            .as_str()
+            .is_some_and(|expression| expression.contains("production"))
+    }));
+    let shared = assertions
+        .iter()
+        .find(|assertion| assertion["helperName"] == "checker")
+        .unwrap();
+    assert_eq!(shared["callingTestIds"].as_array().unwrap().len(), 1);
+    let debug_helper = assertions
+        .iter()
+        .find(|assertion| assertion["helperName"] == "debug_helper")
+        .unwrap();
+    assert_eq!(debug_helper["callingTestIds"].as_array().unwrap().len(), 1);
+    let destructor = assertions
+        .iter()
+        .find(|assertion| assertion["helperName"] == "drop")
+        .unwrap();
+    assert!(destructor["callingTestIds"].as_array().unwrap().is_empty());
+    assert!(
+        assertions
+            .iter()
+            .any(|assertion| assertion["kind"] == "panicExpectation")
+    );
+    assert!(
+        !assertions
+            .iter()
+            .any(|assertion| assertion["helperName"] == "exploding")
     );
 }
 

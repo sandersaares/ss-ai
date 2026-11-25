@@ -83,6 +83,9 @@ pub(crate) struct AssertionSite {
     pub(crate) column: usize,
     pub(crate) expression: String,
     pub(crate) file_sha256: String,
+    /// Transient ownership marker used before serializing the immutable inventory.
+    #[serde(skip)]
+    pub(crate) test_code: bool,
     pub(crate) containing_test_id: Option<String>,
     pub(crate) helper_name: Option<String>,
     pub(crate) calling_test_ids: Vec<String>,

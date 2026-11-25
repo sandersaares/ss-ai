@@ -1,6 +1,6 @@
 //! Deterministic source inventory with parser-backed Rust analysis.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::ffi::OsStr;
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -11,7 +11,7 @@ use sha2::{Digest, Sha256};
 use ss_ai_runtime::{caused_by, fail};
 use syn::spanned::Spanned;
 use syn::visit::Visit;
-use syn::{Block, ImplItemFn, ItemFn, Macro, Signature};
+use syn::{Block, ExprCall, ImplItemFn, ItemFn, Macro, Signature};
 
 use crate::model::{
     AssertionSite, IndexEntry, IndexedFile, Inventory, RevisionKind, ScanDiagnostic, TestCase,
@@ -37,6 +37,8 @@ pub(crate) fn inventory(
     let mut assertions = Vec::new();
     let mut diagnostics = Vec::new();
     let mut entries = Vec::new();
+    let mut test_calls: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
+    let mut expected_panic_calls: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
     let files = collect_files(repository_root, scope_paths, &mut diagnostics)?;
 
     for path in files {
@@ -106,10 +108,14 @@ pub(crate) fn inventory(
             &mut tests,
             &mut assertions,
             &mut diagnostics,
-            &relative,
-            language,
-            &file_sha256,
-            &text,
+            ScanInput {
+                path: &relative,
+                language,
+                file_sha256: &file_sha256,
+                text: &text,
+                test_calls: &mut test_calls,
+                expected_panic_calls: &mut expected_panic_calls,
+            },
         );
     }
 
@@ -122,7 +128,12 @@ pub(crate) fn inventory(
             ));
         }
     }
-    link_shared_assertions(repository_root, &mut tests, &mut assertions)?;
+    link_shared_assertions(
+        &mut tests,
+        &mut assertions,
+        &test_calls,
+        &expected_panic_calls,
+    );
     refresh_cross_checks(&mut diagnostics, &assertions);
     verify_indexed_files(repository_root, &indexed_files)?;
 
@@ -363,16 +374,31 @@ fn truncate(text: &str, max: usize) -> String {
     result
 }
 
+/// Bundles one parsed file so scanner state stays separate from source identity.
+struct ScanInput<'a> {
+    path: &'a str,
+    language: &'a str,
+    file_sha256: &'a str,
+    text: &'a str,
+    test_calls: &'a mut BTreeMap<String, BTreeSet<String>>,
+    expected_panic_calls: &'a mut BTreeMap<String, BTreeSet<String>>,
+}
+
 /// Selects parser-backed Rust scanning or explicit heuristic profiles.
 fn scan_file(
     tests: &mut Vec<TestCase>,
     assertions: &mut Vec<AssertionSite>,
     diagnostics: &mut Vec<ScanDiagnostic>,
-    path: &str,
-    language: &str,
-    file_sha256: &str,
-    text: &str,
+    input: ScanInput<'_>,
 ) {
+    let ScanInput {
+        path,
+        language,
+        file_sha256,
+        text,
+        test_calls,
+        expected_panic_calls,
+    } = input;
     if language == "rust" {
         match syn::parse_file(text) {
             Ok(file) => {
@@ -385,6 +411,10 @@ fn scan_file(
                     text,
                     current_test_id: None,
                     current_function: None,
+                    current_function_is_test: false,
+                    test_context: is_test_path(path),
+                    test_calls,
+                    expected_panic_calls,
                     expected_panic: false,
                 };
                 collector.visit_file(&file);
@@ -469,6 +499,10 @@ struct RustCollector<'a> {
     text: &'a str,
     current_test_id: Option<String>,
     current_function: Option<String>,
+    current_function_is_test: bool,
+    test_context: bool,
+    test_calls: &'a mut BTreeMap<String, BTreeSet<String>>,
+    expected_panic_calls: &'a mut BTreeMap<String, BTreeSet<String>>,
     expected_panic: bool,
 }
 
@@ -482,13 +516,18 @@ impl RustCollector<'_> {
         block: &Block,
     ) {
         let test = test_attributes(attributes);
+        let function_is_test = self.test_context
+            || test.is_some()
+            || attributes.iter().any(attribute_enables_test_code);
         let expected_panic = attributes
             .iter()
             .any(|attribute| attribute.path().is_ident("should_panic"));
         let previous_test = self.current_test_id.take();
         let previous_function = self.current_function.take();
+        let previous_function_is_test = self.current_function_is_test;
         let previous_expected = self.expected_panic;
         self.current_function = Some(name.clone());
+        self.current_function_is_test = function_is_test;
         self.expected_panic = expected_panic;
 
         if let Some(kind) = test {
@@ -533,6 +572,7 @@ impl RustCollector<'_> {
         syn::visit::visit_block(self, block);
         self.current_test_id = previous_test;
         self.current_function = previous_function;
+        self.current_function_is_test = previous_function_is_test;
         self.expected_panic = previous_expected;
     }
 
@@ -571,6 +611,7 @@ impl RustCollector<'_> {
             column,
             expression,
             file_sha256: self.file_sha256.to_owned(),
+            test_code: self.current_test_id.is_some() || self.current_function_is_test,
             containing_test_id,
             helper_name: if self.current_test_id.is_none() {
                 self.current_function.clone()
@@ -591,6 +632,24 @@ impl<'ast> Visit<'ast> for RustCollector<'_> {
         self.visit_function(i.sig.ident.to_string(), &i.attrs, &i.sig, &i.block);
     }
 
+    fn visit_item_mod(&mut self, i: &'ast syn::ItemMod) {
+        let previous = self.test_context;
+        if i.attrs.iter().any(attribute_enables_test_code) {
+            self.test_context = true;
+        }
+        syn::visit::visit_item_mod(self, i);
+        self.test_context = previous;
+    }
+
+    fn visit_item_impl(&mut self, i: &'ast syn::ItemImpl) {
+        let previous = self.test_context;
+        if i.attrs.iter().any(attribute_enables_test_code) {
+            self.test_context = true;
+        }
+        syn::visit::visit_item_impl(self, i);
+        self.test_context = previous;
+    }
+
     fn visit_macro(&mut self, i: &'ast Macro) {
         let Some(name) = i
             .path
@@ -602,7 +661,13 @@ impl<'ast> Visit<'ast> for RustCollector<'_> {
         };
         let kind = rust_macro_kind(&name);
         if let Some(kind) = kind {
-            if kind == "unexpectedBranch" && self.expected_panic {
+            if kind == "unexpectedBranch"
+                && (self.expected_panic
+                    || self
+                        .current_function
+                        .as_deref()
+                        .is_some_and(|name| name == "drop"))
+            {
                 return;
             }
             if kind == "compileTimeAssertion"
@@ -621,6 +686,76 @@ impl<'ast> Visit<'ast> for RustCollector<'_> {
             }
         }
     }
+
+    fn visit_expr_call(&mut self, i: &'ast ExprCall) {
+        let name = call_name(&i.func);
+        if let (Some(test_id), Some(name)) = (&self.current_test_id, &name) {
+            let calls = if self.expected_panic {
+                &mut *self.expected_panic_calls
+            } else {
+                &mut *self.test_calls
+            };
+            calls
+                .entry(test_id.clone())
+                .or_default()
+                .insert(name.clone());
+        }
+        let is_panic_expectation = name.as_deref().is_some_and(is_panic_expectation_call);
+        if is_panic_expectation && (self.current_test_id.is_some() || self.current_function_is_test)
+        {
+            let start = i.span().start();
+            let end = i.span().end();
+            self.push_assertion(
+                "panicExpectation",
+                start.line,
+                end.line,
+                start.column.saturating_add(1),
+                source_slice(self.text, start, end),
+            );
+            let previous_expected = self.expected_panic;
+            self.expected_panic = true;
+            syn::visit::visit_expr_call(self, i);
+            self.expected_panic = previous_expected;
+        } else {
+            syn::visit::visit_expr_call(self, i);
+        }
+    }
+}
+
+/// Restricts shared assertion ownership to files that contain test-only modules.
+fn is_test_path(path: &str) -> bool {
+    let lower = path.replace('\\', "/").to_ascii_lowercase();
+    lower.starts_with("tests/")
+        || lower.contains("/tests/")
+        || lower.ends_with("_test.rs")
+        || lower.ends_with(".tests.rs")
+}
+
+/// Recognizes an exact test-only cfg without treating production feature gates as tests.
+fn attribute_enables_test_code(attribute: &syn::Attribute) -> bool {
+    if !attribute.path().is_ident("cfg") {
+        return false;
+    }
+    let syn::Meta::List(list) = &attribute.meta else {
+        return false;
+    };
+    list.tokens.to_string() == "test"
+}
+
+/// Resolves a direct function-call identifier without guessing method identity.
+fn call_name(expression: &syn::Expr) -> Option<String> {
+    let syn::Expr::Path(path) = expression else {
+        return None;
+    };
+    path.path
+        .segments
+        .last()
+        .map(|segment| segment.ident.to_string())
+}
+
+/// Identifies established test helpers that assert a closure unwinds.
+fn is_panic_expectation_call(name: &str) -> bool {
+    matches!(name, "assert_panics" | "assert_panics_with")
 }
 
 /// Classifies supported attributes without interpreting their test framework semantics.
@@ -767,6 +902,7 @@ fn scan_doctests(
                             column: line.find(comment).unwrap_or_default().saturating_add(1),
                             expression: format!("```{fence}"),
                             file_sha256: file_sha256.to_owned(),
+                            test_code: true,
                             containing_test_id: Some(id.clone()),
                             helper_name: None,
                             calling_test_ids: Vec::new(),
@@ -797,6 +933,7 @@ fn scan_doctests(
                 column: line.find(code).unwrap_or_default().saturating_add(1),
                 expression: code.to_owned(),
                 file_sha256: file_sha256.to_owned(),
+                test_code: true,
                 containing_test_id: Some(id.clone()),
                 helper_name: None,
                 calling_test_ids: Vec::new(),
@@ -901,6 +1038,7 @@ fn scan_heuristically(
                     .saturating_add(1),
                 expression: source_line.trim().to_owned(),
                 file_sha256: file_sha256.to_owned(),
+                test_code: true,
                 containing_test_id: test.clone(),
                 helper_name: None,
                 calling_test_ids: test.into_iter().collect(),
@@ -1079,10 +1217,11 @@ fn cross_check(
 
 /// Adds direct and helper relationships after all file scans are complete.
 fn link_shared_assertions(
-    repository_root: &Path,
     tests: &mut [TestCase],
     assertions: &mut Vec<AssertionSite>,
-) -> Result<(), AppError> {
+    test_calls: &BTreeMap<String, BTreeSet<String>>,
+    expected_panic_calls: &BTreeMap<String, BTreeSet<String>>,
+) {
     for assertion in &mut *assertions {
         if let Some(test_id) = &assertion.containing_test_id
             && let Some(test) = tests.iter_mut().find(|test| test.id == *test_id)
@@ -1090,35 +1229,25 @@ fn link_shared_assertions(
             test.direct_assertion_ids.push(assertion.id.clone());
             continue;
         }
-    }
-
-    let test_paths: BTreeSet<&str> = tests.iter().map(|test| test.path.as_str()).collect();
-    for path in test_paths {
-        let source_path = repository_root.join(Path::new(path));
-        let source = fs::read_to_string(&source_path).map_err(|error| {
-            caused_by(
-                "staleState",
-                format!("Cannot reread test file '{path}' during inventory"),
-                error,
-            )
-        })?;
-        let lines: Vec<&str> = source.lines().collect();
-        for test in tests
-            .iter()
-            .filter(|test| test.path == path && test.line <= test.end_line)
-        {
-            let body = lines
-                .get(test.line.saturating_sub(1)..test.end_line.min(lines.len()))
-                .unwrap_or_default()
-                .join("\n");
-            for assertion in assertions.iter_mut().filter(|assertion| {
-                assertion.containing_test_id.is_none() && assertion.helper_name.is_some()
-            }) {
-                if let Some(helper) = assertion.helper_name.as_deref() {
-                    let call = format!("{helper}(");
-                    if body.contains(&call) {
-                        assertion.calling_test_ids.push(test.id.clone());
-                    }
+        let Some(helper) = assertion.helper_name.as_deref() else {
+            continue;
+        };
+        // `drop` is a trait callback as well as the prelude cleanup function, so
+        // syntax cannot distinguish a callback invocation from an unrelated drop.
+        if helper != "drop" {
+            for test in tests.iter() {
+                if test_calls
+                    .get(&test.id)
+                    .is_some_and(|calls| calls.contains(helper))
+                {
+                    assertion.calling_test_ids.push(test.id.clone());
+                }
+                if assertion.kind != "unexpectedBranch"
+                    && expected_panic_calls
+                        .get(&test.id)
+                        .is_some_and(|calls| calls.contains(helper))
+                {
+                    assertion.calling_test_ids.push(test.id.clone());
                 }
             }
         }
@@ -1128,13 +1257,12 @@ fn link_shared_assertions(
         assertion.calling_test_ids.dedup();
     }
 
-    // A production panic is a normal failure mechanism, not a test predicate.
-    // Retain unexpected-branch failures only inside tests or helpers called by
-    // inventoried tests; this preserves shared test helpers without auditing
-    // every production panic as a check.
+    // Production assertions are candidates until a test calls their free
+    // helper. Method calls are deliberately unresolved, while test-owned
+    // callbacks remain valid even when no static caller can be identified.
     assertions.retain(|assertion| {
-        assertion.containing_test_id.is_some()
-            || assertion.kind != "unexpectedBranch"
+        assertion.test_code
+            || assertion.containing_test_id.is_some()
             || !assertion.calling_test_ids.is_empty()
     });
     for assertion in assertions.iter() {
@@ -1147,7 +1275,6 @@ fn link_shared_assertions(
             }
         }
     }
-    Ok(())
 }
 
 /// Replaces provisional candidate counts after unexpected production panics are removed.

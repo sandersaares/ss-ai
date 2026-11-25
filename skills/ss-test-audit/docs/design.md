@@ -32,8 +32,10 @@ Public observability alone does not create a public promise. A private implement
 
 ## Language coverage
 
-Rust uses the repository's Rust syntax parser for test attributes, functions, assertion macros, panic expectations, static assertions, and unexpected-branch failures, with a separate rustdoc block scan. Rejected Rust syntax receives an explicit line-pattern fallback diagnostic.
+Rust uses the repository's Rust syntax parser for test attributes, functions, assertion macros, panic expectations, static assertions, and unexpected-branch failures, with a separate rustdoc block scan. Direct calls to recognized panic-expectation helpers count as one site while deliberately triggered panics inside the helper argument do not. Production invariants and defensive failure branches remain out of the test inventory unless a direct free-function or qualified-path test call identifies their containing helper. Rejected Rust syntax receives an explicit line-pattern fallback diagnostic.
 
 C#, Java, JavaScript, TypeScript, Python, Go, Kotlin, and PowerShell use narrow language-specific text patterns and diagnostics. Other indexed source languages remain searchable but do not claim test or assertion coverage. Native diagnostics and an independent repository test-list command define the reachable coverage boundary.
 
 Default traversal skips generated and tool-state directories and does not follow symbolic links. A caller can select a normally excluded directory as an explicit scope. The tool rejects a symbolic link as the scope and reports nested link omissions so an audit cannot silently treat a skipped branch as covered.
+
+Caller discovery records AST-visible direct calls rather than same-name text matches. It does not assign method calls, trait callbacks, comments, or declarations to a shared helper. A test-owned callback assertion may therefore have no native caller; the reviewing agent confirms or explains that relationship in the classification record.

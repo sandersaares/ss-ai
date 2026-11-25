@@ -70,6 +70,13 @@ heuristic languages. Agents provide semantic judgments through strict snapshot-
 bound records, so native validation can reject stale or incomplete work without
 making public-contract decisions.
 
+Rust scanning keeps test-owned sites distinct from production candidates. It
+records direct call names while visiting each test and reconciles shared
+assertions only after the complete scope is inventoried. The visitor recognizes
+panic-expectation helper calls and suppresses deliberately triggered panics
+inside them. This avoids method-name substring attribution while retaining
+real free helpers and explicit static-assertion test cases.
+
 The package boundaries follow the subject-owned, one-way dependency practices
 used by [cargo-release-plan](https://github.com/folo-rs/folo/blob/db33786ec25196696b46f38e2b60a03bd33ec913/packages/cargo-release-plan/docs/implementation.md)
 and [cargo-bench-history](https://github.com/folo-rs/folo/blob/db33786ec25196696b46f38e2b60a03bd33ec913/packages/cargo-bench-history/docs/implementation.md).

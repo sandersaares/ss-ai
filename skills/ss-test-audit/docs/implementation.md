@@ -32,6 +32,8 @@ The agent writes one strict batch with the active audit ID and snapshot digest. 
 
 Static call matching links parser-visible helper names across indexed test bodies. The agent can add calling tests discovered through callbacks, traits, registration, or dynamic paths. A shared assertion without callers requires a reason; the tool does not silently assign it to every test.
 
+The Rust visitor records direct `ExprCall` names for each test and reconciles those names after all files are scanned. Production assertions remain candidates and survive only when that exact call map selects their helper. Text is never a caller oracle, so declarations, comments, method names, and trait callbacks cannot create false links. Test-owned `Drop` panic sites are excluded because they commonly exist to induce an expected unwind; other callback assertions remain visible for agent attribution. Recognized `assert_panics` calls become one panic expectation, and the visitor suppresses panic macros evaluated inside that expected-unwind argument.
+
 ## Count semantics
 
 The inventory counts source sites, not runtime loop iterations or repeated trait names in one macro. Rust `#[should_panic]` counts at the expectation attribute, not at the deliberately triggered panic. Ordinary `unwrap` and `expect` calls are not inventory predicates. A rustdoc fence is a test case; a compile-only fence remains in the inventory with no counted predicate.
