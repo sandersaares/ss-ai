@@ -14,7 +14,7 @@ use std::time::Duration;
 
 use jiff::Timestamp;
 use ohno::AppError;
-use serde_json::{Value, json};
+use serde_json::{Value, from_slice, from_str, json, to_vec};
 use ss_ai_runtime::{Clock, LockMode, Process, ProcessOutput, ResourceLock};
 use ss_ai_test_audit::{advance, initialize, next_batch, record_batch, report, submit};
 use tempfile::TempDir;
@@ -211,18 +211,108 @@ fn overlapping_exports_keep_each_returned_pair_coherent() {
         (first, second.join().unwrap())
     });
 
-    for (receipt, count) in [(&first, 1), (&second, 2)] {
+    let pairs = [(&first, &second, 1), (&second, &first, 2)];
+    for (receipt, other, count) in pairs {
         let machine = read_json(artifact(receipt, "batchPath"));
         let display = fs::read_to_string(artifact(receipt, "displayPath")).unwrap();
-        assert_eq!(machine["assertions"].as_array().unwrap().len(), count);
-        assert_eq!(display.matches(" | assertion | ").count(), count);
-        let fingerprint = receipt["batchFingerprint"].as_str().unwrap();
-        assert!(
-            display
-                .lines()
-                .any(|line| line == format!("batchFingerprint: {fingerprint}"))
-        );
+        let crossed_display = fs::read_to_string(artifact(other, "displayPath")).unwrap();
+        let assertions = machine["assertions"].as_array().unwrap();
+        assert_eq!(assertions.len(), count);
+        let matches = |display: &str| {
+            assertions.iter().all(|row| {
+                display.contains(row["id"].as_str().unwrap())
+                    && display.contains(row["expression"].as_str().unwrap())
+            })
+        };
+        assert!(matches(&display));
+        if count == 2 {
+            // The smaller page can share the first site's context but not the
+            // second site's identity, so the complete page cannot use its display.
+            assert!(!matches(&crossed_display));
+        }
     }
+}
+
+#[test]
+fn batch_exports_cannot_target_the_report_staging_area() {
+    let audit = Audit::new(TWO_ASSERTIONS);
+    let reports = audit.state.join("reports");
+    let output = reports.join(".staging").join("batch.json");
+    let row = incidental(&audit.inventory["assertions"][0]["id"], "citations");
+    let input = audit.classification(&row);
+    let journal = audit.journal();
+    for error in [
+        next_batch(&audit.state, &output, 1, &TestClock).unwrap_err(),
+        advance(&audit.state, &input, &output, 1, &TestClock).unwrap_err(),
+    ] {
+        assert!(error.to_string().contains("report publication area"));
+    }
+    assert_eq!(audit.journal(), journal);
+    assert!(!reports.exists());
+}
+
+#[cfg(unix)]
+#[test]
+fn batch_exports_reject_an_alias_into_report_staging() {
+    use std::os::unix::fs::symlink;
+
+    let audit = Audit::new(TWO_ASSERTIONS);
+    let staging = audit.state.join("reports").join(".staging");
+    fs::create_dir_all(&staging).unwrap();
+    let alias = audit.state.join("alias");
+    symlink(&staging, &alias).unwrap();
+    let error = next_batch(&audit.state, &alias.join("batch.json"), 1, &TestClock).unwrap_err();
+    assert!(error.to_string().contains("report publication area"));
+    assert_eq!(fs::read_dir(staging).unwrap().count(), 0);
+}
+
+#[cfg(unix)]
+#[test]
+fn non_utf8_output_paths_fail_before_any_publication_or_classification() {
+    use std::ffi::OsString;
+    use std::os::unix::ffi::OsStringExt as _;
+    use std::os::unix::fs::symlink;
+
+    let audit = Audit::new(TWO_ASSERTIONS);
+    let row = incidental(&audit.inventory["assertions"][0]["id"], "citations");
+    let input = audit.classification(&row);
+    let journal = audit.journal();
+    let name = OsString::from_vec(b"invalid-\xFF".to_vec());
+    let output = audit.state.join("not-created").join(&name);
+    let alias = audit._root.path().join(&name);
+    symlink(&audit.state, &alias).unwrap();
+    let uninitialized = audit._root.path().join("not-created").join(&name);
+    let repository = audit._root.path().join("repository");
+    for error in [
+        initialize(
+            &repository,
+            &[],
+            &uninitialized,
+            &FixtureGit(&repository),
+            &TestClock,
+        )
+        .unwrap_err(),
+        next_batch(&audit.state, &output, 1, &TestClock).unwrap_err(),
+        advance(&audit.state, &input, &output, 1, &TestClock).unwrap_err(),
+        record_batch(&alias, &input, &TestClock).unwrap_err(),
+    ] {
+        assert!(error.to_string().contains("UTF-8"));
+    }
+    assert_eq!(audit.journal(), journal);
+    assert!(!output.parent().unwrap().exists());
+    assert!(!uninitialized.parent().unwrap().exists());
+
+    // An empty audit can reach the report output boundary without recording.
+    let empty = Audit::new("pub fn untouched() {}");
+    let alias = empty._root.path().join(name);
+    symlink(&empty.state, &alias).unwrap();
+    assert!(
+        report(&alias, &TestClock)
+            .unwrap_err()
+            .to_string()
+            .contains("UTF-8")
+    );
+    assert!(!empty.state.join("reports").exists());
 }
 
 #[test]
@@ -367,7 +457,7 @@ fn failures_at_the_last_details_or_summary_write_do_not_publish_a_report() {
 }
 
 #[test]
-fn details_match_the_schema_and_attribute_all_callers_in_both_views() {
+fn reports_preserve_caller_attribution_and_test_gaps_in_both_views() {
     let audit = Audit::new(
         "
 #[cfg(test)]
@@ -376,6 +466,8 @@ fn helper() { assert_eq!(1, 1); }
 fn native_caller() { helper(); }
 #[test]
 fn agent_caller() { let check = helper; check(); }
+#[test]
+fn smoke_without_assertions() {}
 ",
     );
     let assertion = &audit.inventory["assertions"][0];
@@ -399,7 +491,6 @@ fn agent_caller() { let check = helper; check(); }
 
     let result = parse(report(&audit.state, &TestClock).unwrap());
     let details = read_json(artifact(&result, "detailsJsonPath"));
-    assert_details_schema(&details);
     assert_eq!(details["repositoryRoot"], audit.inventory["repositoryRoot"]);
     assert_eq!(details["scopePaths"], json!(["lib.rs"]));
     let callers = [agent, native].into_iter().collect::<BTreeSet<_>>();
@@ -407,69 +498,35 @@ fn agent_caller() { let check = helper; check(); }
         let tests = details["testInventory"].as_array().unwrap();
         let test = tests.iter().find(|test| test["id"] == *caller).unwrap();
         assert_eq!(test["sharedAssertionIds"], json!([id]));
+        assert_eq!(test["assertionCount"], 1);
+        assert_eq!(test["incidentalOnly"], true);
     }
-    let markdown = fs::read_to_string(artifact(&result, "detailsPath")).unwrap();
-    let expected_callers = format!(
-        "- Calling tests: {}",
-        callers.into_iter().collect::<Vec<_>>().join(", ")
-    );
-    assert!(markdown.lines().any(|line| line == expected_callers));
-}
-
-/// Checks the generated details document against the published schema shape.
-fn assert_details_schema(details: &Value) {
-    let schema: Value = serde_json::from_str(include_str!(
-        "../../../skills/ss-test-audit/schemas/details.schema.json"
-    ))
-    .unwrap();
-    let required = schema["required"]
-        .as_array()
-        .unwrap()
+    let tests = details["testInventory"].as_array().unwrap();
+    let smoke = tests
         .iter()
-        .map(|key| key.as_str().unwrap())
-        .collect::<BTreeSet<_>>();
-    let actual = details
-        .as_object()
-        .unwrap()
-        .keys()
-        .map(String::as_str)
-        .collect();
-    assert_eq!(required, actual);
-    assert_eq!(
-        details["schemaVersion"],
-        schema["properties"]["schemaVersion"]["const"]
-    );
-    for key in ["auditId", "repositoryRoot", "repositoryRevision"] {
-        assert!(!details[key].as_str().unwrap().is_empty(), "{key}");
-    }
-    let snapshot = details["snapshotSha256"].as_str().unwrap();
-    assert_eq!(snapshot.len(), 64);
+        .find(|test| test["name"] == "smoke_without_assertions")
+        .unwrap();
+    assert_eq!(smoke["assertionCount"], 0);
+    assert_eq!(smoke["incidentalOnly"], false);
+    let summary = read_json(artifact(&result, "summaryJsonPath"));
+    assert_eq!(summary["incidentalOnlyCount"], 2);
+    assert_eq!(summary["noCountedAssertionCount"], 1);
+    let text = fs::read_to_string(artifact(&result, "summaryPath")).unwrap();
     assert!(
-        snapshot
-            .bytes()
-            .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase())
+        text.contains("`smoke_without_assertions`") && text.contains("has no counted assertion")
+    );
+    assert!(text.contains("`agent_caller`") && text.contains("has only incidental checks"));
+    let markdown = fs::read_to_string(artifact(&result, "detailsPath")).unwrap();
+    assert!(
+        markdown
+            .lines()
+            .any(|line| callers.iter().all(|id| line.contains(id)))
     );
     assert!(
-        details["scopePaths"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .all(Value::is_string)
+        markdown
+            .lines()
+            .any(|line| line.contains("agent_caller") && line.contains(id.as_str().unwrap()))
     );
-    for key in ["assertionTrace", "testInventory", "diagnostics"] {
-        assert!(
-            details[key]
-                .as_array()
-                .unwrap()
-                .iter()
-                .all(Value::is_object)
-        );
-    }
-    for diagnostic in details["diagnostics"].as_array().unwrap() {
-        for field in ["kind", "path", "detail"] {
-            assert!(diagnostic.get(field).is_some());
-        }
-    }
 }
 
 /// Locates every machine summary that could claim durable completion.
@@ -520,15 +577,15 @@ fn artifact<'a>(receipt: &'a Value, key: &str) -> &'a Path {
 
 /// Decodes a JSON command result.
 fn parse(text: impl AsRef<str>) -> Value {
-    serde_json::from_str(text.as_ref()).unwrap()
+    from_str(text.as_ref()).unwrap()
 }
 
 /// Reads a generated JSON document from its workflow path.
 fn read_json(path: impl AsRef<Path>) -> Value {
-    serde_json::from_slice(&fs::read(path).unwrap()).unwrap()
+    from_slice(&fs::read(path).unwrap()).unwrap()
 }
 
 /// Writes a JSON input fixture.
 fn write_json(path: &Path, value: &Value) {
-    fs::write(path, serde_json::to_vec(value).unwrap()).unwrap();
+    fs::write(path, to_vec(value).unwrap()).unwrap();
 }

@@ -1,12 +1,13 @@
 # Native command recipes
 
-Run these installed commands directly. Every state write uses the same `--state-directory`.
+Run these installed commands directly. Every state write uses the same `--state-directory`. For continuation and completion, [follow the current directive](SKILL.md#follow-the-current-directive).
 
 ## Initialize
 
 ```powershell
 #Requires -Version 7.6
 
+if ($PSVersionTable.PSVersion -lt [version]'7.6') { throw 'PowerShell 7.6 or later is required.' }
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 $PSNativeCommandUseErrorActionPreference = $true
@@ -20,24 +21,28 @@ ss-ai test-audit initialize `
 | Placeholder | Description |
 | --- | --- |
 | `REPOSITORY_PATH` | Absolute path to the repository root or a path inside a Git working tree. |
-| `SCOPE_PATH` | Existing repository-relative or absolute file/directory scope for test and assertion inventory. Repeat `--scope-path` for multiple scopes; omit it for the complete repository. The evidence index remains repository-wide. |
-| `STATE_DIRECTORY` | New empty directory outside the audited source scope. |
+| `SCOPE_PATH` | Existing repository-relative or absolute file or directory for test and assertion inventory. Repeat `--scope-path` for multiple scopes; omit it for the repository-wide inventory. The evidence index covers the ordinary repository walk and any explicitly selected source outside it. |
+| `STATE_DIRECTORY` | New, empty directory outside the repository, even when `--scope-path` limits inventory. |
 
 On success, retain the returned state paths, `auditId`, `snapshotSha256`, source revision, test count, assertion count, file count, and diagnostic count. On any failure, report the native diagnostic and do not create an alternate state schema.
+
+Source discovery indexes text files up to and including 4 MiB. Larger files
+produce an `oversizedFile` diagnostic and do not enter the inventory or index.
 
 ## Search evidence
 
 ```powershell
 #Requires -Version 7.6
 
+if ($PSVersionTable.PSVersion -lt [version]'7.6') { throw 'PowerShell 7.6 or later is required.' }
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 $PSNativeCommandUseErrorActionPreference = $true
 
 ss-ai test-audit search `
   --state-directory "{{STATE_DIRECTORY}}" `
-  --query "{{QUERY_ONE}}" `
-  --query "{{QUERY_TWO}}" `
+  --query '{{QUERY_ONE}}' `
+  --query '{{QUERY_TWO}}' `
   --kind "{{EVIDENCE_KIND}}" `
   --limit {{LIMIT}}
 ```
@@ -45,17 +50,18 @@ ss-ai test-audit search `
 | Placeholder | Description |
 | --- | --- |
 | `STATE_DIRECTORY` | Exact initialized audit state directory. |
-| `QUERY_ONE`, `QUERY_TWO` | Independent case-insensitive term groups. Terms within each query must all occur in a path or one line excerpt. Repeat `--query` up to 10 times; a single query is valid. |
+| `QUERY_ONE`, `QUERY_TWO` | Independent queries split on whitespace. Each term may occur anywhere in the result's path or excerpt; matching folds ASCII case only. Double any apostrophe in the substituted text. Repeat `--query` up to 10 times; a single query is valid. |
 | `EVIDENCE_KIND` | Optional `documentation`, `publicDeclaration`, `traitImplementation`, `test`, or `source`; omit `--kind` to search all indexed lines. |
 | `LIMIT` | Result bound from 1 through 200. Use 50 unless a narrower or broader page is justified. |
 
-Use each `results` entry's `matches` as exact citation candidates. Each match contains `evidenceHandle`, `path`, `line`, and `excerpt`; submit the handle rather than reconstructing a citation tuple. Read only the bounded excerpts needed for the assertion. If an entry's `truncated` field is true, refine that query rather than assuming the first page is complete. Do not submit until every required evidence query has at least the intended literal match.
+Use each `results` entry's `matches` as citation candidates. Submit the returned `evidenceHandle` rather than reconstructing a citation from `path`, `line`, and `excerpt`. Refine truncated results. Find a matching citation for `Documented` and for the documented component of `Mixed`. A diagnostic search can end without a match after reasonable targeted queries and after ruling out truncation; this can support an `Implicit` or `Incidental` explanation. One empty query does not prove that no public promise exists.
 
 ## Export the next assertion batch
 
 ```powershell
 #Requires -Version 7.6
 
+if ($PSVersionTable.PSVersion -lt [version]'7.6') { throw 'PowerShell 7.6 or later is required.' }
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 $PSNativeCommandUseErrorActionPreference = $true
@@ -69,16 +75,17 @@ ss-ai test-audit next-batch `
 | Placeholder | Description |
 | --- | --- |
 | `STATE_DIRECTORY` | Exact initialized audit state directory. |
-| `BATCH_PATH` | New or atomically replaceable file receiving at most the requested assertions. |
+| `BATCH_PATH` | Preferred output name for the machine batch. |
 | `25` | Bounded batch size. Use 25 so cumulative conversation progress remains predictable. |
 
-Read the output file only after the command succeeds. Its `completed` and `remaining` fields describe durable classifications before this batch. The command also returns `displayPath`; read that compact text for normal review. The top-level `nextAction` is `continue` for a nonempty batch and `report` for an empty batch; `finalResponseAllowed` is always false. The JSON shape is flat: `assertions[]` contains assertion fields directly, with no `.assertion` wrapper. An empty `assertions` array means the final report is next, not that a final response is allowed.
+Batch exports preserve existing files; `--output-path` supplies a preferred name outside the report publication area. Open the returned `displayPath` to read the assertions and nearby source. Retain the JSON record at the returned `batchPath` unchanged for `submit --batch-path`.
 
 ## Record classification results
 
 ```powershell
 #Requires -Version 7.6
 
+if ($PSVersionTable.PSVersion -lt [version]'7.6') { throw 'PowerShell 7.6 or later is required.' }
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 $PSNativeCommandUseErrorActionPreference = $true
@@ -93,7 +100,8 @@ ss-ai test-audit record-batch `
 | `STATE_DIRECTORY` | Exact initialized audit state directory. |
 | `CLASSIFICATION_BATCH_PATH` | Strict agent-authored record following `schemas/classification-batch.schema.json`. |
 
-The command validates the audit token, snapshot freshness, unique assertion IDs, outcome explanation, category-specific evidence, exact citation lines, known calling tests, and shared-site linkage. Identical replays report `unchanged`; different repeats fail. Use the returned `completed` and `remaining` values in the cumulative progress update. That update is informational only. If `remaining` is greater than zero, immediately invoke `next-batch` again in the same skill invocation. If `remaining` is zero, immediately invoke `report`, whose exact-coverage validation is authoritative. Do not treat a successful record or `remaining: 0` alone as completion.
+The canonical classification input must fit in 1 MiB, including JSON whitespace.
+The command checks that the audit ID (`auditId`) identifies the active audit and that the snapshot digest (`snapshotSha256`) identifies its source snapshot. It also checks source freshness, unique assertion IDs, outcome explanation, category-specific evidence, exact citation lines, known calling tests, and shared-site linkage. Identical replays report `unchanged`; different repeats fail. This record-only command returns no batch; if its directive is `continue`, use `next-batch` to export one.
 
 Use this command when recovering an already-recorded result or inspecting one explicit transition. For ordinary progress, prefer the compact `submit` command below; use `advance` only when a canonical low-level classification record already exists.
 
@@ -102,6 +110,7 @@ Use this command when recovering an already-recorded result or inspecting one ex
 ```powershell
 #Requires -Version 7.6
 
+if ($PSVersionTable.PSVersion -lt [version]'7.6') { throw 'PowerShell 7.6 or later is required.' }
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 $PSNativeCommandUseErrorActionPreference = $true
@@ -117,12 +126,10 @@ ss-ai test-audit advance `
 | --- | --- |
 | `STATE_DIRECTORY` | Exact initialized audit state directory. |
 | `CLASSIFICATION_BATCH_PATH` | Strict agent-authored record following `schemas/classification-batch.schema.json`. |
-| `NEXT_BATCH_PATH` | File receiving the next bounded assertion batch. It may contain zero assertions when the audit is complete. |
+| `NEXT_BATCH_PATH` | Preferred output name for the next machine batch. |
 | `25` | Maximum next-batch size. |
 
-The command atomically records the classification journal and then exports the next batch from the same validated state load. `record` contains the durable completed and remaining counts. The top-level `nextAction` is authoritative for continuation: `continue` forbids a final response and requires processing the next batch, while `report` requires the final report immediately. `finalResponseAllowed` is always false for mutation transitions. `nextBatch.batchPath` is retained for a subsequent submission, while `nextBatch.displayPath` is the compact file to read for judgment. `nextBatch.batchCount` and `nextBatch.remaining` describe it. After a failed export, replaying the identical classification is safe because record insertion is idempotent.
-
-After a successful advance, continue immediately according to `record.remaining`. A greater-than-zero value means read `nextBatch.displayPath`; zero means run `report`. This low-level recovery path is not completion.
+The command commits the classification journal before exporting the next batch from the same validated state load. `record` contains the durable counts. Use the returned `nextBatch.displayPath` for judgment and retain `nextBatch.batchPath` for the next submission. After a known post-record export failure, replay the identical classification input.
 
 ## Submit a compact row batch
 
@@ -169,6 +176,7 @@ Reuse rows must explicitly confirm equivalence and replace both evidence and cal
 ```powershell
 #Requires -Version 7.6
 
+if ($PSVersionTable.PSVersion -lt [version]'7.6') { throw 'PowerShell 7.6 or later is required.' }
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 $PSNativeCommandUseErrorActionPreference = $true
@@ -186,18 +194,17 @@ ss-ai test-audit submit `
 | `STATE_DIRECTORY` | Exact initialized audit state directory. |
 | `BATCH_PATH` | Current exported batch from `next-batch` or the prior `nextBatch.batchPath`. |
 | `SUBMISSION_PATH` | Compact agent-authored row file following `schemas/compact-submission.schema.json`. |
-| `NEXT_BATCH_PATH` | Machine-readable path for the next batch; the result also returns `displayPath`. |
+| `NEXT_BATCH_PATH` | Preferred output name for the next machine batch. |
 | `25` | Maximum next-batch size. |
 
-The command binds rows to the exact exported machine record using `batchFingerprint`, resolves every evidence handle, validates every assertion and citation field, records the canonical classifications, and exports the next batch. Multiple citations belong in `citationHandles` as separate values. Reuse copies semantic outcome fields only after `equivalenceConfirmed: true`; citations and caller IDs are explicit replacements. Empty reuse citation arrays are rejected without fallback. Read `nextBatch.displayPath` for the next cycle while retaining `nextBatch.batchPath` for the next submission. Preserve the original batch and submission for replay, and always choose a distinct next output path. On failure, correct the named assertion ID, field, and evidence reference, then retry the same compact submission.
-
-After every submit, obey the top-level directive exactly. `nextAction: "continue"` means emit only an informational progress update and immediately process the returned batch; a final response is forbidden. `nextAction: "report"` means run the report next; a final response is still forbidden. Both transitions return `finalResponseAllowed: false`.
+The command binds rows to the exported machine batch using `batchFingerprint`, resolves all evidence handles, and commits the validated classifications before exporting the next batch. Use separate `citationHandles` entries for multiple citations. Read the returned `nextBatch.displayPath` for judgment and retain `nextBatch.batchPath` for the next submission. Preserve the original inputs and [recover according to the point of failure](SKILL.md#recover-from-failure).
 
 ## Emit final reports
 
 ```powershell
 #Requires -Version 7.6
 
+if ($PSVersionTable.PSVersion -lt [version]'7.6') { throw 'PowerShell 7.6 or later is required.' }
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 $PSNativeCommandUseErrorActionPreference = $true
@@ -210,10 +217,10 @@ ss-ai test-audit report `
 | --- | --- |
 | `STATE_DIRECTORY` | Exact initialized audit state directory. |
 
-On success, require `nextAction: "complete"` and `finalResponseAllowed: true` before returning a final response. This result is the sole final-response gate and is valid after an empty initial batch, a resumed all-classified state, a low-level recovery command, or a regular compact submission. Use the returned `tracePath`, `testInventoryPath`, `summaryJsonPath`, `summaryPath`, `detailsJsonPath`, and `detailsPath`; do not assume a state-root report location. `summary.json` is the versioned machine summary and `summary.md` its human companion. The summary identifies the repository, revision, scope paths, file/language totals, tests, assertions, classifications, modules, rates, and gap/diagnostic counts. `details.json` uses `assertionTrace`, `testInventory`, and `diagnostics`; `details.md` uses matching section headings. The existing trace and inventory paths remain compatibility artifacts.
+The successful report receipt provides `tracePath`, `testInventoryPath`, `summaryJsonPath`, `summaryPath`, `detailsJsonPath`, and `detailsPath`; do not assume a state-root report location. The standalone trace and test inventory serve consumers that need only one part of the detail report.
 
 The paired JSON artifacts conform to [summary.schema.json](schemas/summary.schema.json)
 and [details.schema.json](schemas/details.schema.json). Their schema version is
 part of each file and changes only with the native utility's record contract.
 
-Retain `status`, test count, assertion count, module count, `noCountedAssertionCount`, `incidentalOnlyCount`, `unlinkedAssertionCount`, `fallibleValueCheckCount`, `conditionalAssertionCount`, and `diagnosticCount`. The trace JSON shape is `rows[]`; each row contains `assertion` and `classification`. Run this after the prior mutation returned `nextAction: "report"`. The command performs the authoritative exact-coverage validation. An incomplete classification journal is an error and emits no success report.
+The trace JSON shape is `rows[]`; each row contains `assertion` and `classification`. The command checks exact coverage and does not publish a success report for an incomplete classification journal.

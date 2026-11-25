@@ -12,12 +12,13 @@ use ss_ai_test_audit::{
 };
 
 use crate::Clock;
+use crate::command::namespace_arguments;
 
 /// Parses the local test-audit namespace without provider initialization.
-#[derive(Debug, Parser)]
+#[derive(Parser)]
 #[command(
     name = "ss-ai test-audit",
-    about = "Inventory and classify test promises"
+    about = "List tests and assertions, record what they check, and write an audit report"
 )]
 struct TestAuditCli {
     #[command(subcommand)]
@@ -25,7 +26,7 @@ struct TestAuditCli {
 }
 
 /// Defines the deterministic native stages of one resumable test audit.
-#[derive(Debug, Subcommand)]
+#[derive(Subcommand)]
 enum TestAuditCommand {
     /// Create an immutable repository and scope snapshot.
     Initialize {
@@ -54,7 +55,7 @@ enum TestAuditCommand {
         state_directory: PathBuf,
         #[arg(long)]
         output_path: PathBuf,
-        /// Matches the skill's cumulative assertion batch progress unit.
+        /// Maximum assertions in the next export; the byte limit can make it smaller.
         #[arg(long, default_value_t = 25)]
         count: usize,
     },
@@ -73,7 +74,7 @@ enum TestAuditCommand {
         batch_path: PathBuf,
         #[arg(long)]
         output_path: PathBuf,
-        /// Matches the skill's cumulative assertion batch progress unit.
+        /// Maximum assertions in the next export; the byte limit can make it smaller.
         #[arg(long, default_value_t = 25)]
         count: usize,
     },
@@ -87,6 +88,7 @@ enum TestAuditCommand {
         submission_path: PathBuf,
         #[arg(long)]
         output_path: PathBuf,
+        /// Maximum assertions exported after recording; the byte limit can make it smaller.
         #[arg(long, default_value_t = 25)]
         count: usize,
     },
@@ -103,10 +105,7 @@ where
     I: IntoIterator<Item = T>,
     T: Into<OsString> + Clone,
 {
-    let cli = match TestAuditCli::try_parse_from(crate::command::namespace_arguments(
-        arguments,
-        "test-audit",
-    )) {
+    let cli = match TestAuditCli::try_parse_from(namespace_arguments(arguments, "test-audit")) {
         Ok(cli) => cli,
         Err(error)
             if matches!(

@@ -4,17 +4,21 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::Write as _;
 use std::fs;
 use std::io::ErrorKind;
+use std::num::NonZeroUsize;
 use std::path::{Path, PathBuf};
 
 use ohno::AppError;
-use serde_json::json;
+use serde::Serialize;
+use serde_json::{json, to_string};
 use ss_ai_runtime::{Clock, LockMode, ResourceLock, fail};
 
 use crate::model::{
-    AuditSummary, Classification, ClassificationKind, ModuleSummary, TestCase, TraceRow,
+    AuditSummary, Classification, ClassificationKind, ModuleSummary, ScanDiagnostic, TestCase,
+    TraceRow,
 };
 use crate::state::{
-    load_fresh, output_path, path_is_vacant, validate_source_snapshot, write_bytes, write_json,
+    LoadedState, load_fresh, output_path, output_path_text, path_is_vacant,
+    validate_source_snapshot, write_bytes, write_json,
 };
 
 /// Validates exact classification coverage and emits durable audit reports.
@@ -22,19 +26,19 @@ use crate::state::{
 /// The returned paths identify a complete, immutable report generation.
 pub fn report(state_directory: &Path, clock: &dyn Clock) -> Result<String, AppError> {
     let loaded = load_fresh(state_directory, clock)?;
-    if loaded.journal.classifications.len() != loaded.inventory.assertions.len() {
+    if loaded.journal.rows().len() != loaded.inventory.assertions.len() {
         return Err(fail(
             "incompleteState",
             format!(
                 "Cannot report before classification is complete: {} of {} assertions classified",
-                loaded.journal.classifications.len(),
+                loaded.journal.rows().len(),
                 loaded.inventory.assertions.len()
             ),
         ));
     }
     let classifications: BTreeMap<&str, &Classification> = loaded
         .journal
-        .classifications
+        .rows()
         .iter()
         .map(|classification| (classification.assertion_id.as_str(), classification))
         .collect();
@@ -50,8 +54,8 @@ pub fn report(state_directory: &Path, clock: &dyn Clock) -> Result<String, AppEr
                 )
             })?;
         trace.push(TraceRow {
-            assertion: assertion.clone(),
-            classification: classification.clone(),
+            assertion,
+            classification,
         });
     }
     if trace.len() != loaded.inventory.assertions.len() {
@@ -65,72 +69,8 @@ pub fn report(state_directory: &Path, clock: &dyn Clock) -> Result<String, AppEr
         &trace,
         &loaded.inventory.repository_revision,
     )?;
-    let modules = module_summaries(&trace);
-    let classification_counts = classification_counts(&trace);
-    let no_counted_assertion_count = tests
-        .iter()
-        .filter(|test| {
-            test.get("assertionCount")
-                .and_then(serde_json::Value::as_u64)
-                == Some(0)
-        })
-        .count();
-    let incidental_only_count = tests
-        .iter()
-        .filter(|test| {
-            test.get("incidentalOnly")
-                .and_then(serde_json::Value::as_bool)
-                == Some(true)
-        })
-        .count();
-    let unlinked_assertion_count = trace
-        .iter()
-        .filter(|row| row.assertion.containing_test_id.is_none() && callers(row).next().is_none())
-        .count();
-    let fallible_value_check_count = trace
-        .iter()
-        .filter(|row| row.assertion.kind == "fallibleValueCheck")
-        .count();
-    let conditional_assertion_count = loaded
-        .inventory
-        .diagnostics
-        .iter()
-        .filter(|diagnostic| diagnostic.kind == "conditionalAssertion")
-        .count();
-    let summary = AuditSummary {
-        schema_version: 1,
-        status: "complete".to_owned(),
-        next_action: "complete".to_owned(),
-        final_response_allowed: true,
-        audit_id: loaded.state.audit_id.clone(),
-        snapshot_sha256: loaded.state.snapshot_sha256.clone(),
-        repository_root: loaded.inventory.repository_root.clone(),
-        repository_revision: loaded.inventory.repository_revision.clone(),
-        scope_paths: loaded.inventory.scope_paths.clone(),
-        indexed_file_count: loaded.inventory.files.len(),
-        source_languages: loaded.inventory.files.iter().fold(
-            BTreeMap::new(),
-            |mut languages, file| {
-                let count = languages.entry(file.language.clone()).or_default();
-                *count = count.saturating_add(1);
-                languages
-            },
-        ),
-        test_count: tests.len(),
-        assertion_count: trace.len(),
-        module_count: modules.len(),
-        classification_counts: classification_counts
-            .iter()
-            .map(|(name, count)| ((*name).to_owned(), *count))
-            .collect(),
-        no_counted_assertion_count,
-        incidental_only_count,
-        unlinked_assertion_count,
-        fallible_value_check_count,
-        conditional_assertion_count,
-        diagnostic_count: loaded.inventory.diagnostics.len(),
-        modules: modules.clone(),
-    };
+    let gaps = TestGaps::collect(&tests);
+    let summary = build_summary(&loaded, &trace, &tests, module_summaries(&trace), &gaps);
     let trace_document = json!({
         "schemaVersion": 1,
         "auditId": loaded.state.audit_id,
@@ -138,8 +78,8 @@ pub fn report(state_directory: &Path, clock: &dyn Clock) -> Result<String, AppEr
         "repositoryRevision": loaded.inventory.repository_revision,
         "repositoryRoot": loaded.inventory.repository_root,
         "scopePaths": loaded.inventory.scope_paths,
-        "classificationCounts": classification_counts,
-        "modules": modules,
+        "classificationCounts": summary.classification_counts,
+        "modules": summary.modules,
         "rows": trace,
     });
     let test_document = json!({
@@ -148,13 +88,7 @@ pub fn report(state_directory: &Path, clock: &dyn Clock) -> Result<String, AppEr
         "snapshotSha256": loaded.state.snapshot_sha256,
         "tests": tests,
     });
-    let summary_text = render_summary(
-        &summary,
-        loaded.inventory.files.len(),
-        &classification_counts,
-        &tests,
-        &loaded.inventory.diagnostics,
-    );
+    let summary_text = render_summary(&summary, &gaps, &loaded.inventory.diagnostics);
     let details_document = json!({
         "schemaVersion": 1,
         "auditId": loaded.state.audit_id,
@@ -174,7 +108,7 @@ pub fn report(state_directory: &Path, clock: &dyn Clock) -> Result<String, AppEr
         &tests,
         &trace,
         &loaded.inventory.diagnostics,
-    );
+    )?;
     let output_directory = publish_report(state_directory, clock, |staging| {
         write_json(&staging.join("trace.json"), &trace_document, clock)?;
         write_json(&staging.join("test-inventory.json"), &test_document, clock)?;
@@ -187,29 +121,87 @@ pub fn report(state_directory: &Path, clock: &dyn Clock) -> Result<String, AppEr
         validate_source_snapshot(&loaded.inventory, &loaded.state.repository_root)
     })?;
     Ok(json!({
-        "schemaVersion": 1,
-        "status": "complete",
-        "nextAction": "complete",
-        "finalResponseAllowed": true,
-        "auditId": loaded.state.audit_id,
-        "testCount": tests.len(),
-        "assertionCount": trace.len(),
-        "classificationCounts": classification_counts,
-        "noCountedAssertionCount": no_counted_assertion_count,
-        "incidentalOnlyCount": incidental_only_count,
-        "unlinkedAssertionCount": unlinked_assertion_count,
-        "fallibleValueCheckCount": fallible_value_check_count,
-        "conditionalAssertionCount": conditional_assertion_count,
-        "diagnosticCount": loaded.inventory.diagnostics.len(),
-        "tracePath": output_directory.join("trace.json"),
-        "testInventoryPath": output_directory.join("test-inventory.json"),
-        "summaryJsonPath": output_directory.join("summary.json"),
-        "summaryPath": output_directory.join("summary.md"),
-        "detailsJsonPath": output_directory.join("details.json"),
-        "detailsPath": output_directory.join("details.md"),
-        "moduleCount": modules.len()
+        "schemaVersion": summary.schema_version,
+        "status": summary.status,
+        "nextAction": summary.next_action,
+        "finalResponseAllowed": summary.final_response_allowed,
+        "auditId": summary.audit_id,
+        "testCount": summary.test_count,
+        "assertionCount": summary.assertion_count,
+        "classificationCounts": summary.classification_counts,
+        "noCountedAssertionCount": summary.no_counted_assertion_count,
+        "incidentalOnlyCount": summary.incidental_only_count,
+        "unlinkedAssertionCount": summary.unlinked_assertion_count,
+        "fallibleValueCheckCount": summary.fallible_value_check_count,
+        "conditionalAssertionCount": summary.conditional_assertion_count,
+        "diagnosticCount": summary.diagnostic_count,
+        "tracePath": output_path_text(&output_directory.join("trace.json"))?,
+        "testInventoryPath": output_path_text(&output_directory.join("test-inventory.json"))?,
+        "summaryJsonPath": output_path_text(&output_directory.join("summary.json"))?,
+        "summaryPath": output_path_text(&output_directory.join("summary.md"))?,
+        "detailsJsonPath": output_path_text(&output_directory.join("details.json"))?,
+        "detailsPath": output_path_text(&output_directory.join("details.md"))?,
+        "moduleCount": summary.module_count
     })
     .to_string())
+}
+
+/// Computes the metrics shared by the human report, JSON summary and receipt.
+fn build_summary(
+    loaded: &LoadedState,
+    trace: &[TraceRow<'_>],
+    tests: &[TestReportRow<'_>],
+    modules: Vec<ModuleSummary>,
+    gaps: &TestGaps<'_>,
+) -> AuditSummary {
+    let mut languages: BTreeMap<&str, usize> = BTreeMap::new();
+    for file in &loaded.inventory.files {
+        let count = languages.entry(file.language.as_str()).or_default();
+        *count = count.saturating_add(1);
+    }
+    AuditSummary {
+        schema_version: 1,
+        status: "complete".to_owned(),
+        next_action: "complete".to_owned(),
+        final_response_allowed: true,
+        audit_id: loaded.state.audit_id.clone(),
+        snapshot_sha256: loaded.state.snapshot_sha256.clone(),
+        repository_root: loaded.inventory.repository_root.clone(),
+        repository_revision: loaded.inventory.repository_revision.clone(),
+        scope_paths: loaded.inventory.scope_paths.clone(),
+        indexed_file_count: loaded.inventory.files.len(),
+        source_languages: languages
+            .into_iter()
+            .map(|(name, count)| (name.to_owned(), count))
+            .collect(),
+        test_count: tests.len(),
+        assertion_count: trace.len(),
+        module_count: modules.len(),
+        classification_counts: classification_counts(trace)
+            .into_iter()
+            .map(|(name, count)| (name.to_owned(), count))
+            .collect(),
+        no_counted_assertion_count: gaps.no_counted.len(),
+        incidental_only_count: gaps.incidental_only.len(),
+        unlinked_assertion_count: trace
+            .iter()
+            .filter(|row| {
+                row.assertion.containing_test_id.is_none() && callers(row).next().is_none()
+            })
+            .count(),
+        fallible_value_check_count: trace
+            .iter()
+            .filter(|row| row.assertion.kind == "fallibleValueCheck")
+            .count(),
+        conditional_assertion_count: loaded
+            .inventory
+            .diagnostics
+            .iter()
+            .filter(|diagnostic| diagnostic.kind == "conditionalAssertion")
+            .count(),
+        diagnostic_count: loaded.inventory.diagnostics.len(),
+        modules,
+    }
 }
 
 /// Commits a complete report generation by renaming its private staging directory.
@@ -226,6 +218,8 @@ fn publish_report(
         )
     })?;
     let _publication = ResourceLock::open(&publication, LockMode::Exclusive, clock)?;
+    let destination = unused_report_path(directory)?;
+    output_path_text(&destination)?;
     let staging = directory.join(".staging");
     match fs::symlink_metadata(&staging) {
         Ok(metadata) if metadata.is_dir() => {}
@@ -241,7 +235,6 @@ fn publish_report(
 
     let result = (|| {
         write_artifacts(&staging)?;
-        let destination = unused_report_path(directory)?;
         fs::rename(&staging, &destination)?;
         Ok(destination)
     })();
@@ -265,7 +258,7 @@ fn unused_report_path(directory: &Path) -> Result<PathBuf, AppError> {
 }
 
 /// Combines native and agent attribution for both human and machine views.
-fn callers(row: &TraceRow) -> impl Iterator<Item = &str> {
+fn callers<'a>(row: &TraceRow<'a>) -> impl Iterator<Item = &'a str> {
     row.assertion
         .calling_test_ids
         .iter()
@@ -274,7 +267,7 @@ fn callers(row: &TraceRow) -> impl Iterator<Item = &str> {
 }
 
 /// Counts each explicit semantic category without turning it into a quality score.
-fn classification_counts(trace: &[TraceRow]) -> BTreeMap<&'static str, usize> {
+fn classification_counts(trace: &[TraceRow<'_>]) -> BTreeMap<&'static str, usize> {
     let mut counts: BTreeMap<&'static str, usize> = BTreeMap::new();
     for row in trace {
         let name = match row.classification.kind {
@@ -289,12 +282,54 @@ fn classification_counts(trace: &[TraceRow]) -> BTreeMap<&'static str, usize> {
     counts
 }
 
+/// Shares complete test attribution and coverage between both report formats.
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct TestReportRow<'a> {
+    id: &'a str,
+    name: &'a str,
+    kind: &'a str,
+    language: &'a str,
+    path: &'a str,
+    line: NonZeroUsize,
+    end_line: usize,
+    repository_revision: &'a str,
+    direct_assertion_ids: BTreeSet<String>,
+    shared_assertion_ids: BTreeSet<String>,
+    assertion_count: usize,
+    incidental_only: bool,
+}
+
+/// Retains the rows that explain the two test-level gap counts.
+struct TestGaps<'a> {
+    no_counted: Vec<&'a TestReportRow<'a>>,
+    incidental_only: Vec<&'a TestReportRow<'a>>,
+}
+
+impl<'a> TestGaps<'a> {
+    /// Selects named gaps once for both the summary counts and Markdown lists.
+    fn collect(tests: &'a [TestReportRow<'a>]) -> Self {
+        let mut gaps = Self {
+            no_counted: Vec::new(),
+            incidental_only: Vec::new(),
+        };
+        for test in tests {
+            if test.assertion_count == 0 {
+                gaps.no_counted.push(test);
+            } else if test.incidental_only {
+                gaps.incidental_only.push(test);
+            }
+        }
+        gaps
+    }
+}
+
 /// Projects final assertion ownership into the complete test inventory.
-fn complete_test_inventory(
-    source_tests: &[TestCase],
-    trace: &[TraceRow],
-    repository_revision: &str,
-) -> Result<Vec<serde_json::Value>, AppError> {
+fn complete_test_inventory<'a>(
+    source_tests: &'a [TestCase],
+    trace: &[TraceRow<'_>],
+    repository_revision: &'a str,
+) -> Result<Vec<TestReportRow<'a>>, AppError> {
     let test_ids: BTreeSet<&str> = source_tests.iter().map(|test| test.id.as_str()).collect();
     if test_ids.len() != source_tests.len() {
         return Err(fail(
@@ -324,20 +359,20 @@ fn complete_test_inventory(
                     .find(|row| row.assertion.id == **id)
                     .is_some_and(|row| row.classification.kind == ClassificationKind::Incidental)
             });
-        result.push(json!({
-            "id": test.id,
-            "name": test.name,
-            "kind": test.kind,
-            "language": test.language,
-            "path": test.path,
-            "line": test.line,
-            "endLine": test.end_line,
-            "repositoryRevision": repository_revision,
-            "directAssertionIds": direct,
-            "sharedAssertionIds": shared,
-            "assertionCount": direct.len().saturating_add(shared.len()),
-            "incidentalOnly": incidental_only
-        }));
+        result.push(TestReportRow {
+            id: &test.id,
+            name: &test.name,
+            kind: &test.kind,
+            language: &test.language,
+            path: &test.path,
+            line: test.line,
+            end_line: test.end_line,
+            repository_revision,
+            assertion_count: direct.len().saturating_add(shared.len()),
+            direct_assertion_ids: direct,
+            shared_assertion_ids: shared,
+            incidental_only,
+        });
     }
     if result.len() != source_tests.len() {
         return Err(fail(
@@ -349,7 +384,7 @@ fn complete_test_inventory(
 }
 
 /// Calculates descriptive contract-evidence rates for each path module.
-fn module_summaries(trace: &[TraceRow]) -> Vec<ModuleSummary> {
+fn module_summaries(trace: &[TraceRow<'_>]) -> Vec<ModuleSummary> {
     let mut modules: BTreeMap<String, (usize, usize, usize)> = BTreeMap::new();
     for row in trace {
         let module = Path::new(&row.assertion.path).parent().map_or_else(
@@ -403,10 +438,8 @@ fn ratio(numerator: usize, denominator: usize) -> f64 {
 /// Renders a concise human report with denominators and execution diagnostics.
 fn render_summary(
     summary: &AuditSummary,
-    _file_count: usize,
-    classification_counts: &BTreeMap<&str, usize>,
-    tests: &[serde_json::Value],
-    diagnostics: &[crate::model::ScanDiagnostic],
+    gaps: &TestGaps<'_>,
+    diagnostics: &[ScanDiagnostic],
 ) -> String {
     let mut output = String::new();
     let audit_id = &summary.audit_id;
@@ -485,6 +518,11 @@ fn render_summary(
     );
     _ = writeln!(output, "- Scan diagnostics: {}\n", summary.diagnostic_count);
     output.push_str(
+        "No explicitly documented promise counts plausible guarantees without exact wording (`Implicit`) \
+         and checks that no public promise requires (`Incidental`). No public-contract check counts \
+         only `Incidental` sites. `Mixed` sites have a documented component, so neither numerator includes them.\n\n",
+    );
+    output.push_str(
         "| Module | Assertions | No explicitly documented promise | No public-contract check |\n",
     );
     output.push_str("| --- | ---: | ---: | ---: |\n");
@@ -525,7 +563,11 @@ fn render_summary(
         _ = writeln!(
             output,
             "- {name}: {}/{total}",
-            classification_counts.get(name).copied().unwrap_or_default()
+            summary
+                .classification_counts
+                .get(name)
+                .copied()
+                .unwrap_or_default()
         );
     }
     output.push_str("\nDefinitions:\n\n");
@@ -533,47 +575,31 @@ fn render_summary(
         "- `No explicitly documented promise = implicit-only + incidental` assertion sites.\n",
     );
     output.push_str("- `No public-contract check = incidental only` assertion sites.\n");
-    output.push_str("- Mixed sites have a documented component and enter neither numerator.\n\n");
+    output.push('\n');
 
-    let no_counted: Vec<&serde_json::Value> = tests
-        .iter()
-        .filter(|test| {
-            test.get("assertionCount")
-                .and_then(serde_json::Value::as_u64)
-                == Some(0)
-        })
-        .collect();
-    let incidental_only: Vec<&serde_json::Value> = tests
-        .iter()
-        .filter(|test| {
-            test.get("incidentalOnly")
-                .and_then(serde_json::Value::as_bool)
-                == Some(true)
-        })
-        .collect();
     output.push_str("## Tests with no contractually motivated checks\n\n");
-    _ = writeln!(output, "Incidental-only tests: {}\n", incidental_only.len());
+    _ = writeln!(
+        output,
+        "Incidental-only tests: {}\n",
+        gaps.incidental_only.len()
+    );
     _ = writeln!(
         output,
         "Tests with no counted assertion: {}\n",
-        no_counted.len()
+        gaps.no_counted.len()
     );
-    for test in incidental_only {
+    for test in &gaps.incidental_only {
         _ = writeln!(
             output,
             "- `{}` (`{}` at line {}) has only incidental checks.\n",
-            test["name"].as_str().unwrap_or("unknown"),
-            test["path"].as_str().unwrap_or("unknown"),
-            test["line"].as_u64().unwrap_or_default()
+            test.name, test.path, test.line
         );
     }
-    for test in no_counted {
+    for test in &gaps.no_counted {
         _ = writeln!(
             output,
             "- `{}` (`{}` at line {}) has no counted assertion.\n",
-            test["name"].as_str().unwrap_or("unknown"),
-            test["path"].as_str().unwrap_or("unknown"),
-            test["line"].as_u64().unwrap_or_default()
+            test.name, test.path, test.line
         );
     }
     if diagnostics.is_empty() {
@@ -603,10 +629,10 @@ fn render_details(
     repository_root: &str,
     revision: &str,
     scope_paths: &[String],
-    tests: &[serde_json::Value],
-    trace: &[TraceRow],
-    diagnostics: &[crate::model::ScanDiagnostic],
-) -> String {
+    tests: &[TestReportRow<'_>],
+    trace: &[TraceRow<'_>],
+    diagnostics: &[ScanDiagnostic],
+) -> Result<String, AppError> {
     let mut output = String::new();
     _ = writeln!(
         output,
@@ -671,13 +697,13 @@ fn render_details(
         _ = writeln!(
             output,
             "- `{}`: {} (`{}:{}`), direct={}, shared={}, incidentalOnly={}\n",
-            test["id"].as_str().unwrap_or(""),
-            test["name"].as_str().unwrap_or(""),
-            test["path"].as_str().unwrap_or(""),
-            test["line"].as_u64().unwrap_or_default(),
-            test["directAssertionIds"],
-            test["sharedAssertionIds"],
-            test["incidentalOnly"].as_bool().unwrap_or(false)
+            test.id,
+            test.name,
+            test.path,
+            test.line,
+            to_string(&test.direct_assertion_ids)?,
+            to_string(&test.shared_assertion_ids)?,
+            test.incidental_only
         );
     }
 
@@ -699,10 +725,10 @@ fn render_details(
             );
         }
     }
-    output
+    Ok(output)
 }
 
-/// Escapes table content without changing persisted paths or scores.
+/// Escapes table delimiters in Markdown without changing the report data.
 fn escape_table(value: &str) -> String {
     value.replace('|', "&#124;")
 }

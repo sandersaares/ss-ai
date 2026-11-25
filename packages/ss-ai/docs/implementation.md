@@ -64,54 +64,12 @@ network dependency. The focused packages support targeted test builds and
 incremental reuse; a cold build of the complete executable still builds its
 dependency closure. None of these internal Rust APIs is a supported SDK.
 
-The test-audit package is a one-way local consumer of the runtime process,
-clock, file transaction, and error boundaries. `ss-ai` supplies local Git
-identity without initializing provider transport. Rust syntax supplies
-deterministic structural inventory; explicit text profiles cover the named
-heuristic languages. Agents provide semantic judgments through strict snapshot-
-bound records, so native validation can reject stale or incomplete work without
-making public-contract decisions.
-
-Rust scanning keeps test-owned sites distinct from production candidates. It
-records direct call names while visiting each test and reconciles shared
-assertions only after the complete scope is inventoried. The visitor recognizes
-panic-expectation helper calls and suppresses deliberately triggered panics
-inside them. This avoids method-name substring attribution while retaining
-real free helpers and explicit static-assertion test cases.
-
-`assert_eq_size` follows the static-assertion path. Empty generic helper
-declarations with trait bounds are pre-indexed, and direct calls from test
-context become compile-time assertion sites at the call. Selected `expect`
-method calls on fallible API values become `fallibleValueCheck` sites; common
-fixture and synchronization accessor names are excluded. Configuration
-attributes on compile-time sites are preserved as scan diagnostics.
-
-`advance` shares one loaded inventory and index between classification
-validation and next-batch export. It still retains separate sibling file
-transactions for the journal and output artifacts, so a durable record can be
-replayed idempotently if publication fails. Multi-query evidence search shares
-one state load and emits a bounded result per query. Read-only operations verify
-stored state digests without traversing source files; mutation and report
-operations rehash source content at their authority boundary.
-
-Every mutation transition emits an explicit top-level continuation directive.
-`continue` means another bounded batch is ready; `report` means classification
-is complete but the final report remains mandatory; both forbid final-response
-completion. The report alone emits `complete` with final-response permission.
-This machine-readable gate complements the skill's prose continuation rules.
-
-`submit` adds the agent-facing compact row boundary in front of `advance`.
-Snapshot-bound evidence handles resolve to exact indexed source lines inside
-the native utility. Explicit reuse requires equivalence confirmation and
-replaces citations and callers rather than inheriting them. Batch exports carry
-a machine record plus compact text display. Report results expose bounded
-completion counts so ordinary workflow completion does not require a trace
-read.
-
-Final report publication builds one typed `AuditSummary` and publishes it as
-JSON and Markdown. A matching `details` document carries the complete trace,
-test inventory, and diagnostics in JSON and Markdown. Existing trace and
-test-inventory JSON files remain unchanged compatibility projections.
+The test-audit package uses the shared runtime to run local commands, read the
+clock, publish files, and report errors. `ss-ai` obtains Git identity locally
+without initializing provider transport. The package parses Rust and applies
+text patterns for other supported languages to discover tests and assertions.
+The agent decides what each assertion checks; the utility verifies that
+judgments match the audited snapshot and cover every assertion.
 
 The package boundaries follow the subject-owned, one-way dependency practices
 used by [cargo-release-plan](https://github.com/folo-rs/folo/blob/db33786ec25196696b46f38e2b60a03bd33ec913/packages/cargo-release-plan/docs/implementation.md)
@@ -127,6 +85,8 @@ identity rules without requiring a selection journal.
 
 Read the topics relevant to the responsibility being changed:
 
+- [Test audit](../../../skills/ss-test-audit/docs/implementation.md) explains
+  scanning, classification, replay, and report publication.
 - [Automatic reapproval](reapproval.md) defines approval recognition, exact source
   evidence, assessment, publication, and supported provider boundaries.
 - [Provider evidence and identities](implementation/providers.md) explains

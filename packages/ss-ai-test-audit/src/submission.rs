@@ -3,6 +3,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use ohno::AppError;
+use serde_json::Value;
 use ss_ai_runtime::fail;
 
 use crate::batch::{MAX_BATCH_SIZE, validate_classification};
@@ -66,7 +67,7 @@ pub(crate) fn resolve_submission(
 
     let accepted: BTreeMap<&str, &Classification> = loaded
         .journal
-        .classifications
+        .rows()
         .iter()
         .map(|classification| (classification.assertion_id.as_str(), classification))
         .collect();
@@ -123,55 +124,71 @@ pub(crate) fn resolve_submission(
 
 /// Resolves one fresh or explicitly reused compact semantic row.
 fn resolve_submission_row(
-    row: CompactSubmissionRow,
+    mut row: CompactSubmissionRow,
     assertion: &AssertionSite,
     accepted: &BTreeMap<&str, &Classification>,
     handles: &BTreeMap<String, usize>,
     index: &[IndexEntry],
 ) -> Result<Classification, AppError> {
-    let Some(reuse_from) = row.reuse_from else {
-        if row.equivalence_confirmed.is_some() {
-            return Err(submission_error(
-                &row.assertion_id,
-                "equivalenceConfirmed",
-                "The field applies only when reuseFrom is present",
-            ));
-        }
-        let citation_handles = required_string_array(
-            row.citation_handles,
-            &row.assertion_id,
-            "citationHandles",
-            "The field is required, including an explicit empty array for incidental checks",
-        )?;
-        let calling_test_ids = required_string_array(
-            row.calling_test_ids,
-            &row.assertion_id,
-            "callingTestIds",
-            "The field is required; do not omit caller attribution",
-        )?;
-        return Ok(Classification {
-            assertion_id: row.assertion_id,
-            kind: required_row_value(row.classification, &assertion.id, "classification")?,
-            evidence_status: required_row_value(
-                row.evidence_status,
-                &assertion.id,
-                "evidenceStatus",
-            )?,
-            actual_outcome: required_row_value(row.actual_outcome, &assertion.id, "actualOutcome")?,
-            rationale: required_row_value(row.rationale, &assertion.id, "rationale")?,
-            citations: resolve_citation_handles(
-                &assertion.id,
-                "citationHandles",
-                &citation_handles,
-                handles,
-                index,
-            )?,
-            incidental_reason: row.incidental_reason,
-            calling_test_ids,
-            unlinked_reason: row.unlinked_reason,
-        });
-    };
+    match row.reuse_from.take() {
+        None => resolve_explicit_row(row, assertion, handles, index),
+        Some(reuse_from) => resolve_reuse_row(row, &reuse_from, accepted, handles, index),
+    }
+}
 
+/// Requires the semantic fields to be supplied directly rather than inherited.
+fn resolve_explicit_row(
+    row: CompactSubmissionRow,
+    assertion: &AssertionSite,
+    handles: &BTreeMap<String, usize>,
+    index: &[IndexEntry],
+) -> Result<Classification, AppError> {
+    if row.equivalence_confirmed.is_some() {
+        return Err(submission_error(
+            &row.assertion_id,
+            "equivalenceConfirmed",
+            "The field applies only when reuseFrom is present",
+        ));
+    }
+    let citation_handles = required_string_array(
+        row.citation_handles,
+        &row.assertion_id,
+        "citationHandles",
+        "The field is required, including an explicit empty array for incidental checks",
+    )?;
+    let calling_test_ids = required_string_array(
+        row.calling_test_ids,
+        &row.assertion_id,
+        "callingTestIds",
+        "The field is required; do not omit caller attribution",
+    )?;
+    Ok(Classification {
+        assertion_id: row.assertion_id,
+        kind: required_row_value(row.classification, &assertion.id, "classification")?,
+        evidence_status: required_row_value(row.evidence_status, &assertion.id, "evidenceStatus")?,
+        actual_outcome: required_row_value(row.actual_outcome, &assertion.id, "actualOutcome")?,
+        rationale: required_row_value(row.rationale, &assertion.id, "rationale")?,
+        citations: resolve_citation_handles(
+            &assertion.id,
+            "citationHandles",
+            &citation_handles,
+            handles,
+            index,
+        )?,
+        incidental_reason: row.incidental_reason,
+        calling_test_ids,
+        unlinked_reason: row.unlinked_reason,
+    })
+}
+
+/// Copies only the accepted semantic judgment, with new evidence and callers.
+fn resolve_reuse_row(
+    row: CompactSubmissionRow,
+    reuse_from: &str,
+    accepted: &BTreeMap<&str, &Classification>,
+    handles: &BTreeMap<String, usize>,
+    index: &[IndexEntry],
+) -> Result<Classification, AppError> {
     if row.equivalence_confirmed != Some(true) {
         return Err(submission_error(
             &row.assertion_id,
@@ -216,7 +233,7 @@ fn resolve_submission_row(
         "callingTestIds",
         format!("Reuse from '{reuse_from}' requires explicit caller attribution"),
     )?;
-    let source = accepted.get(reuse_from.as_str()).copied().ok_or_else(|| {
+    let source = accepted.get(reuse_from).copied().ok_or_else(|| {
         submission_error(
             &row.assertion_id,
             "reuseFrom",
@@ -251,7 +268,7 @@ fn required_row_value<T>(value: Option<T>, assertion_id: &str, field: &str) -> R
 
 /// Parses an agent-owned string array after preserving field-level error context.
 fn required_string_array(
-    value: Option<serde_json::Value>,
+    value: Option<Value>,
     assertion_id: &str,
     field: &str,
     missing_detail: impl Into<String>,

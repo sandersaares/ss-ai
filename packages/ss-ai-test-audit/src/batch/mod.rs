@@ -4,30 +4,33 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::Write as _;
 use std::fs::{File, remove_file};
 use std::io::Read;
+use std::num::NonZeroUsize;
 use std::path::{Path, PathBuf};
 
 use ohno::AppError;
-use serde_json::{Value, json};
+use serde_json::{Value, json, to_value, to_vec_pretty};
 use ss_ai_runtime::{Clock, FileTransaction, caused_by, fail};
 
 use crate::model::{
-    AssertionSite, Batch, BatchAssertion, Citation, Classification, ClassificationBatch,
-    ClassificationJournal, ClassificationKind, CompactSubmission, EvidenceStatus, IndexEntry,
-    Inventory, TestCase,
+    AssertionSite, AuditState, Batch, BatchAssertion, Citation, Classification,
+    ClassificationBatch, ClassificationJournal, ClassificationKind, CompactSubmission,
+    EvidenceStatus, IndexEntry, Inventory, TestCase,
 };
 use crate::scan::digest;
 use crate::state::{
-    LoadedState, load, load_fresh, output_path, parse_json, path_is_vacant, reject_input_alias,
-    reject_source_alias, reject_state_destination, require_version, validate_journal,
-    validate_source_snapshot,
+    LoadedState, create_output_parent, load, load_fresh, output_path_text, parse_json,
+    path_is_vacant, reject_input_alias, reject_source_alias, reject_state_destination,
+    require_version, resolve_output_path, validate_journal, validate_source_snapshot,
 };
 use crate::submission::{resolve_submission, validate_exported_batch};
 
 /// Matches the skill's bounded agent review unit and cumulative progress reporting.
 pub(crate) const MAX_BATCH_SIZE: usize = 25;
-/// Shares the input ceiling with the batch producer, so exports can be submitted.
+/// Bounds a complete JSON page at the reader's input ceiling, even when
+/// escaping and repeated context inflate the serialized assertions.
 const MAX_BATCH_BYTES: usize = 1024 * 1024;
-/// Keeps a useful predicate preview while leaving room for its source context.
+/// Preserves useful predicate text while giving each preview only a fraction
+/// of the page budget, leaving room for escaped text, metadata and context.
 const MAX_EXPRESSION_BYTES: usize = 16 * 1024;
 /// Retains nearby source without duplicating complete files in the batch.
 const ASSERTION_CONTEXT_RADIUS: usize = 4;
@@ -43,24 +46,18 @@ pub fn next_batch(
     count: usize,
     clock: &dyn Clock,
 ) -> Result<String, AppError> {
-    if count == 0 || count > MAX_BATCH_SIZE {
-        return Err(fail(
-            "invalidInput",
-            "Assertion batch size must be between 1 and 25",
-        ));
-    }
+    let count = batch_count(count)?;
     let loaded = load(state_directory, clock)?;
     let batch = build_batch(&loaded, count);
-    let output = output_path(output)?;
-    preflight_batch_output(state_directory, &output, &loaded.inventory, &[])?;
+    let output = preflight_batch_output(state_directory, output, &loaded.inventory, &[])?;
     Ok(export_batch(batch, &output, clock)?.to_string())
 }
 
 /// Builds the next bounded assertion batch from one already validated state load.
-fn build_batch(loaded: &LoadedState, count: usize) -> Batch {
+fn build_batch(loaded: &LoadedState, count: NonZeroUsize) -> Batch {
     let completed: BTreeSet<&str> = loaded
         .journal
-        .classifications
+        .rows()
         .iter()
         .map(|classification| classification.assertion_id.as_str())
         .collect();
@@ -75,7 +72,7 @@ fn build_batch(loaded: &LoadedState, count: usize) -> Batch {
         .assertions
         .iter()
         .filter(|assertion| !completed.contains(assertion.id.as_str()))
-        .take(count)
+        .take(count.get())
         .map(|assertion| batch_assertion(assertion, &loaded.inventory.tests, &loaded.index))
         .collect::<Vec<_>>();
     Batch {
@@ -89,7 +86,7 @@ fn build_batch(loaded: &LoadedState, count: usize) -> Batch {
 }
 
 /// Summarizes one exported batch without repeating its assertion payload.
-fn batch_summary(batch: &Batch, output: &Path, display: &Path, fingerprint: &str) -> Value {
+fn batch_summary(batch: &Batch, output: &str, display: &str, fingerprint: &str) -> Value {
     json!({
         "schemaVersion": 1,
         "batchPath": output,
@@ -107,6 +104,7 @@ fn batch_summary(batch: &Batch, output: &Path, display: &Path, fingerprint: &str
 
 /// Publishes an immutable pair and uses its machine record as the commit point.
 fn export_batch(mut batch: Batch, output: &Path, clock: &dyn Clock) -> Result<Value, AppError> {
+    create_output_parent(output)?;
     let bytes = bounded_export(&mut batch)?;
     let fingerprint = digest(&bytes);
     let display_text = compact_batch_display(&batch, &fingerprint);
@@ -117,6 +115,8 @@ fn export_batch(mut batch: Batch, output: &Path, clock: &dyn Clock) -> Result<Va
             append_suffix(output, &format!(".{generation}.json"))
         };
         let display = append_suffix(&output, ".txt");
+        let output_text = output_path_text(&output)?;
+        let display_path = output_path_text(&display)?;
         // Hold both leases through publication. Always taking the machine lock
         // before its suffixed companion also orders overlapping output names.
         let machine = FileTransaction::open(&output, clock)?;
@@ -130,7 +130,12 @@ fn export_batch(mut batch: Batch, output: &Path, clock: &dyn Clock) -> Result<Va
             _ = remove_file(&display);
             return Err(error);
         }
-        return Ok(batch_summary(&batch, &output, &display, &fingerprint));
+        return Ok(batch_summary(
+            &batch,
+            output_text,
+            display_path,
+            &fingerprint,
+        ));
     }
     Err(fail("io", "No unused batch output generation is available"))
 }
@@ -145,7 +150,7 @@ fn append_suffix(path: &Path, suffix: &str) -> PathBuf {
 /// Fits the largest initial page into the exact size accepted by the reader.
 fn bounded_export(batch: &mut Batch) -> Result<Vec<u8>, AppError> {
     loop {
-        let bytes = serde_json::to_vec_pretty(batch)?;
+        let bytes = to_vec_pretty(batch)?;
         if bytes.len() <= MAX_BATCH_BYTES {
             return Ok(bytes);
         }
@@ -165,14 +170,17 @@ fn preflight_batch_output(
     output: &Path,
     inventory: &Inventory,
     inputs: &[&Path],
-) -> Result<(), AppError> {
-    let display = append_suffix(output, ".txt");
-    for path in [output, &display] {
+) -> Result<PathBuf, AppError> {
+    let resolved = resolve_output_path(output)?;
+    let display = append_suffix(&resolved, ".txt");
+    let requested_display = append_suffix(output, ".txt");
+    for (requested, path) in [(output, resolved.as_path()), (&requested_display, &display)] {
+        output_path_text(path)?;
         reject_input_alias(path, inputs)?;
         reject_source_alias(path, inventory)?;
-        reject_state_destination(path, state_directory)?;
+        reject_state_destination(requested, path, state_directory)?;
     }
-    Ok(())
+    Ok(resolved)
 }
 
 /// Renders only fields needed to judge one bounded assertion batch.
@@ -231,7 +239,8 @@ fn batch_assertion(
         .iter()
         .filter(|entry| {
             (entry.path == assertion.path
-                && (near(entry.line, assertion.line) || near(entry.line, assertion.end_line)))
+                && (near(entry.line.get(), assertion.line.get())
+                    || near(entry.line.get(), assertion.end_line)))
                 || test.is_some_and(|test| {
                     entry.path == test.path
                         && (test.line..=test.line.saturating_add(TEST_HEADER_LINES))
@@ -278,12 +287,7 @@ pub fn advance(
     count: usize,
     clock: &dyn Clock,
 ) -> Result<String, AppError> {
-    if count == 0 || count > MAX_BATCH_SIZE {
-        return Err(fail(
-            "invalidInput",
-            "Assertion batch size must be between 1 and 25",
-        ));
-    }
+    let count = batch_count(count)?;
     let loaded = load_fresh(state_directory, clock)?;
     let classification = read_classification_batch_limited(batch_path)?;
     advance_classification(
@@ -308,12 +312,7 @@ pub fn submit(
     count: usize,
     clock: &dyn Clock,
 ) -> Result<String, AppError> {
-    if count == 0 || count > MAX_BATCH_SIZE {
-        return Err(fail(
-            "invalidInput",
-            "Assertion batch size must be between 1 and 25",
-        ));
-    }
+    let count = batch_count(count)?;
     let loaded = load_fresh(state_directory, clock)?;
     let batch_bytes = read_bounded_json(batch_path, "exported assertion batch")?;
     let batch: Batch = parse_json(&batch_bytes, "exported assertion batch")?;
@@ -341,18 +340,20 @@ pub fn submit(
     )
 }
 
-/// Applies the shared record-and-export transaction to one canonical batch.
+/// Applies the shared record-and-export sequence to one canonical batch.
+///
+/// The journal write commits the classifications even if export later fails.
 fn advance_classification(
     state_directory: &Path,
     output: &Path,
-    count: usize,
+    count: NonZeroUsize,
     clock: &dyn Clock,
     loaded: LoadedState,
     classification: ClassificationBatch,
     inputs: &[&Path],
 ) -> Result<String, AppError> {
-    let output = output_path(output)?;
-    preflight_batch_output(state_directory, &output, &loaded.inventory, inputs)?;
+    let output = preflight_batch_output(state_directory, output, &loaded.inventory, inputs)?;
+    create_output_parent(&output)?;
     let (journal, recorded) =
         record_classification(state_directory, classification, clock, &loaded)?;
     let mut advanced = loaded;
@@ -376,7 +377,7 @@ fn record_loaded(
     batch_path: &Path,
     clock: &dyn Clock,
     loaded: &LoadedState,
-) -> Result<(ClassificationJournal, Value), AppError> {
+) -> Result<(ValidatedJournal, Value), AppError> {
     let batch = read_classification_batch_limited(batch_path)?;
     record_classification(state_directory, batch, clock, loaded)
 }
@@ -439,30 +440,99 @@ fn record_classification(
     batch: ClassificationBatch,
     clock: &dyn Clock,
     loaded: &LoadedState,
-) -> Result<(ClassificationJournal, Value), AppError> {
-    let classification_path = state_directory.join("classifications.json");
+) -> Result<(ValidatedJournal, Value), AppError> {
+    let classification_path = resolve_output_path(&state_directory.join("classifications.json"))?;
+    let classification_path_text = output_path_text(&classification_path)?;
     let transaction = FileTransaction::open(&classification_path, clock)?;
     let Some(journal_bytes) = transaction.read_bytes()? else {
         return Err(fail("invalidState", "Classification journal is missing"));
     };
-    let mut journal: ClassificationJournal = parse_json(&journal_bytes, "classification journal")?;
-    require_version(journal.schema_version, "classification journal")?;
-    if journal.audit_id != loaded.state.audit_id
-        || journal.snapshot_sha256 != loaded.state.snapshot_sha256
-    {
-        return Err(fail(
-            "invalidState",
-            "Classification journal belongs to a different audit",
-        ));
+    let mut journal = ValidatedJournal::from_persisted(
+        parse_json(&journal_bytes, "classification journal")?,
+        &loaded.state,
+        &loaded.inventory,
+        &loaded.index,
+    )?;
+    let (added, unchanged) = accept_batch(
+        &mut journal,
+        batch,
+        &loaded.state,
+        &loaded.inventory,
+        &loaded.index,
+    )?;
+    validate_source_snapshot(&loaded.inventory, &loaded.state.repository_root)?;
+    transaction.write_bytes(&to_vec_pretty(&journal.0)?)?;
+    let remaining = loaded
+        .inventory
+        .assertions
+        .len()
+        .saturating_sub(journal.rows().len());
+    let summary = json!({
+        "schemaVersion": 1,
+        "classificationPath": classification_path_text,
+        "added": added,
+        "unchanged": unchanged,
+        "completed": journal.rows().len(),
+        "remaining": remaining,
+        "nextAction": next_action(remaining),
+        "finalResponseAllowed": false
+    });
+    Ok((journal, summary))
+}
+
+/// Retains only journals checked against the exact inventory and evidence index.
+pub(crate) struct ValidatedJournal(ClassificationJournal);
+
+impl ValidatedJournal {
+    /// Validates persisted rows before any command uses their accepted judgments.
+    pub(crate) fn from_persisted(
+        journal: ClassificationJournal,
+        state: &AuditState,
+        inventory: &Inventory,
+        index: &[IndexEntry],
+    ) -> Result<Self, AppError> {
+        require_version(journal.schema_version, "classification journal")?;
+        if journal.audit_id != state.audit_id {
+            return Err(fail(
+                "invalidState",
+                "Classification journal belongs to a different audit",
+            ));
+        }
+        if journal.snapshot_sha256 != state.snapshot_sha256 {
+            return Err(fail(
+                "invalidState",
+                "Classification journal does not match the snapshot digest",
+            ));
+        }
+        validate_journal(inventory, &journal, index)?;
+        Ok(Self(journal))
     }
-    validate_journal(&loaded.inventory, &journal, &loaded.index)?;
+
+    /// Exposes accepted judgments without allowing unchecked editing.
+    pub(crate) fn rows(&self) -> &[Classification] {
+        &self.0.classifications
+    }
+}
+
+/// Applies an entire validated batch, or leaves the existing judgments unchanged.
+fn accept_batch(
+    journal: &mut ValidatedJournal,
+    batch: ClassificationBatch,
+    state: &AuditState,
+    inventory: &Inventory,
+    index: &[IndexEntry],
+) -> Result<(Vec<String>, Vec<String>), AppError> {
     require_version(batch.schema_version, "classification batch")?;
-    if batch.audit_id != loaded.state.audit_id
-        || batch.snapshot_sha256 != loaded.state.snapshot_sha256
-    {
+    if batch.audit_id != state.audit_id {
         return Err(fail(
             "staleState",
-            "Classification batch belongs to a different audit snapshot",
+            "Classification batch belongs to a different audit",
+        ));
+    }
+    if batch.snapshot_sha256 != state.snapshot_sha256 {
+        return Err(fail(
+            "staleState",
+            "Classification batch does not match the snapshot digest",
         ));
     }
     if batch.assertions.is_empty() || batch.assertions.len() > MAX_BATCH_SIZE {
@@ -472,22 +542,20 @@ fn record_classification(
         ));
     }
 
-    let assertions: BTreeMap<&str, &AssertionSite> = loaded
-        .inventory
+    let assertions: BTreeMap<&str, &AssertionSite> = inventory
         .assertions
         .iter()
         .map(|assertion| (assertion.id.as_str(), assertion))
         .collect();
-    let tests: BTreeSet<&str> = loaded
-        .inventory
+    let tests: BTreeSet<&str> = inventory
         .tests
         .iter()
         .map(|test| test.id.as_str())
         .collect();
-    let existing: BTreeMap<String, Classification> = journal
-        .classifications
+    let existing: BTreeMap<&str, &Classification> = journal
+        .rows()
         .iter()
-        .map(|classification| (classification.assertion_id.clone(), classification.clone()))
+        .map(|classification| (classification.assertion_id.as_str(), classification))
         .collect();
     let mut incoming = BTreeSet::new();
     let mut added = Vec::new();
@@ -516,9 +584,9 @@ fn record_classification(
                 ),
             ));
         }
-        validate_classification(&classification, assertion, &tests, &loaded.index)?;
-        if let Some(previous) = existing.get(&classification.assertion_id) {
-            if serde_json::to_value(previous)? != serde_json::to_value(&classification)? {
+        validate_classification(&classification, assertion, &tests, index)?;
+        if let Some(previous) = existing.get(classification.assertion_id.as_str()) {
+            if to_value(previous)? != to_value(&classification)? {
                 return Err(fail(
                     "invalidState",
                     format!(
@@ -533,28 +601,24 @@ fn record_classification(
             pending.push(classification);
         }
     }
-    journal.classifications.extend(pending);
+    journal.0.classifications.extend(pending);
     journal
+        .0
         .classifications
         .sort_by(|left, right| left.assertion_id.cmp(&right.assertion_id));
-    validate_source_snapshot(&loaded.inventory, &loaded.state.repository_root)?;
-    transaction.write_bytes(&serde_json::to_vec_pretty(&journal)?)?;
-    let remaining = loaded
-        .inventory
-        .assertions
-        .len()
-        .saturating_sub(journal.classifications.len());
-    let summary = json!({
-        "schemaVersion": 1,
-        "classificationPath": classification_path,
-        "added": added,
-        "unchanged": unchanged,
-        "completed": journal.classifications.len(),
-        "remaining": remaining,
-        "nextAction": next_action(remaining),
-        "finalResponseAllowed": false
-    });
-    Ok((journal, summary))
+    Ok((added, unchanged))
+}
+
+/// Checks the externally supplied export maximum once.
+fn batch_count(count: usize) -> Result<NonZeroUsize, AppError> {
+    NonZeroUsize::new(count)
+        .filter(|count| count.get() <= MAX_BATCH_SIZE)
+        .ok_or_else(|| {
+            fail(
+                "invalidInput",
+                "Assertion batch size must be between 1 and 25",
+            )
+        })
 }
 
 /// Directs progress to classification or reporting, neither of which is final.
@@ -704,13 +768,7 @@ fn validate_citation(
             "Citation path must not be empty",
         ));
     }
-    if citation.line == 0 {
-        return Err(row_error(
-            assertion_id,
-            &format!("{field}.line"),
-            "Citation line must be positive",
-        ));
-    }
+
     if citation.excerpt.trim().is_empty() {
         return Err(row_error(
             assertion_id,
@@ -746,3 +804,6 @@ fn validate_citation(
     }
     Ok(())
 }
+
+#[cfg(test)]
+mod fuzz;

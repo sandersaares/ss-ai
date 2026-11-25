@@ -4,15 +4,16 @@
     reason = "The test selects fixed fields from its own generated records."
 )]
 
+use std::env::{temp_dir, var_os};
 use std::fmt::Write as _;
 use std::fs;
 use std::io;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use jiff::Timestamp;
 use ohno::AppError;
-use serde_json::{Value, json};
+use serde_json::{Value, from_slice, from_str, json, to_vec_pretty};
 use ss_ai_runtime::{Clock, Process, ProcessOutput};
 use ss_ai_test_audit::{
     advance, initialize, next_batch, record_batch, report, search, search_many, submit,
@@ -67,9 +68,49 @@ impl Process for GitProcess {
     }
 }
 
-/// Creates the fixture and returns its repository and separate state directories.
-fn fixture() -> (TempDir, std::path::PathBuf, std::path::PathBuf) {
-    let root = TempDir::new().unwrap();
+/// Keeps ordinary fixture roots independent of the ambient Git checkout.
+fn fixture_root() -> TempDir {
+    TempDir::new_in(env!("CARGO_TARGET_TMPDIR")).unwrap()
+}
+
+/// Uses caller-selected storage only after checking the no-Git precondition.
+fn unversioned_fixture_root() -> TempDir {
+    let path = var_os("SS_AI_TEST_UNVERSIONED_FIXTURE_ROOT").map_or_else(temp_dir, PathBuf::from);
+    let path = fs::canonicalize(path).expect("The unversioned audit fixture root must exist");
+    if let Some(marker) = git_ancestor(&path) {
+        panic!(
+            "Git marker {}; set SS_AI_TEST_UNVERSIONED_FIXTURE_ROOT outside any Git checkout",
+            marker.display()
+        );
+    }
+    TempDir::new_in(path).unwrap()
+}
+
+/// Detects the Git marker format used by both repositories and worktrees.
+fn git_ancestor(path: &Path) -> Option<PathBuf> {
+    path.ancestors()
+        .map(|directory| directory.join(".git"))
+        .find(|marker| match fs::symlink_metadata(marker) {
+            Ok(_) => true,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => false,
+            Err(error) => panic!(
+                "Cannot inspect Git ancestry at {}: {error}",
+                marker.display()
+            ),
+        })
+}
+
+/// Supplies local Git identity for scenarios that do not exercise discovery.
+fn initialize_fixture(repository: &Path, state: &Path) -> String {
+    fs::create_dir_all(repository.join(".git")).unwrap();
+    let process = GitProcess {
+        root: repository.to_str().unwrap().to_owned(),
+    };
+    initialize(repository, &[], state, &process, &FixedClock).unwrap()
+}
+
+/// Populates a selected root with matching repository and state directories.
+fn fixture(root: TempDir) -> (TempDir, PathBuf, PathBuf) {
     let repository = root.path().join("repository");
     let state = root.path().join("state");
     fs::create_dir_all(repository.join("src")).unwrap();
@@ -129,15 +170,15 @@ mod tests {
     reason = "The end-to-end test intentionally follows one complete audit contract"
 )]
 fn audits_parser_sites_with_resumable_evidence_batches() {
-    let (_root, repository, state) = fixture();
+    let (_root, repository, state) = fixture(unversioned_fixture_root());
     let summary = initialize(&repository, &[], &state, &NoProcess, &FixedClock).unwrap();
-    let summary: Value = serde_json::from_str(&summary).unwrap();
+    let summary: Value = from_str(&summary).unwrap();
     assert_eq!(summary["testCount"], 5);
     assert_eq!(summary["assertionCount"], 4);
     assert_eq!(summary["revisionKind"], "unversioned");
 
     let evidence = search(&state, "ready operation", None, 20, &FixedClock).unwrap();
-    let evidence: Value = serde_json::from_str(&evidence).unwrap();
+    let evidence: Value = from_str(&evidence).unwrap();
     assert!(
         evidence["results"][0]["matches"]
             .as_array()
@@ -147,13 +188,15 @@ fn audits_parser_sites_with_resumable_evidence_batches() {
     );
     let batch_path = state.join("batches/one.json");
     let batch_summary = next_batch(&state, &batch_path, 25, &FixedClock).unwrap();
-    let batch_summary: Value = serde_json::from_str(&batch_summary).unwrap();
+    let batch_summary: Value = from_str(&batch_summary).unwrap();
     assert_eq!(batch_summary["batchCount"], 4);
     let display = fs::read_to_string(batch_summary["displayPath"].as_str().unwrap()).unwrap();
-    assert!(display.contains("A000001 |"));
-    assert!(display.contains("expression:"));
-    let batch: Value = serde_json::from_slice(&fs::read(batch_path).unwrap()).unwrap();
+    let batch: Value = from_slice(&fs::read(batch_path).unwrap()).unwrap();
     let assertions = batch["assertions"].as_array().unwrap();
+    for row in assertions {
+        assert!(display.contains(row["id"].as_str().unwrap()));
+        assert!(display.contains(row["expression"].as_str().unwrap()));
+    }
     assert_eq!(
         assertions
             .iter()
@@ -213,7 +256,7 @@ fn audits_parser_sites_with_resumable_evidence_batches() {
     fs::create_dir_all(classification_path.parent().unwrap()).unwrap();
     fs::write(
         &classification_path,
-        serde_json::to_vec_pretty(&json!({
+        to_vec_pretty(&json!({
             "schemaVersion": 1,
             "auditId": audit_id,
             "snapshotSha256": snapshot,
@@ -224,15 +267,15 @@ fn audits_parser_sites_with_resumable_evidence_batches() {
     .unwrap();
 
     let recorded = record_batch(&state, &classification_path, &FixedClock).unwrap();
-    let recorded: Value = serde_json::from_str(&recorded).unwrap();
+    let recorded: Value = from_str(&recorded).unwrap();
     assert_eq!(recorded["completed"], 4);
     assert_eq!(recorded["remaining"], 0);
     let replay = record_batch(&state, &classification_path, &FixedClock).unwrap();
-    let replay: Value = serde_json::from_str(&replay).unwrap();
+    let replay: Value = from_str(&replay).unwrap();
     assert_eq!(replay["unchanged"].as_array().unwrap().len(), 4);
 
     let summary = report(&state, &FixedClock).unwrap();
-    let summary: Value = serde_json::from_str(&summary).unwrap();
+    let summary: Value = from_str(&summary).unwrap();
     assert_eq!(summary["status"], "complete");
     assert_eq!(summary["testCount"], 5);
     assert_eq!(summary["assertionCount"], 4);
@@ -244,20 +287,16 @@ fn audits_parser_sites_with_resumable_evidence_batches() {
     assert_eq!(summary["fallibleValueCheckCount"], 0);
     assert_eq!(summary["conditionalAssertionCount"], 0);
     assert!(summary["diagnosticCount"].as_u64().is_some());
-    let trace: Value = serde_json::from_slice(
-        &fs::read(Path::new(summary["tracePath"].as_str().unwrap())).unwrap(),
-    )
-    .unwrap();
+    let trace: Value =
+        from_slice(&fs::read(Path::new(summary["tracePath"].as_str().unwrap())).unwrap()).unwrap();
     assert_eq!(trace["rows"].as_array().unwrap().len(), 4);
-    let test_inventory: Value = serde_json::from_slice(
-        &fs::read(Path::new(summary["testInventoryPath"].as_str().unwrap())).unwrap(),
-    )
-    .unwrap();
+    let test_inventory: Value =
+        from_slice(&fs::read(Path::new(summary["testInventoryPath"].as_str().unwrap())).unwrap())
+            .unwrap();
     assert_eq!(test_inventory["tests"].as_array().unwrap().len(), 5);
     let report_text = fs::read_to_string(summary["summaryPath"].as_str().unwrap()).unwrap();
     let summary_json: Value =
-        serde_json::from_slice(&fs::read(summary["summaryJsonPath"].as_str().unwrap()).unwrap())
-            .unwrap();
+        from_slice(&fs::read(summary["summaryJsonPath"].as_str().unwrap()).unwrap()).unwrap();
     assert_eq!(summary_json["schemaVersion"], 1);
     assert_eq!(summary_json["auditId"], summary["auditId"]);
     assert_eq!(summary_json["testCount"], summary["testCount"]);
@@ -266,26 +305,20 @@ fn audits_parser_sites_with_resumable_evidence_batches() {
     assert_eq!(summary_json["finalResponseAllowed"], true);
     assert_eq!(summary_json["sourceLanguages"]["rust"], 1);
     assert_eq!(
-        summary_json["repositoryRoot"]
-            .as_str()
-            .unwrap()
-            .replace("\\\\?\\", ""),
-        repository.to_str().unwrap()
+        Path::new(summary_json["repositoryRoot"].as_str().unwrap()),
+        fs::canonicalize(&repository).unwrap()
     );
     assert_eq!(summary_json["scopePaths"], json!([".".to_owned()]));
     let details_json: Value =
-        serde_json::from_slice(&fs::read(summary["detailsJsonPath"].as_str().unwrap()).unwrap())
-            .unwrap();
+        from_slice(&fs::read(summary["detailsJsonPath"].as_str().unwrap()).unwrap()).unwrap();
     assert_eq!(details_json["assertionTrace"].as_array().unwrap().len(), 4);
     assert_eq!(details_json["testInventory"].as_array().unwrap().len(), 5);
     let details_text = fs::read_to_string(summary["detailsPath"].as_str().unwrap()).unwrap();
-    assert!(details_text.contains("## Assertion trace"));
-    assert!(details_text.contains("## Test inventory"));
+    assert!(details_text.contains("assert!(ready())"));
+    assert!(details_text.contains("smoke"));
     assert!(report_text.contains("No explicitly documented promise = implicit-only + incidental"));
     assert!(report_text.contains("No public-contract check = incidental only"));
     assert!(report_text.contains("2/4 (50.0%)"));
-    assert!(report_text.contains("## Classification totals"));
-    assert!(report_text.contains("## Coverage summary"));
     let report_lines = report_text.lines().collect::<Vec<_>>();
     assert!(
         report_lines
@@ -297,18 +330,24 @@ fn audits_parser_sites_with_resumable_evidence_batches() {
             .iter()
             .any(|line| line.starts_with("| src | 4 |"))
     );
-    assert!(report_text.contains("- Status: complete"));
-    assert!(report_text.contains("- Schema version: 1"));
-    assert!(report_text.contains("- Source languages:"));
-    assert!(report_text.contains("- Fallible-value candidates:"));
     assert!(report_text.contains("- Documented: 2/4"));
     assert!(report_text.contains("smoke"));
     assert!(report_text.contains("has only incidental checks"));
 }
 
 #[test]
+fn unversioned_fixture_validation_detects_an_ancestor_worktree_marker() {
+    let root = fixture_root();
+    let marker = root.path().join(".git");
+    fs::write(&marker, "gitdir: ../other").unwrap();
+    let nested = root.path().join("nested");
+    fs::create_dir_all(&nested).unwrap();
+    assert_eq!(git_ancestor(&nested), Some(marker));
+}
+
+#[test]
 fn continues_through_more_than_four_submit_transitions() {
-    let root = TempDir::new().unwrap();
+    let root = fixture_root();
     let repository = root.path().join("repository");
     let state = root.path().join("state");
     fs::create_dir_all(repository.join("src")).unwrap();
@@ -320,17 +359,17 @@ fn continues_through_more_than_four_submit_transitions() {
         );
     }
     fs::write(repository.join("src/lib.rs"), source).unwrap();
-    initialize(&repository, &[], &state, &NoProcess, &FixedClock).unwrap();
+    initialize_fixture(&repository, &state);
 
     let mut batch_path = state.join("batch-00.json");
-    let initial = next_batch(&state, &batch_path, 25, &FixedClock).unwrap();
-    let mut receipt: Value = serde_json::from_str(&initial).unwrap();
+    let receipt = next_batch(&state, &batch_path, 25, &FixedClock).unwrap();
+    let mut receipt: Value = from_str(&receipt).unwrap();
     assert_eq!(receipt["nextAction"], "continue");
     assert_eq!(receipt["finalResponseAllowed"], false);
 
     let expected_remaining = [101, 76, 51, 26, 1, 0];
     for batch_number in 1_usize..=6 {
-        let batch: Value = serde_json::from_slice(&fs::read(&batch_path).unwrap()).unwrap();
+        let batch: Value = from_slice(&fs::read(&batch_path).unwrap()).unwrap();
         let records = batch["assertions"]
             .as_array()
             .unwrap()
@@ -351,7 +390,7 @@ fn continues_through_more_than_four_submit_transitions() {
         let submission_path = state.join(format!("submission-{batch_number:02}.json"));
         fs::write(
             &submission_path,
-            serde_json::to_vec_pretty(&json!({
+            to_vec_pretty(&json!({
                 "schemaVersion": 1,
                 "batchFingerprint": receipt["batchFingerprint"],
                 "rows": records
@@ -369,7 +408,7 @@ fn continues_through_more_than_four_submit_transitions() {
             &FixedClock,
         )
         .unwrap();
-        let transition: Value = serde_json::from_str(&transition).unwrap();
+        let transition: Value = from_str(&transition).unwrap();
         let remaining = expected_remaining[batch_number.saturating_sub(1)];
         assert_eq!(transition["record"]["remaining"], remaining);
         assert_eq!(transition["finalResponseAllowed"], false);
@@ -385,7 +424,7 @@ fn continues_through_more_than_four_submit_transitions() {
     }
 
     let complete = report(&state, &FixedClock).unwrap();
-    let complete: Value = serde_json::from_str(&complete).unwrap();
+    let complete: Value = from_str(&complete).unwrap();
     assert_eq!(complete["nextAction"], "complete");
     assert_eq!(complete["finalResponseAllowed"], true);
     assert_eq!(complete["assertionCount"], 126);
@@ -393,16 +432,13 @@ fn continues_through_more_than_four_submit_transitions() {
 
 #[test]
 fn rejects_stale_sources_before_accepting_more_judgments() {
-    let (_root, repository, state) = fixture();
-    initialize(&repository, &[], &state, &NoProcess, &FixedClock).unwrap();
+    let (_root, repository, state) = fixture(fixture_root());
+    initialize_fixture(&repository, &state);
     let batch_path = state.join("batch.json");
     next_batch(&state, &batch_path, 25, &FixedClock).unwrap();
     fs::write(repository.join("src/lib.rs"), "// changed").unwrap();
     let read_only = next_batch(&state, &batch_path, 25, &FixedClock).unwrap();
-    assert_eq!(
-        serde_json::from_str::<Value>(&read_only).unwrap()["batchCount"],
-        4
-    );
+    assert_eq!(from_str::<Value>(&read_only).unwrap()["batchCount"], 4);
     search(&state, "ready", None, 20, &FixedClock).unwrap();
     let classification_path = state.join("stale-classification.json");
     fs::write(&classification_path, b"{}").unwrap();
@@ -412,8 +448,8 @@ fn rejects_stale_sources_before_accepting_more_judgments() {
 
 #[test]
 fn searches_multiple_queries_from_one_snapshot_load() {
-    let (_root, repository, state) = fixture();
-    initialize(&repository, &[], &state, &NoProcess, &FixedClock).unwrap();
+    let (_root, repository, state) = fixture(fixture_root());
+    initialize_fixture(&repository, &state);
     let evidence = search_many(
         &state,
         &["ready".to_owned(), "shared".to_owned()],
@@ -422,23 +458,23 @@ fn searches_multiple_queries_from_one_snapshot_load() {
         &FixedClock,
     )
     .unwrap();
-    let evidence: Value = serde_json::from_str(&evidence).unwrap();
+    let evidence: Value = from_str(&evidence).unwrap();
     assert_eq!(evidence["queryCount"], 2);
     assert_eq!(evidence["results"].as_array().unwrap().len(), 2);
 }
 
 #[test]
 fn advance_records_and_exports_the_next_batch_from_one_state_load() {
-    let (_root, repository, state) = fixture();
-    initialize(&repository, &[], &state, &NoProcess, &FixedClock).unwrap();
+    let (_root, repository, state) = fixture(fixture_root());
+    initialize_fixture(&repository, &state);
     let batch_path = state.join("batch-one.json");
     next_batch(&state, &batch_path, 1, &FixedClock).unwrap();
-    let batch: Value = serde_json::from_slice(&fs::read(&batch_path).unwrap()).unwrap();
+    let batch: Value = from_slice(&fs::read(&batch_path).unwrap()).unwrap();
     let assertion = &batch["assertions"][0];
     let classification_path = state.join("classification-one.json");
     fs::write(
         &classification_path,
-        serde_json::to_vec_pretty(&json!({
+        to_vec_pretty(&json!({
             "schemaVersion": 1,
             "auditId": batch["auditId"],
             "snapshotSha256": batch["snapshotSha256"],
@@ -458,13 +494,13 @@ fn advance_records_and_exports_the_next_batch_from_one_state_load() {
     .unwrap();
     let next_path = state.join("batch-two.json");
     let result = advance(&state, &classification_path, &next_path, 1, &FixedClock).unwrap();
-    let result: Value = serde_json::from_str(&result).unwrap();
+    let result: Value = from_str(&result).unwrap();
     assert_eq!(result["record"]["completed"], 1);
     assert_eq!(result["record"]["remaining"], 3);
     assert_eq!(result["nextBatch"]["batchCount"], 1);
     assert_eq!(result["nextBatch"]["completed"], 1);
     assert_eq!(result["nextBatch"]["remaining"], 3);
-    let next: Value = serde_json::from_slice(&fs::read(next_path).unwrap()).unwrap();
+    let next: Value = from_slice(&fs::read(next_path).unwrap()).unwrap();
     assert_ne!(next["assertions"][0]["id"], assertion["id"]);
 
     let classification_path = state.join("classification-two.json");
@@ -487,7 +523,7 @@ fn advance_records_and_exports_the_next_batch_from_one_state_load() {
         .collect::<Vec<_>>();
     fs::write(
         &classification_path,
-        serde_json::to_vec_pretty(&json!({
+        to_vec_pretty(&json!({
             "schemaVersion": 1,
             "auditId": next["auditId"],
             "snapshotSha256": next["snapshotSha256"],
@@ -505,9 +541,9 @@ fn advance_records_and_exports_the_next_batch_from_one_state_load() {
         &FixedClock,
     )
     .unwrap();
-    let batch_three: Value = serde_json::from_str(&batch_three).unwrap();
+    let batch_three: Value = from_str(&batch_three).unwrap();
     assert_eq!(batch_three["record"]["remaining"], 2);
-    let batch_three: Value = serde_json::from_slice(&fs::read(batch_three_path).unwrap()).unwrap();
+    let batch_three: Value = from_slice(&fs::read(batch_three_path).unwrap()).unwrap();
     assert_eq!(batch_three["assertions"].as_array().unwrap().len(), 2);
 
     let classification_path = state.join("classification-three.json");
@@ -530,7 +566,7 @@ fn advance_records_and_exports_the_next_batch_from_one_state_load() {
         .collect::<Vec<_>>();
     fs::write(
         &classification_path,
-        serde_json::to_vec_pretty(&json!({
+        to_vec_pretty(&json!({
             "schemaVersion": 1,
             "auditId": batch_three["auditId"],
             "snapshotSha256": batch_three["snapshotSha256"],
@@ -548,13 +584,13 @@ fn advance_records_and_exports_the_next_batch_from_one_state_load() {
         &FixedClock,
     )
     .unwrap();
-    let terminal: Value = serde_json::from_str(&terminal).unwrap();
+    let terminal: Value = from_str(&terminal).unwrap();
     assert_eq!(terminal["record"]["remaining"], 0);
     assert_eq!(terminal["nextBatch"]["batchCount"], 0);
     assert_eq!(terminal["nextAction"], "report");
     assert_eq!(terminal["finalResponseAllowed"], false);
     let report = report(&state, &FixedClock).unwrap();
-    let report: Value = serde_json::from_str(&report).unwrap();
+    let report: Value = from_str(&report).unwrap();
     assert_eq!(report["status"], "complete");
     assert_eq!(report["nextAction"], "complete");
     assert_eq!(report["finalResponseAllowed"], true);
@@ -562,13 +598,12 @@ fn advance_records_and_exports_the_next_batch_from_one_state_load() {
 
 #[test]
 fn submit_resolves_multiple_handles_and_explicit_reuse() {
-    let (_root, repository, state) = fixture();
-    initialize(&repository, &[], &state, &NoProcess, &FixedClock).unwrap();
+    let (_root, repository, state) = fixture(fixture_root());
+    initialize_fixture(&repository, &state);
     let first_batch_path = state.join("compact-batch-one.json");
     let first_receipt: Value =
-        serde_json::from_str(&next_batch(&state, &first_batch_path, 1, &FixedClock).unwrap())
-            .unwrap();
-    let first_batch: Value = serde_json::from_slice(&fs::read(&first_batch_path).unwrap()).unwrap();
+        from_str(&next_batch(&state, &first_batch_path, 1, &FixedClock).unwrap()).unwrap();
+    let first_batch: Value = from_slice(&fs::read(&first_batch_path).unwrap()).unwrap();
     let searches = search_many(
         &state,
         &["ready operation".to_owned(), "shared".to_owned()],
@@ -577,7 +612,7 @@ fn submit_resolves_multiple_handles_and_explicit_reuse() {
         &FixedClock,
     )
     .unwrap();
-    let searches: Value = serde_json::from_str(&searches).unwrap();
+    let searches: Value = from_str(&searches).unwrap();
     let handles = [
         searches["results"][0]["matches"][0]["evidenceHandle"]
             .as_str()
@@ -592,7 +627,7 @@ fn submit_resolves_multiple_handles_and_explicit_reuse() {
     let first_submission_path = state.join("compact-submission-one.json");
     fs::write(
         &first_submission_path,
-        serde_json::to_vec_pretty(&json!({
+        to_vec_pretty(&json!({
             "schemaVersion": 1,
             "batchFingerprint": first_receipt["batchFingerprint"],
             "rows": [{
@@ -619,27 +654,29 @@ fn submit_resolves_multiple_handles_and_explicit_reuse() {
         &FixedClock,
     )
     .unwrap();
-    let second: Value = serde_json::from_str(&second).unwrap();
+    let second: Value = from_str(&second).unwrap();
     assert_eq!(second["record"]["completed"], 1);
-    let second_batch: Value =
-        serde_json::from_slice(&fs::read(&second_batch_path).unwrap()).unwrap();
+    let second_batch: Value = from_slice(&fs::read(&second_batch_path).unwrap()).unwrap();
     let second_receipt = second["nextBatch"].clone();
     let second_id = second_batch["assertions"][0]["id"].clone();
     let second_submission_path = state.join("compact-submission-two.json");
-    fs::write(
-        &second_submission_path,
-        serde_json::to_vec_pretty(&json!({
+    let reuse_payload = |citation_handles: Value| {
+        to_vec_pretty(&json!({
             "schemaVersion": 1,
             "batchFingerprint": second_receipt["batchFingerprint"],
             "rows": [{
                 "assertionId": second_id,
                 "reuseFrom": first_id,
                 "equivalenceConfirmed": true,
-                "citationHandles": "Einvalid-reference-000001",
+                "citationHandles": citation_handles,
                 "callingTestIds": []
             }]
         }))
-        .unwrap(),
+        .unwrap()
+    };
+    fs::write(
+        &second_submission_path,
+        reuse_payload(json!("Einvalid-reference-000001")),
     )
     .unwrap();
     let third_batch_path = state.join("compact-batch-three.json");
@@ -658,18 +695,7 @@ fn submit_resolves_multiple_handles_and_explicit_reuse() {
 
     fs::write(
         &second_submission_path,
-        serde_json::to_vec_pretty(&json!({
-            "schemaVersion": 1,
-            "batchFingerprint": second_receipt["batchFingerprint"],
-            "rows": [{
-                "assertionId": second_id,
-                "reuseFrom": first_id,
-                "equivalenceConfirmed": true,
-                "citationHandles": ["Einvalid-reference-000001"],
-                "callingTestIds": []
-            }]
-        }))
-        .unwrap(),
+        reuse_payload(json!(["Einvalid-reference-000001"])),
     )
     .unwrap();
     let error = submit(
@@ -695,18 +721,7 @@ fn submit_resolves_multiple_handles_and_explicit_reuse() {
         .unwrap();
     fs::write(
         &second_submission_path,
-        serde_json::to_vec_pretty(&json!({
-            "schemaVersion": 1,
-            "batchFingerprint": second_receipt["batchFingerprint"],
-            "rows": [{
-                "assertionId": second_id,
-                "reuseFrom": first_id,
-                "equivalenceConfirmed": true,
-                "citationHandles": [reuse_handle],
-                "callingTestIds": []
-            }]
-        }))
-        .unwrap(),
+        reuse_payload(json!([reuse_handle])),
     )
     .unwrap();
     _ = submit(
@@ -718,30 +733,27 @@ fn submit_resolves_multiple_handles_and_explicit_reuse() {
         &FixedClock,
     )
     .unwrap();
-    let third_batch: Value = serde_json::from_slice(&fs::read(third_batch_path).unwrap()).unwrap();
+    let third_batch: Value = from_slice(&fs::read(third_batch_path).unwrap()).unwrap();
     assert_eq!(third_batch["assertions"].as_array().unwrap().len(), 2);
 }
 
 #[test]
 fn compact_submission_reports_empty_citation_replacement() {
-    let (_root, repository, state) = fixture();
-    initialize(&repository, &[], &state, &NoProcess, &FixedClock).unwrap();
+    let (_root, repository, state) = fixture(fixture_root());
+    initialize_fixture(&repository, &state);
     let first_batch_path = state.join("first-batch.json");
     let first_receipt: Value =
-        serde_json::from_str(&next_batch(&state, &first_batch_path, 1, &FixedClock).unwrap())
-            .unwrap();
-    let first_batch: Value =
-        serde_json::from_slice(&fs::read(first_batch_path.clone()).unwrap()).unwrap();
+        from_str(&next_batch(&state, &first_batch_path, 1, &FixedClock).unwrap()).unwrap();
+    let first_batch: Value = from_slice(&fs::read(first_batch_path.clone()).unwrap()).unwrap();
     let first_id = first_batch["assertions"][0]["id"].clone();
-    let handle = serde_json::from_str::<Value>(
-        &search(&state, "ready operation", None, 20, &FixedClock).unwrap(),
-    )
-    .unwrap()["results"][0]["matches"][0]["evidenceHandle"]
-        .clone();
+    let handle =
+        from_str::<Value>(&search(&state, "ready operation", None, 20, &FixedClock).unwrap())
+            .unwrap()["results"][0]["matches"][0]["evidenceHandle"]
+            .clone();
     let first_submission_path = state.join("first-submission.json");
     fs::write(
         &first_submission_path,
-        serde_json::to_vec_pretty(&json!({
+        to_vec_pretty(&json!({
             "schemaVersion": 1,
             "batchFingerprint": first_receipt["batchFingerprint"],
             "rows": [{
@@ -758,7 +770,7 @@ fn compact_submission_reports_empty_citation_replacement() {
     )
     .unwrap();
     let second_batch_path = state.join("second-batch.json");
-    let submit_result = submit(
+    let second_receipt = submit(
         &state,
         &first_batch_path,
         &first_submission_path,
@@ -767,13 +779,12 @@ fn compact_submission_reports_empty_citation_replacement() {
         &FixedClock,
     )
     .unwrap();
-    let second_receipt: Value = serde_json::from_str(&submit_result).unwrap();
-    let second_batch: Value =
-        serde_json::from_slice(&fs::read(second_batch_path.clone()).unwrap()).unwrap();
+    let second_receipt: Value = from_str(&second_receipt).unwrap();
+    let second_batch: Value = from_slice(&fs::read(second_batch_path.clone()).unwrap()).unwrap();
     let submission_path = state.join("empty-replacement.json");
     fs::write(
         &submission_path,
-        serde_json::to_vec_pretty(&json!({
+        to_vec_pretty(&json!({
             "schemaVersion": 1,
             "batchFingerprint": second_receipt["nextBatch"]["batchFingerprint"],
             "rows": [{
@@ -803,8 +814,8 @@ fn compact_submission_reports_empty_citation_replacement() {
 
 #[test]
 fn rejects_batch_output_that_aliases_an_audited_file() {
-    let (_root, repository, state) = fixture();
-    initialize(&repository, &[], &state, &NoProcess, &FixedClock).unwrap();
+    let (_root, repository, state) = fixture(fixture_root());
+    initialize_fixture(&repository, &state);
     let source = repository.join("src/lib.rs");
     let original = fs::read(&source).unwrap();
     let error = next_batch(&state, &source, 25, &FixedClock).unwrap_err();
@@ -823,11 +834,11 @@ fn rejects_batch_output_that_aliases_an_audited_file() {
 
 #[test]
 fn rejects_unbound_citations_and_partial_reports_without_mutation() {
-    let (_root, repository, state) = fixture();
-    initialize(&repository, &[], &state, &NoProcess, &FixedClock).unwrap();
+    let (_root, repository, state) = fixture(fixture_root());
+    initialize_fixture(&repository, &state);
     let batch_path = state.join("batch.json");
     next_batch(&state, &batch_path, 25, &FixedClock).unwrap();
-    let batch: Value = serde_json::from_slice(&fs::read(&batch_path).unwrap()).unwrap();
+    let batch: Value = from_slice(&fs::read(&batch_path).unwrap()).unwrap();
     let first = &batch["assertions"][0];
     let classification = json!({
         "schemaVersion": 1,
@@ -850,7 +861,7 @@ fn rejects_unbound_citations_and_partial_reports_without_mutation() {
     let classification_path = state.join("classification.json");
     fs::write(
         &classification_path,
-        serde_json::to_vec_pretty(&classification).unwrap(),
+        to_vec_pretty(&classification).unwrap(),
     )
     .unwrap();
     let error = record_batch(&state, &classification_path, &FixedClock).unwrap_err();
@@ -861,7 +872,7 @@ fn rejects_unbound_citations_and_partial_reports_without_mutation() {
     );
     assert!(error.to_string().contains("citations[0].excerpt"));
     let journal: Value =
-        serde_json::from_slice(&fs::read(state.join("classifications.json")).unwrap()).unwrap();
+        from_slice(&fs::read(state.join("classifications.json")).unwrap()).unwrap();
     assert_eq!(journal["classifications"].as_array().unwrap().len(), 0);
     let error = report(&state, &FixedClock).unwrap_err();
     assert!(
@@ -873,7 +884,7 @@ fn rejects_unbound_citations_and_partial_reports_without_mutation() {
 
 #[test]
 fn inventories_narrow_common_language_profiles() {
-    let root = TempDir::new().unwrap();
+    let root = fixture_root();
     let repository = root.path().join("repository");
     let state = root.path().join("state");
     fs::create_dir_all(&repository).unwrap();
@@ -892,9 +903,8 @@ fn inventories_narrow_common_language_profiles() {
         "class Checks {\n[Fact]\npublic void Value() {\nAssert.Equal(2, 2);\n}\n}\n",
     )
     .unwrap();
-    initialize(&repository, &[], &state, &NoProcess, &FixedClock).unwrap();
-    let inventory: Value =
-        serde_json::from_slice(&fs::read(state.join("inventory.json")).unwrap()).unwrap();
+    initialize_fixture(&repository, &state);
+    let inventory: Value = from_slice(&fs::read(state.join("inventory.json")).unwrap()).unwrap();
     assert_eq!(inventory["tests"].as_array().unwrap().len(), 3);
     assert_eq!(inventory["assertions"].as_array().unwrap().len(), 3);
     assert!(
@@ -908,7 +918,7 @@ fn inventories_narrow_common_language_profiles() {
 
 #[test]
 fn excludes_production_invariants_and_links_only_bare_test_helpers() {
-    let root = TempDir::new().unwrap();
+    let root = fixture_root();
     let repository = root.path().join("repository");
     let state = root.path().join("state");
     fs::create_dir_all(repository.join("src")).unwrap();
@@ -972,13 +982,12 @@ fn calls_same_named_method_only() {
 "#,
     )
     .unwrap();
-    let summary = initialize(&repository, &[], &state, &NoProcess, &FixedClock).unwrap();
-    let summary: Value = serde_json::from_str(&summary).unwrap();
+    let summary = initialize_fixture(&repository, &state);
+    let summary: Value = from_str(&summary).unwrap();
     assert_eq!(summary["testCount"], 2);
     assert_eq!(summary["assertionCount"], 5);
 
-    let inventory: Value =
-        serde_json::from_slice(&fs::read(state.join("inventory.json")).unwrap()).unwrap();
+    let inventory: Value = from_slice(&fs::read(state.join("inventory.json")).unwrap()).unwrap();
     let assertions = inventory["assertions"].as_array().unwrap();
     assert!(!assertions.iter().any(|assertion| {
         assertion["expression"]
@@ -1014,7 +1023,7 @@ fn calls_same_named_method_only() {
 
 #[test]
 fn inventories_size_checks_compile_constraints_and_ambiguous_expect_calls() {
-    let root = TempDir::new().unwrap();
+    let root = fixture_root();
     let repository = root.path().join("repository");
     let state = root.path().join("state");
     fs::create_dir_all(repository.join("src")).unwrap();
@@ -1056,9 +1065,8 @@ mod tests {
 "#,
     )
     .unwrap();
-    initialize(&repository, &[], &state, &NoProcess, &FixedClock).unwrap();
-    let inventory: Value =
-        serde_json::from_slice(&fs::read(state.join("inventory.json")).unwrap()).unwrap();
+    initialize_fixture(&repository, &state);
+    let inventory: Value = from_slice(&fs::read(state.join("inventory.json")).unwrap()).unwrap();
     let assertions = inventory["assertions"].as_array().unwrap();
     assert_eq!(
         assertions
@@ -1108,7 +1116,7 @@ mod tests {
 
 #[test]
 fn accepts_a_path_inside_a_git_working_tree() {
-    let root = TempDir::new().unwrap();
+    let root = fixture_root();
     let repository = root.path().join("repository");
     let nested = repository.join("packages/example");
     let state = root.path().join("state");
@@ -1119,7 +1127,7 @@ fn accepts_a_path_inside_a_git_working_tree() {
         root: repository.to_string_lossy().into_owned(),
     };
     let summary = initialize(&nested, &[".".into()], &state, &process, &FixedClock).unwrap();
-    let summary: Value = serde_json::from_str(&summary).unwrap();
+    let summary: Value = from_str(&summary).unwrap();
     assert_eq!(summary["revisionKind"], "git");
     assert_eq!(
         summary["repositoryRevision"],

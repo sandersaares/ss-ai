@@ -1,11 +1,14 @@
 //! Versioned records exchanged by the native test-audit workflow.
 
 use std::collections::BTreeMap;
+use std::num::NonZeroUsize;
 
-use serde::{Deserialize, Serialize};
+use serde::de::Error as _;
+use serde::{Deserialize, Deserializer, Serialize};
+use serde_json::Value;
 
 /// Identifies the immutable inventory snapshot and its repository provenance.
-#[derive(Debug, Clone, Deserialize, Serialize)]
+#[derive(Clone, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub(crate) struct AuditState {
     pub(crate) schema_version: u32,
@@ -30,7 +33,7 @@ pub(crate) enum RevisionKind {
 }
 
 /// Contains deterministic source inventory and all observed coverage diagnostics.
-#[derive(Debug, Clone, Deserialize, Serialize)]
+#[derive(Clone, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub(crate) struct Inventory {
     pub(crate) schema_version: u32,
@@ -46,7 +49,7 @@ pub(crate) struct Inventory {
 }
 
 /// Binds one readable file to its snapshot identity and scan outcome.
-#[derive(Debug, Clone, Deserialize, Serialize)]
+#[derive(Clone, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub(crate) struct IndexedFile {
     pub(crate) path: String,
@@ -58,7 +61,7 @@ pub(crate) struct IndexedFile {
 }
 
 /// Represents one executable test, doctest, or compile-time assertion site.
-#[derive(Debug, Clone, Deserialize, Serialize)]
+#[derive(Clone, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub(crate) struct TestCase {
     pub(crate) id: String,
@@ -66,23 +69,23 @@ pub(crate) struct TestCase {
     pub(crate) kind: String,
     pub(crate) language: String,
     pub(crate) path: String,
-    pub(crate) line: usize,
+    pub(crate) line: NonZeroUsize,
     pub(crate) end_line: usize,
     pub(crate) direct_assertion_ids: Vec<String>,
     pub(crate) shared_assertion_ids: Vec<String>,
 }
 
 /// Records one source predicate rather than a runtime iteration of that predicate.
-#[derive(Debug, Clone, Deserialize, Serialize)]
+#[derive(Clone, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub(crate) struct AssertionSite {
     pub(crate) id: String,
     pub(crate) kind: String,
     pub(crate) language: String,
     pub(crate) path: String,
-    pub(crate) line: usize,
+    pub(crate) line: NonZeroUsize,
     pub(crate) end_line: usize,
-    pub(crate) column: usize,
+    pub(crate) column: NonZeroUsize,
     pub(crate) expression: String,
     pub(crate) file_sha256: String,
     /// Transient ownership marker used before serializing the immutable inventory.
@@ -94,7 +97,7 @@ pub(crate) struct AssertionSite {
 }
 
 /// Preserves unsupported syntax and completeness observations for the reviewer.
-#[derive(Debug, Clone, Deserialize, Serialize)]
+#[derive(Clone, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub(crate) struct ScanDiagnostic {
     pub(crate) kind: String,
@@ -104,11 +107,11 @@ pub(crate) struct ScanDiagnostic {
 }
 
 /// Carries one searchable line with immutable source provenance.
-#[derive(Debug, Clone, Deserialize, Serialize)]
+#[derive(Clone, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub(crate) struct IndexEntry {
     pub(crate) path: String,
-    pub(crate) line: usize,
+    pub(crate) line: NonZeroUsize,
     pub(crate) language: String,
     pub(crate) kind: String,
     pub(crate) excerpt: String,
@@ -117,7 +120,7 @@ pub(crate) struct IndexEntry {
 }
 
 /// Holds one bounded group of assertions exported for agent judgment.
-#[derive(Debug, Clone, Deserialize, Serialize)]
+#[derive(Clone, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub(crate) struct Batch {
     pub(crate) schema_version: u32,
@@ -129,19 +132,19 @@ pub(crate) struct Batch {
 }
 
 /// Adds local test and source context to an assertion selected for judgment.
-#[derive(Debug, Clone, Deserialize, Serialize)]
+#[derive(Clone, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub(crate) struct BatchAssertion {
     #[serde(flatten)]
     pub(crate) assertion: AssertionSite,
     pub(crate) test_name: Option<String>,
     pub(crate) test_path: Option<String>,
-    pub(crate) test_line: Option<usize>,
+    pub(crate) test_line: Option<NonZeroUsize>,
     pub(crate) context: Vec<IndexEntry>,
 }
 
 /// Validates the caller's batch envelope before recording semantic judgments.
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Clone, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub(crate) struct ClassificationBatch {
     pub(crate) schema_version: u32,
@@ -167,7 +170,7 @@ pub(crate) enum EvidenceStatus {
 }
 
 /// Records one agent-owned semantic judgment and its exact evidence.
-#[derive(Debug, Clone, Deserialize, Serialize)]
+#[derive(Clone, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub(crate) struct Classification {
     pub(crate) assertion_id: String,
@@ -185,16 +188,23 @@ pub(crate) struct Classification {
 }
 
 /// Anchors agent evidence to an exact indexed source line.
-#[derive(Debug, Clone, Deserialize, Serialize)]
+#[derive(Clone, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub(crate) struct Citation {
     pub(crate) path: String,
-    pub(crate) line: usize,
+    #[serde(deserialize_with = "citation_line")]
+    pub(crate) line: NonZeroUsize,
     pub(crate) excerpt: String,
 }
 
+/// Names the citation field when a full input supplies a zero line.
+fn citation_line<'de, D: Deserializer<'de>>(input: D) -> Result<NonZeroUsize, D::Error> {
+    NonZeroUsize::new(usize::deserialize(input)?)
+        .ok_or_else(|| D::Error::custom("Citation line must be positive"))
+}
+
 /// Compact agent-authored rows bound to the exact exported batch bytes.
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Clone, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub(crate) struct CompactSubmission {
     pub(crate) schema_version: u32,
@@ -203,7 +213,7 @@ pub(crate) struct CompactSubmission {
 }
 
 /// Either supplies one complete judgment or explicitly reuses an accepted one.
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Clone, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub(crate) struct CompactSubmissionRow {
     pub(crate) assertion_id: String,
@@ -216,11 +226,11 @@ pub(crate) struct CompactSubmissionRow {
     #[serde(default)]
     pub(crate) rationale: Option<String>,
     #[serde(default)]
-    pub(crate) citation_handles: Option<serde_json::Value>,
+    pub(crate) citation_handles: Option<Value>,
     #[serde(default)]
     pub(crate) incidental_reason: Option<String>,
     #[serde(default)]
-    pub(crate) calling_test_ids: Option<serde_json::Value>,
+    pub(crate) calling_test_ids: Option<Value>,
     #[serde(default)]
     pub(crate) unlinked_reason: Option<String>,
     #[serde(default)]
@@ -230,7 +240,7 @@ pub(crate) struct CompactSubmissionRow {
 }
 
 /// Persists accepted classifications separately from the immutable inventory.
-#[derive(Debug, Clone, Deserialize, Serialize)]
+#[derive(Clone, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub(crate) struct ClassificationJournal {
     pub(crate) schema_version: u32,
@@ -240,15 +250,15 @@ pub(crate) struct ClassificationJournal {
 }
 
 /// Joins inventory and semantic judgment for one final trace row.
-#[derive(Debug, Clone, Serialize)]
+#[derive(Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
-pub(crate) struct TraceRow {
-    pub(crate) assertion: AssertionSite,
-    pub(crate) classification: Classification,
+pub(crate) struct TraceRow<'a> {
+    pub(crate) assertion: &'a AssertionSite,
+    pub(crate) classification: &'a Classification,
 }
 
 /// Summarizes one module without treating rates as a quality score.
-#[derive(Debug, Clone, Serialize)]
+#[derive(Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct ModuleSummary {
     pub(crate) module: String,
@@ -260,7 +270,7 @@ pub(crate) struct ModuleSummary {
 }
 
 /// Standard machine-readable final summary for one completed audit.
-#[derive(Debug, Clone, Serialize)]
+#[derive(Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct AuditSummary {
     pub(crate) schema_version: u32,

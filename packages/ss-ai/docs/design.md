@@ -23,8 +23,10 @@ classifier or turn descriptive audit rates into a quality score.
 
 ## Test audit scope and coverage
 
-A test audit binds one immutable repository revision, selected file or directory
-scopes, file hashes, and line-level evidence. Rust inventory uses parser-backed
+A test audit derives its audit ID from an immutable snapshot of the selected
+working-tree bytes, scopes, file hashes, and line-level evidence. Git `HEAD`
+is separate repository provenance when available; unversioned inputs use the
+same snapshot contract without a Git revision. Rust inventory uses parser-backed
 analysis with explicit fallback diagnostics. Common non-Rust test languages use
 narrow documented patterns and do not claim exhaustive syntax coverage. Other
 indexed languages remain available for contract evidence without an assertion
@@ -35,8 +37,9 @@ covers repository-wide text, so a narrow audit can still cite public contracts
 outside its selected test tree without adding those files' tests to totals.
 
 Rust caller attribution uses direct test syntax, not same-name source text.
-Production invariants are not assertion sites unless a test calls their free
-helper directly. Recognized panic-expectation helpers count once and suppress
+Production invariants are not assertion sites unless native syntax resolves a
+test's direct free-function or qualified-path call within the same file.
+Recognized panic-expectation helpers count once and suppress
 their deliberately triggered panic expression.
 
 The normal agent transition records a classified batch and exports the next
@@ -62,11 +65,13 @@ report both completes the audit and permits its final summary.
 
 Assertions count once at their source site. Tests with no counted predicate and
 shared helper assertions remain visible in the test inventory. Every accepted
-classification is bound to the same audit token and source snapshot. A report
+classification must match the audit ID (`auditId`) of the active audit and
+the snapshot digest (`snapshotSha256`) of its stored source snapshot. A report
 requires exactly one classification for every assertion and one row for every
-test. No explicitly documented promise means implicit-only plus incidental
-sites; no public-contract check means incidental-only sites. Mixed sites enter
-neither numerator.
+test. The [classification boundaries](../../../skills/ss-test-audit/docs/design.md#classification-boundaries)
+define the labels used in the rates: no explicitly documented promise means
+`Implicit` plus `Incidental` sites; no public-contract check means `Incidental`
+sites only. `Mixed` sites enter neither numerator.
 
 ## Version compatibility
 

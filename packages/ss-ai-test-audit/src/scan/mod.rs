@@ -4,7 +4,13 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::ffi::OsStr;
 use std::fs::{self, File};
 use std::io::{self, Read as _};
+use std::iter::{once, repeat_n};
+use std::mem::{replace, take};
+use std::num::NonZeroUsize;
+use std::ops::ControlFlow::{self, Break, Continue};
+use std::ops::RangeInclusive;
 use std::path::{Path, PathBuf};
+use std::slice::from_ref;
 
 use ohno::AppError;
 use proc_macro2::{Ident, LineColumn, Span};
@@ -13,8 +19,10 @@ use ss_ai_runtime::{caused_by, fail};
 use syn::spanned::Spanned;
 use syn::visit::Visit;
 use syn::{
-    Attribute, Block, Expr, ExprCall, ExprMethodCall, ImplItemFn, Item, ItemFn, Macro, Signature,
-    Stmt, UseTree, visit,
+    Arm, Attribute, Block, Expr, ExprCall, ExprClosure, ExprConst, ExprMethodCall, Field, FnArg,
+    ImplItem, ImplItemConst, ImplItemFn, Item, ItemConst, ItemFn, ItemImpl, ItemMod, ItemStatic,
+    Local, Macro, Meta, Pat, PatIdent, Signature, Stmt, StmtMacro, TraitItem, TraitItemConst, Type,
+    UseTree, Variant, WherePredicate, visit,
 };
 
 use crate::model::{
@@ -26,7 +34,8 @@ use crate::model::{
 /// This cap accommodates ordinary source and generated documentation files
 /// while preserving a predictable local-memory ceiling per file.
 const MAX_FILE_BYTES: usize = 4 * 1024 * 1024;
-/// Keeps oversized source lines usable in bounded search results.
+/// Keeps local evidence around a predicate without letting one long line crowd
+/// out other results in the agent's context.
 const MAX_INDEX_EXCERPT_CHARACTERS: usize = 500;
 
 /// Scans selected repository paths without modifying the working tree.
@@ -41,19 +50,24 @@ pub(crate) fn inventory(
     let mut assertions = Vec::new();
     let mut diagnostics = Vec::new();
     let mut entries = Vec::new();
-    let mut assertion_diagnostics = Vec::new();
-    let assertion_files: BTreeSet<PathBuf> =
-        collect_files(repository_root, scope_paths, &mut assertion_diagnostics)?
-            .into_iter()
-            .collect();
-    let _ = assertion_diagnostics;
-    // The whole repository supplies public-contract evidence. The selected
-    // scope controls tests and assertions only, so narrow audits can still cite
-    // docs and declarations outside the asserted source tree.
-    let files = collect_files(repository_root, &[".".to_owned()], &mut diagnostics)?;
+    let evidence_files = collect_files(repository_root, &[".".to_owned()], &mut diagnostics)?;
+    let mut scope_diagnostics = Vec::new();
+    let assertion_files = collect_files(repository_root, scope_paths, &mut scope_diagnostics)?;
+    for diagnostic in scope_diagnostics {
+        if !diagnostics
+            .iter()
+            .any(|entry| entry.path == diagnostic.path && entry.kind == diagnostic.kind)
+        {
+            diagnostics.push(diagnostic);
+        }
+    }
+    // An explicitly selected root overrides ordinary traversal exclusions.
+    // Add only those selected files to the default evidence walk, so assertions
+    // have provenance without exposing neighboring excluded source.
+    let files = evidence_files.union(&assertion_files);
     for path in files {
-        let relative = relative_path(repository_root, &path)?;
-        let bytes = match read_source(&path) {
+        let relative = relative_path(repository_root, path)?;
+        let bytes = match read_source(path) {
             Ok(Some(bytes)) => bytes,
             Ok(None) => {
                 diagnostics.push(ScanDiagnostic {
@@ -96,7 +110,7 @@ pub(crate) fn inventory(
                 continue;
             }
         };
-        let language = language_for(&path);
+        let language = language_for(path);
         let file_sha256 = digest(text.as_bytes());
         let lines: Vec<&str> = text.lines().collect();
         indexed_files.push(IndexedFile {
@@ -115,7 +129,7 @@ pub(crate) fn inventory(
             &file_sha256,
             &lines,
         );
-        if assertion_files.contains(&path) {
+        if assertion_files.contains(path) {
             scan_file(
                 &mut tests,
                 &mut assertions,
@@ -183,7 +197,7 @@ fn collect_files(
     repository_root: &Path,
     scopes: &[String],
     diagnostics: &mut Vec<ScanDiagnostic>,
-) -> Result<Vec<PathBuf>, AppError> {
+) -> Result<BTreeSet<PathBuf>, AppError> {
     let mut paths = BTreeSet::new();
     for scope in scopes {
         let requested = Path::new(scope);
@@ -205,15 +219,25 @@ fn collect_files(
                 format!("Scope '{}' is outside the repository", requested.display()),
             ));
         }
-        collect_path(&canonical, repository_root, &mut paths, diagnostics)?;
+        if canonical
+            .strip_prefix(repository_root)
+            .is_ok_and(|relative| relative.iter().any(|component| component == ".git"))
+        {
+            return Err(fail(
+                "invalidInput",
+                "Git administrative files cannot be audited",
+            ));
+        }
+        collect_path(&canonical, repository_root, true, &mut paths, diagnostics)?;
     }
-    Ok(paths.into_iter().collect())
+    Ok(paths)
 }
 
 /// Walks a scope without following symbolic links outside or inside the repository.
 fn collect_path(
     path: &Path,
     repository_root: &Path,
+    is_scope_root: bool,
     paths: &mut BTreeSet<PathBuf>,
     diagnostics: &mut Vec<ScanDiagnostic>,
 ) -> Result<(), AppError> {
@@ -235,13 +259,13 @@ fn collect_path(
         paths.insert(path.to_owned());
         return Ok(());
     }
-    if !metadata.is_dir() || should_skip_directory(path, repository_root)? {
+    if !metadata.is_dir() || (!is_scope_root && should_skip_directory(path, repository_root)?) {
         return Ok(());
     }
     let mut children = fs::read_dir(path)?.collect::<Result<Vec<_>, _>>()?;
     children.sort_by_key(fs::DirEntry::file_name);
     for entry in children {
-        collect_path(&entry.path(), repository_root, paths, diagnostics)?;
+        collect_path(&entry.path(), repository_root, false, paths, diagnostics)?;
     }
     Ok(())
 }
@@ -361,7 +385,7 @@ fn append_index(
         }
         entries.push(IndexEntry {
             path: path.to_owned(),
-            line: offset.saturating_add(1),
+            line: NonZeroUsize::MIN.saturating_add(offset),
             language: language.to_owned(),
             kind: index_kind(path, text),
             excerpt: truncate(text.trim(), MAX_INDEX_EXCERPT_CHARACTERS),
@@ -445,6 +469,7 @@ fn scan_file(
                     cfg: Vec::new(),
                     in_const: false,
                     test_context: is_test_path(path),
+                    test_drop_impl: false,
                     calls: BTreeMap::new(),
                     helper_assertions: Vec::new(),
                 };
@@ -454,10 +479,13 @@ fn scan_file(
                     tests,
                     assertions,
                     diagnostics,
-                    path,
-                    language,
-                    file_sha256,
-                    lines,
+                    ScanInput {
+                        path,
+                        language,
+                        file_sha256,
+                        text,
+                        lines,
+                    },
                 );
             }
             Err(error) => {
@@ -536,6 +564,7 @@ struct RustCollector<'a, 'ast> {
     cfg: Vec<String>,
     in_const: bool,
     test_context: bool,
+    test_drop_impl: bool,
     calls: BTreeMap<FunctionId, BTreeMap<String, bool>>,
     helper_assertions: Vec<(usize, FunctionId)>,
 }
@@ -543,13 +572,37 @@ struct RustCollector<'a, 'ast> {
 /// Separates diagnostic display names from the identities used for linking.
 #[derive(Default)]
 struct FunctionContext {
-    test_id: Option<String>,
+    role: FunctionRole,
     name: Option<String>,
     helper: Option<FunctionId>,
-    is_test: bool,
     expects_panic: bool,
+    test_destructor: bool,
     // Function items cannot capture variables from an enclosing function.
     first_binding_scope: usize,
+}
+
+/// Distinguishes named test ownership from unregistered test-context code.
+#[derive(Default)]
+enum FunctionRole {
+    #[default]
+    Ordinary,
+    TestContext,
+    RegisteredTest(String),
+}
+
+impl FunctionRole {
+    /// Gets the inventory owner for assertions directly in a registered test.
+    fn test_id(&self) -> Option<&String> {
+        match self {
+            Self::RegisteredTest(id) => Some(id),
+            Self::Ordinary | Self::TestContext => None,
+        }
+    }
+
+    /// Determines whether test-specific predicate checks apply.
+    fn is_test(&self) -> bool {
+        !matches!(self, Self::Ordinary)
+    }
 }
 
 /// Identifies a declaration by its position within the current parsed file.
@@ -578,6 +631,7 @@ impl<'ast> RustCollector<'_, 'ast> {
         signature: &'ast Signature,
         block: &'ast Block,
         helper: Option<FunctionId>,
+        test_destructor: bool,
     ) {
         for attribute in attributes {
             self.visit_attribute(attribute);
@@ -590,50 +644,55 @@ impl<'ast> RustCollector<'_, 'ast> {
             .iter()
             .find(|attribute| attribute.path().is_ident("should_panic"));
         let name = signature.ident.to_string();
-        let previous = std::mem::replace(
-            &mut self.functions,
-            FunctionContext {
-                name: Some(name.clone()),
-                helper,
-                is_test: function_is_test,
-                expects_panic: panic_attribute.is_some(),
-                first_binding_scope: self.blocks.len(),
-                ..FunctionContext::default()
-            },
-        );
-        let previous_const = std::mem::replace(&mut self.in_const, false);
-
-        if let Some(kind) = test {
+        let role = if let Some(kind) = test {
             let id = next_test_id(self.tests);
             let line = attributes
                 .iter()
                 .filter(|attribute| {
                     attribute.path().is_ident("should_panic")
-                        || test_attributes(std::slice::from_ref(attribute)).is_some()
+                        || test_attributes(from_ref(attribute)).is_some()
                 })
                 .map(|attribute| attribute.span().start().line)
                 .min()
                 .unwrap_or_else(|| signature.ident.span().start().line);
             self.tests.push(TestCase {
                 id: id.clone(),
-                name,
+                name: name.clone(),
                 kind: kind.to_owned(),
                 language: self.language.to_owned(),
                 path: self.path.to_owned(),
-                line,
+                line: parser_line(line),
                 end_line: block.span().end().line,
                 direct_assertion_ids: Vec::new(),
                 shared_assertion_ids: Vec::new(),
             });
-            self.functions.test_id = Some(id);
-            if let Some(attribute) = panic_attribute {
-                self.push_span("panicExpectation", attribute.span());
-            }
+            FunctionRole::RegisteredTest(id)
+        } else if function_is_test {
+            FunctionRole::TestContext
+        } else {
+            FunctionRole::Ordinary
+        };
+        let previous = replace(
+            &mut self.functions,
+            FunctionContext {
+                role,
+                name: Some(name),
+                helper,
+                expects_panic: panic_attribute.is_some(),
+                test_destructor: test_destructor && function_is_test,
+                first_binding_scope: self.blocks.len(),
+            },
+        );
+        let previous_const = replace(&mut self.in_const, false);
+        if self.functions.role.test_id().is_some()
+            && let Some(attribute) = panic_attribute
+        {
+            self.push_span("panicExpectation", attribute.span());
         }
 
         let mut parameters = BlockScope::default();
         for input in &signature.inputs {
-            if let syn::FnArg::Typed(argument) = input {
+            if let FnArg::Typed(argument) = input {
                 record_bindings(&mut parameters.bindings, &argument.pat);
             }
         }
@@ -654,7 +713,7 @@ impl<'ast> RustCollector<'_, 'ast> {
     fn push_range(&mut self, kind: &str, start: LineColumn, end: LineColumn) {
         let line = start.line;
         let end_line = end.line;
-        let mut containing_test_id = self.functions.test_id.clone();
+        let mut containing_test_id = self.functions.role.test_id().cloned();
         let id = next_assertion_id(self.assertions);
         if kind == "compileTimeAssertion" && !self.cfg.is_empty() {
             self.diagnostics.push(ScanDiagnostic {
@@ -672,7 +731,7 @@ impl<'ast> RustCollector<'_, 'ast> {
                 kind: "compileTime".to_owned(),
                 language: self.language.to_owned(),
                 path: self.path.to_owned(),
-                line,
+                line: parser_line(line),
                 end_line,
                 direct_assertion_ids: Vec::new(),
                 shared_assertion_ids: Vec::new(),
@@ -689,16 +748,16 @@ impl<'ast> RustCollector<'_, 'ast> {
             kind: kind.to_owned(),
             language: self.language.to_owned(),
             path: self.path.to_owned(),
-            line,
+            line: parser_line(line),
             end_line,
-            column: source_line(self.lines, line)
-                .map_or(0, |text| byte_column(text, start))
-                .saturating_add(1),
+            column: NonZeroUsize::MIN.saturating_add(
+                source_line(self.lines, line).map_or(0, |text| byte_column(text, start)),
+            ),
             expression: source_slice(self.lines, start, end),
             file_sha256: self.file_sha256.to_owned(),
-            test_code: self.functions.is_test,
+            test_code: self.functions.role.is_test(),
             containing_test_id,
-            helper_name: if self.functions.test_id.is_none() {
+            helper_name: if self.functions.role.test_id().is_none() {
                 self.functions.name.clone()
             } else {
                 None
@@ -734,243 +793,15 @@ impl<'ast> RustCollector<'_, 'ast> {
 
     /// Distinguishes evaluated constant blocks from ordinary runtime assertions.
     fn in_constant(&mut self, visit: impl FnOnce(&mut Self)) {
-        let previous = std::mem::replace(&mut self.in_const, true);
+        let previous = replace(&mut self.in_const, true);
         visit(self);
         self.in_const = previous;
     }
-}
 
-impl<'ast> Visit<'ast> for RustCollector<'_, 'ast> {
-    fn visit_file(&mut self, i: &'ast syn::File) {
-        self.test_context |= i.attrs.iter().any(attribute_enables_test_code);
-        visit::visit_file(self, i);
-    }
-
-    fn visit_item(&mut self, i: &'ast Item) {
-        self.with_attributes(|this| visit::visit_item(this, i));
-    }
-
-    fn visit_impl_item(&mut self, i: &'ast syn::ImplItem) {
-        self.with_attributes(|this| visit::visit_impl_item(this, i));
-    }
-
-    fn visit_trait_item(&mut self, i: &'ast syn::TraitItem) {
-        self.with_attributes(|this| visit::visit_trait_item(this, i));
-    }
-
-    fn visit_expr(&mut self, i: &'ast Expr) {
-        self.with_attributes(|this| visit::visit_expr(this, i));
-    }
-
-    fn visit_stmt_macro(&mut self, i: &'ast syn::StmtMacro) {
-        self.with_attributes(|this| visit::visit_stmt_macro(this, i));
-    }
-
-    fn visit_arm(&mut self, i: &'ast syn::Arm) {
-        let mut bindings = BlockScope::default();
-        record_bindings(&mut bindings.bindings, &i.pat);
-        self.blocks.push(bindings);
-        self.with_attributes(|this| visit::visit_arm(this, i));
-        self.blocks.pop();
-    }
-
-    fn visit_variant(&mut self, i: &'ast syn::Variant) {
-        self.with_attributes(|this| visit::visit_variant(this, i));
-    }
-
-    fn visit_field(&mut self, i: &'ast syn::Field) {
-        self.with_attributes(|this| visit::visit_field(this, i));
-    }
-
-    fn visit_attribute(&mut self, i: &'ast Attribute) {
-        // The audit already selects `cfg(test)` code; other configurations
-        // restrict which builds exercise the check within that selection.
-        if (i.path().is_ident("cfg") || i.path().is_ident("cfg_attr"))
-            && !attribute_enables_test_code(i)
-        {
-            self.cfg
-                .push(source_slice(self.lines, i.span().start(), i.span().end()));
-        }
-    }
-
-    fn visit_item_fn(&mut self, i: &'ast ItemFn) {
-        self.visit_function(&i.attrs, &i.sig, &i.block, Some(function_id(i)));
-    }
-
-    fn visit_impl_item_fn(&mut self, i: &'ast ImplItemFn) {
-        // An associated function needs type resolution; a terminal method name
-        // cannot establish this identity.
-        self.visit_function(&i.attrs, &i.sig, &i.block, None);
-    }
-
-    fn visit_item_mod(&mut self, i: &'ast syn::ItemMod) {
-        let previous = self.test_context;
-        self.test_context |= i.attrs.iter().any(attribute_enables_test_code);
-        if let Some((_, items)) = &i.content {
-            self.modules.push(items);
-            let blocks = std::mem::take(&mut self.blocks);
-            let functions = std::mem::take(&mut self.functions);
-            let in_const = std::mem::replace(&mut self.in_const, false);
-            visit::visit_item_mod(self, i);
-            self.in_const = in_const;
-            self.functions = functions;
-            self.blocks = blocks;
-            self.modules.pop();
-        }
-        self.test_context = previous;
-    }
-
-    fn visit_item_impl(&mut self, i: &'ast syn::ItemImpl) {
-        let previous = self.test_context;
-        self.test_context |= i.attrs.iter().any(attribute_enables_test_code);
-        visit::visit_item_impl(self, i);
-        self.test_context = previous;
-    }
-
-    fn visit_block(&mut self, i: &'ast Block) {
-        self.blocks.push(BlockScope {
-            items: i
-                .stmts
-                .iter()
-                .filter_map(|statement| match statement {
-                    Stmt::Item(item) => Some(item),
-                    _ => None,
-                })
-                .collect(),
-            ..BlockScope::default()
-        });
-        visit::visit_block(self, i);
-        self.blocks.pop();
-    }
-
-    fn visit_local(&mut self, i: &'ast syn::Local) {
-        self.with_attributes(|this| visit::visit_local(this, i));
-        let fixture = self
-            .functions
-            .is_test
-            .then(|| self.local_fixture(i))
-            .flatten();
-        if let Some(block) = self.blocks.last_mut() {
-            record_bindings(&mut block.bindings, &i.pat);
-            if let Some((name, kind)) = fixture {
-                block.bindings.insert(name, Some(kind));
-            }
-        }
-    }
-
-    fn visit_expr_closure(&mut self, i: &'ast syn::ExprClosure) {
-        let mut parameters = BlockScope::default();
-        for input in &i.inputs {
-            record_bindings(&mut parameters.bindings, input);
-        }
-        self.blocks.push(parameters);
-        // A closure body is deferred even if the closure is constructed in a const.
-        let previous = std::mem::replace(&mut self.in_const, false);
-        visit::visit_expr_closure(self, i);
-        self.in_const = previous;
-        self.blocks.pop();
-    }
-
-    fn visit_item_const(&mut self, i: &'ast syn::ItemConst) {
-        self.in_constant(|this| visit::visit_item_const(this, i));
-    }
-
-    fn visit_item_static(&mut self, i: &'ast syn::ItemStatic) {
-        self.in_constant(|this| visit::visit_item_static(this, i));
-    }
-
-    fn visit_impl_item_const(&mut self, i: &'ast syn::ImplItemConst) {
-        self.in_constant(|this| visit::visit_impl_item_const(this, i));
-    }
-
-    fn visit_trait_item_const(&mut self, i: &'ast syn::TraitItemConst) {
-        self.in_constant(|this| visit::visit_trait_item_const(this, i));
-    }
-
-    fn visit_expr_const(&mut self, i: &'ast syn::ExprConst) {
-        self.in_constant(|this| visit::visit_expr_const(this, i));
-    }
-
-    fn visit_macro(&mut self, i: &'ast Macro) {
-        let Some(name) = i
-            .path
-            .segments
-            .last()
-            .map(|segment| segment.ident.to_string())
-        else {
-            return;
-        };
-        let Some(mut kind) = rust_macro_kind(&name) else {
-            return;
-        };
-        if kind == "unexpectedBranch"
-            && (self.functions.expects_panic || self.functions.name.as_deref() == Some("drop"))
-        {
-            return;
-        }
-        if kind == "assertion" && self.in_const {
-            kind = "compileTimeAssertion";
-        }
-        if kind == "compileTimeAssertion" || self.functions.name.is_some() {
-            self.push_span(kind, i.span());
-        }
-    }
-
-    fn visit_expr_call(&mut self, i: &'ast ExprCall) {
-        for attribute in &i.attrs {
-            self.visit_attribute(attribute);
-        }
-        if self.functions.is_test
-            && let Some(function) = self.resolve_function(&i.func)
-        {
-            if let Some(test_id) = &self.functions.test_id {
-                // A regular call is enough to link even if this caller also
-                // invokes the helper inside a panic expectation.
-                *self
-                    .calls
-                    .entry(function_id(function))
-                    .or_default()
-                    .entry(test_id.clone())
-                    .or_default() |= !self.functions.expects_panic;
-            }
-            if function.block.stmts.is_empty() && function_has_bounded_type_parameter(&function.sig)
-            {
-                self.push_range(
-                    "compileTimeAssertion",
-                    i.func.span().start(),
-                    i.span().end(),
-                );
-            }
-        }
-        self.visit_call_children(i);
-    }
-
-    fn visit_expr_method_call(&mut self, i: &'ast ExprMethodCall) {
-        for attribute in &i.attrs {
-            self.visit_attribute(attribute);
-        }
-        if i.method == "expect" && self.functions.is_test && !self.is_fixture_access(&i.receiver) {
-            self.push_range(
-                "fallibleValueCheck",
-                i.receiver.span().start(),
-                i.span().end(),
-            );
-        }
-        self.visit_expr(&i.receiver);
-        if let Some(arguments) = &i.turbofish {
-            self.visit_angle_bracketed_generic_arguments(arguments);
-        }
-        for argument in &i.args {
-            self.visit_expr(argument);
-        }
-    }
-}
-
-impl<'ast> RustCollector<'_, 'ast> {
     /// Visits call arguments while suppressing deliberately triggered expected panics.
     fn visit_call_children(&mut self, i: &'ast ExprCall) {
         let previous = self.functions.expects_panic;
-        if self.functions.is_test && is_panic_expectation_call(&i.func) {
+        if self.functions.role.is_test() && is_panic_expectation_call(&i.func) {
             self.push_range("panicExpectation", i.func.span().start(), i.span().end());
             self.functions.expects_panic = true;
         }
@@ -995,18 +826,14 @@ impl<'ast> RustCollector<'_, 'ast> {
             .iter()
             .map(|segment| segment.ident.to_string())
             .collect::<Vec<_>>();
-        let names = names.iter().map(String::as_str).collect::<Vec<_>>();
-        let (&first, remaining) = names.split_first()?;
+        let (first, remaining) = names.split_first()?;
         let current = self.modules.last()?;
-        let target = match first {
+        let target = match first.as_str() {
             "crate" if is_crate_root(self.path) => walk_items(self.modules.first()?, remaining),
             "crate" | "Self" => None,
             "self" => walk_items(current, remaining),
             "super" => {
-                let parents = remaining
-                    .iter()
-                    .take_while(|&&name| name == "super")
-                    .count();
+                let parents = remaining.iter().take_while(|name| *name == "super").count();
                 let depth = self.modules.len().checked_sub(parents.saturating_add(2))?;
                 walk_items(self.modules.get(depth)?, remaining.get(parents..)?)
             }
@@ -1023,7 +850,7 @@ impl<'ast> RustCollector<'_, 'ast> {
         &self,
         module: &'ast [Item],
         first: &str,
-        remaining: &[&str],
+        remaining: &[String],
     ) -> Option<&'ast Item> {
         for (index, block) in self.blocks.iter().enumerate().rev() {
             if index >= self.functions.first_binding_scope && block.bindings.contains_key(first) {
@@ -1061,10 +888,10 @@ impl<'ast> RustCollector<'_, 'ast> {
     }
 
     /// Records a fixture type only for an explicitly typed or constructed local.
-    fn local_fixture(&self, local: &syn::Local) -> Option<(String, FixtureKind)> {
+    fn local_fixture(&self, local: &Local) -> Option<(String, FixtureKind)> {
         let (pattern, kind) = match &local.pat {
-            syn::Pat::Type(typed) => {
-                let syn::Type::Path(path) = typed.ty.as_ref() else {
+            Pat::Type(typed) => {
+                let Type::Path(path) = typed.ty.as_ref() else {
                     return None;
                 };
                 if path.qself.is_some() {
@@ -1086,7 +913,7 @@ impl<'ast> RustCollector<'_, 'ast> {
                 self.fixture_constructor(&local.init.as_ref()?.expr)?,
             ),
         };
-        let syn::Pat::Ident(ident) = pattern else {
+        let Pat::Ident(ident) = pattern else {
             return None;
         };
         (ident.by_ref.is_none() && ident.subpat.is_none()).then(|| (ident.ident.to_string(), kind))
@@ -1135,14 +962,17 @@ impl<'ast> RustCollector<'_, 'ast> {
         }
         let module = self.modules.last()?;
         for block in self.blocks.iter().rev() {
-            match fixture_import(block.items.iter().copied(), namespace, &terminal) {
-                Some(imported) => return imported.then_some(kind),
-                None => continue,
+            if let Break(imported) =
+                fixture_import(block.items.iter().copied(), namespace, &terminal)
+            {
+                return imported.then_some(kind);
             }
         }
-        fixture_import(module.iter(), namespace, &terminal)
-            .unwrap_or(false)
-            .then_some(kind)
+        matches!(
+            fixture_import(module.iter(), namespace, &terminal),
+            Break(true)
+        )
+        .then_some(kind)
     }
 
     /// Excludes calls only when their syntax identifies a fixture operation.
@@ -1162,11 +992,12 @@ impl<'ast> RustCollector<'_, 'ast> {
         let fixture = if let Expr::Path(path) = unparenthesized(&call.receiver)
             && let Some(name) = path.path.get_ident()
         {
+            let name = name.to_string();
             self.blocks
                 .iter()
                 .skip(self.functions.first_binding_scope)
                 .rev()
-                .find_map(|block| block.bindings.get(&name.to_string()).copied())
+                .find_map(|block| block.bindings.get(&name).copied())
                 .flatten()
         } else {
             self.fixture_constructor(&call.receiver)
@@ -1180,6 +1011,251 @@ impl<'ast> RustCollector<'_, 'ast> {
                 )
                 | (Some(FixtureKind::JoinHandle), "join")
         )
+    }
+}
+
+impl<'ast> Visit<'ast> for RustCollector<'_, 'ast> {
+    fn visit_file(&mut self, i: &'ast syn::File) {
+        self.test_context |= i.attrs.iter().any(attribute_enables_test_code);
+        visit::visit_file(self, i);
+    }
+
+    fn visit_item(&mut self, i: &'ast Item) {
+        self.with_attributes(|this| visit::visit_item(this, i));
+    }
+
+    fn visit_impl_item(&mut self, i: &'ast ImplItem) {
+        self.with_attributes(|this| visit::visit_impl_item(this, i));
+    }
+
+    fn visit_trait_item(&mut self, i: &'ast TraitItem) {
+        self.with_attributes(|this| visit::visit_trait_item(this, i));
+    }
+
+    fn visit_expr(&mut self, i: &'ast Expr) {
+        self.with_attributes(|this| visit::visit_expr(this, i));
+    }
+
+    fn visit_stmt_macro(&mut self, i: &'ast StmtMacro) {
+        self.with_attributes(|this| visit::visit_stmt_macro(this, i));
+    }
+
+    fn visit_arm(&mut self, i: &'ast Arm) {
+        let mut bindings = BlockScope::default();
+        record_bindings(&mut bindings.bindings, &i.pat);
+        self.blocks.push(bindings);
+        self.with_attributes(|this| visit::visit_arm(this, i));
+        self.blocks.pop();
+    }
+
+    fn visit_variant(&mut self, i: &'ast Variant) {
+        self.with_attributes(|this| visit::visit_variant(this, i));
+    }
+
+    fn visit_field(&mut self, i: &'ast Field) {
+        self.with_attributes(|this| visit::visit_field(this, i));
+    }
+
+    fn visit_attribute(&mut self, i: &'ast Attribute) {
+        // The audit already selects `cfg(test)` code; other configurations
+        // restrict which builds exercise the check within that selection.
+        if (i.path().is_ident("cfg") || i.path().is_ident("cfg_attr"))
+            && !attribute_enables_test_code(i)
+        {
+            self.cfg
+                .push(source_slice(self.lines, i.span().start(), i.span().end()));
+        }
+    }
+
+    fn visit_item_fn(&mut self, i: &'ast ItemFn) {
+        self.visit_function(&i.attrs, &i.sig, &i.block, Some(function_id(i)), false);
+    }
+
+    fn visit_impl_item_fn(&mut self, i: &'ast ImplItemFn) {
+        // An associated function needs type resolution; a terminal method name
+        // cannot establish this identity.
+        self.visit_function(
+            &i.attrs,
+            &i.sig,
+            &i.block,
+            None,
+            self.test_drop_impl && i.sig.ident == "drop",
+        );
+    }
+
+    fn visit_item_mod(&mut self, i: &'ast ItemMod) {
+        let previous = self.test_context;
+        self.test_context |= i.attrs.iter().any(attribute_enables_test_code);
+        if let Some((_, items)) = &i.content {
+            self.modules.push(items);
+            let blocks = take(&mut self.blocks);
+            let functions = take(&mut self.functions);
+            let in_const = replace(&mut self.in_const, false);
+            visit::visit_item_mod(self, i);
+            self.in_const = in_const;
+            self.functions = functions;
+            self.blocks = blocks;
+            self.modules.pop();
+        }
+        self.test_context = previous;
+    }
+
+    fn visit_item_impl(&mut self, i: &'ast ItemImpl) {
+        let previous = self.test_context;
+        self.test_context |= i.attrs.iter().any(attribute_enables_test_code);
+        let drop_impl = i.trait_.as_ref().is_some_and(|(_, path, _)| {
+            path.segments
+                .last()
+                .is_some_and(|segment| segment.ident == "Drop")
+        });
+        let previous_drop_impl = replace(&mut self.test_drop_impl, drop_impl);
+        visit::visit_item_impl(self, i);
+        self.test_drop_impl = previous_drop_impl;
+        self.test_context = previous;
+    }
+
+    fn visit_block(&mut self, i: &'ast Block) {
+        self.blocks.push(BlockScope {
+            items: i
+                .stmts
+                .iter()
+                .filter_map(|statement| match statement {
+                    Stmt::Item(item) => Some(item),
+                    _ => None,
+                })
+                .collect(),
+            ..BlockScope::default()
+        });
+        visit::visit_block(self, i);
+        self.blocks.pop();
+    }
+
+    fn visit_local(&mut self, i: &'ast Local) {
+        self.with_attributes(|this| visit::visit_local(this, i));
+        let fixture = self
+            .functions
+            .role
+            .is_test()
+            .then(|| self.local_fixture(i))
+            .flatten();
+        if let Some(block) = self.blocks.last_mut() {
+            record_bindings(&mut block.bindings, &i.pat);
+            if let Some((name, kind)) = fixture {
+                block.bindings.insert(name, Some(kind));
+            }
+        }
+    }
+
+    fn visit_expr_closure(&mut self, i: &'ast ExprClosure) {
+        let mut parameters = BlockScope::default();
+        for input in &i.inputs {
+            record_bindings(&mut parameters.bindings, input);
+        }
+        self.blocks.push(parameters);
+        // A closure body is deferred even if the closure is constructed in a const.
+        let previous = replace(&mut self.in_const, false);
+        visit::visit_expr_closure(self, i);
+        self.in_const = previous;
+        self.blocks.pop();
+    }
+
+    fn visit_item_const(&mut self, i: &'ast ItemConst) {
+        self.in_constant(|this| visit::visit_item_const(this, i));
+    }
+
+    fn visit_item_static(&mut self, i: &'ast ItemStatic) {
+        self.in_constant(|this| visit::visit_item_static(this, i));
+    }
+
+    fn visit_impl_item_const(&mut self, i: &'ast ImplItemConst) {
+        self.in_constant(|this| visit::visit_impl_item_const(this, i));
+    }
+
+    fn visit_trait_item_const(&mut self, i: &'ast TraitItemConst) {
+        self.in_constant(|this| visit::visit_trait_item_const(this, i));
+    }
+
+    fn visit_expr_const(&mut self, i: &'ast ExprConst) {
+        self.in_constant(|this| visit::visit_expr_const(this, i));
+    }
+
+    fn visit_macro(&mut self, i: &'ast Macro) {
+        let Some(name) = i
+            .path
+            .segments
+            .last()
+            .map(|segment| segment.ident.to_string())
+        else {
+            return;
+        };
+        let Some(mut kind) = rust_macro_kind(&name) else {
+            return;
+        };
+        // A test-owned destructor can deliberately trigger an unwind. An
+        // ordinary function named `drop` carries no such meaning.
+        if kind == "unexpectedBranch"
+            && (self.functions.expects_panic || self.functions.test_destructor)
+        {
+            return;
+        }
+        if kind == "assertion" && self.in_const {
+            kind = "compileTimeAssertion";
+        }
+        if kind == "compileTimeAssertion" || self.functions.name.is_some() {
+            self.push_span(kind, i.span());
+        }
+    }
+
+    fn visit_expr_call(&mut self, i: &'ast ExprCall) {
+        for attribute in &i.attrs {
+            self.visit_attribute(attribute);
+        }
+        if self.functions.role.is_test()
+            && let Some(function) = self.resolve_function(&i.func)
+        {
+            if let Some(test_id) = self.functions.role.test_id() {
+                // A regular call is enough to link even if this caller also
+                // invokes the helper inside a panic expectation.
+                *self
+                    .calls
+                    .entry(function_id(function))
+                    .or_default()
+                    .entry(test_id.clone())
+                    .or_default() |= !self.functions.expects_panic;
+            }
+            if function.block.stmts.is_empty() && function_has_bounded_type_parameter(&function.sig)
+            {
+                self.push_range(
+                    "compileTimeAssertion",
+                    i.func.span().start(),
+                    i.span().end(),
+                );
+            }
+        }
+        self.visit_call_children(i);
+    }
+
+    fn visit_expr_method_call(&mut self, i: &'ast ExprMethodCall) {
+        for attribute in &i.attrs {
+            self.visit_attribute(attribute);
+        }
+        if i.method == "expect"
+            && self.functions.role.is_test()
+            && !self.is_fixture_access(&i.receiver)
+        {
+            self.push_range(
+                "fallibleValueCheck",
+                i.receiver.span().start(),
+                i.span().end(),
+            );
+        }
+        self.visit_expr(&i.receiver);
+        if let Some(arguments) = &i.turbofish {
+            self.visit_angle_bracketed_generic_arguments(arguments);
+        }
+        for argument in &i.args {
+            self.visit_expr(argument);
+        }
     }
 }
 
@@ -1197,7 +1273,7 @@ fn attribute_enables_test_code(attribute: &Attribute) -> bool {
     if !attribute.path().is_ident("cfg") {
         return false;
     }
-    let syn::Meta::List(list) = &attribute.meta else {
+    let Meta::List(list) = &attribute.meta else {
         return false;
     };
     list.tokens.to_string() == "test"
@@ -1258,13 +1334,13 @@ fn unique_named_item<'ast>(
 }
 
 /// Follows module qualifiers, stopping at an external module or unknown binding.
-fn walk_items<'ast>(items: &'ast [Item], names: &[&str]) -> Option<&'ast Item> {
+fn walk_items<'ast>(items: &'ast [Item], names: &[String]) -> Option<&'ast Item> {
     let (first, remaining) = names.split_first()?;
     walk_child(unique_named_item(items.iter(), first).ok()??, remaining)
 }
 
 /// Requires every nonterminal component to be an inline module declaration.
-fn walk_child<'ast>(item: &'ast Item, remaining: &[&str]) -> Option<&'ast Item> {
+fn walk_child<'ast>(item: &'ast Item, remaining: &[String]) -> Option<&'ast Item> {
     if remaining.is_empty() {
         return Some(item);
     }
@@ -1297,7 +1373,7 @@ fn fixture_import<'ast>(
     items: impl Iterator<Item = &'ast Item> + Clone,
     namespace: &str,
     name: &str,
-) -> Option<bool> {
+) -> ControlFlow<bool> {
     /// Searches groups without erasing any of the import's path qualifiers.
     fn imports_path(tree: &UseTree, path: &[&str]) -> bool {
         match (tree, path) {
@@ -1310,21 +1386,21 @@ fn fixture_import<'ast>(
         }
     }
     if !matches!(unique_named_item(items.clone(), name), Ok(None)) {
-        return Some(false);
+        return Break(false);
     }
     let mut imports = items.filter(|item| import_could_supply(item, name));
-    let Item::Use(import) = imports.next()? else {
-        return None;
+    let Some(Item::Use(import)) = imports.next() else {
+        return Continue(());
     };
-    Some(imports.next().is_none() && imports_path(&import.tree, &["std", namespace, name]))
+    Break(imports.next().is_none() && imports_path(&import.tree, &["std", namespace, name]))
 }
 
 /// Marks pattern bindings as shadows until a fixture constructor proves their type.
-fn record_bindings(bindings: &mut BTreeMap<String, Option<FixtureKind>>, pattern: &syn::Pat) {
+fn record_bindings(bindings: &mut BTreeMap<String, Option<FixtureKind>>, pattern: &Pat) {
     struct Bindings<'a>(&'a mut BTreeMap<String, Option<FixtureKind>>);
 
     impl<'ast> Visit<'ast> for Bindings<'_> {
-        fn visit_pat_ident(&mut self, i: &'ast syn::PatIdent) {
+        fn visit_pat_ident(&mut self, i: &'ast PatIdent) {
             self.0.insert(i.ident.to_string(), None);
             visit::visit_pat_ident(self, i);
         }
@@ -1342,7 +1418,7 @@ fn is_pointer_fixture_access(expression: &Expr) -> bool {
     }
     match unparenthesized(&call.receiver) {
         Expr::RawAddr(_) => true,
-        Expr::Cast(cast) => matches!(cast.ty.as_ref(), syn::Type::Ptr(_)),
+        Expr::Cast(cast) => matches!(cast.ty.as_ref(), Type::Ptr(_)),
         // A literal wrapped directly in `Some` cannot probe an API result.
         Expr::Call(constructor) => {
             matches!(constructor.func.as_ref(), Expr::Path(path) if path.path.is_ident("Some"))
@@ -1366,7 +1442,7 @@ fn function_has_bounded_type_parameter(signature: &Signature) -> bool {
                 clause.predicates.iter().any(|predicate| {
                     matches!(
                         predicate,
-                        syn::WherePredicate::Type(predicate)
+                        WherePredicate::Type(predicate)
                             if !predicate.bounds.is_empty()
                     )
                 })
@@ -1446,9 +1522,9 @@ fn source_slice(lines: &[&str], start: LineColumn, end: LineColumn) -> String {
         .unwrap_or_default();
     let first = first.get(start_byte..).unwrap_or("");
     let last = last.get(..end_byte).unwrap_or("");
-    std::iter::once(first)
+    once(first)
         .chain(middle.iter().copied())
-        .chain(std::iter::once(last))
+        .chain(once(last))
         .collect::<Vec<_>>()
         .join("\n")
         .trim()
@@ -1458,6 +1534,11 @@ fn source_slice(lines: &[&str], start: LineColumn, end: LineColumn) -> String {
 /// Looks up a line using the parser's one-based line numbering.
 fn source_line<'a>(lines: &[&'a str], line: usize) -> Option<&'a str> {
     lines.get(line.checked_sub(1)?).copied()
+}
+
+/// Converts line numbers from real Syn spans, which are always one-based.
+fn parser_line(line: usize) -> NonZeroUsize {
+    NonZeroUsize::new(line).expect("parsed source spans have positive line numbers")
 }
 
 /// Converts proc-macro character offsets to UTF-8 byte offsets.
@@ -1487,7 +1568,16 @@ struct DocFence {
 /// Associates a Rust fence's assertions with its inventory entry.
 struct DocTest {
     index: usize,
-    expects_panic: bool,
+    mode: DocMode,
+    body: String,
+}
+
+/// Determines which predicates can run in a recognized rustdoc fence.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum DocMode {
+    Runs,
+    ShouldPanic,
+    CompileOnly,
 }
 
 impl DocFence {
@@ -1514,22 +1604,30 @@ impl DocFence {
 }
 
 /// Interprets rustdoc flags independently of their position in the info string.
-fn doctest_expects_panic(info: &str) -> Option<bool> {
+fn doctest_mode(info: &str) -> Option<DocMode> {
     let mut expects_panic = false;
+    let mut compile_only = false;
     for flag in info
         .split(|character: char| character == ',' || character.is_whitespace())
         .filter(|flag| !flag.is_empty())
     {
         match flag {
             "should_panic" => expects_panic = true,
-            "rust" | "compile_fail" | "no_run" | "test_harness" | "edition2015" | "edition2018"
-            | "edition2021" | "edition2024" => {}
+            "compile_fail" | "no_run" => compile_only = true,
+            "rust" | "test_harness" | "edition2015" | "edition2018" | "edition2021"
+            | "edition2024" => {}
             // Includes `ignore` flags and other language identifiers; both
             // are tracked as fences but do not contribute test sites.
             _ => return None,
         }
     }
-    Some(expects_panic)
+    Some(if compile_only {
+        DocMode::CompileOnly
+    } else if expects_panic {
+        DocMode::ShouldPanic
+    } else {
+        DocMode::Runs
+    })
 }
 
 /// Inventories rustdoc blocks separately because syn treats doc contents as attributes.
@@ -1537,77 +1635,37 @@ fn scan_doctests(
     tests: &mut Vec<TestCase>,
     assertions: &mut Vec<AssertionSite>,
     diagnostics: &mut Vec<ScanDiagnostic>,
-    path: &str,
-    language: &str,
-    file_sha256: &str,
-    lines: &[&str],
+    input: ScanInput<'_>,
 ) {
     let mut active: Option<DocFence> = None;
-    for (index, line) in lines.iter().enumerate() {
+    for (index, line) in input.lines.iter().enumerate() {
         let trimmed = line.trim_start();
-        let Some(comment) = trimmed
+        let comment = trimmed
             .strip_prefix("///")
             .or_else(|| trimmed.strip_prefix("//!"))
-        else {
-            continue;
-        };
-        let comment = comment.trim_start();
+            .map(str::trim_start);
         let line_number = index.saturating_add(1);
-        if let Some(fence) = &active {
-            if fence.closes(comment) {
-                if let Some(test) = fence.test.as_ref().and_then(|doc| tests.get_mut(doc.index)) {
-                    test.end_line = line_number;
+        if let Some(fence) = &mut active {
+            if comment.is_some_and(|comment| fence.closes(comment)) {
+                if let Some(doc) = active.take().and_then(|fence| fence.test) {
+                    finish_doctest(tests, assertions, diagnostics, &input, doc, line_number);
                 }
-                active = None;
-            } else if let Some(doc) = &fence.test
-                && let Some(test) = tests.get(doc.index)
-            {
-                let code = comment.trim_start_matches('#').trim_start();
-                if let Some(kind) = first_macro_name(code).as_deref().and_then(rust_macro_kind)
-                    && !(doc.expects_panic && kind == "unexpectedBranch")
-                {
-                    assertions.push(doctest_assertion(
-                        assertions,
-                        test,
-                        file_sha256,
-                        kind,
-                        line_number,
-                        line,
-                        code,
-                    ));
+            } else if let Some(doc) = &mut fence.test {
+                if let Some(comment) = comment {
+                    let code = rustdoc_code_line(comment);
+                    // Replace the stripped prefix with whitespace so Syn's
+                    // byte columns map back to the source file unchanged.
+                    doc.body
+                        .extend(repeat_n(' ', line.len().saturating_sub(code.len())));
+                    doc.body.push_str(code);
                 }
+                doc.body.push('\n');
             }
-        } else if let Some((marker, width, info)) = DocFence::delimiter(comment) {
-            let test = doctest_expects_panic(info).map(|expects_panic| {
-                let index = tests.len();
-                let test = TestCase {
-                    id: next_test_id(tests),
-                    name: format!("doctest at {line_number}"),
-                    kind: "doctest".to_owned(),
-                    language: language.to_owned(),
-                    path: path.to_owned(),
-                    line: line_number,
-                    end_line: line_number,
-                    direct_assertion_ids: Vec::new(),
-                    shared_assertion_ids: Vec::new(),
-                };
-                if expects_panic {
-                    assertions.push(doctest_assertion(
-                        assertions,
-                        &test,
-                        file_sha256,
-                        "panicExpectation",
-                        line_number,
-                        line,
-                        comment,
-                    ));
-                }
-                tests.push(test);
-                DocTest {
-                    index,
-                    expects_panic,
-                }
-            });
+        } else if let Some(comment) = comment
+            && let Some((marker, width, info)) = DocFence::delimiter(comment)
+        {
+            let test = doctest_mode(info)
+                .map(|mode| open_doctest(tests, assertions, &input, line_number, comment, mode));
             active = Some(DocFence {
                 marker,
                 width,
@@ -1615,16 +1673,183 @@ fn scan_doctests(
             });
         }
     }
-    if let Some(doc) = active.and_then(|fence| fence.test)
-        && let Some(test) = tests.get_mut(doc.index)
-    {
-        test.end_line = lines.len();
+    if let Some(doc) = active.and_then(|fence| fence.test) {
         diagnostics.push(ScanDiagnostic {
             kind: "unterminatedDoctest".to_owned(),
-            path: path.to_owned(),
-            line: Some(test.line),
+            path: input.path.to_owned(),
+            line: tests.get(doc.index).map(|test| test.line.get()),
             detail: "The rustdoc code fence has no closing delimiter".to_owned(),
         });
+        finish_doctest(
+            tests,
+            assertions,
+            diagnostics,
+            &input,
+            doc,
+            input.lines.len(),
+        );
+    }
+}
+
+/// Removes rustdoc's hidden-line marker or its escape, not Rust attributes.
+fn rustdoc_code_line(comment: &str) -> &str {
+    if comment == "#" {
+        ""
+    } else if comment.starts_with("##") {
+        comment.strip_prefix('#').unwrap_or(comment)
+    } else {
+        comment.strip_prefix("# ").unwrap_or(comment)
+    }
+}
+
+/// Registers ownership before collecting predicates from the fence body.
+fn open_doctest(
+    tests: &mut Vec<TestCase>,
+    assertions: &mut Vec<AssertionSite>,
+    input: &ScanInput<'_>,
+    line: usize,
+    comment: &str,
+    mode: DocMode,
+) -> DocTest {
+    let index = tests.len();
+    let test = TestCase {
+        id: next_test_id(tests),
+        name: format!("doctest at {line}"),
+        kind: "doctest".to_owned(),
+        language: input.language.to_owned(),
+        path: input.path.to_owned(),
+        line: parser_line(line),
+        end_line: line,
+        direct_assertion_ids: Vec::new(),
+        shared_assertion_ids: Vec::new(),
+    };
+    if mode == DocMode::ShouldPanic {
+        let column = NonZeroUsize::MIN.saturating_add(
+            source_line(input.lines, line)
+                .map_or(0, |source| source.len().saturating_sub(comment.len())),
+        );
+        assertions.push(doctest_assertion(
+            assertions,
+            &test,
+            input.file_sha256,
+            "panicExpectation",
+            test.line..=test.line,
+            column,
+            comment.to_owned(),
+        ));
+    }
+    tests.push(test);
+    // A block accepts statements as well as item declarations. Its opening
+    // line stands in for the fence opener so body line offsets stay aligned.
+    DocTest {
+        index,
+        mode,
+        body: "{\n".to_owned(),
+    }
+}
+
+/// Parses the projected source and emits only predicates belonging to the fence.
+fn finish_doctest(
+    tests: &mut [TestCase],
+    assertions: &mut Vec<AssertionSite>,
+    diagnostics: &mut Vec<ScanDiagnostic>,
+    input: &ScanInput<'_>,
+    mut doc: DocTest,
+    end_line: usize,
+) {
+    let Some(test) = tests.get_mut(doc.index) else {
+        return;
+    };
+    test.end_line = end_line;
+    doc.body.push('}');
+    let block = match syn::parse_str::<Block>(&doc.body) {
+        Ok(block) => block,
+        Err(error) => {
+            diagnostics.push(ScanDiagnostic {
+                kind: "rustdocParseLimitation".to_owned(),
+                path: test.path.clone(),
+                line: Some(test.line.get()),
+                detail: error.to_string(),
+            });
+            return;
+        }
+    };
+    let mut visitor = DocPredicates {
+        mode: doc.mode,
+        in_const: false,
+        spans: Vec::new(),
+    };
+    visitor.visit_block(&block);
+    let projected: Vec<&str> = doc.body.lines().collect();
+    for (kind, span) in visitor.spans {
+        let start = span.start();
+        let end = span.end();
+        let line = test.line.saturating_add(start.line.saturating_sub(1));
+        let end_line = test.line.saturating_add(end.line.saturating_sub(1));
+        let column = NonZeroUsize::MIN.saturating_add(
+            source_line(&projected, start.line).map_or(0, |text| byte_column(text, start)),
+        );
+        assertions.push(doctest_assertion(
+            assertions,
+            test,
+            input.file_sha256,
+            kind,
+            line..=end_line,
+            column,
+            source_slice(&projected, start, end),
+        ));
+    }
+}
+
+/// Collects syntax-backed doctest predicates without registering nested tests.
+struct DocPredicates {
+    mode: DocMode,
+    in_const: bool,
+    spans: Vec<(&'static str, Span)>,
+}
+
+impl<'ast> Visit<'ast> for DocPredicates {
+    fn visit_macro(&mut self, i: &'ast Macro) {
+        let Some(kind) = i
+            .path
+            .segments
+            .last()
+            .and_then(|segment| rust_macro_kind(&segment.ident.to_string()))
+        else {
+            return;
+        };
+        let kind = if self.in_const && kind == "assertion" {
+            "compileTimeAssertion"
+        } else {
+            kind
+        };
+        if (self.mode != DocMode::CompileOnly || kind == "compileTimeAssertion")
+            && !(self.mode == DocMode::ShouldPanic && kind == "unexpectedBranch")
+        {
+            self.spans.push((kind, i.span()));
+        }
+    }
+
+    fn visit_expr_method_call(&mut self, i: &'ast ExprMethodCall) {
+        if i.method == "expect"
+            && !is_pointer_fixture_access(&i.receiver)
+            && let Some(span) = i.receiver.span().join(i.span())
+        {
+            self.spans.push(("fallibleValueCheck", span));
+        }
+        visit::visit_expr_method_call(self, i);
+    }
+
+    fn visit_item_const(&mut self, i: &'ast ItemConst) {
+        let previous = replace(&mut self.in_const, true);
+        visit::visit_item_const(self, i);
+        self.in_const = previous;
+    }
+
+    fn visit_expr_const(&mut self, i: &'ast ExprConst) {
+        let previous = replace(&mut self.in_const, true);
+        visit::visit_expr_const(self, i);
+        self.in_const = previous;
     }
 }
 
@@ -1634,22 +1859,19 @@ fn doctest_assertion(
     test: &TestCase,
     file_sha256: &str,
     kind: &str,
-    line: usize,
-    source: &str,
-    expression: &str,
+    lines: RangeInclusive<NonZeroUsize>,
+    column: NonZeroUsize,
+    expression: String,
 ) -> AssertionSite {
     AssertionSite {
         id: next_assertion_id(assertions),
         kind: kind.to_owned(),
         language: test.language.clone(),
         path: test.path.clone(),
-        line,
-        end_line: line,
-        column: source
-            .len()
-            .saturating_sub(expression.len())
-            .saturating_add(1),
-        expression: expression.to_owned(),
+        line: *lines.start(),
+        end_line: lines.end().get(),
+        column,
+        expression,
         file_sha256: file_sha256.to_owned(),
         test_code: true,
         containing_test_id: Some(test.id.clone()),
@@ -1658,15 +1880,14 @@ fn doctest_assertion(
     }
 }
 
-/// Extracts a simple macro identifier from one rustdoc source line.
-fn first_macro_name(line: &str) -> Option<String> {
-    let marker = line.find('!')?;
-    let prefix = line.get(..marker)?.trim();
+/// Locates a likely macro name in text when the Rust file cannot be parsed.
+fn first_macro_name(line: &str) -> Option<&str> {
+    let prefix = line.get(..line.find('!')?)?.trim();
     let name = prefix
         .split(|character: char| !character.is_ascii_alphanumeric() && character != '_')
         .next_back()?
         .trim();
-    (!name.is_empty()).then(|| name.to_owned())
+    (!name.is_empty()).then_some(name)
 }
 
 /// Uses narrow text patterns when no parser is available or valid syntax is absent.
@@ -1699,7 +1920,7 @@ fn scan_heuristically(
                 kind: "heuristic".to_owned(),
                 language: language.to_owned(),
                 path: path.to_owned(),
-                line: index.saturating_add(1),
+                line: NonZeroUsize::MIN.saturating_add(index),
                 end_line: lines.len(),
                 direct_assertion_ids: Vec::new(),
                 shared_assertion_ids: Vec::new(),
@@ -1714,7 +1935,10 @@ fn scan_heuristically(
         let (Some(current), Some(next)) = (pair.first(), pair.get(1)) else {
             continue;
         };
-        let Some(end_line) = tests.get(*next).map(|test| test.line.saturating_sub(1)) else {
+        let Some(end_line) = tests
+            .get(*next)
+            .map(|test| test.line.get().saturating_sub(1))
+        else {
             continue;
         };
         if let Some(test) = tests.get_mut(*current) {
@@ -1727,7 +1951,7 @@ fn scan_heuristically(
             .iter()
             .rev()
             .filter_map(|candidate| tests.get(*candidate))
-            .find(|test| line >= test.line && line <= test.end_line)
+            .find(|test| line >= test.line.get() && line <= test.end_line)
             .map(|test| test.id.clone());
         if let Some(kind) = heuristic_assertion_kind(language, source_line) {
             assertions.push(AssertionSite {
@@ -1735,12 +1959,13 @@ fn scan_heuristically(
                 kind: kind.to_owned(),
                 language: language.to_owned(),
                 path: path.to_owned(),
-                line,
+                line: NonZeroUsize::MIN.saturating_add(index),
                 end_line: line,
-                column: source_line
-                    .len()
-                    .saturating_sub(source_line.trim_start().len())
-                    .saturating_add(1),
+                column: NonZeroUsize::MIN.saturating_add(
+                    source_line
+                        .len()
+                        .saturating_sub(source_line.trim_start().len()),
+                ),
                 expression: source_line.trim().to_owned(),
                 file_sha256: file_sha256.to_owned(),
                 test_code: true,
@@ -1883,7 +2108,7 @@ fn heuristic_assertion_kind(language: &str, line: &str) -> Option<&'static str> 
         .then_some("assertion"),
         "rust" => {
             if let Some(name) = first_macro_name(trimmed) {
-                rust_macro_kind(&name)
+                rust_macro_kind(name)
             } else {
                 None
             }
@@ -1985,12 +2210,15 @@ fn verify_indexed_files(repository_root: &Path, files: &[IndexedFile]) -> Result
     Ok(())
 }
 
-/// Assigns globally stable IDs as records appear in source order.
+/// Assigns a sequential test ID within this audit inventory.
 fn next_test_id(tests: &[TestCase]) -> String {
     format!("T{:06}", tests.len().saturating_add(1))
 }
 
-/// Assigns globally stable IDs as source predicate sites appear.
+/// Assigns a sequential assertion ID within this audit inventory.
 fn next_assertion_id(assertions: &[AssertionSite]) -> String {
     format!("A{:06}", assertions.len().saturating_add(1))
 }
+
+#[cfg(test)]
+mod fuzz;

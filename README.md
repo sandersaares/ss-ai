@@ -10,7 +10,7 @@ general machine setup or user-facing Copilot preferences.
 | Skill | Purpose |
 | --- | --- |
 | [`ss-cargo-deps-tidy`](skills/ss-cargo-deps-tidy/SKILL.md) | Tidies Rust dependency declarations across a Cargo workspace: unifies declaration style, centralises versions on the workspace level, disables default features, and verifies minimum-version compatibility for published libraries. |
-| [`ss-test-audit`](skills/ss-test-audit/SKILL.md) | Audits test assertion sites against public contracts and emits a resumable, provenance-backed trace, complete test inventory, and module-level evidence rates. |
+| [`ss-test-audit`](skills/ss-test-audit/SKILL.md) | Runs a resumable audit of what test assertions check against documented public behavior. It reports a complete test inventory and summarizes the results by module. |
 | [`ss-review`](skills/ss-review/SKILL.md) | Reviews requested content with evidence, bounded workers, and explicit human approval before publication. Explicit `self-review` mode delivers local Markdown findings non-interactively, including skipped audit findings, without remote writes. |
 | [`ss-review-deep`](skills/ss-review-deep/SKILL.md) | Explicitly requested deep review orchestration. |
 | [`ss-review-proactor`](skills/ss-review-proactor/SKILL.md) | Selects and claims pull requests across an ordered repository list before reviewing them in the primary session; retains human decision gates. |

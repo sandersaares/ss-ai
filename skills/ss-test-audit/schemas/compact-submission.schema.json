@@ -21,200 +21,205 @@
       "maxItems": 25,
       "items": {
         "oneOf": [
-          {
-            "type": "object",
-            "additionalProperties": false,
-            "required": [
-              "assertionId",
-              "classification",
-              "evidenceStatus",
-              "actualOutcome",
-              "rationale",
-              "citationHandles",
-              "callingTestIds"
-            ],
+          { "$ref": "#/$defs/explicitJudgmentRow" },
+          { "$ref": "#/$defs/reuseRow" }
+        ]
+      }
+    }
+  }
+,
+  "$defs": {
+    "explicitJudgmentRow": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "assertionId",
+        "classification",
+        "evidenceStatus",
+        "actualOutcome",
+        "rationale",
+        "citationHandles",
+        "callingTestIds"
+      ],
+      "properties": {
+        "assertionId": {
+          "type": "string",
+          "pattern": "^A[0-9]{6}$"
+        },
+        "classification": {
+          "enum": [
+            "Documented",
+            "Implicit",
+            "Mixed",
+            "Incidental"
+          ]
+        },
+        "evidenceStatus": {
+          "enum": [
+            "Confirmed",
+            "Ambiguous"
+          ]
+        },
+        "actualOutcome": {
+          "type": "string",
+          "minLength": 1
+        },
+        "rationale": {
+          "type": "string",
+          "minLength": 1
+        },
+        "citationHandles": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "pattern": "^E[0-9a-f]{12}-[0-9]+$"
+          }
+        },
+        "incidentalReason": {
+          "type": "string",
+          "minLength": 1
+        },
+        "callingTestIds": {
+          "type": "array",
+          "uniqueItems": true,
+          "items": {
+            "type": "string",
+            "pattern": "^T[0-9]{6}$"
+          }
+        },
+        "unlinkedReason": {
+          "type": "string",
+          "minLength": 1
+        }
+      },
+      "allOf": [
+        {
+          "if": {
             "properties": {
-              "assertionId": {
-                "type": "string",
-                "pattern": "^A[0-9]{6}$"
-              },
               "classification": {
-                "enum": [
-                  "Documented",
-                  "Implicit",
-                  "Mixed",
-                  "Incidental"
-                ]
-              },
-              "evidenceStatus": {
-                "enum": [
-                  "Confirmed",
-                  "Ambiguous"
-                ]
-              },
-              "actualOutcome": {
-                "type": "string",
-                "minLength": 1
-              },
-              "rationale": {
-                "type": "string",
-                "minLength": 1
-              },
-              "citationHandles": {
-                "type": "array",
-                "items": {
-                  "type": "string",
-                  "pattern": "^E[0-9a-f]{12}-[0-9]+$"
-                }
-              },
-              "incidentalReason": {
-                "type": "string",
-                "minLength": 1
-              },
-              "callingTestIds": {
-                "type": "array",
-                "uniqueItems": true,
-                "items": {
-                  "type": "string",
-                  "pattern": "^T[0-9]{6}$"
-                }
-              },
-              "unlinkedReason": {
-                "type": "string",
-                "minLength": 1
+                "const": "Documented"
               }
             },
-            "allOf": [
-              {
-                "if": {
-                  "properties": {
-                    "classification": {
-                      "const": "Documented"
-                    }
-                  },
-                  "required": [
-                    "classification"
-                  ]
-                },
-                "then": {
-                  "properties": {
-                    "evidenceStatus": {
-                      "const": "Confirmed"
-                    },
-                    "citationHandles": {
-                      "minItems": 1
-                    }
-                  }
-                }
-              },
-              {
-                "if": {
-                  "properties": {
-                    "classification": {
-                      "const": "Implicit"
-                    }
-                  },
-                  "required": [
-                    "classification"
-                  ]
-                },
-                "then": {
-                  "properties": {
-                    "evidenceStatus": {
-                      "const": "Ambiguous"
-                    }
-                  }
-                }
-              },
-              {
-                "if": {
-                  "properties": {
-                    "classification": {
-                      "const": "Mixed"
-                    }
-                  },
-                  "required": [
-                    "classification"
-                  ]
-                },
-                "then": {
-                  "required": [
-                    "incidentalReason"
-                  ],
-                  "properties": {
-                    "evidenceStatus": {
-                      "const": "Confirmed"
-                    },
-                    "citationHandles": {
-                      "minItems": 1
-                    }
-                  }
-                }
-              },
-              {
-                "if": {
-                  "properties": {
-                    "classification": {
-                      "const": "Incidental"
-                    }
-                  },
-                  "required": [
-                    "classification"
-                  ]
-                },
-                "then": {
-                  "required": [
-                    "incidentalReason"
-                  ]
-                }
-              }
+            "required": [
+              "classification"
             ]
           },
-          {
-            "type": "object",
-            "additionalProperties": false,
-            "required": [
-              "assertionId",
-              "reuseFrom",
-              "equivalenceConfirmed",
-              "citationHandles",
-              "callingTestIds"
-            ],
+          "then": {
             "properties": {
-              "assertionId": {
-                "type": "string",
-                "pattern": "^A[0-9]{6}$"
-              },
-              "reuseFrom": {
-                "type": "string",
-                "pattern": "^A[0-9]{6}$"
-              },
-              "equivalenceConfirmed": {
-                "const": true
+              "evidenceStatus": {
+                "const": "Confirmed"
               },
               "citationHandles": {
-                "type": "array",
-                "minItems": 1,
-                "items": {
-                  "type": "string",
-                  "pattern": "^E[0-9a-f]{12}-[0-9]+$"
-                }
-              },
-              "callingTestIds": {
-                "type": "array",
-                "uniqueItems": true,
-                "items": {
-                  "type": "string",
-                  "pattern": "^T[0-9]{6}$"
-                }
-              },
-              "unlinkedReason": {
-                "type": "string",
-                "minLength": 1
+                "minItems": 1
               }
             }
           }
-        ]
+        },
+        {
+          "if": {
+            "properties": {
+              "classification": {
+                "const": "Implicit"
+              }
+            },
+            "required": [
+              "classification"
+            ]
+          },
+          "then": {
+            "properties": {
+              "evidenceStatus": {
+                "const": "Ambiguous"
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "classification": {
+                "const": "Mixed"
+              }
+            },
+            "required": [
+              "classification"
+            ]
+          },
+          "then": {
+            "required": [
+              "incidentalReason"
+            ],
+            "properties": {
+              "evidenceStatus": {
+                "const": "Confirmed"
+              },
+              "citationHandles": {
+                "minItems": 1
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "classification": {
+                "const": "Incidental"
+              }
+            },
+            "required": [
+              "classification"
+            ]
+          },
+          "then": {
+            "required": [
+              "incidentalReason"
+            ]
+          }
+        }
+      ]
+    },
+    "reuseRow": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "assertionId",
+        "reuseFrom",
+        "equivalenceConfirmed",
+        "citationHandles",
+        "callingTestIds"
+      ],
+      "properties": {
+        "assertionId": {
+          "type": "string",
+          "pattern": "^A[0-9]{6}$"
+        },
+        "reuseFrom": {
+          "type": "string",
+          "pattern": "^A[0-9]{6}$"
+        },
+        "equivalenceConfirmed": {
+          "const": true
+        },
+        "citationHandles": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "type": "string",
+            "pattern": "^E[0-9a-f]{12}-[0-9]+$"
+          }
+        },
+        "callingTestIds": {
+          "type": "array",
+          "uniqueItems": true,
+          "items": {
+            "type": "string",
+            "pattern": "^T[0-9]{6}$"
+          }
+        },
+        "unlinkedReason": {
+          "type": "string",
+          "minLength": 1
+        }
       }
     }
   }

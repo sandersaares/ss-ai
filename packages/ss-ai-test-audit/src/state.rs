@@ -3,14 +3,18 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::io::ErrorKind;
-use std::path::{Path, PathBuf};
+use std::num::NonZeroUsize;
+use std::path::{Component, Path, PathBuf, absolute};
 
 use ohno::AppError;
 use serde::de::DeserializeOwned;
-use serde_json::{Value, json};
+use serde_json::{Value, from_slice, json, to_vec_pretty};
 use ss_ai_runtime::{Clock, FileTransaction, caused_by, fail, read_bytes};
 
-use crate::model::{AuditState, ClassificationJournal, IndexEntry, IndexedFile, Inventory};
+use crate::batch::ValidatedJournal;
+use crate::model::{
+    AssertionSite, AuditState, ClassificationJournal, IndexEntry, IndexedFile, Inventory, TestCase,
+};
 use crate::scan::digest;
 
 /// Bounds each evidence page to a human-reviewable targeted search result.
@@ -45,12 +49,9 @@ pub fn search_many(
             format!("Search requires between 1 and {MAX_SEARCH_QUERIES} queries"),
         ));
     }
-    if limit == 0 || limit > MAX_SEARCH_RESULTS {
-        return Err(fail(
-            "invalidInput",
-            "Search limit must be between 1 and 200",
-        ));
-    }
+    let limit = NonZeroUsize::new(limit)
+        .filter(|limit| limit.get() <= MAX_SEARCH_RESULTS)
+        .ok_or_else(|| fail("invalidInput", "Search limit must be between 1 and 200"))?;
     if let Some(kind) = kind
         && !matches!(
             kind,
@@ -86,7 +87,7 @@ fn search_query(
     snapshot_sha256: &str,
     query: &str,
     kind: Option<&str>,
-    limit: usize,
+    limit: NonZeroUsize,
 ) -> Result<Value, AppError> {
     if query.trim().is_empty() {
         return Err(fail("invalidInput", "Search query must not be empty"));
@@ -98,13 +99,18 @@ fn search_query(
         .collect();
     let mut matches = Vec::new();
     let mut truncated = false;
+    let mut haystack = String::new();
     for (offset, entry) in index.iter().enumerate() {
         if kind.is_some_and(|kind| entry.kind != kind) {
             continue;
         }
-        let haystack = format!("{} {}", entry.path, entry.excerpt).to_ascii_lowercase();
+        haystack.clear();
+        haystack.push_str(&entry.path);
+        haystack.push(' ');
+        haystack.push_str(&entry.excerpt);
+        haystack.make_ascii_lowercase();
         if terms.iter().all(|term| haystack.contains(term)) {
-            if matches.len() == limit {
+            if matches.len() == limit.get() {
                 truncated = true;
                 break;
             }
@@ -153,7 +159,7 @@ pub(crate) struct LoadedState {
     pub(crate) state: AuditState,
     pub(crate) inventory: Inventory,
     pub(crate) index: Vec<IndexEntry>,
-    pub(crate) journal: ClassificationJournal,
+    pub(crate) journal: ValidatedJournal,
 }
 
 /// Loads schema-version-one state without rehashing audited source files.
@@ -205,14 +211,7 @@ pub(crate) fn load(state_directory: &Path, clock: &dyn Clock) -> Result<LoadedSt
             Some(bytes) => parse_json(&bytes, "classification journal")?,
             None => return Err(fail("invalidState", "Classification journal is missing")),
         };
-    require_version(journal.schema_version, "classification journal")?;
-    if journal.audit_id != state.audit_id || journal.snapshot_sha256 != state.snapshot_sha256 {
-        return Err(fail(
-            "invalidState",
-            "Classification journal belongs to a different audit",
-        ));
-    }
-    validate_journal(&inventory, &journal, &index)?;
+    let journal = ValidatedJournal::from_persisted(journal, &state, &inventory, &index)?;
 
     Ok(LoadedState {
         state,
@@ -253,7 +252,7 @@ pub(crate) fn require_bytes(path: &Path, clock: &dyn Clock) -> Result<Vec<u8>, A
 
 /// Parses one strict record and reports its exact logical role on failure.
 pub(crate) fn parse_json<T: DeserializeOwned>(bytes: &[u8], role: &str) -> Result<T, AppError> {
-    serde_json::from_slice(bytes)
+    from_slice(bytes)
         .map_err(|error| caused_by("invalidState", format!("Cannot parse {role}"), error).into())
 }
 
@@ -274,7 +273,7 @@ pub(crate) fn write_json<T: serde::Serialize>(
     value: &T,
     clock: &dyn Clock,
 ) -> Result<(), AppError> {
-    let bytes = serde_json::to_vec_pretty(value)?;
+    let bytes = to_vec_pretty(value)?;
     let transaction = FileTransaction::open(path, clock)?;
     transaction.write_bytes(&bytes)?;
     Ok(())
@@ -287,21 +286,62 @@ pub(crate) fn write_bytes(path: &Path, bytes: &[u8], clock: &dyn Clock) -> Resul
     Ok(())
 }
 
-/// Resolves an output path and creates only its containing directory.
-pub(crate) fn output_path(path: &Path) -> Result<PathBuf, AppError> {
-    let absolute = if path.is_absolute() {
-        path.to_owned()
-    } else {
-        std::path::absolute(path)?
-    };
+/// Resolves an output path without creating anything before destination checks.
+pub(crate) fn resolve_output_path(path: &Path) -> Result<PathBuf, AppError> {
+    let absolute = absolute(path)?;
+    output_path_text(&absolute)?;
     let name = absolute
         .file_name()
         .ok_or_else(|| fail("invalidInput", "Output path requires a file name"))?;
     let parent = absolute
         .parent()
         .ok_or_else(|| fail("invalidInput", "Output path requires a parent directory"))?;
+    let resolved = resolve_directory(parent)?.join(name);
+    output_path_text(&resolved)?;
+    Ok(resolved)
+}
+
+/// Resolves existing directories through aliases and projects missing children.
+fn resolve_directory(path: &Path) -> Result<PathBuf, AppError> {
+    match fs::canonicalize(path) {
+        Ok(path) => return Ok(path),
+        Err(error) if error.kind() == ErrorKind::NotFound => {}
+        Err(error) => return Err(error.into()),
+    }
+    let parent = path
+        .parent()
+        .ok_or_else(|| fail("invalidInput", "Cannot resolve output directory"))?;
+    let mut resolved = resolve_directory(parent)?;
+    match path.components().next_back() {
+        Some(Component::ParentDir) => {
+            _ = resolved.pop();
+        }
+        Some(Component::Normal(name)) => resolved.push(name),
+        _ => {}
+    }
+    Ok(resolved)
+}
+
+/// Prepares a destination only after its effective path is representable.
+pub(crate) fn output_path(path: &Path) -> Result<PathBuf, AppError> {
+    let output = resolve_output_path(path)?;
+    create_output_parent(&output)?;
+    Ok(output)
+}
+
+/// Creates the parent of an already checked artifact path.
+pub(crate) fn create_output_parent(path: &Path) -> Result<(), AppError> {
+    let parent = path
+        .parent()
+        .ok_or_else(|| fail("invalidInput", "Output path requires a parent directory"))?;
     fs::create_dir_all(parent)?;
-    Ok(fs::canonicalize(parent)?.join(name))
+    Ok(())
+}
+
+/// Returns the exact spelling used by receipts; JSON paths cannot be lossy.
+pub(crate) fn output_path_text(path: &Path) -> Result<&str, AppError> {
+    path.to_str()
+        .ok_or_else(|| fail("invalidInput", "Audit output path must be UTF-8"))
 }
 
 /// Keeps existing generation paths untouched, even if a link there is dangling.
@@ -331,9 +371,32 @@ pub(crate) fn reject_source_alias(path: &Path, inventory: &Inventory) -> Result<
 
 /// Prevents an assertion export from replacing canonical audit state.
 pub(crate) fn reject_state_destination(
+    requested: &Path,
     path: &Path,
     state_directory: &Path,
 ) -> Result<(), AppError> {
+    let requested = absolute(requested)?;
+    let requested_state = absolute(state_directory)?;
+    let state_directory = fs::canonicalize(state_directory)?;
+    let resolved_reports = resolve_directory(&state_directory.join("reports"))?;
+    // Reserve all ASCII case variants across platforms, including before the
+    // first publication when filesystem identity cannot be checked.
+    let in_reports = |path: &Path, state: &Path| {
+        path.strip_prefix(state).is_ok_and(|tail| {
+            tail.components()
+                .next()
+                .is_some_and(|component| component.as_os_str().eq_ignore_ascii_case("reports"))
+        })
+    };
+    if in_reports(&requested, &requested_state)
+        || in_reports(path, &state_directory)
+        || path.starts_with(&resolved_reports)
+    {
+        return Err(fail(
+            "invalidInput",
+            "Batch output cannot target the report publication area",
+        ));
+    }
     for name in [
         "audit-state.json",
         "inventory.json",
@@ -407,9 +470,6 @@ fn validate_index(inventory: &Inventory, index: &[IndexEntry]) -> Result<(), App
                 format!("Search index provenance does not match '{}'", entry.path),
             ));
         }
-        if entry.line == 0 {
-            return Err(fail("invalidState", "Search index line must be positive"));
-        }
     }
     Ok(())
 }
@@ -424,7 +484,7 @@ fn validate_inventory(inventory: &Inventory) -> Result<(), AppError> {
     if files.len() != inventory.files.len() {
         return Err(fail("invalidState", "Inventory repeats a source file"));
     }
-    let tests: BTreeMap<&str, &crate::model::TestCase> = inventory
+    let tests: BTreeMap<&str, &TestCase> = inventory
         .tests
         .iter()
         .map(|test| (test.id.as_str(), test))
@@ -439,7 +499,7 @@ fn validate_inventory(inventory: &Inventory) -> Result<(), AppError> {
                 format!("Test '{}' references an unknown file", test.id),
             ));
         };
-        if test.line == 0 || test.end_line < test.line || test.end_line > file.line_count {
+        if test.end_line < test.line.get() || test.end_line > file.line_count {
             return Err(fail(
                 "invalidState",
                 format!("Test '{}' has an invalid source range", test.id),
@@ -447,7 +507,7 @@ fn validate_inventory(inventory: &Inventory) -> Result<(), AppError> {
         }
     }
 
-    let assertions: BTreeMap<&str, &crate::model::AssertionSite> = inventory
+    let assertions: BTreeMap<&str, &AssertionSite> = inventory
         .assertions
         .iter()
         .map(|assertion| (assertion.id.as_str(), assertion))
@@ -462,9 +522,7 @@ fn validate_inventory(inventory: &Inventory) -> Result<(), AppError> {
                 format!("Assertion '{}' references an unknown file", assertion.id),
             ));
         };
-        if assertion.line == 0
-            || assertion.column == 0
-            || assertion.end_line < assertion.line
+        if assertion.end_line < assertion.line.get()
             || assertion.end_line > file.line_count
             || assertion.expression.trim().is_empty()
             || assertion.file_sha256 != file.sha256
@@ -548,7 +606,7 @@ pub(crate) fn validate_journal(
     journal: &ClassificationJournal,
     index: &[IndexEntry],
 ) -> Result<(), AppError> {
-    let assertions: BTreeMap<&str, &crate::model::AssertionSite> = inventory
+    let assertions: BTreeMap<&str, &AssertionSite> = inventory
         .assertions
         .iter()
         .map(|assertion| (assertion.id.as_str(), assertion))
@@ -587,11 +645,11 @@ pub(crate) fn validate_journal(
 }
 
 /// Supplies a diagnostic map of state file paths to skill recipes.
-pub(crate) fn state_paths(state_directory: &Path) -> Value {
-    json!({
-        "state": state_directory.join("audit-state.json"),
-        "inventory": state_directory.join("inventory.json"),
-        "index": state_directory.join("search-index.jsonl"),
-        "classifications": state_directory.join("classifications.json"),
-    })
+pub(crate) fn state_paths(state_directory: &Path) -> Result<Value, AppError> {
+    Ok(json!({
+        "state": output_path_text(&state_directory.join("audit-state.json"))?,
+        "inventory": output_path_text(&state_directory.join("inventory.json"))?,
+        "index": output_path_text(&state_directory.join("search-index.jsonl"))?,
+        "classifications": output_path_text(&state_directory.join("classifications.json"))?,
+    }))
 }

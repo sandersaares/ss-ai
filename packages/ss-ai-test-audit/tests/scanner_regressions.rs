@@ -11,7 +11,7 @@ use std::time::Duration;
 
 use jiff::Timestamp;
 use ohno::AppError;
-use serde_json::Value;
+use serde_json::{Value, from_slice, json};
 use ss_ai_runtime::{Clock, Process, ProcessOutput};
 use ss_ai_test_audit::initialize;
 use tempfile::tempdir_in;
@@ -60,7 +60,7 @@ fn scan(populate: impl FnOnce(&Path)) -> Value {
     write(&repository, ".git", "gitdir: ../fixture-git");
     populate(&repository);
     initialize(&repository, &[], &state, &FixtureGit, &FixedClock).unwrap();
-    serde_json::from_slice(&fs::read(state.join("inventory.json")).unwrap()).unwrap()
+    from_slice(&fs::read(state.join("inventory.json")).unwrap()).unwrap()
 }
 
 /// Adds a source or evidence file to the selected repository.
@@ -86,6 +86,11 @@ fn narrow_assertion_scope_indexes_repository_contract_evidence() {
         "tests/check.rs",
         "#[test]\nfn checks_value() { assert_eq!(1, 1); }\n",
     );
+    write(
+        &repository,
+        "unselected/check.rs",
+        "#[test]\nfn outside_scope() { assert!(outside_contract()); }\n",
+    );
     initialize(
         &repository,
         &[PathBuf::from("tests")],
@@ -94,10 +99,16 @@ fn narrow_assertion_scope_indexes_repository_contract_evidence() {
         &FixedClock,
     )
     .unwrap();
-    let inventory: Value =
-        serde_json::from_slice(&fs::read(state.join("inventory.json")).unwrap()).unwrap();
-    assert_eq!(inventory["scopePaths"], serde_json::json!(["tests"]));
-    assert_eq!(rows(&inventory, "tests").len(), 1);
+    let inventory: Value = from_slice(&fs::read(state.join("inventory.json")).unwrap()).unwrap();
+    assert_eq!(inventory["scopePaths"], json!(["tests"]));
+    let [test] = rows(&inventory, "tests") else {
+        panic!("expected only the selected test")
+    };
+    assert_eq!(test["name"], "checks_value");
+    let [site] = rows(&inventory, "assertions") else {
+        panic!("expected only the selected assertion")
+    };
+    assert_eq!(site["expression"], "assert_eq!(1, 1)");
     assert!(
         rows(&inventory, "files")
             .iter()
@@ -105,6 +116,55 @@ fn narrow_assertion_scope_indexes_repository_contract_evidence() {
     );
     let index = fs::read_to_string(state.join("search-index.jsonl")).unwrap();
     assert!(index.contains("value` returns one"));
+}
+
+#[test]
+fn explicit_file_and_directory_scopes_can_include_normally_excluded_source() {
+    let fixture = tempdir_in(env!("CARGO_TARGET_TMPDIR")).unwrap();
+    let repository = fixture.path().join("repository");
+    write(&repository, ".git", "gitdir: ../fixture-git");
+    write(&repository, "Cargo.toml", "[workspace]");
+    write(
+        &repository,
+        "target/selected/check.rs",
+        "#[test] fn selected() { assert!(selected_contract()); }",
+    );
+    write(
+        &repository,
+        "target/neighbor.rs",
+        "#[test] fn neighbor() { assert!(neighbor_contract()); }",
+    );
+    for (name, scope) in [
+        ("default", None),
+        ("directory", Some("target/selected")),
+        ("excluded-root", Some("target")),
+        ("file", Some("target/selected/check.rs")),
+    ] {
+        let state = fixture.path().join(name);
+        let scopes = scope.map(PathBuf::from).into_iter().collect::<Vec<_>>();
+        initialize(&repository, &scopes, &state, &FixtureGit, &FixedClock).unwrap();
+        let inventory: Value =
+            from_slice(&fs::read(state.join("inventory.json")).unwrap()).unwrap();
+        let index = fs::read_to_string(state.join("search-index.jsonl")).unwrap();
+        let has_selected = scope.is_some();
+        assert_eq!(
+            rows(&inventory, "tests")
+                .iter()
+                .any(|test| test["name"] == "selected"),
+            has_selected
+        );
+        assert_eq!(
+            rows(&inventory, "assertions")
+                .iter()
+                .any(|site| site["expression"] == "assert!(selected_contract())"),
+            has_selected
+        );
+        assert_eq!(index.contains("target/selected/check.rs"), has_selected);
+        assert_eq!(
+            index.contains("target/neighbor.rs"),
+            name == "excluded-root"
+        );
+    }
 }
 
 /// Accesses a collection in the emitted inventory by its public field name.
@@ -392,26 +452,97 @@ fn rustdoc_flags_are_order_independent_and_ignored_fences_are_skipped() {
 //! ```
 //!
 //! ```no_run,rust
-//! assert!(checked());
+//! assert_eq!(compile_only(), 1);
+//! static_assertions::assert_impl_all!(usize: Copy);
+//! value().expect("availability");
+//! ```
+//!
+//! ```rust
+//! let message = "assert!(fake_string())"; // assert!(fake_comment());
+//! assert_eq!(runs(), 1); assert!(another_check());
 //! ```
 "#,
         );
     });
-    assert_eq!(rows(&inventory, "tests").len(), 3);
-    assert_eq!(rows(&inventory, "assertions").len(), 3);
+    assert_eq!(rows(&inventory, "tests").len(), 4);
+    assert_eq!(rows(&inventory, "assertions").len(), 6);
     for marker in ["```rust,should_panic", "```edition2024, should_panic, rust"] {
         assert_eq!(assertion(&inventory, marker)["kind"], "panicExpectation");
     }
     assert_eq!(
-        assertion(&inventory, "assert!(checked());")["kind"],
+        assertion(&inventory, "assert_eq!(runs(), 1)")["kind"],
         "assertion"
     );
+    assert_eq!(
+        assertion(&inventory, "assert!(another_check())")["column"],
+        28
+    );
+    assert_eq!(
+        assertion(
+            &inventory,
+            "static_assertions::assert_impl_all!(usize: Copy)"
+        )["kind"],
+        "compileTimeAssertion"
+    );
+    assert_eq!(
+        assertion(&inventory, r#"value().expect("availability")"#)["kind"],
+        "fallibleValueCheck"
+    );
+}
+
+#[test]
+fn rustdoc_parse_limitations_do_not_fall_back_to_text_matches() {
+    let inventory = scan(|repository| {
+        write(
+            repository,
+            "src/lib.rs",
+            "//! ```rust\n//! assert!(unparseable()); let =\n//! ```\n",
+        );
+    });
+    assert_eq!(rows(&inventory, "tests").len(), 1);
+    assert!(rows(&inventory, "assertions").is_empty());
+    assert!(
+        rows(&inventory, "diagnostics")
+            .iter()
+            .any(|row| row["kind"] == "rustdocParseLimitation")
+    );
+}
+
+#[test]
+fn only_a_test_owned_destructor_suppresses_panics_based_on_its_role() {
+    let inventory = scan(|repository| {
+        write(
+            repository,
+            "src/lib.rs",
+            r#"
+#[cfg(test)]
+mod named_test {
+    #[test] fn drop() { panic!("ordinary test"); }
+    struct Trigger;
+    impl Drop for Trigger {
+        fn drop(&mut self) { panic!("destructor"); }
+    }
+}
+#[cfg(test)]
+mod helper_test {
+    fn drop() { panic!("ordinary helper"); }
+    #[test] fn call_helper() { drop(); }
+}
+"#,
+        );
+    });
+    assert_eq!(rows(&inventory, "assertions").len(), 2);
+    let test = assertion(&inventory, r#"panic!("ordinary test")"#);
+    assert!(test["containingTestId"].is_string());
+    let helper = assertion(&inventory, r#"panic!("ordinary helper")"#);
+    assert_eq!(helper["callingTestIds"].as_array().unwrap().len(), 1);
 }
 
 #[test]
 fn scans_source_bin_directories_without_indexing_build_outputs() {
     let inventory = scan(|repository| {
         write(repository, "Cargo.toml", "[workspace]");
+        // The .NET marker overlaps Cargo's reserved source directory to check precedence.
         write(repository, "src/mixed.csproj", "<Project />");
         write(
             repository,
@@ -487,7 +618,7 @@ fn unicode() {
 
 #[test]
 fn accepts_the_file_limit_and_excludes_larger_inputs() {
-    // Whitespace exercises the 4 MiB read cap without creating a huge index.
+    // Whitespace exercises the source read cap without creating a huge index.
     const LIMIT: usize = 4 * 1024 * 1024;
     let inventory = scan(|repository| {
         fs::write(repository.join("limit.md"), vec![b' '; LIMIT]).unwrap();

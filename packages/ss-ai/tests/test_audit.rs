@@ -7,10 +7,11 @@
 use std::fs;
 use std::process::Command;
 
-use serde_json::{Value, json};
+use serde_json::{Value, from_slice, json, to_vec_pretty};
 use tempfile::TempDir;
 
 #[test]
+#[cfg_attr(miri, ignore = "requires a native subprocess")]
 fn help_lists_the_native_workflow_without_provider_authentication() {
     let output = Command::new(env!("CARGO_BIN_EXE_ss-ai"))
         .arg("test-audit")
@@ -38,6 +39,7 @@ fn help_lists_the_native_workflow_without_provider_authentication() {
 }
 
 #[test]
+#[cfg_attr(miri, ignore = "requires a native subprocess")]
 fn executable_accepts_multi_query_search_and_compact_submit() {
     let root = TempDir::new().unwrap();
     let repository = root.path().join("repository");
@@ -73,7 +75,7 @@ fn executable_accepts_multi_query_search_and_compact_submit() {
         "{}",
         String::from_utf8_lossy(&search.stderr)
     );
-    let search: Value = serde_json::from_slice(&search.stdout).unwrap();
+    let search: Value = from_slice(&search.stdout).unwrap();
     assert_eq!(search["queryCount"], 2);
 
     let batch_path = state.join("batch-one.json");
@@ -85,13 +87,14 @@ fn executable_accepts_multi_query_search_and_compact_submit() {
         .output()
         .unwrap();
     assert!(next.status.success());
-    let next: Value = serde_json::from_slice(&next.stdout).unwrap();
-    let batch: Value = serde_json::from_slice(&fs::read(&batch_path).unwrap()).unwrap();
+    let next: Value = from_slice(&next.stdout).unwrap();
+    let batch_path = next["batchPath"].as_str().unwrap();
+    let batch: Value = from_slice(&fs::read(batch_path).unwrap()).unwrap();
     let evidence_handle = search["results"][0]["matches"][0]["evidenceHandle"].clone();
     let submission_path = state.join("submission.json");
     fs::write(
         &submission_path,
-        serde_json::to_vec_pretty(&json!({
+        to_vec_pretty(&json!({
             "schemaVersion": 1,
             "batchFingerprint": next["batchFingerprint"],
             "rows": [{
@@ -112,7 +115,7 @@ fn executable_accepts_multi_query_search_and_compact_submit() {
         .args(["test-audit", "submit", "--state-directory"])
         .arg(&state)
         .args(["--batch-path"])
-        .arg(&batch_path)
+        .arg(batch_path)
         .args(["--submission-path"])
         .arg(&submission_path)
         .args(["--output-path"])
@@ -124,7 +127,7 @@ fn executable_accepts_multi_query_search_and_compact_submit() {
         "{}",
         String::from_utf8_lossy(&submit.stderr)
     );
-    let submit: Value = serde_json::from_slice(&submit.stdout).unwrap();
+    let submit: Value = from_slice(&submit.stdout).unwrap();
     assert_eq!(submit["record"]["remaining"], 0);
     assert_eq!(submit["nextBatch"]["batchCount"], 0);
     assert_eq!(submit["nextAction"], "report");
@@ -141,14 +144,33 @@ fn executable_accepts_multi_query_search_and_compact_submit() {
         "{}",
         String::from_utf8_lossy(&report.stderr)
     );
-    let report: Value = serde_json::from_slice(&report.stdout).unwrap();
-    assert!(report["summaryJsonPath"].is_string());
-    assert!(report["summaryPath"].is_string());
-    assert!(report["detailsJsonPath"].is_string());
-    assert!(report["detailsPath"].is_string());
+    let report: Value = from_slice(&report.stdout).unwrap();
+    assert_eq!(report["nextAction"], "complete");
+    assert_eq!(report["finalResponseAllowed"], true);
     let summary: Value =
-        serde_json::from_slice(&fs::read(report["summaryJsonPath"].as_str().unwrap()).unwrap())
-            .unwrap();
+        from_slice(&fs::read(report["summaryJsonPath"].as_str().unwrap()).unwrap()).unwrap();
     assert_eq!(summary["schemaVersion"], 1);
     assert_eq!(summary["testCount"], report["testCount"]);
+    assert_eq!(summary["classificationCounts"]["Documented"], 1);
+    let summary_text = fs::read_to_string(report["summaryPath"].as_str().unwrap()).unwrap();
+    assert!(summary_text.contains("Documented: 1/1"));
+
+    let details: Value =
+        from_slice(&fs::read(report["detailsJsonPath"].as_str().unwrap()).unwrap()).unwrap();
+    let predicate = "assert_eq!(value(), 1)";
+    assert_eq!(details["testInventory"][0]["name"], "checks_value");
+    assert_eq!(
+        details["assertionTrace"][0]["assertion"]["expression"],
+        predicate
+    );
+    let details_text = fs::read_to_string(report["detailsPath"].as_str().unwrap()).unwrap();
+    assert!(details_text.contains("checks_value"));
+    assert!(details_text.contains(predicate));
+
+    let trace: Value =
+        from_slice(&fs::read(report["tracePath"].as_str().unwrap()).unwrap()).unwrap();
+    assert_eq!(trace["rows"][0]["assertion"]["expression"], predicate);
+    let inventory: Value =
+        from_slice(&fs::read(report["testInventoryPath"].as_str().unwrap()).unwrap()).unwrap();
+    assert_eq!(inventory["tests"][0]["name"], "checks_value");
 }

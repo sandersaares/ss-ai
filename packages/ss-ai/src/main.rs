@@ -77,6 +77,8 @@ fn execute() -> Result<ExitCode, AppError> {
         .get(1)
         .is_some_and(|argument| argument == "test-audit")
     {
+        // Route before the fallback constructs NativeHttp: test audit uses
+        // only local Git (docs/implementation.md, Architecture).
         let audit_arguments = arguments
             .first()
             .into_iter()

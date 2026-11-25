@@ -4,12 +4,12 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use ohno::AppError;
-use serde_json::json;
+use serde_json::{json, to_vec_pretty, to_writer};
 use ss_ai_runtime::{Clock, FileTransaction, Process, caused_by, fail};
 
-use crate::model::{AuditState, ClassificationJournal, RevisionKind};
+use crate::model::{AuditState, ClassificationJournal, IndexEntry, RevisionKind};
 use crate::scan::{digest, inventory};
-use crate::state::{output_path, state_paths, write_bytes, write_json};
+use crate::state::{output_path, output_path_text, state_paths, write_bytes, write_json};
 
 /// Keeps session references concise while retaining ample digest entropy.
 const AUDIT_ID_HEX_CHARACTERS: usize = 24;
@@ -52,13 +52,13 @@ pub fn initialize(
         revision_kind,
         &scopes,
     )?;
-    let inventory_material = serde_json::to_vec_pretty(&inventory)?;
+    let inventory_material = to_vec_pretty(&inventory)?;
     let audit_id = digest(&inventory_material);
     inventory.audit_id.clear();
     inventory
         .audit_id
         .push_str(audit_id.get(..AUDIT_ID_HEX_CHARACTERS).unwrap_or_default());
-    let inventory_bytes = serde_json::to_vec_pretty(&inventory)?;
+    let inventory_bytes = to_vec_pretty(&inventory)?;
     let snapshot_sha256 = digest(&inventory_bytes);
     let index_bytes = index_lines(&index)?;
     let index_sha256 = digest(&index_bytes);
@@ -99,11 +99,12 @@ pub fn initialize(
         &journal,
         clock,
     )?;
-    state_transaction.write_bytes(&serde_json::to_vec_pretty(&state)?)?;
+    // The state record marks the audit ready only after its required inputs exist.
+    state_transaction.write_bytes(&to_vec_pretty(&state)?)?;
     Ok(json!({
         "schemaVersion": 1,
-        "stateDirectory": state_directory,
-        "paths": state_paths(&state_directory),
+        "stateDirectory": output_path_text(&state_directory)?,
+        "paths": state_paths(&state_directory)?,
         "auditId": state.audit_id,
         "snapshotSha256": state.snapshot_sha256,
         "repositoryRevision": repository_revision,
@@ -225,10 +226,10 @@ fn git_output(
 }
 
 /// Serializes one compact JSON document per searchable line.
-fn index_lines(entries: &[crate::model::IndexEntry]) -> Result<Vec<u8>, AppError> {
+fn index_lines(entries: &[IndexEntry]) -> Result<Vec<u8>, AppError> {
     let mut bytes = Vec::new();
     for entry in entries {
-        serde_json::to_writer(&mut bytes, entry)?;
+        to_writer(&mut bytes, entry)?;
         bytes.push(b'\n');
     }
     Ok(bytes)

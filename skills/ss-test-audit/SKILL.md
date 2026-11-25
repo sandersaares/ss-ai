@@ -9,9 +9,9 @@ Audit the tests in a repository or explicit scope and distinguish what each asse
 
 # Scope
 
-Resolve the repository path from the invocation. If the user names a crate, package, path, or module, translate it to one or more exact repository-relative scope paths. Those paths control test and assertion inventory. The evidence index still covers the repository-wide text snapshot, subject to the same traversal exclusions, so public declarations and documentation outside a narrow assertion scope remain citable. `scopePaths` reports assertion coverage; indexed file and language totals report evidence coverage. Without a scope, audit assertions and evidence across the complete current repository.
+Resolve the repository path from the invocation. If the user names a crate, package, path, or module, translate it to one or more exact repository-relative scope paths. Those paths control test and assertion inventory. The evidence index covers the repository-wide text snapshot under the normal traversal exclusions, plus explicitly selected source outside that walk, so public declarations and documentation outside a narrow assertion scope remain citable. `scopePaths` reports assertion coverage; indexed file and language totals report evidence coverage. Without a scope, audit assertions and evidence across the complete current repository.
 
-Use one empty state directory for each immutable audit. Reuse that directory only to resume the same audit. State created by another utility schema version is incompatible and must be rejected rather than migrated or interpreted.
+Use a new, empty state directory outside the repository, even for an audit limited by `--scope-path`. Reuse that directory only to resume the same audit. State created by another utility schema version is incompatible and must be rejected rather than migrated or interpreted.
 
 # Evidence boundary
 
@@ -32,7 +32,7 @@ Use `Confirmed` only when the cited evidence establishes the claimed relationshi
 
 # Stage 1: initialize an immutable audit
 
-Resolve or create an absolute state directory outside the audited scope. If resuming, retain its exact path and skip initialization after verifying the retained `auditId`, repository, and snapshot summary from the last session.
+Use the absolute state directory path. If resuming, retain its exact path and skip initialization after verifying the retained `auditId`, repository, and snapshot summary from the last session.
 
 Run `ss-ai test-audit initialize` using the first recipe in [commands.md](commands.md#initialize). Pass `--scope-path` once for each resolved scope. If initialization reports an unsupported-language or parse-fallback diagnostic, retain that diagnostic as a coverage limit; do not describe the later inventory as exhaustive.
 
@@ -42,7 +42,7 @@ Record the returned `auditId`, `snapshotSha256`, counts, state paths, and diagno
 
 Do not raw-dump `inventory.json` or `search-index.jsonl` into the conversation. Use `next-batch` for assertions and `search` for targeted evidence.
 
-Compare the native inventory with an independent repository test-discovery method when the repository provides one, such as `cargo test -- --list`, a language test runner's list mode, or the repository's documented discovery command. Do not execute arbitrary test suites merely to invent a list.
+Compare the native inventory with an independent repository test-discovery method when the repository provides one, such as a language test runner's list mode. Verify the runner is available and run it in the audited checkout in the same invocation, or explicitly select its manifest (for example, `cargo test --manifest-path "{{AUDITED_MANIFEST}}" -- --list`, where `AUDITED_MANIFEST` is the absolute manifest path for that checkout in the runner's environment). For a platform-specific scope, match the audited platform; for a Linux scope from Windows, use WSL when available. If the matching environment or runner is unavailable, record a discovery limitation rather than relying on a host-only result or installing tools. Do not execute arbitrary test suites merely to invent a list.
 
 Reconcile discrepancies before classification:
 
@@ -54,7 +54,7 @@ Reconcile discrepancies before classification:
 - unsupported source language text remains searchable but receives no assertion or test inventory;
 - syntax rejected by the Rust parser uses a Rust text fallback and carries a diagnostic.
 
-Ordinary traversal skips generated and tool-state directories such as `.git`, `target`, `node_modules`, and build-output directories. Select such a directory explicitly if it is part of the requested source scope. The native tool rejects a symbolic link used as the scope and does not follow nested symbolic links; nested omissions receive a diagnostic.
+Ordinary traversal skips generated and tool-state directories such as `target`, `node_modules`, and build-output directories. Select these directories explicitly when they belong to the requested source scope. Git administrative data (`.git`) is not source and cannot be selected. The native tool rejects a symbolic link used as the scope and does not follow nested symbolic links; nested omissions receive a diagnostic.
 
 Shared helpers, callbacks, and destructors count once at their definition. Production assertions and defensive branches do not become test assertions merely because tests call a same-named method. The Rust inventory links a shared assertion only from direct AST-visible free-function or qualified-path calls in a test; it does not infer callers from comments, function declarations, method calls, trait callbacks, or substring matches. Preserve every native caller link and add semantically confirmed `callingTestIds` in the classification record when static syntax cannot identify a call. Supply `unlinkedReason` rather than guessing when no calling test can be established.
 
@@ -62,9 +62,7 @@ Panic sites in test-owned `Drop` implementations do not count when they exist on
 
 # Stage 3: classify assertions in batches
 
-Execute `next-batch` as specified in [commands.md](commands.md#export-the-next-assertion-batch). Keep the default count of 25. Read the returned `displayPath` for compact batch judgment. The companion `batchPath` is a machine-readable record whose `assertions` array is flat: each item is an assertion directly, not `{ assertion: ... }`. Do not use PowerShell JSON projection scripts to reinterpret it.
-
-Obey the initial batch's `nextAction` too: if it is `report`, continue directly to stage 4; if it is `continue`, classify the returned batch. An initial empty batch is still a transition to the report, never a final response.
+Execute `next-batch` as specified in [commands.md](commands.md#export-the-next-assertion-batch). Keep the default count of 25. Read `displayPath` for judgment, and retain the companion machine record at `batchPath` unchanged for `submit --batch-path`. Do not write PowerShell projection scripts to reinterpret it.
 
 Read only the exported batch display, its local context, and targeted evidence searches. For each assertion:
 
@@ -84,26 +82,19 @@ To reuse an accepted row, supply `reuseFrom`, explicit `equivalenceConfirmed: tr
 
 Submit the rows and export the next assertion batch through one `submit` command using [commands.md](commands.md#submit-a-compact-row-batch). `submit` is the normal transition after every classified batch. Use the lower-level `advance`, `record-batch`, and `next-batch` commands only while recovering or inspecting an intermediate state.
 
-If the command reports stale state, malformed citations, duplicate IDs, or an already different classification, stop that batch and report the diagnostic without overwriting state. Errors name the compact row assertion ID, field, and evidence reference. A failed next-batch publication after a successful record can be resumed by replaying the identical compact submission; record insertion remains idempotent.
+## Follow the current directive
 
-After every successful `submit`, read its explicit `nextAction` before doing anything else. Use its `record.completed` and `record.remaining` fields to emit the following informational progress message in the conversation: `Classified C of T assertions; R remain. The batch completed N sites.`
+Use the latest successful transition's `nextAction`, including on the initial batch or after resumption. After `submit`, use the `record` counts to report progress (`Classified C of T assertions; R remain. The batch completed N sites.`). Counts, progress updates, and checkpoints are informational only; do not pause or wait for a reply.
 
-This progress message is not a completion, checkpoint, pause, handoff, request for input, or permission to end the turn. Do not wait for a reply after it. In the same skill invocation, immediately continue with the next required action even when `R` is zero:
+- `continue`: immediately read the returned display and classify its assertions in this invocation. For `submit` or `advance`, these paths are `nextBatch.displayPath` and `nextBatch.batchPath`; do not request the batch again. The recovery-only `record-batch` does not export a batch, so use `next-batch` after its `continue`.
+- `report`: run stage 4 immediately, regardless of which supported path reached reporting.
+- Only a successful `report` with `nextAction: "complete"` and `finalResponseAllowed: true` authorizes a completed response.
 
-1. If `nextAction` is `continue`, read `nextBatch.displayPath` and classify its assertions without another CLI round trip. Retain `nextBatch.batchPath` unchanged for the subsequent compact submission.
-2. If `nextAction` is `report`, continue to stage 4 and run the final `report`; the report command verifies exact classification coverage and fails if the continuation directive is stale or incorrect.
+## Recover from failure
 
-Never emit any final assistant response while the latest transition has `nextAction: "continue"` or `remaining > 0`. This is a hard final-response gate. Saving state, writing SQL/checkpoint records, reading the next batch display, beginning the next batch, or reaching a round batch number does not remove this gate. Continue the loop immediately. Do not reinterpret a long duration or large remaining count as a context-limit event.
+Correct diagnosed row defects before retrying. Stop on stale state or a conflicting accepted classification; report the diagnostic without overwriting state. If export failed after the journal write succeeded, replay the identical compact submission with the original machine batch; record insertion is idempotent. Do not overwrite either input.
 
-The only permitted ways to stop this invocation are:
-
-- a successful `report` result with `nextAction: "complete"` and `finalResponseAllowed: true`;
-- a concrete blocking diagnostic from a native command that names the assertion, field, or evidence problem and cannot be corrected without user input; or
-- an actual runtime interruption explicitly reported by the execution platform.
-
-A normal user turn boundary, checkpoint write, progress message, or self-authored statement that work is lengthy is not a runtime interruption. If the platform does interrupt, preserve durable state without claiming completion; resumption must begin by reading the last transition directive and the corresponding batch. Preserve the exact machine batch and submission when replaying; do not write either next output onto one of those inputs.
-
-Repeat the classification loop while `nextAction` is `continue` or `R` is greater than zero. Never declare completion from an assertion count, a progress message, mutation summary, checkpoint, or partial next-batch read alone.
+Stop without claiming completion only for a concrete native diagnostic that names an assertion, field, or evidence problem and cannot be corrected without user input, or for an interruption explicitly reported by the execution platform. A user turn boundary, progress message, or long duration is not a runtime interruption. Preserve durable state and begin resumption by reading the last directive and corresponding batch.
 
 # Stage 4: validate and emit reports
 
@@ -114,7 +105,7 @@ Deliver these generated paths:
 - `trace.json`: searchable assertion rows with source, actual outcome, classification, and citations;
 - `test-inventory.json`: every test with direct and shared assertion IDs, including smoke cases with no counted predicate;
 - `summary.md`: per-module totals and percentages, tests with incidental-only checks, tests with no counted assertion, and scan diagnostics.
-- `summary.json`: machine-readable versioned summary matching the fields in the native report result.
+- `summary.json`: machine-readable audit summary defined by [summary.schema.json](schemas/summary.schema.json).
 - `details.md`: human-readable assertion trace, test inventory, and diagnostics.
 - `details.json`: machine-readable assertion trace, test inventory, and diagnostics.
 
@@ -127,11 +118,11 @@ Always show numerators and denominators. Mixed assertion sites enter neither num
 
 # Stage 5: summarize the execution
 
-Report completion only from a `report` result with `nextAction: "complete"` and `finalResponseAllowed: true`. That report may follow an initial empty batch, a resumed all-classified state, a low-level `record-batch`, or the latest `submit`; a `submit` is not required when no submission remains. Use the returned path fields; do not infer report paths under the state root. Keep the existing compatibility artifacts (`trace.json`, `test-inventory.json`) and add the standardized pairs (`summary.json` / `summary.md`, `details.json` / `details.md`).
+Use the successful report receipt for completion and artifact paths; do not infer report paths under the state root.
 
 Emit the final conversational summary in this fixed order: audit identity, repository/scope/revision, coverage totals, classification totals, rates, inventory gaps, diagnostics, and artifact paths. The Markdown summary and JSON summary use the same field set; `details.md` and `details.json` use `assertionTrace`, `testInventory`, and `diagnostics`.
 
-The report result also returns `noCountedAssertionCount`, `incidentalOnlyCount`, `unlinkedAssertionCount`, `fallibleValueCheckCount`, `conditionalAssertionCount`, and `diagnosticCount`. The first two fields count tests; the unlinked, fallible, and conditional fields count assertion sites or site diagnostics. Use those bounded counts for ordinary completion without opening the complete trace unless detailed validation requires it. A nonzero fallible count means the agent had to judge heuristic expect-style candidates; it is not an unsupported success-shaped zero.
+The report result also returns `noCountedAssertionCount` and `incidentalOnlyCount` for tests, `unlinkedAssertionCount` and `fallibleValueCheckCount` for assertion sites, and `conditionalAssertionCount` and `diagnosticCount` for diagnostics. Use those bounded counts without opening the complete trace unless detailed validation requires it. A nonzero fallible count means inventoried expect-style candidates required case-by-case judgment.
 
 The summary must state the audited repository and scopes, snapshot revision, test and assertion totals, classification totals, module rates, output paths, discovery cross-check, language coverage, and every material scan diagnostic or unresolved unsupported form.
 
