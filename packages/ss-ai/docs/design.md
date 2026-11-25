@@ -30,6 +30,10 @@ narrow documented patterns and do not claim exhaustive syntax coverage. Other
 indexed languages remain available for contract evidence without an assertion
 inventory.
 
+Selected scope paths limit tests and assertions. The evidence index independently
+covers repository-wide text, so a narrow audit can still cite public contracts
+outside its selected test tree without adding those files' tests to totals.
+
 Rust caller attribution uses direct test syntax, not same-name source text.
 Production invariants are not assertion sites unless a test calls their free
 helper directly. Recognized panic-expectation helpers count once and suppress

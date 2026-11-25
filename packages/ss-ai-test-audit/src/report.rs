@@ -3,18 +3,23 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::Write as _;
 use std::fs;
-use std::path::Path;
+use std::io::ErrorKind;
+use std::path::{Path, PathBuf};
 
 use ohno::AppError;
 use serde_json::json;
-use ss_ai_runtime::{Clock, fail};
+use ss_ai_runtime::{Clock, LockMode, ResourceLock, fail};
 
 use crate::model::{
     AuditSummary, Classification, ClassificationKind, ModuleSummary, TestCase, TraceRow,
 };
-use crate::state::{load_fresh, validate_source_snapshot, write_bytes, write_json};
+use crate::state::{
+    load_fresh, output_path, path_is_vacant, validate_source_snapshot, write_bytes, write_json,
+};
 
 /// Validates exact classification coverage and emits durable audit reports.
+///
+/// The returned paths identify a complete, immutable report generation.
 pub fn report(state_directory: &Path, clock: &dyn Clock) -> Result<String, AppError> {
     let loaded = load_fresh(state_directory, clock)?;
     if loaded.journal.classifications.len() != loaded.inventory.assertions.len() {
@@ -80,11 +85,7 @@ pub fn report(state_directory: &Path, clock: &dyn Clock) -> Result<String, AppEr
         .count();
     let unlinked_assertion_count = trace
         .iter()
-        .filter(|row| {
-            row.assertion.containing_test_id.is_none()
-                && row.assertion.calling_test_ids.is_empty()
-                && row.classification.calling_test_ids.is_empty()
-        })
+        .filter(|row| row.assertion.containing_test_id.is_none() && callers(row).next().is_none())
         .count();
     let fallible_value_check_count = trace
         .iter()
@@ -159,6 +160,8 @@ pub fn report(state_directory: &Path, clock: &dyn Clock) -> Result<String, AppEr
         "auditId": loaded.state.audit_id,
         "snapshotSha256": loaded.state.snapshot_sha256,
         "repositoryRevision": loaded.inventory.repository_revision,
+        "repositoryRoot": loaded.inventory.repository_root,
+        "scopePaths": loaded.inventory.scope_paths,
         "assertionTrace": trace,
         "testInventory": tests,
         "diagnostics": loaded.inventory.diagnostics,
@@ -172,22 +175,17 @@ pub fn report(state_directory: &Path, clock: &dyn Clock) -> Result<String, AppEr
         &trace,
         &loaded.inventory.diagnostics,
     );
-    validate_source_snapshot(&loaded.inventory, &loaded.state.repository_root)?;
-
-    let output_directory = state_directory.join("reports");
-    fs::create_dir_all(&output_directory)?;
-    let trace_path = output_directory.join("trace.json");
-    let inventory_path = output_directory.join("test-inventory.json");
-    let summary_json_path = output_directory.join("summary.json");
-    let summary_path = output_directory.join("summary.md");
-    let details_json_path = output_directory.join("details.json");
-    let details_path = output_directory.join("details.md");
-    write_json(&trace_path, &trace_document, clock)?;
-    write_json(&inventory_path, &test_document, clock)?;
-    write_json(&summary_json_path, &summary, clock)?;
-    write_bytes(&summary_path, summary_text.as_bytes(), clock)?;
-    write_json(&details_json_path, &details_document, clock)?;
-    write_bytes(&details_path, details_text.as_bytes(), clock)?;
+    let output_directory = publish_report(state_directory, clock, |staging| {
+        write_json(&staging.join("trace.json"), &trace_document, clock)?;
+        write_json(&staging.join("test-inventory.json"), &test_document, clock)?;
+        write_json(&staging.join("details.json"), &details_document, clock)?;
+        write_bytes(&staging.join("details.md"), details_text.as_bytes(), clock)?;
+        // Even a stranded staging directory should not advertise completion when
+        // any detail failed. The directory move still commits all artifacts at once.
+        write_bytes(&staging.join("summary.md"), summary_text.as_bytes(), clock)?;
+        write_json(&staging.join("summary.json"), &summary, clock)?;
+        validate_source_snapshot(&loaded.inventory, &loaded.state.repository_root)
+    })?;
     Ok(json!({
         "schemaVersion": 1,
         "status": "complete",
@@ -203,15 +201,76 @@ pub fn report(state_directory: &Path, clock: &dyn Clock) -> Result<String, AppEr
         "fallibleValueCheckCount": fallible_value_check_count,
         "conditionalAssertionCount": conditional_assertion_count,
         "diagnosticCount": loaded.inventory.diagnostics.len(),
-        "tracePath": trace_path,
-        "testInventoryPath": inventory_path,
-        "summaryJsonPath": summary_json_path,
-        "summaryPath": summary_path,
-        "detailsJsonPath": details_json_path,
-        "detailsPath": details_path,
+        "tracePath": output_directory.join("trace.json"),
+        "testInventoryPath": output_directory.join("test-inventory.json"),
+        "summaryJsonPath": output_directory.join("summary.json"),
+        "summaryPath": output_directory.join("summary.md"),
+        "detailsJsonPath": output_directory.join("details.json"),
+        "detailsPath": output_directory.join("details.md"),
         "moduleCount": modules.len()
     })
     .to_string())
+}
+
+/// Commits a complete report generation by renaming its private staging directory.
+fn publish_report(
+    state_directory: &Path,
+    clock: &dyn Clock,
+    write_artifacts: impl FnOnce(&Path) -> Result<(), AppError>,
+) -> Result<PathBuf, AppError> {
+    let publication = output_path(&state_directory.join("reports").join("publication"))?;
+    let directory = publication.parent().ok_or_else(|| {
+        fail(
+            "invalidState",
+            "Report publication requires a parent directory",
+        )
+    })?;
+    let _publication = ResourceLock::open(&publication, LockMode::Exclusive, clock)?;
+    let staging = directory.join(".staging");
+    match fs::symlink_metadata(&staging) {
+        Ok(metadata) if metadata.is_dir() => {}
+        Ok(_) => {
+            return Err(fail(
+                "invalidState",
+                "Report staging path must be a directory",
+            ));
+        }
+        Err(error) if error.kind() == ErrorKind::NotFound => fs::create_dir_all(&staging)?,
+        Err(error) => return Err(error.into()),
+    }
+
+    let result = (|| {
+        write_artifacts(&staging)?;
+        let destination = unused_report_path(directory)?;
+        fs::rename(&staging, &destination)?;
+        Ok(destination)
+    })();
+    if result.is_err() {
+        // The staging directory is exclusive to this publication. Never remove
+        // a published generation or the retained publication lock on failure.
+        _ = fs::remove_dir_all(&staging);
+    }
+    result
+}
+
+/// Finds an immutable destination without replacing earlier report results.
+fn unused_report_path(directory: &Path) -> Result<PathBuf, AppError> {
+    for generation in 1..=usize::MAX {
+        let path = directory.join(format!("generation-{generation}"));
+        if path_is_vacant(&path)? {
+            return Ok(path);
+        }
+    }
+    Err(fail("io", "No unused report generation is available"))
+}
+
+/// Combines native and agent attribution for both human and machine views.
+fn callers(row: &TraceRow) -> impl Iterator<Item = &str> {
+    row.assertion
+        .calling_test_ids
+        .iter()
+        .chain(&row.classification.calling_test_ids)
+        .map(String::as_str)
 }
 
 /// Counts each explicit semantic category without turning it into a quality score.
@@ -251,16 +310,7 @@ fn complete_test_inventory(
             if row.assertion.containing_test_id.as_deref() == Some(test.id.as_str()) {
                 direct.insert(row.assertion.id.clone());
             }
-            if (row
-                .assertion
-                .calling_test_ids
-                .iter()
-                .any(|id| id == &test.id)
-                || row
-                    .classification
-                    .calling_test_ids
-                    .iter()
-                    .any(|id| id == &test.id))
+            if callers(row).any(|id| id == test.id)
                 && row.assertion.containing_test_id.as_deref() != Some(test.id.as_str())
             {
                 shared.insert(row.assertion.id.clone());
@@ -452,14 +502,14 @@ fn render_summary(
         .sum::<usize>();
     _ = writeln!(
         output,
-        "| Total | {total} | {undocumented}/{total} ({:.1}%) | {incidental}/{total} ({:.1}%) |\n",
+        "| Total | {total} | {undocumented}/{total} ({:.1}%) | {incidental}/{total} ({:.1}%) |",
         ratio(undocumented, total),
         ratio(incidental, total)
     );
     for module in modules {
         _ = writeln!(
             output,
-            "| {} | {} | {}/{} ({:.1}%) | {}/{} ({:.1}%) |\n",
+            "| {} | {} | {}/{} ({:.1}%) | {}/{} ({:.1}%) |",
             escape_table(&module.module),
             module.assertion_count,
             module.no_explicitly_documented_promise_count,
@@ -569,11 +619,7 @@ fn render_details(
     );
     output.push_str("\n## Assertion trace\n\n");
     for row in trace {
-        let callers = if row.classification.calling_test_ids.is_empty() {
-            row.assertion.calling_test_ids.join(", ")
-        } else {
-            row.classification.calling_test_ids.join(", ")
-        };
+        let callers: BTreeSet<_> = callers(row).collect();
         _ = writeln!(
             output,
             "### {} — {:?} — `{}:{}`\n",
@@ -601,7 +647,7 @@ fn render_details(
             if callers.is_empty() {
                 "none".to_owned()
             } else {
-                callers
+                callers.into_iter().collect::<Vec<_>>().join(", ")
             }
         );
         if let Some(reason) = &row.classification.incidental_reason {

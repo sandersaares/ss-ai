@@ -9,7 +9,7 @@ Audit the tests in a repository or explicit scope and distinguish what each asse
 
 # Scope
 
-Resolve the repository path from the invocation. If the user names a crate, package, path, or module, translate it to one or more exact repository-relative scope paths. Without a scope, audit the complete current repository.
+Resolve the repository path from the invocation. If the user names a crate, package, path, or module, translate it to one or more exact repository-relative scope paths. Those paths control test and assertion inventory. The evidence index still covers the repository-wide text snapshot, subject to the same traversal exclusions, so public declarations and documentation outside a narrow assertion scope remain citable. `scopePaths` reports assertion coverage; indexed file and language totals report evidence coverage. Without a scope, audit assertions and evidence across the complete current repository.
 
 Use one empty state directory for each immutable audit. Reuse that directory only to resume the same audit. State created by another utility schema version is incompatible and must be rejected rather than migrated or interpreted.
 
@@ -64,7 +64,7 @@ Panic sites in test-owned `Drop` implementations do not count when they exist on
 
 Execute `next-batch` as specified in [commands.md](commands.md#export-the-next-assertion-batch). Keep the default count of 25. Read the returned `displayPath` for compact batch judgment. The companion `batchPath` is a machine-readable record whose `assertions` array is flat: each item is an assertion directly, not `{ assertion: ... }`. Do not use PowerShell JSON projection scripts to reinterpret it.
 
-Obey the initial batch's `nextAction` too: if it is `report`, continue directly to stage 4; if it is `continue`, classify the returned batch. An empty initial batch is still a transition to the report, never a final response.
+Obey the initial batch's `nextAction` too: if it is `report`, continue directly to stage 4; if it is `continue`, classify the returned batch. An initial empty batch is still a transition to the report, never a final response.
 
 Read only the exported batch display, its local context, and targeted evidence searches. For each assertion:
 
@@ -76,7 +76,7 @@ Read only the exported batch display, its local context, and targeted evidence s
 
 Search API docs, design docs, public declarations, trait implementations, and inherited contracts using [commands.md](commands.md#search-evidence). Group independent evidence lookups into one `search` command by repeating `--query`; the command returns one result page per query. Supply `--kind` to narrow queries only when the target is already clear. Terms within one query are combined as an AND query.
 
-Write one compact submission matching [compact-submission.schema.json](schemas/compact-submission.schema.json). Do not repeat the audit token; `submit` binds the rows to the current `batchPath`. Each `citationHandles` entry must be an exact `evidenceHandle` returned by search. Multiple citations are independent array entries.
+Write one compact submission matching [compact-submission.schema.json](schemas/compact-submission.schema.json). Copy the current batch result's `batchFingerprint` exactly; do not recompute it or copy a fingerprint from an earlier generation. `submit` uses that fingerprint to bind the rows to the exact current `batchPath`. Each `citationHandles` entry must be an exact `evidenceHandle` returned by search. Multiple citations are independent array entries.
 
 For a fresh row, supply assertion ID, classification, evidence status, actual outcome, rationale, citation handles, caller IDs, and applicable reasons directly.
 
@@ -101,7 +101,7 @@ The only permitted ways to stop this invocation are:
 - a concrete blocking diagnostic from a native command that names the assertion, field, or evidence problem and cannot be corrected without user input; or
 - an actual runtime interruption explicitly reported by the execution platform.
 
-A normal user turn boundary, checkpoint write, progress message, or self-authored statement that work is lengthy is not a runtime interruption. If the platform does interrupt, preserve durable state without claiming completion; resumption must begin by reading the last transition directive and the corresponding batch.
+A normal user turn boundary, checkpoint write, progress message, or self-authored statement that work is lengthy is not a runtime interruption. If the platform does interrupt, preserve durable state without claiming completion; resumption must begin by reading the last transition directive and the corresponding batch. Preserve the exact machine batch and submission when replaying; do not write either next output onto one of those inputs.
 
 Repeat the classification loop while `nextAction` is `continue` or `R` is greater than zero. Never declare completion from an assertion count, a progress message, mutation summary, checkpoint, or partial next-batch read alone.
 
@@ -127,7 +127,7 @@ Always show numerators and denominators. Mixed assertion sites enter neither num
 
 # Stage 5: summarize the execution
 
-Report completion only after the last `submit` says `nextAction: "report"`, followed by a `report` result with `nextAction: "complete"` and `finalResponseAllowed: true`. Use the returned path fields; do not infer report paths under the state root. Keep the existing compatibility artifacts (`trace.json`, `test-inventory.json`) and add the standardized pairs (`summary.json` / `summary.md`, `details.json` / `details.md`).
+Report completion only from a `report` result with `nextAction: "complete"` and `finalResponseAllowed: true`. That report may follow an initial empty batch, a resumed all-classified state, a low-level `record-batch`, or the latest `submit`; a `submit` is not required when no submission remains. Use the returned path fields; do not infer report paths under the state root. Keep the existing compatibility artifacts (`trace.json`, `test-inventory.json`) and add the standardized pairs (`summary.json` / `summary.md`, `details.json` / `details.md`).
 
 Emit the final conversational summary in this fixed order: audit identity, repository/scope/revision, coverage totals, classification totals, rates, inventory gaps, diagnostics, and artifact paths. The Markdown summary and JSON summary use the same field set; `details.md` and `details.json` use `assertionTrace`, `testInventory`, and `diagnostics`.
 

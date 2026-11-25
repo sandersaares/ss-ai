@@ -139,7 +139,9 @@ ss-ai test-audit report --state-directory "{{STATE_DIRECTORY}}"
 ```
 
 `initialize` requires a new empty state directory and accepts repeated
-`--scope-path` inputs; omitting scopes selects the repository. It atomically
+`--scope-path` inputs; omitting scopes selects the repository. These paths limit
+test and assertion inventory, while the evidence index covers repository-wide
+text under the normal traversal exclusions. It atomically
 publishes the immutable inventory and line index, then returns source revision,
 audit identity, snapshot digest, and counts. Git repositories retain a full
 commit ID. Other local repositories use `unversioned` revision metadata and

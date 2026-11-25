@@ -4,11 +4,16 @@
   "additionalProperties": false,
   "required": [
     "schemaVersion",
+    "batchFingerprint",
     "rows"
   ],
   "properties": {
     "schemaVersion": {
       "const": 1
+    },
+    "batchFingerprint": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
     },
     "rows": {
       "type": "array",

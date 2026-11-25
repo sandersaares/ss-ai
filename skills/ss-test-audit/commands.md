@@ -20,7 +20,7 @@ ss-ai test-audit initialize `
 | Placeholder | Description |
 | --- | --- |
 | `REPOSITORY_PATH` | Absolute path to the repository root or a path inside a Git working tree. |
-| `SCOPE_PATH` | Existing repository-relative or absolute file/directory scope. Repeat `--scope-path` for multiple scopes; omit it for the complete repository. |
+| `SCOPE_PATH` | Existing repository-relative or absolute file/directory scope for test and assertion inventory. Repeat `--scope-path` for multiple scopes; omit it for the complete repository. The evidence index remains repository-wide. |
 | `STATE_DIRECTORY` | New empty directory outside the audited source scope. |
 
 On success, retain the returned state paths, `auditId`, `snapshotSha256`, source revision, test count, assertion count, file count, and diagnostic count. On any failure, report the native diagnostic and do not create an alternate state schema.
@@ -133,6 +133,7 @@ Fresh rows:
 ```json
 {
   "schemaVersion": 1,
+  "batchFingerprint": "COPY THE CURRENT BATCH FINGERPRINT",
   "rows": [
     {
       "assertionId": "A000001",
@@ -152,6 +153,7 @@ Reuse rows must explicitly confirm equivalence and replace both evidence and cal
 ```json
 {
   "schemaVersion": 1,
+  "batchFingerprint": "COPY THE CURRENT BATCH FINGERPRINT",
   "rows": [
     {
       "assertionId": "A000002",
@@ -187,7 +189,7 @@ ss-ai test-audit submit `
 | `NEXT_BATCH_PATH` | Machine-readable path for the next batch; the result also returns `displayPath`. |
 | `25` | Maximum next-batch size. |
 
-The command binds rows to the current batch and snapshot, resolves every evidence handle, validates every assertion and citation field, records the canonical classifications, and exports the next batch. Multiple citations belong in `citationHandles` as separate values. Reuse copies semantic outcome fields only after `equivalenceConfirmed: true`; citations and caller IDs are explicit replacements. Empty reuse citation arrays are rejected without fallback. Read `nextBatch.displayPath` for the next cycle while retaining `nextBatch.batchPath` for the next submission. On failure, correct the named assertion ID, field, and evidence reference, then retry the same compact submission.
+The command binds rows to the exact exported machine record using `batchFingerprint`, resolves every evidence handle, validates every assertion and citation field, records the canonical classifications, and exports the next batch. Multiple citations belong in `citationHandles` as separate values. Reuse copies semantic outcome fields only after `equivalenceConfirmed: true`; citations and caller IDs are explicit replacements. Empty reuse citation arrays are rejected without fallback. Read `nextBatch.displayPath` for the next cycle while retaining `nextBatch.batchPath` for the next submission. Preserve the original batch and submission for replay, and always choose a distinct next output path. On failure, correct the named assertion ID, field, and evidence reference, then retry the same compact submission.
 
 After every submit, obey the top-level directive exactly. `nextAction: "continue"` means emit only an informational progress update and immediately process the returned batch; a final response is forbidden. `nextAction: "report"` means run the report next; a final response is still forbidden. Both transitions return `finalResponseAllowed: false`.
 
@@ -208,7 +210,7 @@ ss-ai test-audit report `
 | --- | --- |
 | `STATE_DIRECTORY` | Exact initialized audit state directory. |
 
-On success, require `nextAction: "complete"` and `finalResponseAllowed: true` before returning a final response. Use the returned `tracePath`, `testInventoryPath`, `summaryJsonPath`, `summaryPath`, `detailsJsonPath`, and `detailsPath`; do not assume a state-root report location. `summary.json` is the versioned machine summary and `summary.md` its human companion. The summary identifies the repository, revision, scope paths, file/language totals, tests, assertions, classifications, modules, rates, and gap/diagnostic counts. `details.json` uses `assertionTrace`, `testInventory`, and `diagnostics`; `details.md` uses matching section headings. The existing trace and inventory paths remain compatibility artifacts.
+On success, require `nextAction: "complete"` and `finalResponseAllowed: true` before returning a final response. This result is the sole final-response gate and is valid after an empty initial batch, a resumed all-classified state, a low-level recovery command, or a regular compact submission. Use the returned `tracePath`, `testInventoryPath`, `summaryJsonPath`, `summaryPath`, `detailsJsonPath`, and `detailsPath`; do not assume a state-root report location. `summary.json` is the versioned machine summary and `summary.md` its human companion. The summary identifies the repository, revision, scope paths, file/language totals, tests, assertions, classifications, modules, rates, and gap/diagnostic counts. `details.json` uses `assertionTrace`, `testInventory`, and `diagnostics`; `details.md` uses matching section headings. The existing trace and inventory paths remain compatibility artifacts.
 
 The paired JSON artifacts conform to [summary.schema.json](schemas/summary.schema.json)
 and [details.schema.json](schemas/details.schema.json). Their schema version is

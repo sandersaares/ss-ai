@@ -2,6 +2,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
+use std::io::ErrorKind;
 use std::path::{Path, PathBuf};
 
 use ohno::AppError;
@@ -303,6 +304,15 @@ pub(crate) fn output_path(path: &Path) -> Result<PathBuf, AppError> {
     Ok(fs::canonicalize(parent)?.join(name))
 }
 
+/// Keeps existing generation paths untouched, even if a link there is dangling.
+pub(crate) fn path_is_vacant(path: &Path) -> Result<bool, AppError> {
+    match fs::symlink_metadata(path) {
+        Ok(_) => Ok(false),
+        Err(error) if error.kind() == ErrorKind::NotFound => Ok(true),
+        Err(error) => Err(error.into()),
+    }
+}
+
 /// Rejects destinations that would replace or mutate an audited source through an alias.
 pub(crate) fn reject_source_alias(path: &Path, inventory: &Inventory) -> Result<(), AppError> {
     if !path.try_exists()? {
@@ -331,11 +341,7 @@ pub(crate) fn reject_state_destination(
         "classifications.json",
     ] {
         let destination = state_directory.join(name);
-        let same_path = destination == path
-            || (destination.try_exists()?
-                && path.try_exists()?
-                && same_file::is_same_file(path, destination)?);
-        if same_path {
+        if paths_alias(path, &destination)? {
             return Err(fail(
                 "invalidInput",
                 format!("Batch output cannot replace audit state file '{name}'"),
@@ -343,6 +349,25 @@ pub(crate) fn reject_state_destination(
         }
     }
     Ok(())
+}
+
+/// Protects an operation's input files from its prospective output paths.
+pub(crate) fn reject_input_alias(output: &Path, inputs: &[&Path]) -> Result<(), AppError> {
+    for input in inputs {
+        if paths_alias(output, input)? {
+            return Err(fail(
+                "invalidInput",
+                format!("Batch output aliases input file '{}'", input.display()),
+            ));
+        }
+    }
+    Ok(())
+}
+
+/// Handles both path spelling and filesystem identity, including hard links.
+fn paths_alias(left: &Path, right: &Path) -> Result<bool, AppError> {
+    Ok(left == right
+        || (left.try_exists()? && right.try_exists()? && same_file::is_same_file(left, right)?))
 }
 
 /// Parses the newline-delimited searchable evidence index.

@@ -2,34 +2,41 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::Write as _;
-use std::fs;
-use std::path::Path;
+use std::fs::{File, remove_file};
+use std::io::Read;
+use std::path::{Path, PathBuf};
 
 use ohno::AppError;
-use serde_json::json;
+use serde_json::{Value, json};
 use ss_ai_runtime::{Clock, FileTransaction, caused_by, fail};
 
 use crate::model::{
     AssertionSite, Batch, BatchAssertion, Citation, Classification, ClassificationBatch,
     ClassificationJournal, ClassificationKind, CompactSubmission, EvidenceStatus, IndexEntry,
+    Inventory, TestCase,
 };
+use crate::scan::digest;
 use crate::state::{
-    LoadedState, load, load_fresh, output_path, parse_json, reject_source_alias,
-    reject_state_destination, require_version, validate_journal, validate_source_snapshot,
-    write_bytes, write_json,
+    LoadedState, load, load_fresh, output_path, parse_json, path_is_vacant, reject_input_alias,
+    reject_source_alias, reject_state_destination, require_version, validate_journal,
+    validate_source_snapshot,
 };
 use crate::submission::{resolve_submission, validate_exported_batch};
 
 /// Matches the skill's bounded agent review unit and cumulative progress reporting.
 pub(crate) const MAX_BATCH_SIZE: usize = 25;
-/// Keeps one agent-authored result page small enough for bounded local ingestion.
-const MAX_CLASSIFICATION_BATCH_BYTES: u64 = 1024 * 1024;
+/// Shares the input ceiling with the batch producer, so exports can be submitted.
+const MAX_BATCH_BYTES: usize = 1024 * 1024;
+/// Keeps a useful predicate preview while leaving room for its source context.
+const MAX_EXPRESSION_BYTES: usize = 16 * 1024;
 /// Retains nearby source without duplicating complete files in the batch.
 const ASSERTION_CONTEXT_RADIUS: usize = 4;
 /// Includes the declaration and a small header in each containing-test context.
 const TEST_HEADER_LINES: usize = 2;
 
 /// Exports at most one bounded review batch without consuming resumable state.
+///
+/// The returned `batchPath` and `displayPath` identify one immutable export.
 pub fn next_batch(
     state_directory: &Path,
     output: &Path,
@@ -45,10 +52,8 @@ pub fn next_batch(
     let loaded = load(state_directory, clock)?;
     let batch = build_batch(&loaded, count);
     let output = output_path(output)?;
-    let display = batch_display_path(&output)?;
-    preflight_batch_output(state_directory, &output, &display, &loaded.inventory)?;
-    export_batch(&batch, &output, &display, clock)?;
-    Ok(batch_summary(&batch, &output, &display).to_string())
+    preflight_batch_output(state_directory, &output, &loaded.inventory, &[])?;
+    Ok(export_batch(batch, &output, clock)?.to_string())
 }
 
 /// Builds the next bounded assertion batch from one already validated state load.
@@ -84,54 +89,86 @@ fn build_batch(loaded: &LoadedState, count: usize) -> Batch {
 }
 
 /// Summarizes one exported batch without repeating its assertion payload.
-fn batch_summary(batch: &Batch, output: &Path, display: &Path) -> serde_json::Value {
-    let next_action = if batch.assertions.is_empty() {
-        "report"
-    } else {
-        "continue"
-    };
+fn batch_summary(batch: &Batch, output: &Path, display: &Path, fingerprint: &str) -> Value {
     json!({
         "schemaVersion": 1,
         "batchPath": output,
         "displayPath": display,
         "auditId": batch.audit_id,
         "snapshotSha256": batch.snapshot_sha256,
+        "batchFingerprint": fingerprint,
         "batchCount": batch.assertions.len(),
         "completed": batch.completed,
         "remaining": batch.remaining,
-        "nextAction": next_action,
+        "nextAction": next_action(batch.remaining),
         "finalResponseAllowed": false
     })
 }
 
-/// Publishes the machine record and its compact human-readable projection.
-fn export_batch(
-    batch: &Batch,
-    output: &Path,
-    display: &Path,
-    clock: &dyn Clock,
-) -> Result<(), AppError> {
-    write_json(output, batch, clock)?;
-    write_bytes(display, compact_batch_display(batch).as_bytes(), clock)?;
-    Ok(())
+/// Publishes an immutable pair and uses its machine record as the commit point.
+fn export_batch(mut batch: Batch, output: &Path, clock: &dyn Clock) -> Result<Value, AppError> {
+    let bytes = bounded_export(&mut batch)?;
+    let fingerprint = digest(&bytes);
+    let display_text = compact_batch_display(&batch, &fingerprint);
+    for generation in 0..=usize::MAX {
+        let output = if generation == 0 {
+            output.to_owned()
+        } else {
+            append_suffix(output, &format!(".{generation}.json"))
+        };
+        let display = append_suffix(&output, ".txt");
+        // Hold both leases through publication. Always taking the machine lock
+        // before its suffixed companion also orders overlapping output names.
+        let machine = FileTransaction::open(&output, clock)?;
+        let companion = FileTransaction::open(&display, clock)?;
+        if !path_is_vacant(&output)? || !path_is_vacant(&display)? {
+            continue;
+        }
+        companion.write_bytes(display_text.as_bytes())?;
+        // Readers discover the pair through its machine record or the command result.
+        if let Err(error) = machine.write_bytes(&bytes) {
+            _ = remove_file(&display);
+            return Err(error);
+        }
+        return Ok(batch_summary(&batch, &output, &display, &fingerprint));
+    }
+    Err(fail("io", "No unused batch output generation is available"))
 }
 
-/// Derives the compact companion without allowing it to alias the machine record.
-fn batch_display_path(output: &Path) -> Result<std::path::PathBuf, AppError> {
-    let name = output
-        .file_name()
-        .ok_or_else(|| fail("invalidInput", "Batch output requires a file name"))?;
-    Ok(output.with_file_name(format!("{}.txt", name.to_string_lossy())))
+/// Adds a suffix without losing information about the caller's filename.
+fn append_suffix(path: &Path, suffix: &str) -> PathBuf {
+    let mut name = path.as_os_str().to_owned();
+    name.push(suffix);
+    name.into()
+}
+
+/// Fits the largest initial page into the exact size accepted by the reader.
+fn bounded_export(batch: &mut Batch) -> Result<Vec<u8>, AppError> {
+    loop {
+        let bytes = serde_json::to_vec_pretty(batch)?;
+        if bytes.len() <= MAX_BATCH_BYTES {
+            return Ok(bytes);
+        }
+        if batch.assertions.len() <= 1 {
+            return Err(fail(
+                "invalidInput",
+                "Assertion batch exceeds the bounded input size",
+            ));
+        }
+        _ = batch.assertions.pop();
+    }
 }
 
 /// Protects state and source files before a journal transition is committed.
 fn preflight_batch_output(
     state_directory: &Path,
     output: &Path,
-    display: &Path,
-    inventory: &crate::model::Inventory,
+    inventory: &Inventory,
+    inputs: &[&Path],
 ) -> Result<(), AppError> {
-    for path in [output, display] {
+    let display = append_suffix(output, ".txt");
+    for path in [output, &display] {
+        reject_input_alias(path, inputs)?;
         reject_source_alias(path, inventory)?;
         reject_state_destination(path, state_directory)?;
     }
@@ -139,10 +176,10 @@ fn preflight_batch_output(
 }
 
 /// Renders only fields needed to judge one bounded assertion batch.
-fn compact_batch_display(batch: &Batch) -> String {
+fn compact_batch_display(batch: &Batch, fingerprint: &str) -> String {
     let mut output = format!(
-        "Audit {} snapshot {} completed {} remaining {}\n",
-        batch.audit_id, batch.snapshot_sha256, batch.completed, batch.remaining
+        "Audit {} snapshot {} completed {} remaining {}\nbatchFingerprint: {fingerprint}\n",
+        batch.audit_id, batch.snapshot_sha256, batch.completed, batch.remaining,
     );
     for assertion in &batch.assertions {
         let test = assertion
@@ -181,47 +218,44 @@ fn compact_batch_display(batch: &Batch) -> String {
 /// Adds exact line context and test ownership to each exported source predicate.
 fn batch_assertion(
     assertion: &AssertionSite,
-    tests: &[crate::model::TestCase],
+    tests: &[TestCase],
     index: &[IndexEntry],
 ) -> BatchAssertion {
     let test = assertion
         .containing_test_id
         .as_ref()
         .and_then(|id| tests.iter().find(|test| test.id == *id));
-    let assertion_context = index
+    // Keep both boundaries rather than duplicating the full body of multiline predicates.
+    let near = |line: usize, anchor: usize| line.abs_diff(anchor) <= ASSERTION_CONTEXT_RADIUS;
+    let context = index
         .iter()
         .filter(|entry| {
-            entry.path == assertion.path
-                && entry.line >= assertion.line.saturating_sub(ASSERTION_CONTEXT_RADIUS)
-                && entry.line <= assertion.end_line.saturating_add(ASSERTION_CONTEXT_RADIUS)
-        })
-        .cloned();
-    let test_context = test
-        .into_iter()
-        .flat_map(|test| {
-            index
-                .iter()
-                .filter(|entry| {
+            (entry.path == assertion.path
+                && (near(entry.line, assertion.line) || near(entry.line, assertion.end_line)))
+                || test.is_some_and(|test| {
                     entry.path == test.path
-                        && entry.line >= test.line
-                        && entry.line <= test.line.saturating_add(TEST_HEADER_LINES)
+                        && (test.line..=test.line.saturating_add(TEST_HEADER_LINES))
+                            .contains(&entry.line)
                 })
-                .cloned()
-                .collect::<Vec<_>>()
         })
-        .collect::<Vec<_>>();
-    let mut context: BTreeMap<(String, usize), IndexEntry> = assertion_context
-        .map(|entry| ((entry.path.clone(), entry.line), entry))
+        .cloned()
         .collect();
-    for entry in test_context {
-        context.insert((entry.path.clone(), entry.line), entry);
+    let mut assertion = assertion.clone();
+    if assertion.expression.len() > MAX_EXPRESSION_BYTES {
+        let end = assertion
+            .expression
+            .floor_char_boundary(MAX_EXPRESSION_BYTES);
+        assertion.expression.truncate(end);
+        assertion
+            .expression
+            .push_str(" … [see source for full expression]");
     }
     BatchAssertion {
-        assertion: assertion.clone(),
+        assertion,
         test_name: test.map(|test| test.name.clone()),
         test_path: test.map(|test| test.path.clone()),
         test_line: test.map(|test| test.line),
-        context: context.into_values().collect(),
+        context,
     }
 }
 
@@ -259,10 +293,13 @@ pub fn advance(
         clock,
         loaded,
         classification,
+        &[batch_path],
     )
 }
 
 /// Resolves compact agent rows against the exported batch and accepted journal.
+///
+/// Submit the fingerprint returned with the batch and retain its exact JSON bytes.
 pub fn submit(
     state_directory: &Path,
     batch_path: &Path,
@@ -278,16 +315,20 @@ pub fn submit(
         ));
     }
     let loaded = load_fresh(state_directory, clock)?;
-    let batch: Batch = parse_json(
-        &read_bounded_json(batch_path, "exported assertion batch")?,
-        "exported assertion batch",
-    )?;
+    let batch_bytes = read_bounded_json(batch_path, "exported assertion batch")?;
+    let batch: Batch = parse_json(&batch_bytes, "exported assertion batch")?;
     validate_exported_batch(&batch, &loaded)?;
     let submission: CompactSubmission = parse_json(
         &read_bounded_json(submission_path, "compact submission")?,
         "compact submission",
     )?;
     require_version(submission.schema_version, "compact submission")?;
+    if submission.batch_fingerprint != digest(&batch_bytes) {
+        return Err(fail(
+            "staleState",
+            "Compact submission batchFingerprint does not match the exported assertion batch",
+        ));
+    }
     let classification = resolve_submission(&loaded, &batch, submission)?;
     advance_classification(
         state_directory,
@@ -296,6 +337,7 @@ pub fn submit(
         clock,
         loaded,
         classification,
+        &[batch_path, submission_path],
     )
 }
 
@@ -307,29 +349,21 @@ fn advance_classification(
     clock: &dyn Clock,
     loaded: LoadedState,
     classification: ClassificationBatch,
+    inputs: &[&Path],
 ) -> Result<String, AppError> {
     let output = output_path(output)?;
-    let display = batch_display_path(&output)?;
-    preflight_batch_output(state_directory, &output, &display, &loaded.inventory)?;
+    preflight_batch_output(state_directory, &output, &loaded.inventory, inputs)?;
     let (journal, recorded) =
         record_classification(state_directory, classification, clock, &loaded)?;
     let mut advanced = loaded;
     advanced.journal = journal;
     let batch = build_batch(&advanced, count);
-    export_batch(&batch, &output, &display, clock)?;
-    let next_action = if recorded
-        .get("remaining")
-        .and_then(serde_json::Value::as_u64)
-        == Some(0)
-    {
-        "report"
-    } else {
-        "continue"
-    };
+    let next_action = next_action(batch.remaining);
+    let next = export_batch(batch, &output, clock)?;
     Ok(json!({
         "schemaVersion": 1,
         "record": recorded,
-        "nextBatch": batch_summary(&batch, &output, &display),
+        "nextBatch": next,
         "nextAction": next_action,
         "finalResponseAllowed": false
     })
@@ -342,7 +376,7 @@ fn record_loaded(
     batch_path: &Path,
     clock: &dyn Clock,
     loaded: &LoadedState,
-) -> Result<(ClassificationJournal, serde_json::Value), AppError> {
+) -> Result<(ClassificationJournal, Value), AppError> {
     let batch = read_classification_batch_limited(batch_path)?;
     record_classification(state_directory, batch, clock, loaded)
 }
@@ -357,35 +391,43 @@ fn read_classification_batch_limited(path: &Path) -> Result<ClassificationBatch,
 
 /// Reads one agent input with a stable safety ceiling and actionable path.
 fn read_bounded_json(path: &Path, role: &str) -> Result<Vec<u8>, AppError> {
-    let batch_size = fs::metadata(path)
-        .map_err(|error| {
-            caused_by(
-                "invalidInput",
-                format!("Cannot inspect {role} '{}'", path.display()),
-                error,
-            )
-        })?
-        .len();
-    if batch_size > MAX_CLASSIFICATION_BATCH_BYTES {
-        return Err(fail(
+    let inspect_error = |error| {
+        caused_by(
             "invalidInput",
-            format!("{role} '{}' exceeds the bounded input size", path.display()),
-        ));
-    }
-    let bytes = fs::read(path).map_err(|error| {
+            format!("Cannot inspect {role} '{}'", path.display()),
+            error,
+        )
+    };
+    let read_error = |error| {
         caused_by(
             "invalidInput",
             format!("Cannot read {role} '{}'", path.display()),
             error,
         )
-    })?;
-    if u64::try_from(bytes.len()).unwrap_or(u64::MAX) > MAX_CLASSIFICATION_BATCH_BYTES {
+    };
+    let not_regular = || {
+        fail(
+            "invalidInput",
+            format!("{role} '{}' must be a regular file", path.display()),
+        )
+    };
+    // Do not open a known nonregular file: opening a FIFO could block.
+    if !path.metadata().map_err(inspect_error)?.is_file() {
+        return Err(not_regular());
+    }
+    let file = File::open(path).map_err(read_error)?;
+    if !file.metadata().map_err(inspect_error)?.is_file() {
+        return Err(not_regular());
+    }
+    let mut bytes = Vec::new();
+    // Detect overflow rather than accepting a valid JSON prefix of a larger input.
+    file.take(u64::try_from(MAX_BATCH_BYTES)?.saturating_add(1))
+        .read_to_end(&mut bytes)
+        .map_err(read_error)?;
+    if bytes.len() > MAX_BATCH_BYTES {
         return Err(fail(
             "invalidInput",
-            format!(
-                "{role} '{}' exceeded the bounded input size while being read",
-                path.display()
-            ),
+            format!("{role} '{}' exceeds the bounded input size", path.display()),
         ));
     }
     Ok(bytes)
@@ -397,7 +439,7 @@ fn record_classification(
     batch: ClassificationBatch,
     clock: &dyn Clock,
     loaded: &LoadedState,
-) -> Result<(ClassificationJournal, serde_json::Value), AppError> {
+) -> Result<(ClassificationJournal, Value), AppError> {
     let classification_path = state_directory.join("classifications.json");
     let transaction = FileTransaction::open(&classification_path, clock)?;
     let Some(journal_bytes) = transaction.read_bytes()? else {
@@ -497,15 +539,27 @@ fn record_classification(
         .sort_by(|left, right| left.assertion_id.cmp(&right.assertion_id));
     validate_source_snapshot(&loaded.inventory, &loaded.state.repository_root)?;
     transaction.write_bytes(&serde_json::to_vec_pretty(&journal)?)?;
+    let remaining = loaded
+        .inventory
+        .assertions
+        .len()
+        .saturating_sub(journal.classifications.len());
     let summary = json!({
         "schemaVersion": 1,
         "classificationPath": classification_path,
         "added": added,
         "unchanged": unchanged,
         "completed": journal.classifications.len(),
-        "remaining": loaded.inventory.assertions.len().saturating_sub(journal.classifications.len())
+        "remaining": remaining,
+        "nextAction": next_action(remaining),
+        "finalResponseAllowed": false
     });
     Ok((journal, summary))
+}
+
+/// Directs progress to classification or reporting, neither of which is final.
+fn next_action(remaining: usize) -> &'static str {
+    if remaining == 0 { "report" } else { "continue" }
 }
 
 /// Names the exact compact input row and field in a recoverable diagnostic.
@@ -581,31 +635,25 @@ pub(crate) fn validate_classification(
                     "Mixed classifications require documented-component evidence",
                 ));
             }
-            if classification
-                .incidental_reason
-                .as_deref()
-                .is_none_or(str::is_empty)
-            {
-                return Err(row_error(
-                    &assertion.id,
-                    "incidentalReason",
-                    "Mixed classifications require the undocumented detail",
-                ));
-            }
         }
+        ClassificationKind::Incidental => {}
+    }
+    let incidental_reason = match classification.kind {
+        ClassificationKind::Mixed => Some("Mixed classifications require the undocumented detail"),
         ClassificationKind::Incidental => {
-            if classification
-                .incidental_reason
-                .as_deref()
-                .is_none_or(str::is_empty)
-            {
-                return Err(row_error(
-                    &assertion.id,
-                    "incidentalReason",
-                    "Incidental classifications require why no public promise applies",
-                ));
-            }
+            Some("Incidental classifications require why no public promise applies")
         }
+        _ => None,
+    };
+    if reason_missing_or_blank(
+        classification.incidental_reason.as_deref(),
+        incidental_reason.is_some(),
+    ) {
+        return Err(row_error(
+            &assertion.id,
+            "incidentalReason",
+            incidental_reason.unwrap_or("An incidental reason must not be blank"),
+        ));
     }
     for (position, citation) in classification.citations.iter().enumerate() {
         validate_citation(&assertion.id, position, citation, index)?;
@@ -619,21 +667,26 @@ pub(crate) fn validate_classification(
             ));
         }
     }
-    if assertion.containing_test_id.is_none()
+    let unlinked = assertion.containing_test_id.is_none()
         && assertion.calling_test_ids.is_empty()
-        && classification.calling_test_ids.is_empty()
-        && classification
-            .unlinked_reason
-            .as_deref()
-            .is_none_or(str::is_empty)
-    {
+        && classification.calling_test_ids.is_empty();
+    if reason_missing_or_blank(classification.unlinked_reason.as_deref(), unlinked) {
         return Err(row_error(
             &assertion.id,
             "callingTestIds/unlinkedReason",
-            "A shared assertion without calling tests requires an explicit unlinked reason",
+            if unlinked {
+                "A shared assertion without calling tests requires an explicit unlinked reason"
+            } else {
+                "An unlinked reason must not be blank"
+            },
         ));
     }
     Ok(())
+}
+
+/// Treats whitespace-only explanations as absent, but rejects them even if optional.
+fn reason_missing_or_blank(reason: Option<&str>, required: bool) -> bool {
+    reason.map_or(required, |reason| reason.trim().is_empty())
 }
 
 /// Requires every cited excerpt to be contained on the selected indexed line.

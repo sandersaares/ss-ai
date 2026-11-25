@@ -85,6 +85,7 @@ fn executable_accepts_multi_query_search_and_compact_submit() {
         .output()
         .unwrap();
     assert!(next.status.success());
+    let next: Value = serde_json::from_slice(&next.stdout).unwrap();
     let batch: Value = serde_json::from_slice(&fs::read(&batch_path).unwrap()).unwrap();
     let evidence_handle = search["results"][0]["matches"][0]["evidenceHandle"].clone();
     let submission_path = state.join("submission.json");
@@ -92,6 +93,7 @@ fn executable_accepts_multi_query_search_and_compact_submit() {
         &submission_path,
         serde_json::to_vec_pretty(&json!({
             "schemaVersion": 1,
+            "batchFingerprint": next["batchFingerprint"],
             "rows": [{
                 "assertionId": batch["assertions"][0]["id"],
                 "classification": "Documented",

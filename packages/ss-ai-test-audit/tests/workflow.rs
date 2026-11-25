@@ -286,6 +286,17 @@ fn audits_parser_sites_with_resumable_evidence_batches() {
     assert!(report_text.contains("2/4 (50.0%)"));
     assert!(report_text.contains("## Classification totals"));
     assert!(report_text.contains("## Coverage summary"));
+    let report_lines = report_text.lines().collect::<Vec<_>>();
+    assert!(
+        report_lines
+            .iter()
+            .any(|line| line.starts_with("| Total | 4 |"))
+    );
+    assert!(
+        report_lines
+            .iter()
+            .any(|line| line.starts_with("| src | 4 |"))
+    );
     assert!(report_text.contains("- Status: complete"));
     assert!(report_text.contains("- Schema version: 1"));
     assert!(report_text.contains("- Source languages:"));
@@ -313,9 +324,9 @@ fn continues_through_more_than_four_submit_transitions() {
 
     let mut batch_path = state.join("batch-00.json");
     let initial = next_batch(&state, &batch_path, 25, &FixedClock).unwrap();
-    let initial: Value = serde_json::from_str(&initial).unwrap();
-    assert_eq!(initial["nextAction"], "continue");
-    assert_eq!(initial["finalResponseAllowed"], false);
+    let mut receipt: Value = serde_json::from_str(&initial).unwrap();
+    assert_eq!(receipt["nextAction"], "continue");
+    assert_eq!(receipt["finalResponseAllowed"], false);
 
     let expected_remaining = [101, 76, 51, 26, 1, 0];
     for batch_number in 1_usize..=6 {
@@ -342,6 +353,7 @@ fn continues_through_more_than_four_submit_transitions() {
             &submission_path,
             serde_json::to_vec_pretty(&json!({
                 "schemaVersion": 1,
+                "batchFingerprint": receipt["batchFingerprint"],
                 "rows": records
             }))
             .unwrap(),
@@ -369,6 +381,7 @@ fn continues_through_more_than_four_submit_transitions() {
             assert_eq!(transition["nextBatch"]["batchCount"], 25.min(remaining));
         }
         batch_path = next_path;
+        receipt = transition["nextBatch"].clone();
     }
 
     let complete = report(&state, &FixedClock).unwrap();
@@ -552,7 +565,9 @@ fn submit_resolves_multiple_handles_and_explicit_reuse() {
     let (_root, repository, state) = fixture();
     initialize(&repository, &[], &state, &NoProcess, &FixedClock).unwrap();
     let first_batch_path = state.join("compact-batch-one.json");
-    next_batch(&state, &first_batch_path, 1, &FixedClock).unwrap();
+    let first_receipt: Value =
+        serde_json::from_str(&next_batch(&state, &first_batch_path, 1, &FixedClock).unwrap())
+            .unwrap();
     let first_batch: Value = serde_json::from_slice(&fs::read(&first_batch_path).unwrap()).unwrap();
     let searches = search_many(
         &state,
@@ -579,6 +594,7 @@ fn submit_resolves_multiple_handles_and_explicit_reuse() {
         &first_submission_path,
         serde_json::to_vec_pretty(&json!({
             "schemaVersion": 1,
+            "batchFingerprint": first_receipt["batchFingerprint"],
             "rows": [{
                 "assertionId": first_id,
                 "classification": "Incidental",
@@ -607,12 +623,14 @@ fn submit_resolves_multiple_handles_and_explicit_reuse() {
     assert_eq!(second["record"]["completed"], 1);
     let second_batch: Value =
         serde_json::from_slice(&fs::read(&second_batch_path).unwrap()).unwrap();
+    let second_receipt = second["nextBatch"].clone();
     let second_id = second_batch["assertions"][0]["id"].clone();
     let second_submission_path = state.join("compact-submission-two.json");
     fs::write(
         &second_submission_path,
         serde_json::to_vec_pretty(&json!({
             "schemaVersion": 1,
+            "batchFingerprint": second_receipt["batchFingerprint"],
             "rows": [{
                 "assertionId": second_id,
                 "reuseFrom": first_id,
@@ -642,6 +660,7 @@ fn submit_resolves_multiple_handles_and_explicit_reuse() {
         &second_submission_path,
         serde_json::to_vec_pretty(&json!({
             "schemaVersion": 1,
+            "batchFingerprint": second_receipt["batchFingerprint"],
             "rows": [{
                 "assertionId": second_id,
                 "reuseFrom": first_id,
@@ -678,6 +697,7 @@ fn submit_resolves_multiple_handles_and_explicit_reuse() {
         &second_submission_path,
         serde_json::to_vec_pretty(&json!({
             "schemaVersion": 1,
+            "batchFingerprint": second_receipt["batchFingerprint"],
             "rows": [{
                 "assertionId": second_id,
                 "reuseFrom": first_id,
@@ -689,7 +709,7 @@ fn submit_resolves_multiple_handles_and_explicit_reuse() {
         .unwrap(),
     )
     .unwrap();
-    submit(
+    _ = submit(
         &state,
         &second_batch_path,
         &second_submission_path,
@@ -707,7 +727,9 @@ fn compact_submission_reports_empty_citation_replacement() {
     let (_root, repository, state) = fixture();
     initialize(&repository, &[], &state, &NoProcess, &FixedClock).unwrap();
     let first_batch_path = state.join("first-batch.json");
-    next_batch(&state, &first_batch_path, 1, &FixedClock).unwrap();
+    let first_receipt: Value =
+        serde_json::from_str(&next_batch(&state, &first_batch_path, 1, &FixedClock).unwrap())
+            .unwrap();
     let first_batch: Value =
         serde_json::from_slice(&fs::read(first_batch_path.clone()).unwrap()).unwrap();
     let first_id = first_batch["assertions"][0]["id"].clone();
@@ -721,6 +743,7 @@ fn compact_submission_reports_empty_citation_replacement() {
         &first_submission_path,
         serde_json::to_vec_pretty(&json!({
             "schemaVersion": 1,
+            "batchFingerprint": first_receipt["batchFingerprint"],
             "rows": [{
                 "assertionId": first_id,
                 "classification": "Documented",
@@ -735,7 +758,7 @@ fn compact_submission_reports_empty_citation_replacement() {
     )
     .unwrap();
     let second_batch_path = state.join("second-batch.json");
-    submit(
+    let submit_result = submit(
         &state,
         &first_batch_path,
         &first_submission_path,
@@ -744,6 +767,7 @@ fn compact_submission_reports_empty_citation_replacement() {
         &FixedClock,
     )
     .unwrap();
+    let second_receipt: Value = serde_json::from_str(&submit_result).unwrap();
     let second_batch: Value =
         serde_json::from_slice(&fs::read(second_batch_path.clone()).unwrap()).unwrap();
     let submission_path = state.join("empty-replacement.json");
@@ -751,6 +775,7 @@ fn compact_submission_reports_empty_citation_replacement() {
         &submission_path,
         serde_json::to_vec_pretty(&json!({
             "schemaVersion": 1,
+            "batchFingerprint": second_receipt["nextBatch"]["batchFingerprint"],
             "rows": [{
                 "assertionId": second_batch["assertions"][0]["id"],
                 "reuseFrom": first_id,

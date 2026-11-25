@@ -13,7 +13,7 @@ The workflow distinguishes:
 
 ## User-visible behavior
 
-The skill audits one repository and any selected set of existing file or directory scopes. It preserves a source snapshot, source revision, file hashes, line locations, source expressions, and search index on disk. Every assertion batch contains at most 25 sites. Each accepted judgment remains resumable and bound to the exact snapshot.
+The skill audits one repository and any selected set of existing file or directory scopes. Scope paths limit test and assertion inventory. The search index covers repository-wide text under the normal traversal exclusions, so narrow test scopes retain access to out-of-scope public contracts. It preserves a source snapshot, source revision, file hashes, line locations, source expressions, and search index on disk. Every assertion batch contains at most 25 sites. Each accepted judgment remains resumable and bound to the exact snapshot.
 
 The final trace contains exactly one classification row for each inventoried assertion. The test inventory contains every inventoried test and links direct and shared assertion IDs. Tests that execute smoke behavior without a counted predicate remain visible.
 

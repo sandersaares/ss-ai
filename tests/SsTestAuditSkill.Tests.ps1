@@ -25,6 +25,8 @@ Describe 'ss-test-audit skill contract' {
         $skill | Should -Match 'A normal user turn boundary, checkpoint write, progress message, or self-authored statement that work is lengthy is not a runtime interruption'
         $skill | Should -Match 'submit` is the normal transition'
         $skill | Should -Match 'read `nextBatch.displayPath`'
+        $skill | Should -Match 'Report completion only from a `report` result'
+        $skill | Should -Match 'An initial empty batch is still a transition to the report'
         $skill | Should -Match 'If `nextAction` is `report`, continue to stage 4'
         $skill | Should -Match 'compact-submission\.schema\.json'
         $skill | Should -Match 'direct AST-visible free-function'
@@ -62,6 +64,7 @@ Describe 'ss-test-audit skill contract' {
         $commands | Should -Match 'finalResponseAllowed` is always false'
         $commands | Should -Match 'nextAction: "complete"'
         $commands | Should -Match 'finalResponseAllowed: true'
+        $commands | Should -Match 'sole final-response gate'
         $commands | Should -Match 'nextAction: "continue"'
         $commands | Should -Match 'nextAction: "report"'
         Test-Path -LiteralPath (Join-Path $script:Skill 'scripts') | Should -BeFalse
@@ -81,6 +84,7 @@ Describe 'ss-test-audit skill contract' {
         $schema = Get-Content -LiteralPath $schemaPath -Raw | ConvertFrom-Json
         $schema.properties.schemaVersion.const | Should -Be 1
         $schema.properties.rows.maxItems | Should -Be 25
+        @($schema.required) | Should -Contain 'batchFingerprint'
         $schema.properties.rows.items.oneOf.Count | Should -Be 2
         $reuse = $schema.properties.rows.items.oneOf |
             Where-Object { $_.required -contains 'reuseFrom' }

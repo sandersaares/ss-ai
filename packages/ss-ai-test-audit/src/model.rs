@@ -193,11 +193,12 @@ pub(crate) struct Citation {
     pub(crate) excerpt: String,
 }
 
-/// Compact agent-authored rows resolved against the currently exported batch.
+/// Compact agent-authored rows bound to the exact exported batch bytes.
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub(crate) struct CompactSubmission {
     pub(crate) schema_version: u32,
+    pub(crate) batch_fingerprint: String,
     pub(crate) rows: Vec<CompactSubmissionRow>,
 }
 
