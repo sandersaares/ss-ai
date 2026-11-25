@@ -7,7 +7,7 @@ use std::process::ExitCode;
 use ohno::AppError;
 use ss_ai::{
     NativeHttp, NativeProcess, SystemClock, classification, run, run_cargo, run_context, run_git,
-    run_workflow,
+    run_test_audit, run_workflow,
 };
 use ss_ai_runtime::fail;
 
@@ -73,6 +73,16 @@ fn execute() -> Result<ExitCode, AppError> {
             .chain(arguments.iter().skip(2));
         let process = NativeProcess::new(&env::current_dir()?);
         run_workflow(workflow_arguments, &process, &SystemClock::default())?
+    } else if arguments
+        .get(1)
+        .is_some_and(|argument| argument == "test-audit")
+    {
+        let audit_arguments = arguments
+            .first()
+            .into_iter()
+            .chain(arguments.iter().skip(2));
+        let process = NativeProcess::new(&env::current_dir()?);
+        run_test_audit(audit_arguments, &process, &SystemClock::default())?
     } else {
         let process = NativeProcess::new(&env::current_dir()?);
         let http = NativeHttp::new()?;

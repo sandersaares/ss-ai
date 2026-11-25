@@ -7,6 +7,7 @@ mod context;
 mod final_review;
 mod git;
 mod overview;
+mod test_audit;
 mod tracker;
 mod workflow;
 
@@ -18,4 +19,5 @@ pub use ss_ai_review::{
     Clock, Http, HttpResponse, NativeHttp, NativeProcess, Process, ProcessOutput, SystemClock,
     classification,
 };
+pub use test_audit::run as run_test_audit;
 pub use workflow::run as run_workflow;

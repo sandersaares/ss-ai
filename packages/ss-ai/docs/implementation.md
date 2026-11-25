@@ -18,6 +18,9 @@ The nonpublished workspace packages implement the utility-wide [design](design.m
   records, approved projections, shared Markdown rendering, worker assignments,
   bounded shared-document reads, instruction snapshots, focus-area preparation
   and reuse, report tooling, HTML rendering, and their workflow plans.
+- `ss-ai-test-audit` owns immutable local test inventory, searchable evidence
+  indexing, bounded classification batches, snapshot freshness, and final
+  trace/test/report aggregation for `ss-test-audit`.
 
 Dependencies flow from command composition toward focused operations and shared
 runtime boundaries, never back to the executable. Review selection, provider
@@ -58,6 +61,14 @@ The Cargo inventory has no provider or
 network dependency. The focused packages support targeted test builds and
 incremental reuse; a cold build of the complete executable still builds its
 dependency closure. None of these internal Rust APIs is a supported SDK.
+
+The test-audit package is a one-way local consumer of the runtime process,
+clock, file transaction, and error boundaries. `ss-ai` supplies local Git
+identity without initializing provider transport. Rust syntax supplies
+deterministic structural inventory; explicit text profiles cover the named
+heuristic languages. Agents provide semantic judgments through strict snapshot-
+bound records, so native validation can reject stale or incomplete work without
+making public-contract decisions.
 
 The package boundaries follow the subject-owned, one-way dependency practices
 used by [cargo-release-plan](https://github.com/folo-rs/folo/blob/db33786ec25196696b46f38e2b60a03bd33ec913/packages/cargo-release-plan/docs/implementation.md)

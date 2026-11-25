@@ -109,6 +109,48 @@ publishes the inventory and emits a summary with absolute `outputPath`,
 manifest. Readers can retain an opened complete version during replacement.
 The inventory is local and does not initialize provider authentication.
 
+## Test audit commands
+
+```powershell
+#Requires -Version 7.6
+
+Set-StrictMode -Version Latest
+$ErrorActionPreference = 'Stop'
+$PSNativeCommandUseErrorActionPreference = $true
+
+ss-ai test-audit initialize --repository-path "{{REPOSITORY_PATH}}" `
+  --scope-path "{{SCOPE_PATH}}" --state-directory "{{STATE_DIRECTORY}}"
+ss-ai test-audit search --state-directory "{{STATE_DIRECTORY}}" `
+  --query "{{QUERY}}" --kind "{{EVIDENCE_KIND}}" --limit 50
+ss-ai test-audit next-batch --state-directory "{{STATE_DIRECTORY}}" `
+  --output-path "{{BATCH_PATH}}" --count 25
+ss-ai test-audit record-batch --state-directory "{{STATE_DIRECTORY}}" `
+  --batch-path "{{CLASSIFICATION_BATCH_PATH}}"
+ss-ai test-audit report --state-directory "{{STATE_DIRECTORY}}"
+```
+
+`initialize` requires a new empty state directory and accepts repeated
+`--scope-path` inputs; omitting scopes selects the repository. It atomically
+publishes the immutable inventory and line index, then returns source revision,
+audit identity, snapshot digest, and counts. Git repositories retain a full
+commit ID. Other local repositories use `unversioned` revision metadata and
+still bind every indexed file to a SHA-256 digest.
+
+`search` performs bounded case-insensitive AND-term matching over indexed paths
+and lines. Evidence kinds are `documentation`, `publicDeclaration`,
+`traitImplementation`, `test`, and `source`. `next-batch` exports no more than
+25 unclassified source sites. `record-batch` validates the exact audit and
+snapshot, unique assertion IDs, category-specific evidence, indexed citations,
+and known or explained shared callers. Identical records are idempotent.
+
+`report` rejects incomplete classification, then writes `reports/trace.json`,
+`reports/test-inventory.json`, and `reports/summary.md` under the state
+directory. The trace has one row per assertion. The test inventory retains
+direct and shared assertion IDs, including tests without counted predicates.
+All rates are descriptive; the command does not score test quality. Rust is
+parser-backed; named non-Rust profiles are heuristic, and diagnostics preserve
+the exact coverage boundary.
+
 ## Git commands
 
 ```powershell

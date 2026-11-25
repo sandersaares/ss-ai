@@ -14,6 +14,30 @@ retaining user interaction and loop control. Registration does not approve a
 pull request. The `ss-review` workflow owns review capture,
 judgments, report rendering, and publication.
 
+`ss-test-audit` consumes local repository content and produces a resumable
+evidence trace. The native utility owns deterministic test and assertion
+inventory, source provenance, bounded batch transport, and report validation.
+The executing agent owns public-contract evidence selection and semantic
+classification. The utility does not interpret source wording with a keyword
+classifier or turn descriptive audit rates into a quality score.
+
+## Test audit scope and coverage
+
+A test audit binds one immutable repository revision, selected file or directory
+scopes, file hashes, and line-level evidence. Rust inventory uses parser-backed
+analysis with explicit fallback diagnostics. Common non-Rust test languages use
+narrow documented patterns and do not claim exhaustive syntax coverage. Other
+indexed languages remain available for contract evidence without an assertion
+inventory.
+
+Assertions count once at their source site. Tests with no counted predicate and
+shared helper assertions remain visible in the test inventory. Every accepted
+classification is bound to the same audit token and source snapshot. A report
+requires exactly one classification for every assertion and one row for every
+test. No explicitly documented promise means implicit-only plus incidental
+sites; no public-contract check means incidental-only sites. Mixed sites enter
+neither numerator.
+
 ## Version compatibility
 
 Sessions and persisted workflow state belong to the utility version that creates
