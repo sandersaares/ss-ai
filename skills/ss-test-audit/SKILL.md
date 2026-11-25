@@ -68,22 +68,24 @@ Execute `next-batch` as specified in [commands.md](commands.md#export-the-next-a
 4. Assign the exact classification and evidence status.
 5. Validate that a shared site has complete caller evidence or an explicit unlinked reason.
 
-Search API docs, design docs, public declarations, trait implementations, and inherited contracts using [commands.md](commands.md#search-evidence). Supply `--kind` to narrow a query only when the target is already clear. Terms are combined as an AND query.
+Search API docs, design docs, public declarations, trait implementations, and inherited contracts using [commands.md](commands.md#search-evidence). Group independent evidence lookups into one `search` command by repeating `--query`; the command returns one result page per query. Supply `--kind` to narrow queries only when the target is already clear. Terms within one query are combined as an AND query.
 
 Write one strict classification batch matching [classification-batch.schema.json](schemas/classification-batch.schema.json). Preserve the batch's `auditId` and `snapshotSha256`; never copy an earlier batch token. Each citation's `path`, `line`, and exact `excerpt` must come from a search result or a batch context entry.
 
-Apply the batch through `record-batch` using [commands.md](commands.md#record-classification-results). If the command reports stale state, malformed citations, duplicate IDs, or an already different classification, stop that batch and report the diagnostic without overwriting state.
+Apply the classification and export the next assertion batch through one `advance` command using [commands.md](commands.md#record-and-export-the-next-batch). `advance` is the normal transition after every classified batch. Use separate `record-batch` and `next-batch` only while recovering or inspecting an intermediate state.
 
-After every successful `record-batch`, emit the following informational progress message in the conversation: `Classified C of T assertions; R remain. The batch completed N sites.`
+If the command reports stale state, malformed citations, duplicate IDs, or an already different classification, stop that batch and report the diagnostic without overwriting state. A failed next-batch publication after a successful record can be resumed by replaying the identical classification; the command reports idempotent `unchanged` records.
+
+After every successful `advance`, use its `record.completed` and `record.remaining` fields to emit the following informational progress message in the conversation: `Classified C of T assertions; R remain. The batch completed N sites.`
 
 This progress message is not a completion, checkpoint, pause, handoff, request for input, or permission to end the turn. Do not wait for a reply after it. In the same skill invocation, immediately continue with the next required action even when `R` is zero:
 
-1. If `R` is greater than zero, invoke `next-batch` and return to classification with its assertions.
+1. If `R` is greater than zero, read the `nextBatch.batchPath` file and classify its assertions without another CLI round trip.
 2. If `R` is zero, continue to stage 4 and run the final `report`; the report command verifies exact classification coverage and fails if the zero is stale or incorrect.
 
-Never stop after a progress message, after `record-batch` alone, after a partial batch, or because the returned `remaining` value is zero. Only a successful final `report` command followed by stage 5 establishes completion. A context limit or execution interruption may stop the invocation, but that is an interruption to be resumed from durable state, not successful completion.
+Never stop after a progress message, after `advance` alone, after a partial batch, or because the returned `remaining` value is zero. Only a successful final `report` command followed by stage 5 establishes completion. A context limit or execution interruption may stop the invocation, but that is an interruption to be resumed from durable state, not successful completion.
 
-Repeat the classification loop while `R` is greater than zero. Never declare completion from an assertion count, a progress message, or `record-batch` summary alone.
+Repeat the classification loop while `R` is greater than zero. Never declare completion from an assertion count, a progress message, or mutation summary alone.
 
 # Stage 4: validate and emit reports
 
@@ -104,6 +106,6 @@ Always show numerators and denominators. Mixed assertion sites enter neither num
 
 # Stage 5: summarize the execution
 
-Report completion only after `record-batch` reports zero remaining assertions and the final native report command succeeds. The summary must state the audited repository and scopes, snapshot revision, test and assertion totals, classification totals, module rates, output paths, discovery cross-check, language coverage, and every material scan diagnostic or unresolved unsupported form.
+Report completion only after `advance.record.remaining` is zero and the final native report command succeeds. The summary must state the audited repository and scopes, snapshot revision, test and assertion totals, classification totals, module rates, output paths, discovery cross-check, language coverage, and every material scan diagnostic or unresolved unsupported form.
 
 Do not omit smoke tests, unlinked shared assertions, parse fallbacks, or unsupported forms to make coverage appear complete.

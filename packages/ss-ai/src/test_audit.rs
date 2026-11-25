@@ -7,7 +7,7 @@ use clap::error::ErrorKind;
 use clap::{Parser, Subcommand};
 use ohno::AppError;
 use ss_ai_runtime::{Process, caused_by};
-use ss_ai_test_audit::{initialize, next_batch, record_batch, report, search};
+use ss_ai_test_audit::{advance, initialize, next_batch, record_batch, report, search_many};
 
 use crate::Clock;
 
@@ -38,8 +38,8 @@ enum TestAuditCommand {
     Search {
         #[arg(long)]
         state_directory: PathBuf,
-        #[arg(long)]
-        query: String,
+        #[arg(long = "query", required = true)]
+        queries: Vec<String>,
         #[arg(long)]
         kind: Option<String>,
         /// Uses a reviewable page while allowing narrower targeted searches.
@@ -62,6 +62,18 @@ enum TestAuditCommand {
         state_directory: PathBuf,
         #[arg(long)]
         batch_path: PathBuf,
+    },
+    /// Record one classification batch and export the next batch.
+    Advance {
+        #[arg(long)]
+        state_directory: PathBuf,
+        #[arg(long)]
+        batch_path: PathBuf,
+        #[arg(long)]
+        output_path: PathBuf,
+        /// Matches the skill's cumulative assertion batch progress unit.
+        #[arg(long, default_value_t = 25)]
+        count: usize,
     },
     /// Require complete coverage and write the final trace and reports.
     Report {
@@ -107,10 +119,10 @@ where
         ),
         TestAuditCommand::Search {
             state_directory,
-            query,
+            queries,
             kind,
             limit,
-        } => search(&state_directory, &query, kind.as_deref(), limit, clock),
+        } => search_many(&state_directory, &queries, kind.as_deref(), limit, clock),
         TestAuditCommand::NextBatch {
             state_directory,
             output_path,
@@ -120,6 +132,12 @@ where
             state_directory,
             batch_path,
         } => record_batch(&state_directory, &batch_path, clock),
+        TestAuditCommand::Advance {
+            state_directory,
+            batch_path,
+            output_path,
+            count,
+        } => advance(&state_directory, &batch_path, &output_path, count, clock),
         TestAuditCommand::Report { state_directory } => report(&state_directory, clock),
     }
 }

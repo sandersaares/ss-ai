@@ -121,11 +121,15 @@ $PSNativeCommandUseErrorActionPreference = $true
 ss-ai test-audit initialize --repository-path "{{REPOSITORY_PATH}}" `
   --scope-path "{{SCOPE_PATH}}" --state-directory "{{STATE_DIRECTORY}}"
 ss-ai test-audit search --state-directory "{{STATE_DIRECTORY}}" `
-  --query "{{QUERY}}" --kind "{{EVIDENCE_KIND}}" --limit 50
+  --query "{{QUERY_ONE}}" --query "{{QUERY_TWO}}" `
+  --kind "{{EVIDENCE_KIND}}" --limit 50
 ss-ai test-audit next-batch --state-directory "{{STATE_DIRECTORY}}" `
   --output-path "{{BATCH_PATH}}" --count 25
 ss-ai test-audit record-batch --state-directory "{{STATE_DIRECTORY}}" `
   --batch-path "{{CLASSIFICATION_BATCH_PATH}}"
+ss-ai test-audit advance --state-directory "{{STATE_DIRECTORY}}" `
+  --batch-path "{{CLASSIFICATION_BATCH_PATH}}" `
+  --output-path "{{NEXT_BATCH_PATH}}" --count 25
 ss-ai test-audit report --state-directory "{{STATE_DIRECTORY}}"
 ```
 
@@ -137,11 +141,24 @@ commit ID. Other local repositories use `unversioned` revision metadata and
 still bind every indexed file to a SHA-256 digest.
 
 `search` performs bounded case-insensitive AND-term matching over indexed paths
-and lines. Evidence kinds are `documentation`, `publicDeclaration`,
+and lines. Repeating `--query` evaluates independent queries from one state load,
+up to ten queries per invocation. Evidence kinds are `documentation`, `publicDeclaration`,
 `traitImplementation`, `test`, and `source`. `next-batch` exports no more than
 25 unclassified source sites. `record-batch` validates the exact audit and
 snapshot, unique assertion IDs, category-specific evidence, indexed citations,
 and known or explained shared callers. Identical records are idempotent.
+`advance` combines `record-batch` and `next-batch` in one process and returns
+both the durable record summary and the next batch path.
+
+For an audit with `T` assertions and `B = ceil(T / 25)`, the primary transition
+path uses at most `B + 3` structural invocations: one initialization, one
+initial batch, `B` advances, and one final report. Independent evidence
+queries do not add process startup per query when repeated in one `search`
+invocation.
+
+Read-only `search` and `next-batch` validate the immutable state files but do
+not rehash every audited source. `record-batch`, `advance`, and `report` verify
+current source hashes before accepting a mutation or emitting final reports.
 
 Rust caller attribution comes from direct syntax in test functions. Production
 invariants and method names are not promoted to shared assertions, while

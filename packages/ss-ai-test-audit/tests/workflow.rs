@@ -13,7 +13,9 @@ use jiff::Timestamp;
 use ohno::AppError;
 use serde_json::{Value, json};
 use ss_ai_runtime::{Clock, Process, ProcessOutput};
-use ss_ai_test_audit::{initialize, next_batch, record_batch, report, search};
+use ss_ai_test_audit::{
+    advance, initialize, next_batch, record_batch, report, search, search_many,
+};
 use tempfile::TempDir;
 
 /// Supplies a deterministic initialization time.
@@ -132,13 +134,12 @@ fn audits_parser_sites_with_resumable_evidence_batches() {
     let evidence = search(&state, "ready operation", None, 20, &FixedClock).unwrap();
     let evidence: Value = serde_json::from_str(&evidence).unwrap();
     assert!(
-        evidence["matches"]
+        evidence["results"][0]["matches"]
             .as_array()
             .unwrap()
             .iter()
             .any(|entry| entry["excerpt"] == "/// Returns whether the operation is ready.")
     );
-
     let batch_path = state.join("batches/one.json");
     let batch_summary = next_batch(&state, &batch_path, 25, &FixedClock).unwrap();
     let batch_summary: Value = serde_json::from_str(&batch_summary).unwrap();
@@ -256,8 +257,164 @@ fn rejects_stale_sources_before_accepting_more_judgments() {
     let batch_path = state.join("batch.json");
     next_batch(&state, &batch_path, 25, &FixedClock).unwrap();
     fs::write(repository.join("src/lib.rs"), "// changed").unwrap();
-    let error = next_batch(&state, &batch_path, 25, &FixedClock).unwrap_err();
+    let read_only = next_batch(&state, &batch_path, 25, &FixedClock).unwrap();
+    assert_eq!(
+        serde_json::from_str::<Value>(&read_only).unwrap()["batchCount"],
+        4
+    );
+    search(&state, "ready", None, 20, &FixedClock).unwrap();
+    let classification_path = state.join("stale-classification.json");
+    fs::write(&classification_path, b"{}").unwrap();
+    let error = record_batch(&state, &classification_path, &FixedClock).unwrap_err();
     assert!(error.to_string().contains("changed after initialization"));
+}
+
+#[test]
+fn searches_multiple_queries_from_one_snapshot_load() {
+    let (_root, repository, state) = fixture();
+    initialize(&repository, &[], &state, &NoProcess, &FixedClock).unwrap();
+    let evidence = search_many(
+        &state,
+        &["ready".to_owned(), "shared".to_owned()],
+        None,
+        20,
+        &FixedClock,
+    )
+    .unwrap();
+    let evidence: Value = serde_json::from_str(&evidence).unwrap();
+    assert_eq!(evidence["queryCount"], 2);
+    assert_eq!(evidence["results"].as_array().unwrap().len(), 2);
+}
+
+#[test]
+fn advance_records_and_exports_the_next_batch_from_one_state_load() {
+    let (_root, repository, state) = fixture();
+    initialize(&repository, &[], &state, &NoProcess, &FixedClock).unwrap();
+    let batch_path = state.join("batch-one.json");
+    next_batch(&state, &batch_path, 1, &FixedClock).unwrap();
+    let batch: Value = serde_json::from_slice(&fs::read(&batch_path).unwrap()).unwrap();
+    let assertion = &batch["assertions"][0];
+    let classification_path = state.join("classification-one.json");
+    fs::write(
+        &classification_path,
+        serde_json::to_vec_pretty(&json!({
+            "schemaVersion": 1,
+            "auditId": batch["auditId"],
+            "snapshotSha256": batch["snapshotSha256"],
+            "assertions": [{
+                "assertionId": assertion["id"],
+                "classification": "Incidental",
+                "evidenceStatus": "Confirmed",
+                "actualOutcome": "The test checks a source-level detail.",
+                "rationale": "No public wording promises this exact check.",
+                "citations": [],
+                "incidentalReason": "The check is internal test behavior.",
+                "callingTestIds": []
+            }]
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+    let next_path = state.join("batch-two.json");
+    let result = advance(&state, &classification_path, &next_path, 1, &FixedClock).unwrap();
+    let result: Value = serde_json::from_str(&result).unwrap();
+    assert_eq!(result["record"]["completed"], 1);
+    assert_eq!(result["record"]["remaining"], 3);
+    assert_eq!(result["nextBatch"]["batchCount"], 1);
+    assert_eq!(result["nextBatch"]["completed"], 1);
+    assert_eq!(result["nextBatch"]["remaining"], 3);
+    let next: Value = serde_json::from_slice(&fs::read(next_path).unwrap()).unwrap();
+    assert_ne!(next["assertions"][0]["id"], assertion["id"]);
+
+    let classification_path = state.join("classification-two.json");
+    let records = next["assertions"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|assertion| {
+            json!({
+                "assertionId": assertion["id"],
+                "classification": "Incidental",
+                "evidenceStatus": "Confirmed",
+                "actualOutcome": "The test checks a source-level detail.",
+                "rationale": "No public wording promises this exact check.",
+                "citations": [],
+                "incidentalReason": "The check is internal test behavior.",
+                "callingTestIds": []
+            })
+        })
+        .collect::<Vec<_>>();
+    fs::write(
+        &classification_path,
+        serde_json::to_vec_pretty(&json!({
+            "schemaVersion": 1,
+            "auditId": next["auditId"],
+            "snapshotSha256": next["snapshotSha256"],
+            "assertions": records
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+    let batch_three_path = state.join("batch-three.json");
+    let batch_three = advance(
+        &state,
+        &classification_path,
+        &batch_three_path,
+        25,
+        &FixedClock,
+    )
+    .unwrap();
+    let batch_three: Value = serde_json::from_str(&batch_three).unwrap();
+    assert_eq!(batch_three["record"]["remaining"], 2);
+    let batch_three: Value = serde_json::from_slice(&fs::read(batch_three_path).unwrap()).unwrap();
+    assert_eq!(batch_three["assertions"].as_array().unwrap().len(), 2);
+
+    let classification_path = state.join("classification-three.json");
+    let records = batch_three["assertions"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|assertion| {
+            json!({
+                "assertionId": assertion["id"],
+                "classification": "Incidental",
+                "evidenceStatus": "Confirmed",
+                "actualOutcome": "The test checks a source-level detail.",
+                "rationale": "No public wording promises this exact check.",
+                "citations": [],
+                "incidentalReason": "The check is internal test behavior.",
+                "callingTestIds": []
+            })
+        })
+        .collect::<Vec<_>>();
+    fs::write(
+        &classification_path,
+        serde_json::to_vec_pretty(&json!({
+            "schemaVersion": 1,
+            "auditId": batch_three["auditId"],
+            "snapshotSha256": batch_three["snapshotSha256"],
+            "assertions": records
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+    let terminal_path = state.join("terminal-batch.json");
+    let terminal = advance(
+        &state,
+        &classification_path,
+        &terminal_path,
+        25,
+        &FixedClock,
+    )
+    .unwrap();
+    let terminal: Value = serde_json::from_str(&terminal).unwrap();
+    assert_eq!(terminal["record"]["remaining"], 0);
+    assert_eq!(terminal["nextBatch"]["batchCount"], 0);
+    let report = report(&state, &FixedClock).unwrap();
+    assert_eq!(
+        serde_json::from_str::<Value>(&report).unwrap()["status"],
+        "complete"
+    );
 }
 
 #[test]

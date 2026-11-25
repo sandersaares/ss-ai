@@ -13,8 +13,9 @@ use crate::model::{
     ClassificationJournal, ClassificationKind, EvidenceStatus, IndexEntry,
 };
 use crate::state::{
-    load, output_path, parse_json, reject_source_alias, reject_state_destination, require_version,
-    validate_journal, validate_source_snapshot, write_json,
+    LoadedState, load, load_fresh, output_path, parse_json, reject_source_alias,
+    reject_state_destination, require_version, validate_journal, validate_source_snapshot,
+    write_json,
 };
 
 /// Matches the skill's bounded agent review unit and cumulative progress reporting.
@@ -40,6 +41,16 @@ pub fn next_batch(
         ));
     }
     let loaded = load(state_directory, clock)?;
+    let batch = build_batch(&loaded, count);
+    let output = output_path(output)?;
+    reject_source_alias(&output, &loaded.inventory)?;
+    reject_state_destination(&output, state_directory)?;
+    write_json(&output, &batch, clock)?;
+    Ok(batch_summary(&batch, &output).to_string())
+}
+
+/// Builds the next bounded assertion batch from one already validated state load.
+fn build_batch(loaded: &LoadedState, count: usize) -> Batch {
     let completed: BTreeSet<&str> = loaded
         .journal
         .classifications
@@ -60,19 +71,19 @@ pub fn next_batch(
         .take(count)
         .map(|assertion| batch_assertion(assertion, &loaded.inventory.tests, &loaded.index))
         .collect::<Vec<_>>();
-    let batch = Batch {
+    Batch {
         schema_version: 1,
         audit_id: loaded.state.audit_id.clone(),
         snapshot_sha256: loaded.state.snapshot_sha256.clone(),
         assertions: selected,
         completed: completed.len(),
         remaining,
-    };
-    let output = output_path(output)?;
-    reject_source_alias(&output, &loaded.inventory)?;
-    reject_state_destination(&output, state_directory)?;
-    write_json(&output, &batch, clock)?;
-    Ok(json!({
+    }
+}
+
+/// Summarizes one exported batch without repeating its assertion payload.
+fn batch_summary(batch: &Batch, output: &Path) -> serde_json::Value {
+    json!({
         "schemaVersion": 1,
         "batchPath": output,
         "auditId": batch.audit_id,
@@ -81,7 +92,6 @@ pub fn next_batch(
         "completed": batch.completed,
         "remaining": batch.remaining
     })
-    .to_string())
 }
 
 /// Adds exact line context and test ownership to each exported source predicate.
@@ -137,7 +147,49 @@ pub fn record_batch(
     batch_path: &Path,
     clock: &dyn Clock,
 ) -> Result<String, AppError> {
-    let loaded = load(state_directory, clock)?;
+    let loaded = load_fresh(state_directory, clock)?;
+    let (_, summary) = record_loaded(state_directory, batch_path, clock, &loaded)?;
+    Ok(summary.to_string())
+}
+
+/// Records one classification batch and exports the next batch in the same process.
+pub fn advance(
+    state_directory: &Path,
+    batch_path: &Path,
+    output: &Path,
+    count: usize,
+    clock: &dyn Clock,
+) -> Result<String, AppError> {
+    if count == 0 || count > MAX_BATCH_SIZE {
+        return Err(fail(
+            "invalidInput",
+            "Assertion batch size must be between 1 and 25",
+        ));
+    }
+    let loaded = load_fresh(state_directory, clock)?;
+    let output = output_path(output)?;
+    reject_source_alias(&output, &loaded.inventory)?;
+    reject_state_destination(&output, state_directory)?;
+    let (journal, recorded) = record_loaded(state_directory, batch_path, clock, &loaded)?;
+    let mut advanced = loaded;
+    advanced.journal = journal;
+    let batch = build_batch(&advanced, count);
+    write_json(&output, &batch, clock)?;
+    Ok(json!({
+        "schemaVersion": 1,
+        "record": recorded,
+        "nextBatch": batch_summary(&batch, &output),
+    })
+    .to_string())
+}
+
+/// Records one strict classification batch from an already fresh state load.
+fn record_loaded(
+    state_directory: &Path,
+    batch_path: &Path,
+    clock: &dyn Clock,
+    loaded: &LoadedState,
+) -> Result<(ClassificationJournal, serde_json::Value), AppError> {
     let classification_path = state_directory.join("classifications.json");
     let transaction = FileTransaction::open(&classification_path, clock)?;
     let Some(journal_bytes) = transaction.read_bytes()? else {
@@ -261,15 +313,15 @@ pub fn record_batch(
         .sort_by(|left, right| left.assertion_id.cmp(&right.assertion_id));
     validate_source_snapshot(&loaded.inventory, &loaded.state.repository_root)?;
     transaction.write_bytes(&serde_json::to_vec_pretty(&journal)?)?;
-    Ok(json!({
+    let summary = json!({
         "schemaVersion": 1,
         "classificationPath": classification_path,
         "added": added,
         "unchanged": unchanged,
         "completed": journal.classifications.len(),
         "remaining": loaded.inventory.assertions.len().saturating_sub(journal.classifications.len())
-    })
-    .to_string())
+    });
+    Ok((journal, summary))
 }
 
 /// Enforces the evidence and ambiguity contract for each semantic category.

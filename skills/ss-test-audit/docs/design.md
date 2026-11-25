@@ -17,6 +17,8 @@ The skill audits one repository and any selected set of existing file or directo
 
 The final trace contains exactly one classification row for each inventoried assertion. The test inventory contains every inventoried test and links direct and shared assertion IDs. Tests that execute smoke behavior without a counted predicate remain visible.
 
+The skill requests one initial assertion batch, then uses one combined command to record each completed batch and export the next one. Related evidence queries can share one command. Read-only operations remain bound to the immutable snapshot; commands that accept judgments or emit final reports also verify current source hashes.
+
 The Markdown report shows per-module totals and percentages for:
 
 - `No explicitly documented promise = implicit-only + incidental`;

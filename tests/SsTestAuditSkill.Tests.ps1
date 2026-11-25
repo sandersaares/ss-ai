@@ -20,16 +20,18 @@ Describe 'ss-test-audit skill contract' {
         $skill | Should -Match 'Classified C of T assertions'
         $skill | Should -Match 'not a completion, checkpoint, pause, handoff, request for input, or permission to end the turn'
         $skill | Should -Match 'Never stop after a progress message'
-        $skill | Should -Match 'If `R` is greater than zero, invoke `next-batch`'
+        $skill | Should -Match 'advance` command'
+        $skill | Should -Match 'read the `nextBatch.batchPath` file'
         $skill | Should -Match 'If `R` is zero, continue to stage 4 and run the final `report`'
         $skill | Should -Match 'classification-batch\.schema\.json'
         $skill | Should -Match 'direct AST-visible free-function'
         $skill | Should -Match 'assert_panics'
+        $skill | Should -Match 'one `search` command by repeating `--query`'
     }
 
     It 'keeps executable behavior in native command recipes' {
         $commands = Get-Content -LiteralPath (Join-Path $script:Skill 'commands.md') -Raw
-        foreach ($command in @('initialize', 'search', 'next-batch', 'record-batch', 'report')) {
+        foreach ($command in @('initialize', 'search', 'next-batch', 'record-batch', 'advance', 'report')) {
             $commands | Should -Match ([regex]::Escape("ss-ai test-audit $command"))
         }
         $commands | Should -Not -Match '(?im)^\s*pwsh\b[^\r\n]*\s-File\b'

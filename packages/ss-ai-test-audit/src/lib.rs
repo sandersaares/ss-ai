@@ -8,7 +8,7 @@ mod report;
 mod scan;
 mod state;
 
-pub use batch::{next_batch, record_batch};
+pub use batch::{advance, next_batch, record_batch};
 pub use inventory::initialize;
 pub use report::report;
-pub use state::search;
+pub use state::{search, search_many};

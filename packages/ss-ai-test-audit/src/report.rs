@@ -10,11 +10,11 @@ use serde_json::json;
 use ss_ai_runtime::{Clock, fail};
 
 use crate::model::{Classification, ClassificationKind, ModuleSummary, TestCase, TraceRow};
-use crate::state::{load, validate_source_snapshot, write_bytes, write_json};
+use crate::state::{load_fresh, validate_source_snapshot, write_bytes, write_json};
 
 /// Validates exact classification coverage and emits durable audit reports.
 pub fn report(state_directory: &Path, clock: &dyn Clock) -> Result<String, AppError> {
-    let loaded = load(state_directory, clock)?;
+    let loaded = load_fresh(state_directory, clock)?;
     if loaded.journal.classifications.len() != loaded.inventory.assertions.len() {
         return Err(fail(
             "incompleteState",

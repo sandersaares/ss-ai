@@ -35,6 +35,11 @@ Production invariants are not assertion sites unless a test calls their free
 helper directly. Recognized panic-expectation helpers count once and suppress
 their deliberately triggered panic expression.
 
+The normal agent transition records a classified batch and exports the next
+batch in one local command. Related evidence searches can be grouped in one
+invocation. Read-only operations use the immutable state snapshot; commands
+that accept judgments or emit final reports also verify current source files.
+
 Assertions count once at their source site. Tests with no counted predicate and
 shared helper assertions remain visible in the test inventory. Every accepted
 classification is bound to the same audit token and source snapshot. A report

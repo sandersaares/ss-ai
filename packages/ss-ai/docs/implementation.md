@@ -77,6 +77,14 @@ panic-expectation helper calls and suppresses deliberately triggered panics
 inside them. This avoids method-name substring attribution while retaining
 real free helpers and explicit static-assertion test cases.
 
+`advance` shares one loaded inventory and index between classification
+validation and next-batch export. It still retains separate sibling file
+transactions for the journal and output artifacts, so a durable record can be
+replayed idempotently if publication fails. Multi-query evidence search shares
+one state load and emits a bounded result per query. Read-only operations verify
+stored state digests without traversing source files; mutation and report
+operations rehash source content at their authority boundary.
+
 The package boundaries follow the subject-owned, one-way dependency practices
 used by [cargo-release-plan](https://github.com/folo-rs/folo/blob/db33786ec25196696b46f38e2b60a03bd33ec913/packages/cargo-release-plan/docs/implementation.md)
 and [cargo-bench-history](https://github.com/folo-rs/folo/blob/db33786ec25196696b46f38e2b60a03bd33ec913/packages/cargo-bench-history/docs/implementation.md).

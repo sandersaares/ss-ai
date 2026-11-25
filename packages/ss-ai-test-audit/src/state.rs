@@ -14,6 +14,8 @@ use crate::scan::digest;
 
 /// Bounds each evidence page to a human-reviewable targeted search result.
 const MAX_SEARCH_RESULTS: usize = 200;
+/// Keeps one multi-query evidence call bounded even when every query returns a full page.
+const MAX_SEARCH_QUERIES: usize = 10;
 
 /// Searches the immutable line index without loading all evidence into the agent.
 pub fn search(
@@ -23,9 +25,22 @@ pub fn search(
     limit: usize,
     clock: &dyn Clock,
 ) -> Result<String, AppError> {
-    let loaded = load(state_directory, clock)?;
-    if query.trim().is_empty() {
-        return Err(fail("invalidInput", "Search query must not be empty"));
+    search_many(state_directory, &[query.to_owned()], kind, limit, clock)
+}
+
+/// Searches several independently bounded queries from one immutable state load.
+pub fn search_many(
+    state_directory: &Path,
+    queries: &[String],
+    kind: Option<&str>,
+    limit: usize,
+    clock: &dyn Clock,
+) -> Result<String, AppError> {
+    if queries.is_empty() || queries.len() > MAX_SEARCH_QUERIES {
+        return Err(fail(
+            "invalidInput",
+            format!("Search requires between 1 and {MAX_SEARCH_QUERIES} queries"),
+        ));
     }
     if limit == 0 || limit > MAX_SEARCH_RESULTS {
         return Err(fail(
@@ -41,6 +56,31 @@ pub fn search(
     {
         return Err(fail("invalidInput", "Unknown evidence kind"));
     }
+    let loaded = load(state_directory, clock)?;
+    let mut results = Vec::new();
+    for query in queries {
+        results.push(search_query(&loaded.index, query, kind, limit)?);
+    }
+    Ok(json!({
+        "schemaVersion": 1,
+        "auditId": loaded.state.audit_id,
+        "snapshotSha256": loaded.state.snapshot_sha256,
+        "results": results,
+        "queryCount": queries.len()
+    })
+    .to_string())
+}
+
+/// Executes one bounded AND-term query against the already validated index.
+fn search_query(
+    index: &[IndexEntry],
+    query: &str,
+    kind: Option<&str>,
+    limit: usize,
+) -> Result<Value, AppError> {
+    if query.trim().is_empty() {
+        return Err(fail("invalidInput", "Search query must not be empty"));
+    }
     let terms: Vec<String> = query
         .split_whitespace()
         .filter(|term| !term.is_empty())
@@ -48,7 +88,7 @@ pub fn search(
         .collect();
     let mut matches = Vec::new();
     let mut truncated = false;
-    for entry in loaded.index {
+    for entry in index {
         if kind.is_some_and(|kind| entry.kind != kind) {
             continue;
         }
@@ -58,19 +98,15 @@ pub fn search(
                 truncated = true;
                 break;
             }
-            matches.push(entry);
+            matches.push(entry.clone());
         }
     }
     Ok(json!({
-        "schemaVersion": 1,
-        "auditId": loaded.state.audit_id,
-        "snapshotSha256": loaded.state.snapshot_sha256,
         "query": query,
         "kind": kind,
         "matches": matches,
         "truncated": truncated
-    })
-    .to_string())
+    }))
 }
 
 /// Validated, consistently loaded state shared by batch and report operations.
@@ -81,7 +117,7 @@ pub(crate) struct LoadedState {
     pub(crate) journal: ClassificationJournal,
 }
 
-/// Loads only schema-version-one state and verifies its immutable source snapshot.
+/// Loads schema-version-one state without rehashing audited source files.
 pub(crate) fn load(state_directory: &Path, clock: &dyn Clock) -> Result<LoadedState, AppError> {
     let state: AuditState = read_json(&state_directory.join("audit-state.json"), clock)?;
     require_version(state.schema_version, "audit state")?;
@@ -124,7 +160,6 @@ pub(crate) fn load(state_directory: &Path, clock: &dyn Clock) -> Result<LoadedSt
     }
     let index = parse_index(&index_bytes)?;
     validate_index(&inventory, &index)?;
-    validate_source_snapshot(&inventory, &state.repository_root)?;
 
     let journal: ClassificationJournal =
         match read_bytes(&state_directory.join("classifications.json"), clock)? {
@@ -146,6 +181,16 @@ pub(crate) fn load(state_directory: &Path, clock: &dyn Clock) -> Result<LoadedSt
         index,
         journal,
     })
+}
+
+/// Loads state and verifies that every source still matches the immutable snapshot.
+pub(crate) fn load_fresh(
+    state_directory: &Path,
+    clock: &dyn Clock,
+) -> Result<LoadedState, AppError> {
+    let loaded = load(state_directory, clock)?;
+    validate_source_snapshot(&loaded.inventory, &loaded.state.repository_root)?;
+    Ok(loaded)
 }
 
 /// Reads and validates a complete JSON record at an exact state path.
