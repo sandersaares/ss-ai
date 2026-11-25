@@ -46,7 +46,9 @@ Compare the native inventory with an independent repository test-discovery metho
 
 Reconcile discrepancies before classification:
 
-- parser-backed Rust records `#[test]`, recognized test attributes, rustdoc code blocks, assertions, panic expectations, compile-time static assertions, and direct failure branches;
+- parser-backed Rust records `#[test]`, recognized test attributes, rustdoc code blocks, assertions, panic expectations, `static_assertions` checks (including `assert_eq_size!`), and direct failure branches;
+- compile-only checks count at a call site that instantiates an empty generic helper with trait bounds, rather than at the helper declaration;
+- fallible value access in test code may appear as `fallibleValueCheck` sites. Judge these individually: a standalone `.expect(...)` on an extracted API value can verify presence, while lock, pointer, join, ownership, and other fixture extraction remains excluded. Do not blanket-count every `unwrap` or `expect`;
 - recognized panic expectation helpers such as `assert_panics` count once, while a panic deliberately triggered inside that expectation does not count again;
 - C#, Java, JavaScript, TypeScript, Python, Go, Kotlin, and PowerShell use deliberately narrow text patterns;
 - unsupported source language text remains searchable but receives no assertion or test inventory;
@@ -114,7 +116,7 @@ Always show numerators and denominators. Mixed assertion sites enter neither num
 
 Report completion only after `submit.record.remaining` is zero and the final native report command succeeds. Read `tracePath`, `testInventoryPath`, and `summaryPath` from the report result; do not infer report paths under the state root. The trace shape is `rows[]`, with evidence in `rows[].assertion` and judgment in `rows[].classification`, not `assertions[]`.
 
-The report result also returns `noCountedAssertionCount`, `incidentalOnlyCount`, `unlinkedAssertionCount`, and `diagnosticCount`. The first two fields count tests; the unlinked field counts assertion sites and the diagnostic field counts scan diagnostics. Use those bounded counts for ordinary completion without opening the complete trace unless detailed validation requires it.
+The report result also returns `noCountedAssertionCount`, `incidentalOnlyCount`, `unlinkedAssertionCount`, `fallibleValueCheckCount`, `conditionalAssertionCount`, and `diagnosticCount`. The first two fields count tests; the unlinked, fallible, and conditional fields count assertion sites or site diagnostics. Use those bounded counts for ordinary completion without opening the complete trace unless detailed validation requires it. A nonzero fallible count means the agent had to judge heuristic expect-style candidates; it is not an unsupported success-shaped zero.
 
 The summary must state the audited repository and scopes, snapshot revision, test and assertion totals, classification totals, module rates, output paths, discovery cross-check, language coverage, and every material scan diagnostic or unresolved unsupported form.
 

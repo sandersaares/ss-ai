@@ -43,6 +43,13 @@ Public observability alone does not create a public promise. A private implement
 
 Rust uses the repository's Rust syntax parser for test attributes, functions, assertion macros, panic expectations, static assertions, and unexpected-branch failures, with a separate rustdoc block scan. Direct calls to recognized panic-expectation helpers count as one site while deliberately triggered panics inside the helper argument do not. Production invariants and defensive failure branches remain out of the test inventory unless a direct free-function or qualified-path test call identifies their containing helper. Rejected Rust syntax receives an explicit line-pattern fallback diagnostic.
 
+Rust static-assertion macros include size-equality checks. A call into an empty
+generic helper with trait bounds counts at that call as a compile-time check.
+Test-context `expect` calls on fallible API values are exported as
+`fallibleValueCheck` candidates for semantic judgment, while common fixture and
+synchronization access patterns remain excluded. Configuration attributes on
+compile-time assertions remain visible as scan diagnostics.
+
 C#, Java, JavaScript, TypeScript, Python, Go, Kotlin, and PowerShell use narrow language-specific text patterns and diagnostics. Other indexed source languages remain searchable but do not claim test or assertion coverage. Native diagnostics and an independent repository test-list command define the reachable coverage boundary.
 
 Default traversal skips generated and tool-state directories and does not follow symbolic links. A caller can select a normally excluded directory as an explicit scope. The tool rejects a symbolic link as the scope and reports nested link omissions so an audit cannot silently treat a skipped branch as covered.

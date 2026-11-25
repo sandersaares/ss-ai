@@ -62,9 +62,17 @@ Static call matching links parser-visible helper names across indexed test bodie
 
 The Rust visitor records direct `ExprCall` names for each test and reconciles those names after all files are scanned. Production assertions remain candidates and survive only when that exact call map selects their helper. Text is never a caller oracle, so declarations, comments, method names, and trait callbacks cannot create false links. Test-owned `Drop` panic sites are excluded because they commonly exist to induce an expected unwind; other callback assertions remain visible for agent attribution. Recognized `assert_panics` calls become one panic expectation, and the visitor suppresses panic macros evaluated inside that expected-unwind argument.
 
+`assert_eq_size` macros use the same compile-time path as trait assertions. A
+prepass identifies empty functions whose generic type parameters have trait
+bounds; direct calls from test-context code count at the enforcing invocation.
+The parser emits test-context `expect` method calls as `fallibleValueCheck`
+sites after excluding common lock, join, pointer, ownership, and fixture
+accessors. Contiguous cfg attributes on compile-time sites become
+`conditionalAssertion` diagnostics, preserving branch provenance.
+
 ## Count semantics
 
-The inventory counts source sites, not runtime loop iterations or repeated trait names in one macro. Rust `#[should_panic]` counts at the expectation attribute, not at the deliberately triggered panic. Ordinary `unwrap` and `expect` calls are not inventory predicates. A rustdoc fence is a test case; a compile-only fence remains in the inventory with no counted predicate.
+The inventory counts source sites, not runtime loop iterations or repeated trait names in one macro. Rust `#[should_panic]` counts at the expectation attribute, not at the deliberately triggered panic. Ordinary `unwrap` calls remain setup rather than predicates. Selected test-context `expect` calls that extract API values count as heuristic `fallibleValueCheck` sites; common fixture and synchronization accessors remain excluded. A rustdoc fence is a test case; a compile-only fence remains in the inventory with no counted predicate unless it contains one of the recognized static or fallible checks.
 
 The report computes assertion-site rates over classified rows and preserves test inventory entries independently. This prevents smoke tests and no-predicate doctests from disappearing while keeping their lack of checks explicit.
 

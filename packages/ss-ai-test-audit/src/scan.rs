@@ -11,7 +11,7 @@ use sha2::{Digest, Sha256};
 use ss_ai_runtime::{caused_by, fail};
 use syn::spanned::Spanned;
 use syn::visit::Visit;
-use syn::{Block, ExprCall, ImplItemFn, ItemFn, Macro, Signature};
+use syn::{Block, ExprCall, ExprMethodCall, ImplItemFn, ItemFn, Macro, Signature};
 
 use crate::model::{
     AssertionSite, IndexEntry, IndexedFile, Inventory, RevisionKind, ScanDiagnostic, TestCase,
@@ -402,6 +402,7 @@ fn scan_file(
     if language == "rust" {
         match syn::parse_file(text) {
             Ok(file) => {
+                let compile_check_helpers = find_compile_check_helpers(&file);
                 let mut collector = RustCollector {
                     tests,
                     assertions,
@@ -415,9 +416,11 @@ fn scan_file(
                     test_context: is_test_path(path),
                     test_calls,
                     expected_panic_calls,
+                    compile_check_helpers: &compile_check_helpers,
                     expected_panic: false,
                 };
                 collector.visit_file(&file);
+                record_conditional_assertions(diagnostics, path, text, assertions);
                 scan_doctests(
                     tests,
                     assertions,
@@ -503,6 +506,7 @@ struct RustCollector<'a> {
     test_context: bool,
     test_calls: &'a mut BTreeMap<String, BTreeSet<String>>,
     expected_panic_calls: &'a mut BTreeMap<String, BTreeSet<String>>,
+    compile_check_helpers: &'a BTreeSet<String>,
     expected_panic: bool,
 }
 
@@ -701,6 +705,46 @@ impl<'ast> Visit<'ast> for RustCollector<'_> {
                 .insert(name.clone());
         }
         let is_panic_expectation = name.as_deref().is_some_and(is_panic_expectation_call);
+        if name
+            .as_deref()
+            .is_some_and(|name| self.compile_check_helpers.contains(name))
+            && self.current_function_is_test
+        {
+            let start = i.span().start();
+            let end = i.span().end();
+            self.push_assertion(
+                "compileTimeAssertion",
+                start.line,
+                end.line,
+                start.column.saturating_add(1),
+                source_slice(self.text, start, end),
+            );
+            self.visit_panic_expectation_children(i, is_panic_expectation);
+        } else {
+            self.visit_panic_expectation_children(i, is_panic_expectation);
+        }
+    }
+
+    fn visit_expr_method_call(&mut self, i: &'ast ExprMethodCall) {
+        if i.method == "expect" && self.current_function_is_test && !is_fixture_access(&i.receiver)
+        {
+            let start = i.span().start();
+            let end = i.span().end();
+            self.push_assertion(
+                "fallibleValueCheck",
+                start.line,
+                end.line,
+                start.column.saturating_add(1),
+                source_slice(self.text, start, end),
+            );
+        }
+        syn::visit::visit_expr_method_call(self, i);
+    }
+}
+
+impl RustCollector<'_> {
+    /// Visits call arguments while suppressing deliberately triggered expected panics.
+    fn visit_panic_expectation_children(&mut self, i: &ExprCall, is_panic_expectation: bool) {
         if is_panic_expectation && (self.current_test_id.is_some() || self.current_function_is_test)
         {
             let start = i.span().start();
@@ -758,6 +802,96 @@ fn is_panic_expectation_call(name: &str) -> bool {
     matches!(name, "assert_panics" | "assert_panics_with")
 }
 
+/// Finds empty generic helper functions whose trait bounds enforce call-site compilation.
+fn find_compile_check_helpers(file: &syn::File) -> BTreeSet<String> {
+    struct Helpers(BTreeSet<String>);
+
+    impl<'ast> Visit<'ast> for Helpers {
+        fn visit_item_fn(&mut self, i: &'ast ItemFn) {
+            if i.block.stmts.is_empty() && function_has_bounded_type_parameter(&i.sig) {
+                self.0.insert(i.sig.ident.to_string());
+            }
+            syn::visit::visit_item_fn(self, i);
+        }
+
+        fn visit_impl_item_fn(&mut self, i: &'ast ImplItemFn) {
+            if i.block.stmts.is_empty() && function_has_bounded_type_parameter(&i.sig) {
+                self.0.insert(i.sig.ident.to_string());
+            }
+            syn::visit::visit_impl_item_fn(self, i);
+        }
+    }
+
+    let mut helpers = Helpers(BTreeSet::new());
+    helpers.visit_file(file);
+    helpers.0
+}
+
+/// Recognizes a generic type parameter whose trait bound can reject a call.
+fn function_has_bounded_type_parameter(signature: &Signature) -> bool {
+    signature
+        .generics
+        .type_params()
+        .any(|parameter| !parameter.bounds.is_empty())
+        || signature
+            .generics
+            .where_clause
+            .as_ref()
+            .is_some_and(|clause| {
+                clause.predicates.iter().any(|predicate| {
+                    matches!(
+                        predicate,
+                        syn::WherePredicate::Type(predicate)
+                            if !predicate.bounds.is_empty()
+                    )
+                })
+            })
+}
+
+/// Excludes common ownership and synchronization fixture access from expect candidates.
+fn is_fixture_access(receiver: &syn::Expr) -> bool {
+    let Some(name) = last_method_name(receiver) else {
+        return false;
+    };
+    matches!(
+        name.as_str(),
+        "lock"
+            | "try_lock"
+            | "read"
+            | "write"
+            | "join"
+            | "as_ref"
+            | "as_mut"
+            | "take"
+            | "borrow"
+            | "borrow_mut"
+    )
+}
+
+/// Returns the last method name in a direct call chain for fixture classification.
+fn last_method_name(expression: &syn::Expr) -> Option<String> {
+    match expression {
+        syn::Expr::MethodCall(call) => Some(call.method.to_string()),
+        syn::Expr::Group(group) => last_method_name(&group.expr),
+        syn::Expr::Paren(paren) => last_method_name(&paren.expr),
+        syn::Expr::Unsafe(unsafe_block) => {
+            let statement = unsafe_block.block.stmts.last()?;
+            match statement {
+                syn::Stmt::Expr(expression, _) => last_method_name(expression),
+                _ => None,
+            }
+        }
+        syn::Expr::Block(block) => {
+            let statement = block.block.stmts.last()?;
+            match statement {
+                syn::Stmt::Expr(expression, _) => last_method_name(expression),
+                _ => None,
+            }
+        }
+        _ => None,
+    }
+}
+
 /// Classifies supported attributes without interpreting their test framework semantics.
 fn test_attributes(attributes: &[syn::Attribute]) -> Option<&'static str> {
     attributes.iter().find_map(|attribute| {
@@ -781,6 +915,8 @@ fn rust_macro_kind(name: &str) -> Option<&'static str> {
         name,
         "assert_impl_all"
             | "assert_not_impl_any"
+            | "assert_eq_size"
+            | "assert_eq_size_val"
             | "const_assert"
             | "static_assert"
             | "static_assertions_const"
@@ -1200,6 +1336,7 @@ fn cross_check(
             let lower = line.to_ascii_lowercase();
             lower.contains("assert")
                 || lower.contains("should_panic")
+                || lower.contains(".expect(")
                 || lower.contains("pytest.raises")
                 || lower.contains("assertthrows")
                 || lower.contains("t.throw")
@@ -1213,6 +1350,62 @@ fn cross_check(
             "Independent marker lines: {markers}; inventoried assertion sites: {assertion_count}"
         ),
     });
+}
+
+/// Retains compile-configuration provenance for conditional assertion sites.
+fn record_conditional_assertions(
+    diagnostics: &mut Vec<ScanDiagnostic>,
+    path: &str,
+    text: &str,
+    assertions: &[AssertionSite],
+) {
+    for assertion in assertions
+        .iter()
+        .filter(|assertion| assertion.path == path && assertion.kind == "compileTimeAssertion")
+    {
+        let Some(configuration) = preceding_cfg(text, assertion.line) else {
+            continue;
+        };
+        if diagnostics.iter().any(|diagnostic| {
+            diagnostic.kind == "conditionalAssertion"
+                && diagnostic.path == path
+                && diagnostic.line == Some(assertion.line)
+        }) {
+            continue;
+        }
+        diagnostics.push(ScanDiagnostic {
+            kind: "conditionalAssertion".to_owned(),
+            path: path.to_owned(),
+            line: Some(assertion.line),
+            detail: format!(
+                "Assertion '{}' is conditional on {configuration}",
+                assertion.id
+            ),
+        });
+    }
+}
+
+/// Reads the contiguous cfg attributes immediately preceding a source line.
+fn preceding_cfg(text: &str, line: usize) -> Option<String> {
+    let lines: Vec<&str> = text.lines().collect();
+    let mut configurations = Vec::new();
+    let mut offset = line.saturating_sub(1);
+    while offset > 0 {
+        let previous = lines.get(offset.saturating_sub(1))?.trim();
+        if previous.starts_with("#[cfg(") || previous.starts_with("#[cfg_attr(") {
+            configurations.push(previous.to_owned());
+            offset = offset.saturating_sub(1);
+            continue;
+        }
+        if previous.is_empty() {
+            break;
+        }
+        break;
+    }
+    (!configurations.is_empty()).then(|| {
+        configurations.reverse();
+        configurations.join(" ")
+    })
 }
 
 /// Adds direct and helper relationships after all file scans are complete.

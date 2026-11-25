@@ -84,6 +84,16 @@ pub fn report(state_directory: &Path, clock: &dyn Clock) -> Result<String, AppEr
                 && row.classification.calling_test_ids.is_empty()
         })
         .count();
+    let fallible_value_check_count = trace
+        .iter()
+        .filter(|row| row.assertion.kind == "fallibleValueCheck")
+        .count();
+    let conditional_assertion_count = loaded
+        .inventory
+        .diagnostics
+        .iter()
+        .filter(|diagnostic| diagnostic.kind == "conditionalAssertion")
+        .count();
     let trace_document = json!({
         "schemaVersion": 1,
         "auditId": loaded.state.audit_id,
@@ -128,6 +138,8 @@ pub fn report(state_directory: &Path, clock: &dyn Clock) -> Result<String, AppEr
         "noCountedAssertionCount": no_counted_assertion_count,
         "incidentalOnlyCount": incidental_only_count,
         "unlinkedAssertionCount": unlinked_assertion_count,
+        "fallibleValueCheckCount": fallible_value_check_count,
+        "conditionalAssertionCount": conditional_assertion_count,
         "diagnosticCount": loaded.inventory.diagnostics.len(),
         "tracePath": trace_path,
         "testInventoryPath": inventory_path,

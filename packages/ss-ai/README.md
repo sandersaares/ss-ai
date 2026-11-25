@@ -173,13 +173,17 @@ final reports.
 Batch exports return `batchPath` and `displayPath`. The JSON batch has a flat
 `assertions[]` shape; the display removes PowerShell projection glue. Report
 results return all output paths and completion counts for no-assertion,
-incidental-only, unlinked, and diagnostic cases.
+incidental-only, unlinked, fallible-value, conditional-assertion, and diagnostic
+cases.
 
 Rust caller attribution comes from direct syntax in test functions. Production
 invariants and method names are not promoted to shared assertions, while
 free helpers called by tests and test-owned callbacks remain inventoried.
 Recognized panic-expectation helper calls count once without counting the
 deliberately triggered panic inside their argument.
+`assert_eq_size!`, constrained empty generic helper invocations, and selected
+test-context `expect(...)` value-presence checks are inventoried. Common lock,
+pointer, join, ownership, and fixture extraction calls remain excluded.
 
 `report` rejects incomplete classification, then writes `reports/trace.json`,
 `reports/test-inventory.json`, and `reports/summary.md` under the state

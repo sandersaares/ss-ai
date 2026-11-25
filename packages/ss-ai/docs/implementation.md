@@ -79,6 +79,13 @@ panic-expectation helper calls and suppresses deliberately triggered panics
 inside them. This avoids method-name substring attribution while retaining
 real free helpers and explicit static-assertion test cases.
 
+`assert_eq_size` follows the static-assertion path. Empty generic helper
+declarations with trait bounds are pre-indexed, and direct calls from test
+context become compile-time assertion sites at the call. Selected `expect`
+method calls on fallible API values become `fallibleValueCheck` sites; common
+fixture and synchronization accessor names are excluded. Configuration
+attributes on compile-time sites are preserved as scan diagnostics.
+
 `advance` shares one loaded inventory and index between classification
 validation and next-batch export. It still retains separate sibling file
 transactions for the journal and output artifacts, so a durable record can be

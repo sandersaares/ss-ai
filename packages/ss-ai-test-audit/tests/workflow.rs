@@ -240,6 +240,8 @@ fn audits_parser_sites_with_resumable_evidence_batches() {
     assert_eq!(summary["noCountedAssertionCount"], 1);
     assert!(summary["incidentalOnlyCount"].as_u64().unwrap() > 0);
     assert_eq!(summary["unlinkedAssertionCount"], 0);
+    assert_eq!(summary["fallibleValueCheckCount"], 0);
+    assert_eq!(summary["conditionalAssertionCount"], 0);
     assert!(summary["diagnosticCount"].as_u64().is_some());
     let trace: Value = serde_json::from_slice(
         &fs::read(Path::new(summary["tracePath"].as_str().unwrap())).unwrap(),
@@ -866,6 +868,100 @@ fn calls_same_named_method_only() {
             .iter()
             .any(|assertion| assertion["helperName"] == "exploding")
     );
+}
+
+#[test]
+fn inventories_size_checks_compile_constraints_and_ambiguous_expect_calls() {
+    let root = TempDir::new().unwrap();
+    let repository = root.path().join("repository");
+    let state = root.path().join("state");
+    fs::create_dir_all(repository.join("src")).unwrap();
+    fs::write(
+        repository.join("src/lib.rs"),
+        r#"struct Small(u8);
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Mutex;
+
+    use super::Small;
+    use static_assertions::assert_eq_size;
+
+    #[cfg(debug_assertions)]
+    assert_eq_size!(Small, (u8,));
+    #[cfg(not(debug_assertions))]
+    assert_eq_size!(Small, u8);
+
+    fn _assert_send<F: Future + Send>(_: F) {}
+
+    fn compile_only_send_check() {
+        _assert_send(async {});
+    }
+
+    fn ordinary_generic<T: Clone>(value: T) -> T {
+        value
+    }
+
+    #[test]
+    fn checks_presence_but_not_fixture_access() {
+        let _value = Some(42).expect("value exists");
+        let _pointer = unsafe { Some(42).as_ref() }.expect("pointer fixture");
+        let mutex = Mutex::new(Some(42));
+        let _guard = mutex.lock().expect("test mutex");
+        let _copied = ordinary_generic(42);
+    }
+}
+"#,
+    )
+    .unwrap();
+    initialize(&repository, &[], &state, &NoProcess, &FixedClock).unwrap();
+    let inventory: Value =
+        serde_json::from_slice(&fs::read(state.join("inventory.json")).unwrap()).unwrap();
+    let assertions = inventory["assertions"].as_array().unwrap();
+    assert_eq!(
+        assertions
+            .iter()
+            .filter(|assertion| assertion["expression"]
+                .as_str()
+                .is_some_and(|expression| expression.contains("assert_eq_size!")))
+            .count(),
+        2
+    );
+    assert!(assertions.iter().any(|assertion| {
+        assertion["kind"] == "compileTimeAssertion"
+            && assertion["expression"]
+                .as_str()
+                .is_some_and(|expression| expression.contains("_assert_send(async"))
+    }));
+    assert!(assertions.iter().any(|assertion| {
+        assertion["kind"] == "fallibleValueCheck"
+            && assertion["expression"]
+                .as_str()
+                .is_some_and(|expression| expression.contains("value exists"))
+    }));
+    assert!(!assertions.iter().any(|assertion| {
+        assertion["expression"].as_str().is_some_and(|expression| {
+            expression.contains("test mutex") || expression.contains("pointer fixture")
+        })
+    }));
+    assert!(!assertions.iter().any(|assertion| {
+        assertion["expression"]
+            .as_str()
+            .is_some_and(|expression| expression.contains("ordinary_generic"))
+    }));
+    let diagnostics = inventory["diagnostics"].as_array().unwrap();
+    assert_eq!(
+        diagnostics
+            .iter()
+            .filter(|diagnostic| diagnostic["kind"] == "conditionalAssertion")
+            .count(),
+        2
+    );
+    assert!(diagnostics.iter().any(|diagnostic| {
+        diagnostic["detail"]
+            .as_str()
+            .is_some_and(|detail| detail.contains("#[cfg(debug_assertions)]"))
+    }));
 }
 
 #[test]

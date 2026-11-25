@@ -40,6 +40,12 @@ batch in one local command. Related evidence searches can be grouped in one
 invocation. Read-only operations use the immutable state snapshot; commands
 that accept judgments or emit final reports also verify current source files.
 
+Rust discovery covers size assertions, compile-time trait-bound helper
+invocations, and narrowly selected fallible-value `expect` sites. Ambiguous
+expect-style candidates remain explicit in results and require semantic
+judgment. Fixture and synchronization accessors are excluded rather than
+promoted to checks merely because they panic on unexpected state.
+
 The compact submission boundary accepts agent-owned semantic rows and
 snapshot-bound evidence handles, with explicit equivalence, citation, and
 caller choices for reuse. Batch and report results include compact presentation
