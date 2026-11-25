@@ -9,7 +9,9 @@ use ohno::AppError;
 use serde_json::json;
 use ss_ai_runtime::{Clock, fail};
 
-use crate::model::{Classification, ClassificationKind, ModuleSummary, TestCase, TraceRow};
+use crate::model::{
+    AuditSummary, Classification, ClassificationKind, ModuleSummary, TestCase, TraceRow,
+};
 use crate::state::{load_fresh, validate_source_snapshot, write_bytes, write_json};
 
 /// Validates exact classification coverage and emits durable audit reports.
@@ -94,11 +96,47 @@ pub fn report(state_directory: &Path, clock: &dyn Clock) -> Result<String, AppEr
         .iter()
         .filter(|diagnostic| diagnostic.kind == "conditionalAssertion")
         .count();
+    let summary = AuditSummary {
+        schema_version: 1,
+        status: "complete".to_owned(),
+        next_action: "complete".to_owned(),
+        final_response_allowed: true,
+        audit_id: loaded.state.audit_id.clone(),
+        snapshot_sha256: loaded.state.snapshot_sha256.clone(),
+        repository_root: loaded.inventory.repository_root.clone(),
+        repository_revision: loaded.inventory.repository_revision.clone(),
+        scope_paths: loaded.inventory.scope_paths.clone(),
+        indexed_file_count: loaded.inventory.files.len(),
+        source_languages: loaded.inventory.files.iter().fold(
+            BTreeMap::new(),
+            |mut languages, file| {
+                let count = languages.entry(file.language.clone()).or_default();
+                *count = count.saturating_add(1);
+                languages
+            },
+        ),
+        test_count: tests.len(),
+        assertion_count: trace.len(),
+        module_count: modules.len(),
+        classification_counts: classification_counts
+            .iter()
+            .map(|(name, count)| ((*name).to_owned(), *count))
+            .collect(),
+        no_counted_assertion_count,
+        incidental_only_count,
+        unlinked_assertion_count,
+        fallible_value_check_count,
+        conditional_assertion_count,
+        diagnostic_count: loaded.inventory.diagnostics.len(),
+        modules: modules.clone(),
+    };
     let trace_document = json!({
         "schemaVersion": 1,
         "auditId": loaded.state.audit_id,
         "snapshotSha256": loaded.state.snapshot_sha256,
         "repositoryRevision": loaded.inventory.repository_revision,
+        "repositoryRoot": loaded.inventory.repository_root,
+        "scopePaths": loaded.inventory.scope_paths,
         "classificationCounts": classification_counts,
         "modules": modules,
         "rows": trace,
@@ -109,13 +147,29 @@ pub fn report(state_directory: &Path, clock: &dyn Clock) -> Result<String, AppEr
         "snapshotSha256": loaded.state.snapshot_sha256,
         "tests": tests,
     });
-    let report_text = render_report(
-        &loaded.state.audit_id,
-        &loaded.inventory.repository_revision,
+    let summary_text = render_summary(
+        &summary,
         loaded.inventory.files.len(),
-        &modules,
         &classification_counts,
         &tests,
+        &loaded.inventory.diagnostics,
+    );
+    let details_document = json!({
+        "schemaVersion": 1,
+        "auditId": loaded.state.audit_id,
+        "snapshotSha256": loaded.state.snapshot_sha256,
+        "repositoryRevision": loaded.inventory.repository_revision,
+        "assertionTrace": trace,
+        "testInventory": tests,
+        "diagnostics": loaded.inventory.diagnostics,
+    });
+    let details_text = render_details(
+        &loaded.state.audit_id,
+        &loaded.inventory.repository_root,
+        &loaded.inventory.repository_revision,
+        &loaded.inventory.scope_paths,
+        &tests,
+        &trace,
         &loaded.inventory.diagnostics,
     );
     validate_source_snapshot(&loaded.inventory, &loaded.state.repository_root)?;
@@ -124,10 +178,16 @@ pub fn report(state_directory: &Path, clock: &dyn Clock) -> Result<String, AppEr
     fs::create_dir_all(&output_directory)?;
     let trace_path = output_directory.join("trace.json");
     let inventory_path = output_directory.join("test-inventory.json");
+    let summary_json_path = output_directory.join("summary.json");
     let summary_path = output_directory.join("summary.md");
+    let details_json_path = output_directory.join("details.json");
+    let details_path = output_directory.join("details.md");
     write_json(&trace_path, &trace_document, clock)?;
     write_json(&inventory_path, &test_document, clock)?;
-    write_bytes(&summary_path, report_text.as_bytes(), clock)?;
+    write_json(&summary_json_path, &summary, clock)?;
+    write_bytes(&summary_path, summary_text.as_bytes(), clock)?;
+    write_json(&details_json_path, &details_document, clock)?;
+    write_bytes(&details_path, details_text.as_bytes(), clock)?;
     Ok(json!({
         "schemaVersion": 1,
         "status": "complete",
@@ -145,7 +205,10 @@ pub fn report(state_directory: &Path, clock: &dyn Clock) -> Result<String, AppEr
         "diagnosticCount": loaded.inventory.diagnostics.len(),
         "tracePath": trace_path,
         "testInventoryPath": inventory_path,
+        "summaryJsonPath": summary_json_path,
         "summaryPath": summary_path,
+        "detailsJsonPath": details_json_path,
+        "detailsPath": details_path,
         "moduleCount": modules.len()
     })
     .to_string())
@@ -288,24 +351,89 @@ fn ratio(numerator: usize, denominator: usize) -> f64 {
 }
 
 /// Renders a concise human report with denominators and execution diagnostics.
-fn render_report(
-    audit_id: &str,
-    revision: &str,
-    file_count: usize,
-    modules: &[ModuleSummary],
+fn render_summary(
+    summary: &AuditSummary,
+    _file_count: usize,
     classification_counts: &BTreeMap<&str, usize>,
     tests: &[serde_json::Value],
     diagnostics: &[crate::model::ScanDiagnostic],
 ) -> String {
     let mut output = String::new();
+    let audit_id = &summary.audit_id;
+    let repository_root = &summary.repository_root;
+    let revision = &summary.repository_revision;
+    let scope_paths = &summary.scope_paths;
+    let modules = &summary.modules;
+    let file_count = summary.indexed_file_count;
     output.push_str("# Test audit\n\n");
+    _ = writeln!(output, "- Schema version: {}", summary.schema_version);
+    _ = writeln!(output, "- Status: {}", summary.status);
+    _ = writeln!(output, "- Next action: {}", summary.next_action);
     _ = writeln!(
         output,
-        "Audit: `{audit_id}`  \nRevision: `{revision}`  \nIndexed files: {file_count}\n"
+        "- Final response allowed: {}\n",
+        summary.final_response_allowed
+    );
+    _ = writeln!(
+        output,
+        "Audit: `{audit_id}`  \nSnapshot: `{}`  \nRepository: `{}`  \nRevision: `{revision}`  \nScope: `{}`  \nIndexed files: {file_count}\n",
+        summary.snapshot_sha256,
+        repository_root,
+        if scope_paths.is_empty() {
+            "<repository>".to_owned()
+        } else {
+            scope_paths.join(", ")
+        }
     );
     output.push_str(
         "These rates describe assertion evidence. They are not a test-quality score.\n\n",
     );
+    output.push_str("## Coverage summary\n\n");
+    _ = writeln!(output, "- Tests: {}", summary.test_count);
+    _ = writeln!(output, "- Assertions: {}", summary.assertion_count);
+    _ = writeln!(output, "- Modules: {}", summary.module_count);
+    _ = writeln!(output, "- Indexed files: {}", summary.indexed_file_count);
+    let languages = summary
+        .source_languages
+        .iter()
+        .map(|(language, count)| format!("{language}: {count}"))
+        .collect::<Vec<_>>()
+        .join(", ");
+    _ = writeln!(
+        output,
+        "- Source languages: {}\n",
+        if languages.is_empty() {
+            "none".to_owned()
+        } else {
+            languages
+        }
+    );
+    _ = writeln!(
+        output,
+        "- Tests with no counted assertion: {}",
+        summary.no_counted_assertion_count
+    );
+    _ = writeln!(
+        output,
+        "- Incidental-only tests: {}",
+        summary.incidental_only_count
+    );
+    _ = writeln!(
+        output,
+        "- Unlinked assertion sites: {}",
+        summary.unlinked_assertion_count
+    );
+    _ = writeln!(
+        output,
+        "- Fallible-value candidates: {}",
+        summary.fallible_value_check_count
+    );
+    _ = writeln!(
+        output,
+        "- Conditional assertion diagnostics: {}",
+        summary.conditional_assertion_count
+    );
+    _ = writeln!(output, "- Scan diagnostics: {}\n", summary.diagnostic_count);
     output.push_str(
         "| Module | Assertions | No explicitly documented promise | No public-contract check |\n",
     );
@@ -406,6 +534,115 @@ fn render_report(
             _ = writeln!(
                 output,
                 "- `{}` at `{}`{}: {}\n",
+                diagnostic.kind,
+                diagnostic.path,
+                diagnostic
+                    .line
+                    .map(|line| format!(":{line}"))
+                    .unwrap_or_default(),
+                diagnostic.detail
+            );
+        }
+    }
+    output
+}
+
+/// Renders the complete human-readable companion to `details.json`.
+fn render_details(
+    audit_id: &str,
+    repository_root: &str,
+    revision: &str,
+    scope_paths: &[String],
+    tests: &[serde_json::Value],
+    trace: &[TraceRow],
+    diagnostics: &[crate::model::ScanDiagnostic],
+) -> String {
+    let mut output = String::new();
+    _ = writeln!(
+        output,
+        "# Test audit details\n\nAudit: `{audit_id}`  \nRepository: `{repository_root}`  \nRevision: `{revision}`  \nScope: `{}`\n",
+        if scope_paths.is_empty() {
+            "<repository>".to_owned()
+        } else {
+            scope_paths.join(", ")
+        }
+    );
+    output.push_str("\n## Assertion trace\n\n");
+    for row in trace {
+        let callers = if row.classification.calling_test_ids.is_empty() {
+            row.assertion.calling_test_ids.join(", ")
+        } else {
+            row.classification.calling_test_ids.join(", ")
+        };
+        _ = writeln!(
+            output,
+            "### {} — {:?} — `{}:{}`\n",
+            row.assertion.id, row.classification.kind, row.assertion.path, row.assertion.line
+        );
+        _ = writeln!(
+            output,
+            "- Actual outcome: {}",
+            row.classification.actual_outcome
+        );
+        _ = writeln!(output, "- Rationale: {}", row.classification.rationale);
+        _ = writeln!(
+            output,
+            "- Evidence status: {:?}",
+            row.classification.evidence_status
+        );
+        _ = writeln!(
+            output,
+            "- Source: {}",
+            row.assertion.expression.replace('\n', " ")
+        );
+        _ = writeln!(
+            output,
+            "- Calling tests: {}",
+            if callers.is_empty() {
+                "none".to_owned()
+            } else {
+                callers
+            }
+        );
+        if let Some(reason) = &row.classification.incidental_reason {
+            _ = writeln!(output, "- Incidental reason: {reason}");
+        }
+        if let Some(reason) = &row.classification.unlinked_reason {
+            _ = writeln!(output, "- Unlinked reason: {reason}");
+        }
+        for citation in &row.classification.citations {
+            _ = writeln!(
+                output,
+                "- Citation: `{}:{}` — {}",
+                citation.path, citation.line, citation.excerpt
+            );
+        }
+        output.push('\n');
+    }
+
+    output.push_str("## Test inventory\n\n");
+    for test in tests {
+        _ = writeln!(
+            output,
+            "- `{}`: {} (`{}:{}`), direct={}, shared={}, incidentalOnly={}\n",
+            test["id"].as_str().unwrap_or(""),
+            test["name"].as_str().unwrap_or(""),
+            test["path"].as_str().unwrap_or(""),
+            test["line"].as_u64().unwrap_or_default(),
+            test["directAssertionIds"],
+            test["sharedAssertionIds"],
+            test["incidentalOnly"].as_bool().unwrap_or(false)
+        );
+    }
+
+    output.push_str("\n## Diagnostics\n\n");
+    if diagnostics.is_empty() {
+        output.push_str("No scan diagnostics.\n");
+    } else {
+        for diagnostic in diagnostics {
+            _ = writeln!(
+                output,
+                "- `{}` at `{}`{}: {}",
                 diagnostic.kind,
                 diagnostic.path,
                 diagnostic

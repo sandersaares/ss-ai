@@ -114,6 +114,9 @@ Deliver these generated paths:
 - `trace.json`: searchable assertion rows with source, actual outcome, classification, and citations;
 - `test-inventory.json`: every test with direct and shared assertion IDs, including smoke cases with no counted predicate;
 - `summary.md`: per-module totals and percentages, tests with incidental-only checks, tests with no counted assertion, and scan diagnostics.
+- `summary.json`: machine-readable versioned summary matching the fields in the native report result.
+- `details.md`: human-readable assertion trace, test inventory, and diagnostics.
+- `details.json`: machine-readable assertion trace, test inventory, and diagnostics.
 
 Keep the rate labels exact:
 
@@ -124,7 +127,9 @@ Always show numerators and denominators. Mixed assertion sites enter neither num
 
 # Stage 5: summarize the execution
 
-Report completion only after the last `submit` says `nextAction: "report"`, followed by a `report` result with `nextAction: "complete"` and `finalResponseAllowed: true`. Read `tracePath`, `testInventoryPath`, and `summaryPath` from the report result; do not infer report paths under the state root. The trace shape is `rows[]`, with evidence in `rows[].assertion` and judgment in `rows[].classification`, not `assertions[]`.
+Report completion only after the last `submit` says `nextAction: "report"`, followed by a `report` result with `nextAction: "complete"` and `finalResponseAllowed: true`. Use the returned path fields; do not infer report paths under the state root. Keep the existing compatibility artifacts (`trace.json`, `test-inventory.json`) and add the standardized pairs (`summary.json` / `summary.md`, `details.json` / `details.md`).
+
+Emit the final conversational summary in this fixed order: audit identity, repository/scope/revision, coverage totals, classification totals, rates, inventory gaps, diagnostics, and artifact paths. The Markdown summary and JSON summary use the same field set; `details.md` and `details.json` use `assertionTrace`, `testInventory`, and `diagnostics`.
 
 The report result also returns `noCountedAssertionCount`, `incidentalOnlyCount`, `unlinkedAssertionCount`, `fallibleValueCheckCount`, `conditionalAssertionCount`, and `diagnosticCount`. The first two fields count tests; the unlinked, fallible, and conditional fields count assertion sites or site diagnostics. Use those bounded counts for ordinary completion without opening the complete trace unless detailed validation requires it. A nonzero fallible count means the agent had to judge heuristic expect-style candidates; it is not an unsupported success-shaped zero.
 

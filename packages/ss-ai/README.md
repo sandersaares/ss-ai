@@ -180,6 +180,15 @@ results return all output paths and completion counts for no-assertion,
 incidental-only, unlinked, fallible-value, conditional-assertion, and diagnostic
 cases.
 
+Final reports standardize paired human and machine artifacts:
+`summary.json`/`summary.md` carry the versioned audit summary, while
+`details.json`/`details.md` carry matching assertion-trace, test-inventory, and
+diagnostic sections. Details use `assertionTrace`, `testInventory`, and
+`diagnostics` as their section names. Summary identity includes repository,
+revision, scope paths, indexed files, and language totals. Existing
+`trace.json` and `test-inventory.json` remain
+compatibility artifacts.
+
 Rust caller attribution comes from direct syntax in test functions. Production
 invariants and method names are not promoted to shared assertions, while
 free helpers called by tests and test-owned callbacks remain inventoried.

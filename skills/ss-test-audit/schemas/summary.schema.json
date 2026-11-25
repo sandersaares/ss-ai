@@ -1,0 +1,174 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schemaVersion",
+    "status",
+    "nextAction",
+    "finalResponseAllowed",
+    "auditId",
+    "snapshotSha256",
+    "repositoryRoot",
+    "repositoryRevision",
+    "scopePaths",
+    "indexedFileCount",
+    "sourceLanguages",
+    "testCount",
+    "assertionCount",
+    "moduleCount",
+    "classificationCounts",
+    "noCountedAssertionCount",
+    "incidentalOnlyCount",
+    "unlinkedAssertionCount",
+    "fallibleValueCheckCount",
+    "conditionalAssertionCount",
+    "diagnosticCount",
+    "modules"
+  ],
+  "properties": {
+    "schemaVersion": {
+      "const": 1
+    },
+    "status": {
+      "const": "complete"
+    },
+    "nextAction": {
+      "const": "complete"
+    },
+    "finalResponseAllowed": {
+      "const": true
+    },
+    "auditId": {
+      "type": "string",
+      "minLength": 1
+    },
+    "snapshotSha256": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "repositoryRoot": {
+      "type": "string",
+      "minLength": 1
+    },
+    "repositoryRevision": {
+      "type": "string",
+      "minLength": 1
+    },
+    "scopePaths": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "indexedFileCount": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "sourceLanguages": {
+      "type": "object",
+      "additionalProperties": {
+        "type": "integer",
+        "minimum": 0
+      }
+    },
+    "testCount": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "assertionCount": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "moduleCount": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "classificationCounts": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "Documented": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "Implicit": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "Mixed": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "Incidental": {
+          "type": "integer",
+          "minimum": 0
+        }
+      }
+    },
+    "noCountedAssertionCount": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "incidentalOnlyCount": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "unlinkedAssertionCount": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "fallibleValueCheckCount": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "conditionalAssertionCount": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "diagnosticCount": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "modules": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "module",
+          "assertionCount",
+          "noExplicitlyDocumentedPromiseCount",
+          "noPublicContractCheckCount",
+          "noExplicitlyDocumentedPromiseRate",
+          "noPublicContractCheckRate"
+        ],
+        "properties": {
+          "module": {
+            "type": "string"
+          },
+          "assertionCount": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "noExplicitlyDocumentedPromiseCount": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "noPublicContractCheckCount": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "noExplicitlyDocumentedPromiseRate": {
+            "type": "number",
+            "minimum": 0
+          },
+          "noPublicContractCheckRate": {
+            "type": "number",
+            "minimum": 0
+          }
+        }
+      }
+    }
+  }
+}

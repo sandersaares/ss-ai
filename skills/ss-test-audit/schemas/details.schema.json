@@ -1,0 +1,66 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schemaVersion",
+    "auditId",
+    "snapshotSha256",
+    "repositoryRevision",
+    "repositoryRoot",
+    "scopePaths",
+    "assertionTrace",
+    "testInventory",
+    "diagnostics"
+  ],
+  "properties": {
+    "schemaVersion": {
+      "const": 1
+    },
+    "auditId": {
+      "type": "string",
+      "minLength": 1
+    },
+    "snapshotSha256": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "repositoryRevision": {
+      "type": "string",
+      "minLength": 1
+    },
+    "repositoryRoot": {
+      "type": "string",
+      "minLength": 1
+    },
+    "scopePaths": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "assertionTrace": {
+      "type": "array",
+      "items": {
+        "type": "object"
+      }
+    },
+    "testInventory": {
+      "type": "array",
+      "items": {
+        "type": "object"
+      }
+    },
+    "diagnostics": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": [
+          "kind",
+          "path",
+          "detail"
+        ]
+      }
+    }
+  }
+}

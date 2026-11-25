@@ -255,10 +255,41 @@ fn audits_parser_sites_with_resumable_evidence_batches() {
     .unwrap();
     assert_eq!(test_inventory["tests"].as_array().unwrap().len(), 5);
     let report_text = fs::read_to_string(summary["summaryPath"].as_str().unwrap()).unwrap();
+    let summary_json: Value =
+        serde_json::from_slice(&fs::read(summary["summaryJsonPath"].as_str().unwrap()).unwrap())
+            .unwrap();
+    assert_eq!(summary_json["schemaVersion"], 1);
+    assert_eq!(summary_json["auditId"], summary["auditId"]);
+    assert_eq!(summary_json["testCount"], summary["testCount"]);
+    assert_eq!(summary_json["status"], "complete");
+    assert_eq!(summary_json["nextAction"], "complete");
+    assert_eq!(summary_json["finalResponseAllowed"], true);
+    assert_eq!(summary_json["sourceLanguages"]["rust"], 1);
+    assert_eq!(
+        summary_json["repositoryRoot"]
+            .as_str()
+            .unwrap()
+            .replace("\\\\?\\", ""),
+        repository.to_str().unwrap()
+    );
+    assert_eq!(summary_json["scopePaths"], json!([".".to_owned()]));
+    let details_json: Value =
+        serde_json::from_slice(&fs::read(summary["detailsJsonPath"].as_str().unwrap()).unwrap())
+            .unwrap();
+    assert_eq!(details_json["assertionTrace"].as_array().unwrap().len(), 4);
+    assert_eq!(details_json["testInventory"].as_array().unwrap().len(), 5);
+    let details_text = fs::read_to_string(summary["detailsPath"].as_str().unwrap()).unwrap();
+    assert!(details_text.contains("## Assertion trace"));
+    assert!(details_text.contains("## Test inventory"));
     assert!(report_text.contains("No explicitly documented promise = implicit-only + incidental"));
     assert!(report_text.contains("No public-contract check = incidental only"));
     assert!(report_text.contains("2/4 (50.0%)"));
     assert!(report_text.contains("## Classification totals"));
+    assert!(report_text.contains("## Coverage summary"));
+    assert!(report_text.contains("- Status: complete"));
+    assert!(report_text.contains("- Schema version: 1"));
+    assert!(report_text.contains("- Source languages:"));
+    assert!(report_text.contains("- Fallible-value candidates:"));
     assert!(report_text.contains("- Documented: 2/4"));
     assert!(report_text.contains("smoke"));
     assert!(report_text.contains("has only incidental checks"));

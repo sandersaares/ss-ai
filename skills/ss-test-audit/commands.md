@@ -208,4 +208,10 @@ ss-ai test-audit report `
 | --- | --- |
 | `STATE_DIRECTORY` | Exact initialized audit state directory. |
 
-On success, require `nextAction: "complete"` and `finalResponseAllowed: true` before returning a final response. Use the returned `tracePath`, `testInventoryPath`, and `summaryPath`; do not assume a state-root report location. Retain `status`, test count, assertion count, module count, `noCountedAssertionCount`, `incidentalOnlyCount`, `unlinkedAssertionCount`, `fallibleValueCheckCount`, `conditionalAssertionCount`, and `diagnosticCount`. The trace JSON shape is `rows[]`; each row contains `assertion` and `classification`. Run this after the prior mutation returned `nextAction: "report"`. The command performs the authoritative exact-coverage validation. An incomplete classification journal is an error and emits no success report.
+On success, require `nextAction: "complete"` and `finalResponseAllowed: true` before returning a final response. Use the returned `tracePath`, `testInventoryPath`, `summaryJsonPath`, `summaryPath`, `detailsJsonPath`, and `detailsPath`; do not assume a state-root report location. `summary.json` is the versioned machine summary and `summary.md` its human companion. The summary identifies the repository, revision, scope paths, file/language totals, tests, assertions, classifications, modules, rates, and gap/diagnostic counts. `details.json` uses `assertionTrace`, `testInventory`, and `diagnostics`; `details.md` uses matching section headings. The existing trace and inventory paths remain compatibility artifacts.
+
+The paired JSON artifacts conform to [summary.schema.json](schemas/summary.schema.json)
+and [details.schema.json](schemas/details.schema.json). Their schema version is
+part of each file and changes only with the native utility's record contract.
+
+Retain `status`, test count, assertion count, module count, `noCountedAssertionCount`, `incidentalOnlyCount`, `unlinkedAssertionCount`, `fallibleValueCheckCount`, `conditionalAssertionCount`, and `diagnosticCount`. The trace JSON shape is `rows[]`; each row contains `assertion` and `classification`. Run this after the prior mutation returned `nextAction: "report"`. The command performs the authoritative exact-coverage validation. An incomplete classification journal is an error and emits no success report.

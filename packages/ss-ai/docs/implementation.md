@@ -108,6 +108,11 @@ a machine record plus compact text display. Report results expose bounded
 completion counts so ordinary workflow completion does not require a trace
 read.
 
+Final report publication builds one typed `AuditSummary` and publishes it as
+JSON and Markdown. A matching `details` document carries the complete trace,
+test inventory, and diagnostics in JSON and Markdown. Existing trace and
+test-inventory JSON files remain unchanged compatibility projections.
+
 The package boundaries follow the subject-owned, one-way dependency practices
 used by [cargo-release-plan](https://github.com/folo-rs/folo/blob/db33786ec25196696b46f38e2b60a03bd33ec913/packages/cargo-release-plan/docs/implementation.md)
 and [cargo-bench-history](https://github.com/folo-rs/folo/blob/db33786ec25196696b46f38e2b60a03bd33ec913/packages/cargo-bench-history/docs/implementation.md).

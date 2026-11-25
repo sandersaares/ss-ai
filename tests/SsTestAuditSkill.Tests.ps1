@@ -35,7 +35,11 @@ Describe 'ss-test-audit skill contract' {
         $skill | Should -Match 'one `search` command by repeating `--query`'
         $skill | Should -Match 'compact submission'
         $skill | Should -Match 'flat: each item is an assertion directly'
-        $skill | Should -Match 'rows\[\]\.assertion'
+        $skill | Should -Match 'details\.json'
+        $skill | Should -Match 'details\.md'
+        $skill | Should -Match 'summary\.json'
+        $skill | Should -Match 'summary\.md'
+        $skill | Should -Match 'fixed order'
         $skill | Should -Match 'noCountedAssertionCount'
         $skill | Should -Match '\$LASTEXITCODE'
         $skill | Should -Match '@\(\.\.\.\)'
@@ -53,6 +57,8 @@ Describe 'ss-test-audit skill contract' {
         $commands | Should -Match 'compact-submission\.schema\.json'
         $commands | Should -Match 'evidenceHandle'
         $commands | Should -Match 'displayPath'
+        $commands | Should -Match 'summaryJsonPath'
+        $commands | Should -Match 'detailsJsonPath'
         $commands | Should -Match 'finalResponseAllowed` is always false'
         $commands | Should -Match 'nextAction: "complete"'
         $commands | Should -Match 'finalResponseAllowed: true'
@@ -81,5 +87,23 @@ Describe 'ss-test-audit skill contract' {
         @($reuse.required) | Should -Contain 'equivalenceConfirmed'
         @($reuse.required) | Should -Contain 'citationHandles'
         @($reuse.required) | Should -Contain 'callingTestIds'
+    }
+
+    It 'ships strict final report schemas' {
+        foreach ($name in @('summary.schema.json', 'details.schema.json')) {
+            $schemaPath = Join-Path $script:Skill "schemas/$name"
+            $schema = Get-Content -LiteralPath $schemaPath -Raw | ConvertFrom-Json
+            $schema.properties.schemaVersion.const | Should -Be 1
+        }
+        $summary = Get-Content -LiteralPath (Join-Path $script:Skill 'schemas\summary.schema.json') -Raw |
+            ConvertFrom-Json
+        @($summary.required) | Should -Contain 'scopePaths'
+        @($summary.required) | Should -Contain 'sourceLanguages'
+        @($summary.required) | Should -Contain 'modules'
+        $details = Get-Content -LiteralPath (Join-Path $script:Skill 'schemas\details.schema.json') -Raw |
+            ConvertFrom-Json
+        @($details.required) | Should -Contain 'assertionTrace'
+        @($details.required) | Should -Contain 'testInventory'
+        @($details.required) | Should -Contain 'diagnostics'
     }
 }

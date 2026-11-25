@@ -1,5 +1,7 @@
 //! Versioned records exchanged by the native test-audit workflow.
 
+use std::collections::BTreeMap;
+
 use serde::{Deserialize, Serialize};
 
 /// Identifies the immutable inventory snapshot and its repository provenance.
@@ -254,4 +256,32 @@ pub(crate) struct ModuleSummary {
     pub(crate) no_public_contract_check_count: usize,
     pub(crate) no_explicitly_documented_promise_rate: f64,
     pub(crate) no_public_contract_check_rate: f64,
+}
+
+/// Standard machine-readable final summary for one completed audit.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct AuditSummary {
+    pub(crate) schema_version: u32,
+    pub(crate) status: String,
+    pub(crate) next_action: String,
+    pub(crate) final_response_allowed: bool,
+    pub(crate) audit_id: String,
+    pub(crate) snapshot_sha256: String,
+    pub(crate) repository_root: String,
+    pub(crate) repository_revision: String,
+    pub(crate) scope_paths: Vec<String>,
+    pub(crate) indexed_file_count: usize,
+    pub(crate) source_languages: BTreeMap<String, usize>,
+    pub(crate) test_count: usize,
+    pub(crate) assertion_count: usize,
+    pub(crate) module_count: usize,
+    pub(crate) classification_counts: BTreeMap<String, usize>,
+    pub(crate) no_counted_assertion_count: usize,
+    pub(crate) incidental_only_count: usize,
+    pub(crate) unlinked_assertion_count: usize,
+    pub(crate) fallible_value_check_count: usize,
+    pub(crate) conditional_assertion_count: usize,
+    pub(crate) diagnostic_count: usize,
+    pub(crate) modules: Vec<ModuleSummary>,
 }

@@ -128,4 +128,25 @@ fn executable_accepts_multi_query_search_and_compact_submit() {
     assert_eq!(submit["nextAction"], "report");
     assert_eq!(submit["finalResponseAllowed"], false);
     assert!(submit["nextBatch"]["displayPath"].is_string());
+
+    let report = Command::new(env!("CARGO_BIN_EXE_ss-ai"))
+        .args(["test-audit", "report", "--state-directory"])
+        .arg(&state)
+        .output()
+        .unwrap();
+    assert!(
+        report.status.success(),
+        "{}",
+        String::from_utf8_lossy(&report.stderr)
+    );
+    let report: Value = serde_json::from_slice(&report.stdout).unwrap();
+    assert!(report["summaryJsonPath"].is_string());
+    assert!(report["summaryPath"].is_string());
+    assert!(report["detailsJsonPath"].is_string());
+    assert!(report["detailsPath"].is_string());
+    let summary: Value =
+        serde_json::from_slice(&fs::read(report["summaryJsonPath"].as_str().unwrap()).unwrap())
+            .unwrap();
+    assert_eq!(summary["schemaVersion"], 1);
+    assert_eq!(summary["testCount"], report["testCount"]);
 }
