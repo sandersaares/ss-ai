@@ -46,6 +46,8 @@ const DELETE: &str = "mutation($reviewId:ID!){
  deletePullRequestReview(input:{pullRequestReviewId:$reviewId}){pullRequestReview{id}}}";
 const UNRESOLVE: &str = "mutation($threadId:ID!){
  unresolveReviewThread(input:{threadId:$threadId}){thread{id isResolved}}}";
+const THREAD_STATE: &str = "query($threadId:ID!){
+ node(id:$threadId){... on PullRequestReviewThread{id isResolved}}}";
 const VERIFY: &str = "query($reviewId:ID!,$cur:String,$size:Int!){
  node(id:$reviewId){... on PullRequestReview{
  id state url body comments(first:$size,after:$cur){pageInfo{hasNextPage endCursor}
@@ -574,17 +576,51 @@ pub(crate) fn reopen(
     if thread_id.trim().is_empty() {
         return Err(fail("invalidInput", "Thread identifier is required"));
     }
-    let response = transport.graphql_mutation(UNRESOLVE, &json!({"threadId":thread_id}))?;
-    let thread = receipt(&response, "/data/unresolveReviewThread/thread", "id")?;
-    if required(thread, "id", "ambiguousWrite")? != thread_id
-        || thread.get("isResolved") != Some(&json!(false))
-    {
-        return Err(fail(
-            "ambiguousWrite",
-            "GitHub returned an incomplete reopen receipt",
-        ));
+    if !thread_resolved(transport, target, thread_id)? {
+        return Ok(());
     }
-    Ok(())
+    let written = (|| {
+        let response = transport.graphql_mutation(UNRESOLVE, &json!({"threadId":thread_id}))?;
+        let thread = receipt(&response, "/data/unresolveReviewThread/thread", "id")?;
+        if required(thread, "id", "ambiguousWrite")? != thread_id
+            || thread.get("isResolved") != Some(&json!(false))
+        {
+            return Err(fail(
+                "ambiguousWrite",
+                "GitHub returned an incomplete reopen receipt",
+            ));
+        }
+        Ok(())
+    })();
+    match written {
+        Ok(()) => Ok(()),
+        Err(write_error) if crate::classification(&write_error) == "ambiguousWrite" => {
+            match thread_resolved(transport, target, thread_id) {
+                Ok(false) => Ok(()),
+                Ok(true) => Err(write_error),
+                Err(read_error) => Err(fail(
+                    "ambiguousWrite",
+                    format!("{write_error}; automatic thread reconciliation failed: {read_error}"),
+                )),
+            }
+        }
+        Err(error) => Err(error),
+    }
+}
+
+/// Reads the current resolution state without mutating the thread.
+fn thread_resolved(
+    transport: &Transport<'_>,
+    target: &Target,
+    thread_id: &str,
+) -> Result<bool, AppError> {
+    check(transport, target)?;
+    let response = transport.graphql(THREAD_STATE, &json!({"threadId":thread_id}))?;
+    let thread = node(&response, "/data/node")?;
+    if required(thread, "id", "service")? != thread_id {
+        return Err(fail("service", "GitHub returned a different review thread"));
+    }
+    boolean(field(thread, "isResolved")?)
 }
 
 /// Removes only the identified draft; callers decide whether removal is allowed.
@@ -804,6 +840,12 @@ mod tests {
                 "graphql",
                 json!({"threadId":"old"}),
                 true,
+                json!({"data":{"node":{"id":"old","isResolved":true}}}),
+            ),
+            (
+                "graphql",
+                json!({"threadId":"old"}),
+                true,
                 json!({"data":{"unresolveReviewThread":{"thread":{"id":"old","isResolved":false}}}}),
             ),
             (
@@ -868,6 +910,48 @@ mod tests {
         assert!(queries[1].contains("startSide:$side"));
         assert!(queries[2].contains("subjectType:FILE"));
         assert!(queries[3].contains("addPullRequestReviewThreadReply"));
+    }
+
+    #[test]
+    fn reopen_accepts_an_already_unresolved_thread_without_a_write() {
+        let script = Script::new(vec![(
+            "graphql",
+            json!({"threadId":"old"}),
+            true,
+            json!({"data":{"node":{"id":"old","isResolved":false}}}),
+        )]);
+        let target = target();
+        let transport = Transport::new(&target, None, &script, &NoHttp, &NoWait);
+        reopen(&transport, &target, "old").unwrap();
+        script.done();
+    }
+
+    #[test]
+    fn reopen_reconciles_an_ambiguous_mutation_through_thread_state() {
+        let script = Script::new(vec![
+            (
+                "graphql",
+                json!({"threadId":"old"}),
+                true,
+                json!({"data":{"node":{"id":"old","isResolved":true}}}),
+            ),
+            (
+                "graphql",
+                json!({"threadId":"old"}),
+                false,
+                json!({"message":"Bad Gateway"}),
+            ),
+            (
+                "graphql",
+                json!({"threadId":"old"}),
+                true,
+                json!({"data":{"node":{"id":"old","isResolved":false}}}),
+            ),
+        ]);
+        let target = target();
+        let transport = Transport::new(&target, None, &script, &NoHttp, &NoWait);
+        reopen(&transport, &target, "old").unwrap();
+        script.done();
     }
 
     #[test]

@@ -32,6 +32,12 @@ successful completed search, not an error fallback. Only `claimed` can enter con
 verification or completion. Interrupted update states require human
 reconciliation.
 
+Confirmation evaluates current candidate eligibility before activating a
+reservation. Publication verification instead checks target availability and
+active-claim ownership, without evaluating selection-only evidence such as
+reviewer state or commit recency. Completion continues from the same owned
+reservation and likewise does not reapply candidate eligibility.
+
 ## Transaction lifetime and publication
 
 Acquire a retained sibling lock before checking whether the journal exists.

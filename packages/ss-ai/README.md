@@ -74,8 +74,10 @@ Read selection results' `status`, `target`, and `diagnostics`. `claimed`
 requires checkout preparation, then confirmation. A replacement `claimed`
 requires its own preparation. `confirmed` proceeds directly to `ss-review`.
 `check` verifies the active reservation immediately before publication without
-changing it. `--publish-to-closed-pull-request` relaxes only the closed-state
-eligibility check; ownership and source-bound evidence remain required.
+changing it. It checks target availability and active-claim ownership without
+reapplying candidate selection criteria such as reviewer state or commit
+recency. `--publish-to-closed-pull-request` relaxes only the closed-target
+check; ownership and source-bound evidence remain required.
 `complete` changes the owned active marker to completion evidence bound to the
 exact final reviewed source revision
 after the full review workflow finishes. `noCandidate` means this single-repository selection operation has no candidate;
@@ -359,10 +361,14 @@ identity, vote and required status against its receipt. Both read back the
 completed review before reopening follow-up threads. Azure DevOps journals
 finding writes and receipts sequentially; readback verifies each actual comment
 and relative order within a thread, not a global order across independent
-threads. An ambiguous write requires human reconciliation, not automatic retry.
-A follow-up failure emits `publishedWithFollowUpFailure` and exits nonzero; do
-not republish the review. Initial overview, tracker, and Markdown delivery
-retain their separate workflows and authority boundaries.
+threads. An ambiguous GitHub submission is reconciled through the completed
+review readback rather than resubmitted. Follow-up threads are read before
+reopening so an already unresolved thread causes no duplicate mutation; an
+ambiguous reopen response is reconciled through another state read.
+Other ambiguous writes still require reconciliation, not automatic retry. A
+follow-up failure emits `publishedWithFollowUpFailure` and exits nonzero; do not
+republish the review. Initial overview, tracker, and Markdown delivery retain
+their separate workflows and authority boundaries.
 
 ## Tracker publication
 
