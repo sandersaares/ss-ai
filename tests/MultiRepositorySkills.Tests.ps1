@@ -141,7 +141,10 @@ Describe 'Multi-repository skill contracts' {
             Should -Match 'before final review\s+publication'
         $script:ProactorSkill |
             Should -Match 'do not rerun\s+`review check`'
-        $script:ProactorSkill | Should -Match 'produces `alreadyReviewed`'
+        $script:ProactorSkill |
+            Should -Match 'without reapplying candidate selection\s+criteria'
+        $script:ProactorImplementation |
+            Should -Match 'target availability and active-claim ownership'
         $script:ProactorSkill |
             Should -Match '`review complete`\s+command performs the remaining remote ownership'
         $script:ProactorCommands |
@@ -153,7 +156,7 @@ Describe 'Multi-repository skill contracts' {
         $script:ReviewImplementation |
             Should -Match 'After phase 8 completes'
         $script:ReviewImplementation |
-            Should -Match 'does not rerun the\s+candidate-eligibility check'
+            Should -Match 'does not rerun the\s+pre-publication active-reservation check'
     }
 
     It 'records no-write outcomes as phase-8 completion evidence' {

@@ -532,6 +532,8 @@ pub(crate) trait Provider {
         now: Timestamp,
         selection_mode: SelectionMode,
     ) -> Result<Candidate, AppError>;
+    /// Checks target availability without applying selection eligibility.
+    fn reservation_target(&mut self, target: &Target) -> Result<ReservationTargetState, AppError>;
     /// Supplies all undeleted discussion evidence needed to discover live claims.
     fn comments(&mut self, target: &Target) -> Result<Vec<Comment>, AppError>;
     /// Performs one journaled creation and returns its remote ownership coordinates.
@@ -579,6 +581,15 @@ pub(crate) struct Candidate {
     pub(crate) source_commit: Option<String>,
     /// Current reviewer participation bound into completion evidence.
     pub(crate) review_fingerprint: Option<String>,
+}
+
+/// Separates publication target availability from selection eligibility.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum ReservationTargetState {
+    /// The pull request remains available for further review publication.
+    Open,
+    /// The pull request closed after the reservation became active.
+    Closed,
 }
 
 /// Normalized discussion evidence includes resolved ADO threads.
@@ -893,24 +904,12 @@ pub(crate) fn check(
         ));
     };
     let id = candidate_id(&reservation.intent.target)?;
-    // Reviewer registration intentionally changes an available candidate's
-    // assignment state after handoff; that expected transition is not stale work.
-    if let Some(reason) = provider
-        .candidate(
-            &reservation.intent.target,
-            &state.identity,
-            clock.now(),
-            state.selection_mode,
-        )?
-        .reason
-        .filter(|reason| {
-            !(state.selection_mode == SelectionMode::Available && reason == "alreadyReviewer")
-                && !(publish_to_closed_pull_request && reason == "closed")
-        })
+    if provider.reservation_target(&reservation.intent.target)? == ReservationTargetState::Closed
+        && !publish_to_closed_pull_request
     {
         return Err(fail(
             "invalidState",
-            format!("Publication reservation is no longer eligible: {reason}"),
+            "Publication reservation target is closed",
         ));
     }
     let comments = provider.comments(&reservation.intent.target)?;

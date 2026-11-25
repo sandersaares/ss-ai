@@ -21,8 +21,8 @@ use crate::clock::timestamp;
 use crate::error::fail;
 use crate::identity::Identity;
 use crate::selection::{
-    Candidate, Comment, Journal, Provider, RemoteClaim, SelectionMode, State, Status, check,
-    complete, run,
+    Candidate, Comment, Journal, Provider, RemoteClaim, ReservationTargetState, SelectionMode,
+    State, Status, check, complete, run,
 };
 use crate::target::{Platform, Target};
 use crate::transport::Transport;
@@ -107,6 +107,7 @@ struct FakeProvider {
     fail_create: bool,
     fail_delete: bool,
     fail_read: bool,
+    reservation_targets: BTreeMap<u32, ReservationTargetState>,
     source_revision: String,
     review_fingerprint: String,
 }
@@ -124,6 +125,7 @@ impl FakeProvider {
             fail_create: false,
             fail_delete: false,
             fail_read: false,
+            reservation_targets: BTreeMap::new(),
             source_revision: "source-10".to_owned(),
             review_fingerprint: "a".repeat(64),
         }
@@ -165,6 +167,13 @@ impl Provider for FakeProvider {
             }),
             review_fingerprint: Some(self.review_fingerprint.clone()),
         })
+    }
+    fn reservation_target(&mut self, target: &Target) -> Result<ReservationTargetState, AppError> {
+        Ok(self
+            .reservation_targets
+            .get(&target.pull_request_id)
+            .copied()
+            .unwrap_or(ReservationTargetState::Open))
     }
     fn comments(&mut self, target: &Target) -> Result<Vec<Comment>, AppError> {
         Ok(self
@@ -492,13 +501,48 @@ fn active_claim_survives_preparation_expiration_until_explicit_completion() {
 }
 
 #[test]
+fn confirmed_reservation_does_not_reapply_candidate_eligibility() {
+    let clock = FakeClock::new();
+    let mut provider = FakeProvider::new();
+    let mut journal = MemoryJournal::default();
+    select(&mut provider, &mut journal, &clock, false);
+    select(&mut provider, &mut journal, &clock, true);
+    let candidate_reads = provider.candidate_logins.len();
+    provider.reasons.insert(10, "noRecentCommit".to_owned());
+
+    let checked = check(
+        &mut provider,
+        &mut journal,
+        &clock,
+        initial(Platform::GitHub),
+        false,
+    )
+    .unwrap();
+    assert_eq!(checked.status, Status::Confirmed);
+    assert_eq!(provider.candidate_logins.len(), candidate_reads);
+
+    let completed = complete(
+        &mut provider,
+        &mut journal,
+        &clock,
+        initial(Platform::GitHub),
+        "source-10",
+    )
+    .unwrap();
+    assert_eq!(completed.status, Status::Completed);
+    assert_eq!(provider.candidate_logins.len(), candidate_reads);
+}
+
+#[test]
 fn publication_check_allows_only_explicit_closed_pull_request_authorization() {
     let clock = FakeClock::new();
     let mut provider = FakeProvider::new();
     let mut journal = MemoryJournal::default();
     select(&mut provider, &mut journal, &clock, false);
     select(&mut provider, &mut journal, &clock, true);
-    provider.reasons.insert(10, "closed".to_owned());
+    provider
+        .reservation_targets
+        .insert(10, ReservationTargetState::Closed);
 
     let refused = check(
         &mut provider,
@@ -521,6 +565,27 @@ fn publication_check_allows_only_explicit_closed_pull_request_authorization() {
         .status,
         Status::Confirmed
     );
+}
+
+#[test]
+fn publication_check_preserves_active_claim_ownership() {
+    let clock = FakeClock::new();
+    let mut provider = FakeProvider::new();
+    let mut journal = MemoryJournal::default();
+    select(&mut provider, &mut journal, &clock, false);
+    select(&mut provider, &mut journal, &clock, true);
+    provider.comments.get_mut(&10).unwrap()[0].author.id = Some("other".to_owned());
+
+    let error = check(
+        &mut provider,
+        &mut journal,
+        &clock,
+        initial(Platform::GitHub),
+        false,
+    )
+    .unwrap_err();
+    assert_eq!(crate::classification(&error), "invalidState");
+    assert_eq!(journal.state.as_ref().unwrap().status, Status::Confirmed);
 }
 
 #[test]
@@ -2155,6 +2220,7 @@ fn eligibility_exclusions_avoid_commit_reads_and_ignore_pending_reviews_or_teams
             script.done();
         }
     }
+
     for state in ["PENDING", "DISMISSED"] {
         let script = Script::new(vec![
             Step::read(
@@ -2189,6 +2255,35 @@ fn eligibility_exclusions_avoid_commit_reads_and_ignore_pending_reviews_or_teams
                 .reason
                 .is_none()
         );
+        script.done();
+    }
+}
+
+#[test]
+fn reservation_target_checks_do_not_read_selection_evidence() {
+    for (platform, path, body, expected) in [
+        (
+            Platform::GitHub,
+            "repos/example/widgets/pulls/10".to_owned(),
+            json!({"state":"open"}),
+            ReservationTargetState::Open,
+        ),
+        (
+            Platform::AzureDevOps,
+            ado(
+                "A%20Project/_apis/git/repositories/A%20Repo/pullRequests/10",
+                "",
+            ),
+            json!({"status":"completed"}),
+            ReservationTargetState::Closed,
+        ),
+    ] {
+        let script = Script::new(vec![Step::read(&path, body)]);
+        let clock = FakeClock::new();
+        let state = api(platform, &script, &clock)
+            .reservation_target(&repository(platform).candidate(10.try_into().unwrap()))
+            .unwrap();
+        assert_eq!(state, expected);
         script.done();
     }
 }

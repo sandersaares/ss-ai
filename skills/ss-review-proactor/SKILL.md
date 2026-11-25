@@ -333,12 +333,12 @@ request in the active-cycle record. A refusal or mismatch means the cycle is
 not safely resumable; stop instead of substituting another cycle's artifacts.
 
 After phase 8 has completed and the review is in phase 9, do not rerun
-`review check`: a submitted GitHub review correctly produces `alreadyReviewed`.
-Validate the exact cycle identity against the handoff's journal, review-state
-paths, and durable phase-8 outcome instead. The stage-5 `review complete`
-command performs the remaining remote ownership and active-reservation
-validation after learning completes. A phase-8 failure or ambiguous outcome
-still follows publication recovery before learning can start.
+`review check`. Validate the exact cycle identity against the handoff's journal,
+review-state paths, and durable phase-8 outcome instead. The stage-5 `review complete`
+command performs the remaining remote ownership and active-reservation validation
+after learning completes without reapplying candidate selection criteria. A phase-8
+failure or ambiguous outcome still follows publication recovery before learning
+can start.
 
 After reviewer registration, leave the claim as discussion history. A resulting
 assignment, an active submitted review, or a matching completed marker prevents

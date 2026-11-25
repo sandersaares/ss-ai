@@ -50,17 +50,16 @@ journal, review-state directory, checkout, and initial capture. On interruption
 or compaction before final publication, it verifies that binding with the
 active-reservation check and requires the result to match the handoff before
 consuming any retained artifact. After phase 8 completes, it does not rerun the
-candidate-eligibility check: submitting the GitHub review intentionally
-produces `alreadyReviewed`. Phase 9 instead verifies the selection journal,
-review-state paths, and durable phase-8 completion record against the same
-established identity. That record can be the publication result or a maintained
+pre-publication active-reservation check. Phase 9 instead verifies the selection
+journal, review-state paths, and durable phase-8 completion record against the
+same established identity. That record can be the publication result or a maintained
 checkpoint entry for a `nothingToPublish` or successful tracker outcome; either
 binds the exact final reviewed source commit and review identity. A failed or
-ambiguous phase-8 outcome remains in publication recovery. Standalone reviews
-have no proactor journal, handoff identity, or source-commit requirement and
-resume from their own review checkpoint and artifacts. These stage-aware
-checks prevent a completed prior cycle's `findings.json`, rendered audit, or
-other fixed-name artifact from being mistaken for current work.
+ambiguous phase-8 outcome remains in publication recovery. Standalone reviews have no proactor journal, handoff identity, or source-commit requirement
+and resume from their own review checkpoint and
+artifacts. These stage-aware checks prevent a completed prior cycle's
+`findings.json`, rendered audit, or other fixed-name artifact from being
+mistaken for current work.
 
 It verifies that journal immediately before the first publication write. A
 phase-8 path with no remote write records its identity, final source commit,

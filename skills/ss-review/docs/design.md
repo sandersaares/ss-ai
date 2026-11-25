@@ -85,14 +85,14 @@ A user-authorized `ss-review-proactor` invocation may select and claim a pull
 request before handing it to this skill directly or through delegated execution.
 This scheduled entry retains the same human authority and uses the ordinary
 review workflow. The proactor owns activation before handoff. This skill
-verifies candidate eligibility and the active reservation before final
-publication. After publication, a submitted review is no longer expected to be
-selection-eligible; phase 9 preserves the exact established review identity
-and durable phase-8 completion record instead. A phase-8 outcome that requires
-no remote write records its identity, final source commit, destination,
-`nothingToPublish` outcome, and reason in the maintained checkpoint; that entry
-is completion evidence for phase 9. The proactor's completion command then
-verifies reservation ownership and marks the cycle complete. Standalone reviews
+verifies target availability and the active reservation before final
+publication without reapplying candidate selection criteria, including commit
+recency. Phase 9 preserves the exact established review identity and durable
+phase-8 completion record instead. A phase-8 outcome that requires no remote
+write records its identity, final source commit, destination, `nothingToPublish`
+outcome, and reason in the maintained checkpoint; that entry is completion
+evidence for phase 9. The proactor's completion command then verifies
+reservation ownership and marks the cycle complete. Standalone reviews
 record the same outcome without requiring a source commit or proactor handoff
 identity. Successful tracker publication also records an identity-bound
 completion checkpoint for proactor phase-9 resumption.

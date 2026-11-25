@@ -45,12 +45,12 @@ review worker. Require `confirmed` and the checked target URL to match the
 active-cycle checkpoint; a mismatch is not a resumption signal.
 
 Do not run this check to resume phase 9 or any later post-publication work. A
-submitted GitHub review makes the candidate ineligible and the command correctly
-returns `alreadyReviewed`. Validate the established cycle against the exact
-selection journal, review-state paths, and durable phase-8 outcome instead. A
-maintained checkpoint entry that records the matching cycle identity, final
-source commit, destination, `nothingToPublish` outcome, and reason satisfies
-that evidence requirement when no remote write was needed.
+submitted review or later commit age does not change the established
+reservation, but publication has already ended. Validate the established cycle
+against the exact selection journal, review-state paths, and durable phase-8
+outcome instead. A maintained checkpoint entry that records the matching cycle
+identity, final source commit, destination, `nothingToPublish` outcome, and
+reason satisfies that evidence requirement when no remote write was needed.
 For successful tracker publication, use the completion checkpoint that binds
 `tracker-publication-result.json` to the matching cycle identity and final
 checked source commit.
