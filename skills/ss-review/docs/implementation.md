@@ -606,7 +606,9 @@ approval records a false decision rather than retaining the earlier approval.
 
 Auto-approval runs after synthesis and before the human audit. The policy lives
 only in `../auto-approval-rules.md`; the worker prompt in `../auto-approve.md`
-defines iteration and authority without duplicating its categories.
+defines iteration and authority without duplicating that rule. The worker reads
+the immutable focus-area snapshot paths for dispatched reviewers from the
+review-work manifest, excluding entirely unused focus-area assignments.
 
 The consolidated finding artifact stays immutable during classification. One
 worker owns decision-log writes and repeatedly polls for the first live finding
@@ -615,6 +617,9 @@ identifiers needing human audit; it does not consume work or rewrite files.
 The existing append-only log journals both outcomes: `auto-approved` is a final
 policy verdict, while `needs-audit` is a completed classification with no final
 approval or rejection. Polling skips both, as well as existing user verdicts.
+An `auto-approved` reason names the focus-area path and exact motivating
+guideline; an uncertain or incidental finding receives `needs-audit` with the
+missing trace explained.
 The worker's recording command uses `--policy-classification` to reject other
 verdicts and user feedback before writing the log.
 

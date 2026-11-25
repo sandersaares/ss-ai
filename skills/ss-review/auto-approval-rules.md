@@ -1,27 +1,7 @@
 # Auto-approval rules
 
-A finding is obvious when it matches any of these categories:
+A finding is auto-approved when it is directly motivated by at least one guideline in any focus area used in the current review. Identify an exact guideline whose effective scope includes the reviewed context and explain how it directly motivates the finding, including its recommended action. A topical resemblance or discovery during focus-area analysis is not enough.
 
-* It recommends aligning documentation and code, in either direction, where a mismatch was detected. Applies to user-facing API documentation as well as internal documentation like design documents and implementation guides.
-* It recommends that conflicting, misleading, or ambiguous documentation be clarified or otherwise improved.
-* It recommends an action that improves maintainability by adding clarity, simplifying logic, or removing something unnecessary.
-* It recommends a clear performance win that does not require any design tradeoffs to be made.
-* It recommends adding missing documentation/justification to code or configuration.
-* It recommends adjusting benchmark/test coverage or structure to better align with desired practices.
-* It recommends handling additional error cases that do not require logic changes beyond simple detection (e.g. no need for adding new recovery paths or refactoring existing code to enable such detection).
-* It recommends strengthening the data model to make greater use of the type system (e.g. more narrowly bounded types like `NonZero<u32>`, replacing stringly typed fields with concrete types like `String` -> `EmailAddress`, reflecting validity/state via transforming data into different types like `RawCustomer` before validation to `Customer` after validation, and similar).
-* It recommends improving correctness of parsing/processing some schematized/well-defined format/protocol/data-structure.
-* It highlights a gap in a Rust API's safety contract, including incomplete or incorrect documented safety requirements on `unsafe` functions or traits, or incomplete or incorrect documented safety guarantees in comments.
-* It recommends addressing a broken guarantee in a comment or error message (e.g. "this never happens because X" but it turns out X is not always true).
-* It recommends fixing an order of operations where the existing order has clearly identifiable defects.
-* It recommends addressing a possible panic/exception that may be raised and cause unexpected logic flow.
-* It recommends adding inlining hints to code.
-* It recommends aligning an individual project's configuration/setup to the configuration/setup of the workspace, or documenting the differences to ensure they are justified.
-* It recommends a documentation change to make the content more maintainable (e.g. by removing duplication/restatement/trivia).
-* It recommends clarification of a comment or dev-tooling related attribute in the code (e.g. improving an explanation of why a rule is ignored).
-* It recommends aligning the assertions in a test with the documented API contract the code is meant to implement.
-* It recommends simplifying overly verbose `Debug` trait implementations in Rust code.
+When no applicable guideline directly motivates the finding, or when that trace is uncertain, classify the finding as `needs-audit`. This includes incidental discoveries, such as synthesis findings, that cannot be clearly attributed to a focus-area guideline.
 
-Every other finding is important. When in doubt, treat a finding as important and leave it for the user's audit.
-
-An obvious finding is auto-approved without presenting it. Record the category it matched as the reason. An auto-approved finding has the same outcome as a user-approved one: it is carried into the approved set and published. Do not ask the user about it or append anything to `audit-feedback.json` for it.
+For an auto-approved finding, record the focus-area path and guideline as the reason. Auto-approval has the same outcome as user approval: the finding enters the approved set and is published. Do not ask the user about it or append anything to `audit-feedback.json` for it.
