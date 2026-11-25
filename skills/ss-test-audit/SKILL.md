@@ -64,6 +64,8 @@ Panic sites in test-owned `Drop` implementations do not count when they exist on
 
 Execute `next-batch` as specified in [commands.md](commands.md#export-the-next-assertion-batch). Keep the default count of 25. Read the returned `displayPath` for compact batch judgment. The companion `batchPath` is a machine-readable record whose `assertions` array is flat: each item is an assertion directly, not `{ assertion: ... }`. Do not use PowerShell JSON projection scripts to reinterpret it.
 
+Obey the initial batch's `nextAction` too: if it is `report`, continue directly to stage 4; if it is `continue`, classify the returned batch. An empty initial batch is still a transition to the report, never a final response.
+
 Read only the exported batch display, its local context, and targeted evidence searches. For each assertion:
 
 1. Record the actual outcome the source predicate checks.
@@ -84,16 +86,24 @@ Submit the rows and export the next assertion batch through one `submit` command
 
 If the command reports stale state, malformed citations, duplicate IDs, or an already different classification, stop that batch and report the diagnostic without overwriting state. Errors name the compact row assertion ID, field, and evidence reference. A failed next-batch publication after a successful record can be resumed by replaying the identical compact submission; record insertion remains idempotent.
 
-After every successful `submit`, use its `record.completed` and `record.remaining` fields to emit the following informational progress message in the conversation: `Classified C of T assertions; R remain. The batch completed N sites.`
+After every successful `submit`, read its explicit `nextAction` before doing anything else. Use its `record.completed` and `record.remaining` fields to emit the following informational progress message in the conversation: `Classified C of T assertions; R remain. The batch completed N sites.`
 
 This progress message is not a completion, checkpoint, pause, handoff, request for input, or permission to end the turn. Do not wait for a reply after it. In the same skill invocation, immediately continue with the next required action even when `R` is zero:
 
-1. If `R` is greater than zero, read `nextBatch.displayPath` and classify its assertions without another CLI round trip. Retain `nextBatch.batchPath` unchanged for the subsequent compact submission.
-2. If `R` is zero, continue to stage 4 and run the final `report`; the report command verifies exact classification coverage and fails if the zero is stale or incorrect.
+1. If `nextAction` is `continue`, read `nextBatch.displayPath` and classify its assertions without another CLI round trip. Retain `nextBatch.batchPath` unchanged for the subsequent compact submission.
+2. If `nextAction` is `report`, continue to stage 4 and run the final `report`; the report command verifies exact classification coverage and fails if the continuation directive is stale or incorrect.
 
-Never stop after a progress message, after `submit` alone, after a partial batch, or because the returned `remaining` value is zero. Only a successful final `report` command followed by stage 5 establishes completion. A context limit or execution interruption may stop the invocation, but that is an interruption to be resumed from durable state, not successful completion.
+Never emit any final assistant response while the latest transition has `nextAction: "continue"` or `remaining > 0`. This is a hard final-response gate. Saving state, writing SQL/checkpoint records, reading the next batch display, beginning the next batch, or reaching a round batch number does not remove this gate. Continue the loop immediately. Do not reinterpret a long duration or large remaining count as a context-limit event.
 
-Repeat the classification loop while `R` is greater than zero. Never declare completion from an assertion count, a progress message, or mutation summary alone.
+The only permitted ways to stop this invocation are:
+
+- a successful `report` result with `nextAction: "complete"` and `finalResponseAllowed: true`;
+- a concrete blocking diagnostic from a native command that names the assertion, field, or evidence problem and cannot be corrected without user input; or
+- an actual runtime interruption explicitly reported by the execution platform.
+
+A normal user turn boundary, checkpoint write, progress message, or self-authored statement that work is lengthy is not a runtime interruption. If the platform does interrupt, preserve durable state without claiming completion; resumption must begin by reading the last transition directive and the corresponding batch.
+
+Repeat the classification loop while `nextAction` is `continue` or `R` is greater than zero. Never declare completion from an assertion count, a progress message, mutation summary, checkpoint, or partial next-batch read alone.
 
 # Stage 4: validate and emit reports
 
@@ -114,7 +124,7 @@ Always show numerators and denominators. Mixed assertion sites enter neither num
 
 # Stage 5: summarize the execution
 
-Report completion only after `submit.record.remaining` is zero and the final native report command succeeds. Read `tracePath`, `testInventoryPath`, and `summaryPath` from the report result; do not infer report paths under the state root. The trace shape is `rows[]`, with evidence in `rows[].assertion` and judgment in `rows[].classification`, not `assertions[]`.
+Report completion only after the last `submit` says `nextAction: "report"`, followed by a `report` result with `nextAction: "complete"` and `finalResponseAllowed: true`. Read `tracePath`, `testInventoryPath`, and `summaryPath` from the report result; do not infer report paths under the state root. The trace shape is `rows[]`, with evidence in `rows[].assertion` and judgment in `rows[].classification`, not `assertions[]`.
 
 The report result also returns `noCountedAssertionCount`, `incidentalOnlyCount`, `unlinkedAssertionCount`, `fallibleValueCheckCount`, `conditionalAssertionCount`, and `diagnosticCount`. The first two fields count tests; the unlinked, fallible, and conditional fields count assertion sites or site diagnostics. Use those bounded counts for ordinary completion without opening the complete trace unless detailed validation requires it. A nonzero fallible count means the agent had to judge heuristic expect-style candidates; it is not an unsupported success-shaped zero.
 

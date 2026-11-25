@@ -19,10 +19,13 @@ Describe 'ss-test-audit skill contract' {
         $skill | Should -Match 'No public-contract check = incidental only'
         $skill | Should -Match 'Classified C of T assertions'
         $skill | Should -Match 'not a completion, checkpoint, pause, handoff, request for input, or permission to end the turn'
-        $skill | Should -Match 'Never stop after a progress message'
+        $skill | Should -Match 'Never emit any final assistant response while the latest transition has'
+        $skill | Should -Match 'Never emit any final assistant response while the latest transition has `nextAction: "continue"`'
+        $skill | Should -Match 'Saving state, writing SQL/checkpoint records, reading the next batch display, beginning the next batch, or reaching a round batch number does not remove this gate'
+        $skill | Should -Match 'A normal user turn boundary, checkpoint write, progress message, or self-authored statement that work is lengthy is not a runtime interruption'
         $skill | Should -Match 'submit` is the normal transition'
         $skill | Should -Match 'read `nextBatch.displayPath`'
-        $skill | Should -Match 'If `R` is zero, continue to stage 4 and run the final `report`'
+        $skill | Should -Match 'If `nextAction` is `report`, continue to stage 4'
         $skill | Should -Match 'compact-submission\.schema\.json'
         $skill | Should -Match 'direct AST-visible free-function'
         $skill | Should -Match 'assert_panics'
@@ -50,6 +53,11 @@ Describe 'ss-test-audit skill contract' {
         $commands | Should -Match 'compact-submission\.schema\.json'
         $commands | Should -Match 'evidenceHandle'
         $commands | Should -Match 'displayPath'
+        $commands | Should -Match 'finalResponseAllowed` is always false'
+        $commands | Should -Match 'nextAction: "complete"'
+        $commands | Should -Match 'finalResponseAllowed: true'
+        $commands | Should -Match 'nextAction: "continue"'
+        $commands | Should -Match 'nextAction: "report"'
         Test-Path -LiteralPath (Join-Path $script:Skill 'scripts') | Should -BeFalse
     }
 

@@ -85,6 +85,11 @@ fn build_batch(loaded: &LoadedState, count: usize) -> Batch {
 
 /// Summarizes one exported batch without repeating its assertion payload.
 fn batch_summary(batch: &Batch, output: &Path, display: &Path) -> serde_json::Value {
+    let next_action = if batch.assertions.is_empty() {
+        "report"
+    } else {
+        "continue"
+    };
     json!({
         "schemaVersion": 1,
         "batchPath": output,
@@ -93,7 +98,9 @@ fn batch_summary(batch: &Batch, output: &Path, display: &Path) -> serde_json::Va
         "snapshotSha256": batch.snapshot_sha256,
         "batchCount": batch.assertions.len(),
         "completed": batch.completed,
-        "remaining": batch.remaining
+        "remaining": batch.remaining,
+        "nextAction": next_action,
+        "finalResponseAllowed": false
     })
 }
 
@@ -310,10 +317,21 @@ fn advance_classification(
     advanced.journal = journal;
     let batch = build_batch(&advanced, count);
     export_batch(&batch, &output, &display, clock)?;
+    let next_action = if recorded
+        .get("remaining")
+        .and_then(serde_json::Value::as_u64)
+        == Some(0)
+    {
+        "report"
+    } else {
+        "continue"
+    };
     Ok(json!({
         "schemaVersion": 1,
         "record": recorded,
         "nextBatch": batch_summary(&batch, &output, &display),
+        "nextAction": next_action,
+        "finalResponseAllowed": false
     })
     .to_string())
 }

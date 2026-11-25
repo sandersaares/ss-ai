@@ -4,6 +4,7 @@
     reason = "The test selects fixed fields from its own generated records."
 )]
 
+use std::fmt::Write as _;
 use std::fs;
 use std::io;
 use std::path::Path;
@@ -264,6 +265,89 @@ fn audits_parser_sites_with_resumable_evidence_batches() {
 }
 
 #[test]
+fn continues_through_more_than_four_submit_transitions() {
+    let root = TempDir::new().unwrap();
+    let repository = root.path().join("repository");
+    let state = root.path().join("state");
+    fs::create_dir_all(repository.join("src")).unwrap();
+    let mut source = String::from("pub fn value() -> i32 { 1 }\n\n");
+    for index in 0..126 {
+        _ = writeln!(
+            source,
+            "#[test]\nfn generated_{index:03}() {{ assert_eq!(value(), 1); }}"
+        );
+    }
+    fs::write(repository.join("src/lib.rs"), source).unwrap();
+    initialize(&repository, &[], &state, &NoProcess, &FixedClock).unwrap();
+
+    let mut batch_path = state.join("batch-00.json");
+    let initial = next_batch(&state, &batch_path, 25, &FixedClock).unwrap();
+    let initial: Value = serde_json::from_str(&initial).unwrap();
+    assert_eq!(initial["nextAction"], "continue");
+    assert_eq!(initial["finalResponseAllowed"], false);
+
+    let expected_remaining = [101, 76, 51, 26, 1, 0];
+    for batch_number in 1_usize..=6 {
+        let batch: Value = serde_json::from_slice(&fs::read(&batch_path).unwrap()).unwrap();
+        let records = batch["assertions"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|assertion| {
+                json!({
+                    "assertionId": assertion["id"],
+                    "classification": "Incidental",
+                    "evidenceStatus": "Confirmed",
+                    "actualOutcome": "The generated test checks a direct source-level value.",
+                    "rationale": "No public contract promises this generated test detail.",
+                    "citationHandles": [],
+                    "incidentalReason": "The check exists only in the continuation fixture.",
+                    "callingTestIds": []
+                })
+            })
+            .collect::<Vec<_>>();
+        let submission_path = state.join(format!("submission-{batch_number:02}.json"));
+        fs::write(
+            &submission_path,
+            serde_json::to_vec_pretty(&json!({
+                "schemaVersion": 1,
+                "rows": records
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+        let next_path = state.join(format!("batch-{batch_number:02}.json"));
+        let transition = submit(
+            &state,
+            &batch_path,
+            &submission_path,
+            &next_path,
+            25,
+            &FixedClock,
+        )
+        .unwrap();
+        let transition: Value = serde_json::from_str(&transition).unwrap();
+        let remaining = expected_remaining[batch_number.saturating_sub(1)];
+        assert_eq!(transition["record"]["remaining"], remaining);
+        assert_eq!(transition["finalResponseAllowed"], false);
+        if remaining == 0 {
+            assert_eq!(transition["nextAction"], "report");
+            assert_eq!(transition["nextBatch"]["batchCount"], 0);
+        } else {
+            assert_eq!(transition["nextAction"], "continue");
+            assert_eq!(transition["nextBatch"]["batchCount"], 25.min(remaining));
+        }
+        batch_path = next_path;
+    }
+
+    let complete = report(&state, &FixedClock).unwrap();
+    let complete: Value = serde_json::from_str(&complete).unwrap();
+    assert_eq!(complete["nextAction"], "complete");
+    assert_eq!(complete["finalResponseAllowed"], true);
+    assert_eq!(complete["assertionCount"], 126);
+}
+
+#[test]
 fn rejects_stale_sources_before_accepting_more_judgments() {
     let (_root, repository, state) = fixture();
     initialize(&repository, &[], &state, &NoProcess, &FixedClock).unwrap();
@@ -423,11 +507,13 @@ fn advance_records_and_exports_the_next_batch_from_one_state_load() {
     let terminal: Value = serde_json::from_str(&terminal).unwrap();
     assert_eq!(terminal["record"]["remaining"], 0);
     assert_eq!(terminal["nextBatch"]["batchCount"], 0);
+    assert_eq!(terminal["nextAction"], "report");
+    assert_eq!(terminal["finalResponseAllowed"], false);
     let report = report(&state, &FixedClock).unwrap();
-    assert_eq!(
-        serde_json::from_str::<Value>(&report).unwrap()["status"],
-        "complete"
-    );
+    let report: Value = serde_json::from_str(&report).unwrap();
+    assert_eq!(report["status"], "complete");
+    assert_eq!(report["nextAction"], "complete");
+    assert_eq!(report["finalResponseAllowed"], true);
 }
 
 #[test]

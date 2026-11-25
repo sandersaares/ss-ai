@@ -158,6 +158,10 @@ both the durable record summary and the next batch path.
 snapshot-bound evidence handles, builds the canonical classification batch, and
 then follows the same advance transaction. Compact reuse requires explicit
 equivalence confirmation plus citation and caller replacements.
+Mutation transitions return top-level `nextAction` (`continue` or `report`) and
+`finalResponseAllowed: false`. The final report returns `nextAction: "complete"`
+and `finalResponseAllowed: true`. These fields prevent progress updates or
+round batch boundaries from being mistaken for workflow completion.
 
 For an audit with `T` assertions and `B = ceil(T / 25)`, the primary transition
 path uses at most `B + 3` structural invocations: one initialization, one

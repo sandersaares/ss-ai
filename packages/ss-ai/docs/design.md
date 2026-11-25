@@ -52,6 +52,10 @@ caller choices for reuse. Batch and report results include compact presentation
 surfaces and bounded completion counts, reducing the need for ad hoc JSON
 projection and full-trace reads.
 
+Workflow transitions distinguish continuation from completion explicitly.
+Recording work never authorizes a final response. Only a successful final
+report both completes the audit and permits its final summary.
+
 Assertions count once at their source site. Tests with no counted predicate and
 shared helper assertions remain visible in the test inventory. Every accepted
 classification is bound to the same audit token and source snapshot. A report

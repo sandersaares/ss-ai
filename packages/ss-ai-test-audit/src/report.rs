@@ -131,6 +131,8 @@ pub fn report(state_directory: &Path, clock: &dyn Clock) -> Result<String, AppEr
     Ok(json!({
         "schemaVersion": 1,
         "status": "complete",
+        "nextAction": "complete",
+        "finalResponseAllowed": true,
         "auditId": loaded.state.audit_id,
         "testCount": tests.len(),
         "assertionCount": trace.len(),

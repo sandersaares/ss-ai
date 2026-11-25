@@ -125,5 +125,7 @@ fn executable_accepts_multi_query_search_and_compact_submit() {
     let submit: Value = serde_json::from_slice(&submit.stdout).unwrap();
     assert_eq!(submit["record"]["remaining"], 0);
     assert_eq!(submit["nextBatch"]["batchCount"], 0);
+    assert_eq!(submit["nextAction"], "report");
+    assert_eq!(submit["finalResponseAllowed"], false);
     assert!(submit["nextBatch"]["displayPath"].is_string());
 }

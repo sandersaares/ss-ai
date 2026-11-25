@@ -72,7 +72,7 @@ ss-ai test-audit next-batch `
 | `BATCH_PATH` | New or atomically replaceable file receiving at most the requested assertions. |
 | `25` | Bounded batch size. Use 25 so cumulative conversation progress remains predictable. |
 
-Read the output file only after the command succeeds. Its `completed` and `remaining` fields describe durable classifications before this batch. The command also returns `displayPath`; read that compact text for normal review. The JSON shape is flat: `assertions[]` contains assertion fields directly, with no `.assertion` wrapper. An empty `assertions` array means all inventoried sites are classified.
+Read the output file only after the command succeeds. Its `completed` and `remaining` fields describe durable classifications before this batch. The command also returns `displayPath`; read that compact text for normal review. The top-level `nextAction` is `continue` for a nonempty batch and `report` for an empty batch; `finalResponseAllowed` is always false. The JSON shape is flat: `assertions[]` contains assertion fields directly, with no `.assertion` wrapper. An empty `assertions` array means the final report is next, not that a final response is allowed.
 
 ## Record classification results
 
@@ -120,7 +120,7 @@ ss-ai test-audit advance `
 | `NEXT_BATCH_PATH` | File receiving the next bounded assertion batch. It may contain zero assertions when the audit is complete. |
 | `25` | Maximum next-batch size. |
 
-The command atomically records the classification journal and then exports the next batch from the same validated state load. `record` contains the durable completed and remaining counts. `nextBatch.batchPath` is retained for a subsequent low-level submission, while `nextBatch.displayPath` is the compact file to read for judgment. `nextBatch.batchCount` and `nextBatch.remaining` describe it. After a failed export, replaying the identical classification is safe because record insertion is idempotent.
+The command atomically records the classification journal and then exports the next batch from the same validated state load. `record` contains the durable completed and remaining counts. The top-level `nextAction` is authoritative for continuation: `continue` forbids a final response and requires processing the next batch, while `report` requires the final report immediately. `finalResponseAllowed` is always false for mutation transitions. `nextBatch.batchPath` is retained for a subsequent submission, while `nextBatch.displayPath` is the compact file to read for judgment. `nextBatch.batchCount` and `nextBatch.remaining` describe it. After a failed export, replaying the identical classification is safe because record insertion is idempotent.
 
 After a successful advance, continue immediately according to `record.remaining`. A greater-than-zero value means read `nextBatch.displayPath`; zero means run `report`. This low-level recovery path is not completion.
 
@@ -189,6 +189,8 @@ ss-ai test-audit submit `
 
 The command binds rows to the current batch and snapshot, resolves every evidence handle, validates every assertion and citation field, records the canonical classifications, and exports the next batch. Multiple citations belong in `citationHandles` as separate values. Reuse copies semantic outcome fields only after `equivalenceConfirmed: true`; citations and caller IDs are explicit replacements. Empty reuse citation arrays are rejected without fallback. Read `nextBatch.displayPath` for the next cycle while retaining `nextBatch.batchPath` for the next submission. On failure, correct the named assertion ID, field, and evidence reference, then retry the same compact submission.
 
+After every submit, obey the top-level directive exactly. `nextAction: "continue"` means emit only an informational progress update and immediately process the returned batch; a final response is forbidden. `nextAction: "report"` means run the report next; a final response is still forbidden. Both transitions return `finalResponseAllowed: false`.
+
 ## Emit final reports
 
 ```powershell
@@ -206,4 +208,4 @@ ss-ai test-audit report `
 | --- | --- |
 | `STATE_DIRECTORY` | Exact initialized audit state directory. |
 
-On success, use the returned `tracePath`, `testInventoryPath`, and `summaryPath`; do not assume a state-root report location. Retain `status`, test count, assertion count, module count, `noCountedAssertionCount`, `incidentalOnlyCount`, `unlinkedAssertionCount`, `fallibleValueCheckCount`, `conditionalAssertionCount`, and `diagnosticCount`. The trace JSON shape is `rows[]`; each row contains `assertion` and `classification`. Run this after `submit.record.remaining` or recovery-path `advance.record.remaining` is zero. The command performs the authoritative exact-coverage validation. An incomplete classification journal is an error and emits no success report.
+On success, require `nextAction: "complete"` and `finalResponseAllowed: true` before returning a final response. Use the returned `tracePath`, `testInventoryPath`, and `summaryPath`; do not assume a state-root report location. Retain `status`, test count, assertion count, module count, `noCountedAssertionCount`, `incidentalOnlyCount`, `unlinkedAssertionCount`, `fallibleValueCheckCount`, `conditionalAssertionCount`, and `diagnosticCount`. The trace JSON shape is `rows[]`; each row contains `assertion` and `classification`. Run this after the prior mutation returned `nextAction: "report"`. The command performs the authoritative exact-coverage validation. An incomplete classification journal is an error and emits no success report.

@@ -94,6 +94,12 @@ one state load and emits a bounded result per query. Read-only operations verify
 stored state digests without traversing source files; mutation and report
 operations rehash source content at their authority boundary.
 
+Every mutation transition emits an explicit top-level continuation directive.
+`continue` means another bounded batch is ready; `report` means classification
+is complete but the final report remains mandatory; both forbid final-response
+completion. The report alone emits `complete` with final-response permission.
+This machine-readable gate complements the skill's prose continuation rules.
+
 `submit` adds the agent-facing compact row boundary in front of `advance`.
 Snapshot-bound evidence handles resolve to exact indexed source lines inside
 the native utility. Explicit reuse requires equivalence confirmation and
