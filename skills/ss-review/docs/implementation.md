@@ -989,8 +989,10 @@ budgets. It never clears durable state or treats missing output as completion.
 Before restarting a write-capable command, the orchestrator establishes that
 no remote write was attempted and that its lifecycle permits re-entry.
 Ambiguous or attempted publication writes retain their human-reconciliation
-boundary; absence of a receipt alone does not authorize replay. Unrecoverable
-external failures and required human decisions still suspend affected work.
+boundary unless the native GitHub final-review publisher can prove the completed
+review through its exact readback verification. Absence of a receipt alone does
+not authorize replay. Unrecoverable external failures and required human
+decisions still suspend affected work.
 
 Prompt policy governs the aggregate reading budget: workers process relevant
 pages and retain identifiers, evidence references, and decisions instead of
@@ -1157,19 +1159,25 @@ Remote publication is implemented as a guarded sequence:
    before completion. It checks each finding's body and thread, and checks the
    file, diff side and line range of anchored comments against the plan.
 6. **Complete** publishes the summary and optional merge verdict only after
-   finding verification succeeds. Azure DevOps records an approving vote as a
-   separate journaled effect before the summary.
+   finding verification succeeds. If GitHub returns an ambiguous response, the
+   command does not resubmit; it reads the completed review and reconciles only
+   exact verified state. Azure DevOps records an approving vote as a separate
+   journaled effect before the summary.
 7. **Verify completion** reads back the completed review, its summary and
    findings. GitHub verification checks the expected submitted review state.
    For an Azure DevOps approval, readback checks the reviewer identity,
    approving vote and required status against the recorded approval receipt.
 8. **Reopen follow-ups** returns replied-to threads that were not active in the
-   original capture to an unresolved state.
+   original capture to an unresolved state. GitHub first reads the thread and
+   skips the mutation when submission already reopened it. An ambiguous reopen
+   response is reconciled by another thread-state read.
 
 The journal is a recovery aid, not a distributed transaction. Each operation
 distinguishes a definite service refusal from an ambiguous failure that may
-have written state. Any prior operation that wrote or may have written blocks a
-fresh run until a person reconciles local and remote state.
+have written state. A GitHub final submission can be reconciled in the same
+transaction when completed-review readback proves the exact outcome. Other
+operations that wrote or may have written block a fresh run until a person
+reconciles local and remote state.
 
 GitHub implements completion by submitting one pending review. Azure DevOps has
 no draft review, so findings become visible individually and the summary is the

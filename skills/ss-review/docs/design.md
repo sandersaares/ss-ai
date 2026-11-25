@@ -718,7 +718,11 @@ discussion that the reviewer will not monitor.
 
 Remote writes are not assumed to be transactional. An ambiguous or partial run
 requires reconciliation instead of an automatic retry, because duplicate
-review content is more harmful than a paused delivery.
+review content is more harmful than a paused delivery. For a GitHub final
+review, the publisher reconciles an ambiguous submission response by reading
+the submitted review and accepting it only when the exact approved content is
+visible. This is read-only reconciliation, not a repeated write, and the caller
+does not need to inspect the pull request while that verification succeeds.
 
 Explicit rate-limit rejections are definite refusals, not uncertain writes.
 Reads and writes wait and retry until accepted, using exponential backoff when
@@ -743,6 +747,12 @@ A pull request that closed while the review was running creates a new user
 decision: deliberately publish to the closed discussion or deliver the findings
 as tracked work. The workflow does not silently choose a less visible
 destination.
+
+Before reopening a replied-to thread, publication checks whether submission
+already left it unresolved. The publisher issues a reopen mutation only for a
+thread that remains resolved. If that mutation returns an ambiguous response,
+the publisher reads the thread again and treats only unresolved state as
+completed reconciliation.
 
 ## Tracker publication
 

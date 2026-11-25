@@ -58,6 +58,14 @@ creation. Preserve claim journals and publication records; do not delete, move
 aside, or replace them to enable a retry. Where the command requires human
 reconciliation after an attempted or ambiguous write, retain that requirement.
 Successful publication is not replayed to repair a later cleanup failure.
+The final-review publisher has one command-specific exception: after an
+ambiguous GitHub submission response, it performs read-only completed-review
+verification and accepts the transaction only when the exact review is visible.
+It also reads follow-up thread state before reopening and after an ambiguous
+reopen response. Treat proven
+reconciliation as completion; do not ask the user to inspect the pull request.
+If the command's reconciliation fails, retain the human-reconciliation
+requirement and never resubmit.
 
 # Stage 3: resume only the affected work
 

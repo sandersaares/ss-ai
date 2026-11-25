@@ -580,6 +580,9 @@ struct PublicationProvider {
     stale_live_commit: Cell<bool>,
     pull_request_reads: Cell<usize>,
     fail_github_reopen: bool,
+    fail_github_submission_with_502: Cell<bool>,
+    github_follow_up: Cell<bool>,
+    github_thread_resolved: Cell<bool>,
 }
 
 impl PublicationProvider {
@@ -607,6 +610,9 @@ impl PublicationProvider {
             stale_live_commit: Cell::new(false),
             pull_request_reads: Cell::new(0),
             fail_github_reopen: false,
+            fail_github_submission_with_502: Cell::new(false),
+            github_follow_up: Cell::new(false),
+            github_thread_resolved: Cell::new(false),
         }
     }
 
@@ -664,14 +670,19 @@ impl PublicationProvider {
                 return response;
             }
             if query.contains("unresolveReviewThread(") {
-                assert!(self.fail_github_reopen);
                 self.writes.borrow_mut().push("reopen".into());
-                return json!({"errors":[{"message":"Reopening refused"}]});
+                if self.fail_github_reopen {
+                    return json!({"errors":[{"message":"Reopening refused"}]});
+                }
+                self.github_thread_resolved.set(false);
+                return json!({"data":{"unresolveReviewThread":{"thread":{
+                    "id":variables["threadId"],"isResolved":false
+                }}}});
             }
             if query.contains("addPullRequestReviewThreadReply(") {
-                assert!(self.fail_github_reopen);
                 assert_eq!(variables["threadId"], "PRRT_1");
                 self.writes.borrow_mut().push("reply".into());
+                self.github_follow_up.set(true);
                 *self.finding.borrow_mut() = Some(variables["body"].as_str().unwrap().to_owned());
                 return json!({"data":{"addPullRequestReviewThreadReply":{"comment":{"id":"comment"}}}});
             }
@@ -708,8 +719,13 @@ impl PublicationProvider {
             if query.contains("node(id:$reviewId)") {
                 return self.github_review_response();
             }
+            if query.contains("node(id:$threadId)") && query.contains("isResolved") {
+                return json!({"data":{"node":{"id":variables["threadId"],
+                    "isResolved":self.fail_github_reopen || self.github_thread_resolved.get()
+                }}});
+            }
             if query.contains("node(id:$threadId)") && self.finding.borrow().is_some() {
-                return json!({"data":{"node":{"id":if self.fail_github_reopen {"PRRT_1"} else {"thread"},
+                return json!({"data":{"node":{"id":if self.github_follow_up.get() {"PRRT_1"} else {"thread"},
                     "diffSide":"RIGHT","subjectType":"LINE",
                     "comments":{"pageInfo":{"hasNextPage":false,"endCursor":null},
                             "nodes":[{"id":"comment"}]}}}});
@@ -852,6 +868,19 @@ impl Process for PublicationProvider {
         assert_eq!(program, "gh");
         assert_eq!(arguments[0], "api");
         let response = self.github_response(&arguments[1], input);
+        if self.fail_github_submission_with_502.get() && arguments[1] == "graphql" {
+            let request: Value = from_slice(input).unwrap();
+            if request["query"]
+                .as_str()
+                .is_some_and(|query| query.contains("submitPullRequestReview("))
+            {
+                return Ok(ProcessOutput::new(
+                    false,
+                    b"HTTP/2 502\n\n{\"message\":\"Bad Gateway\"}".to_vec(),
+                    Vec::new(),
+                ));
+            }
+        }
         Ok(ProcessOutput::new(true, to_vec(&response).unwrap(), vec![]))
     }
 }
@@ -1371,6 +1400,55 @@ fn accepted_github_submission_with_failed_readback_is_not_replayed() {
     assert_eq!(*provider.writes.borrow(), ["start", "finding", "complete"]);
 }
 
+#[test]
+fn github_502_submission_is_reconciled_and_follow_up_state_is_checked() {
+    let fixture = Fixture::new();
+    let mut provider = PublicationProvider::new("github", false);
+    provider.fail_github_submission_with_502.set(true);
+    provider.github_thread_resolved.set(true);
+    provider.responses["reviewThreads"]["data"]["repository"]["pullRequest"]["reviewThreads"]["nodes"]
+        [0]["isResolved"] = json!(true);
+    let args = publication_args(&fixture, "github");
+    let mut capture = recorded("github-expected");
+    capture["threads"][0]["resolution"] = json!("resolved");
+    capture["threads"][0]["rawStatus"] = json!("resolved");
+    fixture.write("context 雪.json", &capture);
+    let mut document = approved(&capture, true);
+    document["findings"][0]["followUp"] = json!({"threadId":"PRRT_1","commentId":"PRRC_1"});
+    fixture.write("approved 雪.json", &document);
+    let result: Value = from_str(&run(&args, &provider, &provider, &FixedClock).unwrap()).unwrap();
+    assert_eq!(result["status"], "succeeded");
+    assert_eq!(
+        *provider.writes.borrow(),
+        ["start", "reply", "complete", "reopen"]
+    );
+    assert_eq!(*provider.readbacks.borrow(), ["draft", "completed"]);
+    assert!(!provider.github_thread_resolved.get());
+    let journal: Value =
+        from_slice(&fs::read(fixture.path("output 雪/publication-result.json")).unwrap()).unwrap();
+    let complete = journal["operations"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|operation| operation["operation"] == "completeReview")
+        .unwrap();
+    assert_eq!(complete["outcome"], "succeeded");
+    assert!(
+        complete["message"]
+            .as_str()
+            .is_some_and(|message| message.contains("automatic readback confirmed"))
+    );
+    assert_eq!(
+        journal["operations"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|operation| operation["operation"] == "reopenThread")
+            .unwrap()["outcome"],
+        "succeeded"
+    );
+}
+
 /// Serves the executable's provider processes from deterministic local evidence.
 #[cfg(unix)]
 struct PartialProvider {
@@ -1417,6 +1495,9 @@ impl PartialProvider {
                     "nodes":[{"id":"reply-comment","state":if submitted {"SUBMITTED"} else {"PENDING"},
                         "path":"src/café.rs","line":5,"startLine":4,"subjectType":"LINE",
                         "body":self.reply.as_ref().unwrap()}]}}}});
+            }
+            if query.contains("node(id:$threadId)") && query.contains("isResolved") {
+                return json!({"data":{"node":{"id":"PRRT_1","isResolved":true}}});
             }
             if query.contains("node(id:$threadId)") && self.reply.is_some() {
                 return json!({"data":{"node":{"id":"PRRT_1","diffSide":"RIGHT","subjectType":"LINE",
