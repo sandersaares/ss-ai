@@ -20,6 +20,7 @@ A finding is obvious when it matches any of these categories:
 * It recommends a documentation change to make the content more maintainable (e.g. by removing duplication/restatement/trivia).
 * It recommends clarification of a comment or dev-tooling related attribute in the code (e.g. improving an explanation of why a rule is ignored).
 * It recommends aligning the assertions in a test with the documented API contract the code is meant to implement.
+* It recommends simplifying overly verbose `Debug` trait implementations in Rust code.
 
 Every other finding is important. When in doubt, treat a finding as important and leave it for the user's audit.
 
