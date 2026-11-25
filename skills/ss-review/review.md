@@ -42,6 +42,8 @@ UNLESS EXPLICITLY AUTHORIZED (default no), if you are reviewing a pull request, 
 
 Recommend a proportionate remedy. Its implementation effort, revalidation effort, and recurring maintenance burden must be justified by the consequences it avoids. Prefer the simplest effective remedy. If the proposed remedy is disproportionate, find a smaller one; omit the finding only when no proportionate, actionable recommendation remains. High cost alone is not a veto when the consequences warrant it, including for correctness and security defects. State material trade-offs and leave prioritization to the recipient. Do not request that documentation restate a detailed constraint table already specified in an authoritative source the reader can reach merely for completeness; an omitted contractual constraint remains a valid concern. Recommend shared fixtures or abstractions only when the contract complexity or demonstrated drift risk justifies maintaining them. Prefer a remedy that preserves completed empirical validation, and recommend repeating that validation only when the consequences avoided justify the effort.
 
+Treat broad test feature selection, such as Cargo `--all-features`, as an intentional coverage choice; do not recommend narrowing it solely because some enabled features are unused by the selected tests.
+
 # Notes for automatic context compaction
 
 Keep these notes available in context and in a durable checkpoint at `{{SESSION_STATE}}/review-progress/{{REVIEWER_ID}}.md`, updating it after each group. Compaction is controlled by the runtime: do not try to force it, wait for it, or require it before continuing or reporting completion.
