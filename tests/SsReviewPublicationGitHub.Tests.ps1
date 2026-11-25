@@ -152,6 +152,10 @@ Describe 'Native GitHub follow-up publication' {
                 body = $(if ($submitted) { $state.summary } else { '' })
                 comments = @{ pageInfo = @{ hasNextPage = $false; endCursor = $null }; nodes = $comments }
             } } }
+        } elseif ($query.Contains('node(id:$threadId)') -and $query.Contains('isResolved')) {
+            $response = @{ data = @{ node = @{
+                id = $variables.threadId; isResolved = $true
+            } } }
         } elseif ($query.Contains('node(id:$threadId)')) {
             $replies = @($state.replies | Where-Object { $_.thread -eq $variables.threadId })
             if ($replies.Count -eq 0) { throw "Unknown written thread $($variables.threadId)" }

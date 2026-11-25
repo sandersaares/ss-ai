@@ -296,10 +296,14 @@ identity, vote and required status against its receipt. Both read back the
 completed review before reopening follow-up threads. Azure DevOps journals
 finding writes and receipts sequentially; readback verifies each actual comment
 and relative order within a thread, not a global order across independent
-threads. An ambiguous write requires human reconciliation, not automatic retry.
-A follow-up failure emits `publishedWithFollowUpFailure` and exits nonzero; do
-not republish the review. Initial overview, tracker, and Markdown delivery
-retain their separate workflows and authority boundaries.
+threads. An ambiguous GitHub submission is reconciled through the completed
+review readback rather than resubmitted. Follow-up threads are read before
+reopening so an already unresolved thread causes no duplicate mutation; an
+ambiguous reopen response is reconciled through another state read.
+Other ambiguous writes still require reconciliation, not automatic retry. A
+follow-up failure emits `publishedWithFollowUpFailure` and exits nonzero; do not
+republish the review. Initial overview, tracker, and Markdown delivery retain
+their separate workflows and authority boundaries.
 
 ## Tracker publication
 

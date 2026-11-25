@@ -46,7 +46,9 @@ so provider transactions do not depend on report rendering or attachment tools.
 Audit and projection operations share the captured-evidence serializer and
 exact Git comparison with other review commands. Final review publication
 combines these local operations with provider effects and a retained journal
-lock in `ss-ai-review`.
+lock in `ss-ai-review`. GitHub submission responses that may have reached the
+service are reconciled with a completed-review readback before publication can
+continue; reconciliation never resends the submission.
 Tracker publication combines the native renderer with provider-specific
 preflight and per-item journaled creation and verification.
 Accepted Azure body rewrites become durable before the transaction records a

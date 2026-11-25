@@ -929,7 +929,7 @@ fn execute_inner(
             )?;
         }
         let review_id = result["reviewId"].clone();
-        effect(
+        let completion = effect(
             journal,
             &mut result,
             Some(complete_index),
@@ -946,11 +946,54 @@ fn execute_inner(
                 }
                 Ok(receipt)
             },
-        )?;
-        submitted = true;
-        let verification = effect(journal, &mut result, None, EffectKind::Verify, || {
-            effects.verify()
-        })?;
+        );
+        let verification = match completion {
+            Ok(_) => effect(journal, &mut result, None, EffectKind::Verify, || {
+                effects.verify()
+            })?,
+            Err(completion_error)
+                if target["platform"] == "gitHub"
+                    && classification(&completion_error) == "ambiguousWrite" =>
+            {
+                // A GitHub gateway failure can occur after the review is
+                // submitted. A readback decides the outcome without repeating
+                // the submission or treating the lost response as success.
+                let verification = effect(journal, &mut result, None, EffectKind::Verify, || {
+                    effects.verify()
+                })?;
+                if let Err(error) = verify_completed(
+                    &result,
+                    plan,
+                    summary,
+                    approve,
+                    approval_index,
+                    &verification,
+                ) {
+                    result["operations"][complete_index]["message"] = json!(format!(
+                        "{completion_error}; automatic reconciliation: {error}"
+                    ));
+                    save(journal, &result)?;
+                    return Err(fail(
+                        "ambiguousWrite",
+                        format!("{completion_error}; automatic reconciliation failed: {error}"),
+                    ));
+                }
+                let url = verification["url"].as_str().filter(|url| !url.is_empty());
+                if url.is_none() {
+                    return Err(fail("service", "Reconciled GitHub review omitted its URL"));
+                }
+                result["operations"][complete_index]["outcome"] = json!("succeeded");
+                result["operations"][complete_index]["message"] = json!(format!(
+                    "{completion_error}; automatic readback confirmed the submitted review"
+                ));
+                result["operations"][complete_index]["receipt"] =
+                    json!({"reviewId":review_id,"url":verification["url"]});
+                result["reviewUrl"] = verification["url"].clone();
+                save(journal, &result)?;
+                verification
+            }
+            Err(error) => return Err(error),
+        };
         verify_completed(
             &result,
             plan,
@@ -959,6 +1002,7 @@ fn execute_inner(
             approval_index,
             &verification,
         )?;
+        submitted = true;
         Ok(())
     })();
 
@@ -1154,7 +1198,7 @@ mod tests {
                 Some("required") => approval["isRequired"] = json!(false),
                 _ => {}
             }
-            let mut verification = json!({"reviewId": "review", "state": state, "isPublished": published, "body": "summary", "approval": approval, "comments": [
+            let mut verification = json!({"reviewId": "review", "url": "url", "state": state, "isPublished": published, "body": "summary", "approval": approval, "comments": [
                 {"id": "comment", "threadId": "thread", "body": if self.bad_pre && !published || self.bad_post && published { "wrong" } else { "finding" },
                  "isPublished": published, "path": "src/file", "subjectType": "LINE",
                  "line": 7, "startLine": null, "side": "RIGHT"}
@@ -1289,6 +1333,7 @@ mod tests {
             let mut journal = Memory::default();
             let mut provider = Provider {
                 failure: Some((stage, kind)),
+                bad_post: stage == "complete" && kind == "ambiguousWrite",
                 ..Provider::default()
             };
             _ = run(&mut journal, &mut provider, "gitHub", false).unwrap_err();
@@ -1361,6 +1406,7 @@ mod tests {
             assert_eq!(classification(&error), "ambiguousWrite");
             let mut provider = Provider {
                 completion_error: Some(error),
+                bad_post: true,
                 ..Provider::default()
             };
             let mut journal = Memory::default();
@@ -1383,6 +1429,40 @@ mod tests {
             assert_eq!(provider.calls.len(), calls);
             assert_eq!(process.calls.get(), 1);
         }
+    }
+
+    #[test]
+    fn ambiguous_github_completion_is_reconciled_by_readback() {
+        let mut journal = Memory::default();
+        let mut provider = Provider {
+            completion_error: Some(fail(
+                "ambiguousWrite",
+                "GitHub request failed: HTTP 502 Bad Gateway",
+            )),
+            ..Provider::default()
+        };
+        let result = run(&mut journal, &mut provider, "gitHub", false).unwrap();
+        assert_eq!(result["status"], "succeeded");
+        assert_eq!(
+            provider.calls,
+            ["start", "add", "verify_findings", "complete", "verify"]
+        );
+        let record = journal.record.as_ref().unwrap();
+        let complete = record["operations"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|operation| operation["operation"] == "completeReview")
+            .unwrap();
+        assert_eq!(complete["outcome"], "succeeded");
+        assert!(
+            complete["message"]
+                .as_str()
+                .is_some_and(|message| message.contains("automatic readback confirmed"))
+        );
+        assert_eq!(record["reviewUrl"], "url");
+        assert_eq!(record["verification"]["isPublished"], true);
+        _ = check_prior_inner(&mut journal, &target("gitHub")).unwrap_err();
     }
 
     #[test]

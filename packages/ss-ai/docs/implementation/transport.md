@@ -65,6 +65,10 @@ remote writes. An explicitly authorized pre-existing GitHub draft discard is
 the exception to the review journal: it follows preflight but precedes the
 journal. The subsequent transaction persists each effect's intent and outcome,
 distinguishes refusals from ambiguous writes, and requires reconciliation rather
-than replay after a possible effect. Azure DevOps approval is a separate
+than replay after a possible effect. A lost or invalid GitHub submission
+response enters automatic read-only reconciliation: the completed review must
+prove the exact planned result before the command accepts it. The command never
+resends that mutation. GitHub follow-up reopening uses the same read-only
+reconciliation when its mutation response is ambiguous. Azure DevOps approval is a separate
 journaled reviewer update that preserves `isRequired`; its findings are already
 visible before the summary is posted.
