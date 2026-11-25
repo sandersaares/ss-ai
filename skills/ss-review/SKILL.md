@@ -268,7 +268,9 @@ Report reused classifications, newly classified comments (the classification com
 
 # Phase 5: auto-approval
 
-Dispatch one subagent (GPT 6.2 Sol) with explicit `model: "gpt-6.2-sol"`, `reasoning_effort: "medium"`, and `context_tier: "default"`; apply the same settings to any replacement worker. Supply the skill root, session state directory, exact review-work manifest path retained from phase 2, and the prompt in `auto-approve.md`. The worker applies `auto-approval-rules.md` to the manifest-bound focus areas used in the review, polling one full finding at a time and recording either `auto-approved` or `needs-audit` before polling again. Do not load the whole findings artifact into its context.
+Open the exact review-work manifest retained from phase 2 and enumerate every `reviewers` entry whose `dispatch` is `review`. Preserve each entry's absolute `focusArea` snapshot path in manifest order as `USED_FOCUS_AREA_PATHS`. Include no entry with `dispatch: "excluded"` and do not enumerate the live `focus-areas` directory. The resulting list is the complete definition of the focus areas used in the review.
+
+Dispatch one subagent (GPT 6.2 Sol) with explicit `model: "gpt-6.2-sol"`, `reasoning_effort: "medium"`, and `context_tier: "long_context"`; apply the same settings to any replacement worker. Supply the skill root, session state directory, exact manifest path, the complete `USED_FOCUS_AREA_PATHS` list, and the prompt in `auto-approve.md`. The worker verifies that input, opens every supplied focus-area snapshot, and applies `auto-approval-rules.md`, polling one full finding at a time and recording either `auto-approved` or `needs-audit` before polling again. Do not load the whole findings artifact into its context.
 
 Keep `findings.json` unchanged while this phase runs and give the worker exclusive ownership of decision-log writes. It has policy-classification authority only: no user decisions, finding rewrites, merge approval, or publication. If interrupted, verify that it has stopped before dispatching a replacement with the same paths; the decision log preserves completed classifications without a separate queue.
 

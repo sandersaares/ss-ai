@@ -608,7 +608,12 @@ Auto-approval runs after synthesis and before the human audit. The policy lives
 only in `../auto-approval-rules.md`; the worker prompt in `../auto-approve.md`
 defines iteration and authority without duplicating that rule. The worker reads
 the immutable focus-area snapshot paths for dispatched reviewers from the
-review-work manifest, excluding entirely unused focus-area assignments.
+review-work manifest, excluding entirely unused focus-area assignments. The
+orchestrator enumerates those paths from entries with `dispatch: "review"` and
+passes the complete ordered list directly to the worker as
+`USED_FOCUS_AREA_PATHS`. The worker verifies the list against the manifest and
+opens every named file before polling findings, so classification never relies
+on an implicit directory scan or a partial guideline set.
 
 The consolidated finding artifact stays immutable during classification. One
 worker owns decision-log writes and repeatedly polls for the first live finding
