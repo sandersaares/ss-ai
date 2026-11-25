@@ -92,7 +92,7 @@ ss-ai test-audit record-batch `
 | `STATE_DIRECTORY` | Exact initialized audit state directory. |
 | `CLASSIFICATION_BATCH_PATH` | Strict agent-authored record following `schemas/classification-batch.schema.json`. |
 
-The command validates the audit token, snapshot freshness, unique assertion IDs, outcome explanation, category-specific evidence, exact citation lines, known calling tests, and shared-site linkage. Identical replays report `unchanged`; different repeats fail. Use the returned `completed` and `remaining` values in the cumulative progress update.
+The command validates the audit token, snapshot freshness, unique assertion IDs, outcome explanation, category-specific evidence, exact citation lines, known calling tests, and shared-site linkage. Identical replays report `unchanged`; different repeats fail. Use the returned `completed` and `remaining` values in the cumulative progress update. That update is informational only. If `remaining` is greater than zero, immediately invoke `next-batch` again in the same skill invocation. If `remaining` is zero, immediately invoke `report`, whose exact-coverage validation is authoritative. Do not treat a successful record or `remaining: 0` alone as completion.
 
 ## Emit final reports
 
@@ -111,4 +111,4 @@ ss-ai test-audit report `
 | --- | --- |
 | `STATE_DIRECTORY` | Exact initialized audit state directory. |
 
-On success, retain `tracePath`, `testInventoryPath`, `summaryPath`, `status`, test count, assertion count, and module count. An incomplete classification journal is an error and emits no success report.
+On success, retain `tracePath`, `testInventoryPath`, `summaryPath`, `status`, test count, assertion count, and module count. Run this after `record-batch` reports `remaining: 0`. The command performs the authoritative exact-coverage validation. An incomplete classification journal is an error and emits no success report.

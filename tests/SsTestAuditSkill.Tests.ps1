@@ -18,6 +18,10 @@ Describe 'ss-test-audit skill contract' {
         $skill | Should -Match 'No explicitly documented promise = implicit-only \+ incidental'
         $skill | Should -Match 'No public-contract check = incidental only'
         $skill | Should -Match 'Classified C of T assertions'
+        $skill | Should -Match 'not a completion, checkpoint, pause, handoff, request for input, or permission to end the turn'
+        $skill | Should -Match 'Never stop after a progress message'
+        $skill | Should -Match 'If `R` is greater than zero, invoke `next-batch`'
+        $skill | Should -Match 'If `R` is zero, continue to stage 4 and run the final `report`'
         $skill | Should -Match 'classification-batch\.schema\.json'
         $skill | Should -Match 'direct AST-visible free-function'
         $skill | Should -Match 'assert_panics'
@@ -29,6 +33,8 @@ Describe 'ss-test-audit skill contract' {
             $commands | Should -Match ([regex]::Escape("ss-ai test-audit $command"))
         }
         $commands | Should -Not -Match '(?im)^\s*pwsh\b[^\r\n]*\s-File\b'
+        $commands | Should -Match 'Do not treat a successful record or `remaining: 0` alone as completion'
+        $commands | Should -Match 'The command performs the authoritative exact-coverage validation'
         Test-Path -LiteralPath (Join-Path $script:Skill 'scripts') | Should -BeFalse
     }
 

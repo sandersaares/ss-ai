@@ -74,9 +74,16 @@ Write one strict classification batch matching [classification-batch.schema.json
 
 Apply the batch through `record-batch` using [commands.md](commands.md#record-classification-results). If the command reports stale state, malformed citations, duplicate IDs, or an already different classification, stop that batch and report the diagnostic without overwriting state.
 
-After every completed record, state cumulative progress in the conversation: `Classified C of T assertions; R remain. The batch completed N sites.` For the final partial batch, also state that the remainder has been completed.
+After every successful `record-batch`, emit the following informational progress message in the conversation: `Classified C of T assertions; R remain. The batch completed N sites.`
 
-Repeat until `next-batch` returns zero assertions. Never declare completion from an assertion count alone.
+This progress message is not a completion, checkpoint, pause, handoff, request for input, or permission to end the turn. Do not wait for a reply after it. In the same skill invocation, immediately continue with the next required action even when `R` is zero:
+
+1. If `R` is greater than zero, invoke `next-batch` and return to classification with its assertions.
+2. If `R` is zero, continue to stage 4 and run the final `report`; the report command verifies exact classification coverage and fails if the zero is stale or incorrect.
+
+Never stop after a progress message, after `record-batch` alone, after a partial batch, or because the returned `remaining` value is zero. Only a successful final `report` command followed by stage 5 establishes completion. A context limit or execution interruption may stop the invocation, but that is an interruption to be resumed from durable state, not successful completion.
+
+Repeat the classification loop while `R` is greater than zero. Never declare completion from an assertion count, a progress message, or `record-batch` summary alone.
 
 # Stage 4: validate and emit reports
 
@@ -97,6 +104,6 @@ Always show numerators and denominators. Mixed assertion sites enter neither num
 
 # Stage 5: summarize the execution
 
-Report completion only after the final native report command succeeds. The summary must state the audited repository and scopes, snapshot revision, test and assertion totals, classification totals, module rates, output paths, discovery cross-check, language coverage, and every material scan diagnostic or unresolved unsupported form.
+Report completion only after `record-batch` reports zero remaining assertions and the final native report command succeeds. The summary must state the audited repository and scopes, snapshot revision, test and assertion totals, classification totals, module rates, output paths, discovery cross-check, language coverage, and every material scan diagnostic or unresolved unsupported form.
 
 Do not omit smoke tests, unlinked shared assertions, parse fallbacks, or unsupported forms to make coverage appear complete.
