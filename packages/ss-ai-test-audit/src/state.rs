@@ -16,6 +16,8 @@ use crate::scan::digest;
 const MAX_SEARCH_RESULTS: usize = 200;
 /// Keeps one multi-query evidence call bounded even when every query returns a full page.
 const MAX_SEARCH_QUERIES: usize = 10;
+/// Keeps evidence handles compact while retaining snapshot-bound identity.
+const EVIDENCE_SNAPSHOT_PREFIX_CHARACTERS: usize = 12;
 
 /// Searches the immutable line index without loading all evidence into the agent.
 pub fn search(
@@ -59,7 +61,13 @@ pub fn search_many(
     let loaded = load(state_directory, clock)?;
     let mut results = Vec::new();
     for query in queries {
-        results.push(search_query(&loaded.index, query, kind, limit)?);
+        results.push(search_query(
+            &loaded.index,
+            &loaded.state.snapshot_sha256,
+            query,
+            kind,
+            limit,
+        )?);
     }
     Ok(json!({
         "schemaVersion": 1,
@@ -74,6 +82,7 @@ pub fn search_many(
 /// Executes one bounded AND-term query against the already validated index.
 fn search_query(
     index: &[IndexEntry],
+    snapshot_sha256: &str,
     query: &str,
     kind: Option<&str>,
     limit: usize,
@@ -88,7 +97,7 @@ fn search_query(
         .collect();
     let mut matches = Vec::new();
     let mut truncated = false;
-    for entry in index {
+    for (offset, entry) in index.iter().enumerate() {
         if kind.is_some_and(|kind| entry.kind != kind) {
             continue;
         }
@@ -98,7 +107,16 @@ fn search_query(
                 truncated = true;
                 break;
             }
-            matches.push(entry.clone());
+            matches.push(json!({
+                "evidenceHandle": evidence_handle(snapshot_sha256, offset),
+                "path": entry.path,
+                "line": entry.line,
+                "language": entry.language,
+                "kind": entry.kind,
+                "excerpt": entry.excerpt,
+                "repositoryRevision": entry.repository_revision,
+                "fileSha256": entry.file_sha256
+            }));
         }
     }
     Ok(json!({
@@ -107,6 +125,26 @@ fn search_query(
         "matches": matches,
         "truncated": truncated
     }))
+}
+
+/// Builds the same compact, snapshot-bound evidence reference for search and submit.
+pub(crate) fn evidence_handle(snapshot_sha256: &str, offset: usize) -> String {
+    let prefix = snapshot_sha256
+        .get(..EVIDENCE_SNAPSHOT_PREFIX_CHARACTERS)
+        .unwrap_or(snapshot_sha256);
+    format!("E{prefix}-{}", offset.saturating_add(1))
+}
+
+/// Resolves handles to exact index positions without trusting caller-provided paths.
+pub(crate) fn evidence_index(
+    snapshot_sha256: &str,
+    index: &[IndexEntry],
+) -> BTreeMap<String, usize> {
+    index
+        .iter()
+        .enumerate()
+        .map(|(offset, _)| (evidence_handle(snapshot_sha256, offset), offset))
+        .collect()
 }
 
 /// Validated, consistently loaded state shared by batch and report operations.

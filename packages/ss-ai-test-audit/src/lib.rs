@@ -7,8 +7,9 @@ mod model;
 mod report;
 mod scan;
 mod state;
+mod submission;
 
-pub use batch::{advance, next_batch, record_batch};
+pub use batch::{advance, next_batch, record_batch, submit};
 pub use inventory::initialize;
 pub use report::report;
 pub use state::{search, search_many};

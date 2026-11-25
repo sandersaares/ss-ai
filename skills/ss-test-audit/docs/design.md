@@ -19,6 +19,13 @@ The final trace contains exactly one classification row for each inventoried ass
 
 The skill requests one initial assertion batch, then uses one combined command to record each completed batch and export the next one. Related evidence queries can share one command. Read-only operations remain bound to the immutable snapshot; commands that accept judgments or emit final reports also verify current source hashes.
 
+The compact submission record contains only agent-owned semantic rows and
+snapshot evidence handles. Native code binds those rows to the current batch,
+resolves exact citations, and uses the combined advance transaction. Reuse is
+an explicit row shape requiring confirmed equivalence, replacement citations,
+and caller attribution. Batch display and final report counts make ordinary
+workflow completion independent of PowerShell JSON projection.
+
 The Markdown report shows per-module totals and percentages for:
 
 - `No explicitly documented promise = implicit-only + incidental`;

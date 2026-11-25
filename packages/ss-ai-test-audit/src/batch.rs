@@ -1,6 +1,7 @@
 //! Bounded assertion export and strict semantic-classification ingestion.
 
 use std::collections::{BTreeMap, BTreeSet};
+use std::fmt::Write as _;
 use std::fs;
 use std::path::Path;
 
@@ -10,16 +11,17 @@ use ss_ai_runtime::{Clock, FileTransaction, caused_by, fail};
 
 use crate::model::{
     AssertionSite, Batch, BatchAssertion, Citation, Classification, ClassificationBatch,
-    ClassificationJournal, ClassificationKind, EvidenceStatus, IndexEntry,
+    ClassificationJournal, ClassificationKind, CompactSubmission, EvidenceStatus, IndexEntry,
 };
 use crate::state::{
     LoadedState, load, load_fresh, output_path, parse_json, reject_source_alias,
     reject_state_destination, require_version, validate_journal, validate_source_snapshot,
-    write_json,
+    write_bytes, write_json,
 };
+use crate::submission::{resolve_submission, validate_exported_batch};
 
 /// Matches the skill's bounded agent review unit and cumulative progress reporting.
-const MAX_BATCH_SIZE: usize = 25;
+pub(crate) const MAX_BATCH_SIZE: usize = 25;
 /// Keeps one agent-authored result page small enough for bounded local ingestion.
 const MAX_CLASSIFICATION_BATCH_BYTES: u64 = 1024 * 1024;
 /// Retains nearby source without duplicating complete files in the batch.
@@ -43,10 +45,10 @@ pub fn next_batch(
     let loaded = load(state_directory, clock)?;
     let batch = build_batch(&loaded, count);
     let output = output_path(output)?;
-    reject_source_alias(&output, &loaded.inventory)?;
-    reject_state_destination(&output, state_directory)?;
-    write_json(&output, &batch, clock)?;
-    Ok(batch_summary(&batch, &output).to_string())
+    let display = batch_display_path(&output)?;
+    preflight_batch_output(state_directory, &output, &display, &loaded.inventory)?;
+    export_batch(&batch, &output, &display, clock)?;
+    Ok(batch_summary(&batch, &output, &display).to_string())
 }
 
 /// Builds the next bounded assertion batch from one already validated state load.
@@ -82,16 +84,91 @@ fn build_batch(loaded: &LoadedState, count: usize) -> Batch {
 }
 
 /// Summarizes one exported batch without repeating its assertion payload.
-fn batch_summary(batch: &Batch, output: &Path) -> serde_json::Value {
+fn batch_summary(batch: &Batch, output: &Path, display: &Path) -> serde_json::Value {
     json!({
         "schemaVersion": 1,
         "batchPath": output,
+        "displayPath": display,
         "auditId": batch.audit_id,
         "snapshotSha256": batch.snapshot_sha256,
         "batchCount": batch.assertions.len(),
         "completed": batch.completed,
         "remaining": batch.remaining
     })
+}
+
+/// Publishes the machine record and its compact human-readable projection.
+fn export_batch(
+    batch: &Batch,
+    output: &Path,
+    display: &Path,
+    clock: &dyn Clock,
+) -> Result<(), AppError> {
+    write_json(output, batch, clock)?;
+    write_bytes(display, compact_batch_display(batch).as_bytes(), clock)?;
+    Ok(())
+}
+
+/// Derives the compact companion without allowing it to alias the machine record.
+fn batch_display_path(output: &Path) -> Result<std::path::PathBuf, AppError> {
+    let name = output
+        .file_name()
+        .ok_or_else(|| fail("invalidInput", "Batch output requires a file name"))?;
+    Ok(output.with_file_name(format!("{}.txt", name.to_string_lossy())))
+}
+
+/// Protects state and source files before a journal transition is committed.
+fn preflight_batch_output(
+    state_directory: &Path,
+    output: &Path,
+    display: &Path,
+    inventory: &crate::model::Inventory,
+) -> Result<(), AppError> {
+    for path in [output, display] {
+        reject_source_alias(path, inventory)?;
+        reject_state_destination(path, state_directory)?;
+    }
+    Ok(())
+}
+
+/// Renders only fields needed to judge one bounded assertion batch.
+fn compact_batch_display(batch: &Batch) -> String {
+    let mut output = format!(
+        "Audit {} snapshot {} completed {} remaining {}\n",
+        batch.audit_id, batch.snapshot_sha256, batch.completed, batch.remaining
+    );
+    for assertion in &batch.assertions {
+        let test = assertion
+            .test_name
+            .as_deref()
+            .map_or_else(|| "-".to_owned(), str::to_owned);
+        let callers = assertion.assertion.calling_test_ids.join(",");
+        _ = writeln!(
+            output,
+            "{} | {} | {}:{}-{} | test={} | helper={} | callers={}",
+            assertion.assertion.id,
+            assertion.assertion.kind,
+            assertion.assertion.path,
+            assertion.assertion.line,
+            assertion.assertion.end_line,
+            test,
+            assertion.assertion.helper_name.as_deref().unwrap_or("-"),
+            callers
+        );
+        _ = writeln!(
+            output,
+            "  expression: {}",
+            assertion.assertion.expression.replace('\n', " ")
+        );
+        for entry in &assertion.context {
+            _ = writeln!(
+                output,
+                "  context {}:{}: {}",
+                entry.path, entry.line, entry.excerpt
+            );
+        }
+    }
+    output
 }
 
 /// Adds exact line context and test ownership to each exported source predicate.
@@ -167,18 +244,76 @@ pub fn advance(
         ));
     }
     let loaded = load_fresh(state_directory, clock)?;
+    let classification = read_classification_batch_limited(batch_path)?;
+    advance_classification(
+        state_directory,
+        output,
+        count,
+        clock,
+        loaded,
+        classification,
+    )
+}
+
+/// Resolves compact agent rows against the exported batch and accepted journal.
+pub fn submit(
+    state_directory: &Path,
+    batch_path: &Path,
+    submission_path: &Path,
+    output: &Path,
+    count: usize,
+    clock: &dyn Clock,
+) -> Result<String, AppError> {
+    if count == 0 || count > MAX_BATCH_SIZE {
+        return Err(fail(
+            "invalidInput",
+            "Assertion batch size must be between 1 and 25",
+        ));
+    }
+    let loaded = load_fresh(state_directory, clock)?;
+    let batch: Batch = parse_json(
+        &read_bounded_json(batch_path, "exported assertion batch")?,
+        "exported assertion batch",
+    )?;
+    validate_exported_batch(&batch, &loaded)?;
+    let submission: CompactSubmission = parse_json(
+        &read_bounded_json(submission_path, "compact submission")?,
+        "compact submission",
+    )?;
+    require_version(submission.schema_version, "compact submission")?;
+    let classification = resolve_submission(&loaded, &batch, submission)?;
+    advance_classification(
+        state_directory,
+        output,
+        count,
+        clock,
+        loaded,
+        classification,
+    )
+}
+
+/// Applies the shared record-and-export transaction to one canonical batch.
+fn advance_classification(
+    state_directory: &Path,
+    output: &Path,
+    count: usize,
+    clock: &dyn Clock,
+    loaded: LoadedState,
+    classification: ClassificationBatch,
+) -> Result<String, AppError> {
     let output = output_path(output)?;
-    reject_source_alias(&output, &loaded.inventory)?;
-    reject_state_destination(&output, state_directory)?;
-    let (journal, recorded) = record_loaded(state_directory, batch_path, clock, &loaded)?;
+    let display = batch_display_path(&output)?;
+    preflight_batch_output(state_directory, &output, &display, &loaded.inventory)?;
+    let (journal, recorded) =
+        record_classification(state_directory, classification, clock, &loaded)?;
     let mut advanced = loaded;
     advanced.journal = journal;
     let batch = build_batch(&advanced, count);
-    write_json(&output, &batch, clock)?;
+    export_batch(&batch, &output, &display, clock)?;
     Ok(json!({
         "schemaVersion": 1,
         "record": recorded,
-        "nextBatch": batch_summary(&batch, &output),
+        "nextBatch": batch_summary(&batch, &output, &display),
     })
     .to_string())
 }
@@ -187,6 +322,61 @@ pub fn advance(
 fn record_loaded(
     state_directory: &Path,
     batch_path: &Path,
+    clock: &dyn Clock,
+    loaded: &LoadedState,
+) -> Result<(ClassificationJournal, serde_json::Value), AppError> {
+    let batch = read_classification_batch_limited(batch_path)?;
+    record_classification(state_directory, batch, clock, loaded)
+}
+
+/// Reads and bounds one canonical low-level classification batch.
+fn read_classification_batch_limited(path: &Path) -> Result<ClassificationBatch, AppError> {
+    parse_json(
+        &read_bounded_json(path, "classification batch")?,
+        "classification batch",
+    )
+}
+
+/// Reads one agent input with a stable safety ceiling and actionable path.
+fn read_bounded_json(path: &Path, role: &str) -> Result<Vec<u8>, AppError> {
+    let batch_size = fs::metadata(path)
+        .map_err(|error| {
+            caused_by(
+                "invalidInput",
+                format!("Cannot inspect {role} '{}'", path.display()),
+                error,
+            )
+        })?
+        .len();
+    if batch_size > MAX_CLASSIFICATION_BATCH_BYTES {
+        return Err(fail(
+            "invalidInput",
+            format!("{role} '{}' exceeds the bounded input size", path.display()),
+        ));
+    }
+    let bytes = fs::read(path).map_err(|error| {
+        caused_by(
+            "invalidInput",
+            format!("Cannot read {role} '{}'", path.display()),
+            error,
+        )
+    })?;
+    if u64::try_from(bytes.len()).unwrap_or(u64::MAX) > MAX_CLASSIFICATION_BATCH_BYTES {
+        return Err(fail(
+            "invalidInput",
+            format!(
+                "{role} '{}' exceeded the bounded input size while being read",
+                path.display()
+            ),
+        ));
+    }
+    Ok(bytes)
+}
+
+/// Validates and atomically records one already parsed classification batch.
+fn record_classification(
+    state_directory: &Path,
+    batch: ClassificationBatch,
     clock: &dyn Clock,
     loaded: &LoadedState,
 ) -> Result<(ClassificationJournal, serde_json::Value), AppError> {
@@ -206,30 +396,6 @@ fn record_loaded(
         ));
     }
     validate_journal(&loaded.inventory, &journal, &loaded.index)?;
-    let batch_size = fs::metadata(batch_path)?.len();
-    if batch_size > MAX_CLASSIFICATION_BATCH_BYTES {
-        return Err(fail(
-            "invalidInput",
-            "Classification batch exceeds the bounded input size",
-        ));
-    }
-    let bytes = fs::read(batch_path).map_err(|error| {
-        caused_by(
-            "invalidInput",
-            format!(
-                "Cannot read classification batch '{}'",
-                batch_path.display()
-            ),
-            error,
-        )
-    })?;
-    if u64::try_from(bytes.len()).unwrap_or(u64::MAX) > MAX_CLASSIFICATION_BATCH_BYTES {
-        return Err(fail(
-            "invalidInput",
-            "Classification batch exceeded the bounded input size while being read",
-        ));
-    }
-    let batch: ClassificationBatch = parse_json(&bytes, "classification batch")?;
     require_version(batch.schema_version, "classification batch")?;
     if batch.audit_id != loaded.state.audit_id
         || batch.snapshot_sha256 != loaded.state.snapshot_sha256
@@ -324,6 +490,17 @@ fn record_loaded(
     Ok((journal, summary))
 }
 
+/// Names the exact compact input row and field in a recoverable diagnostic.
+fn row_error(assertion_id: &str, field: &str, detail: impl Into<String>) -> AppError {
+    fail(
+        "invalidInput",
+        format!(
+            "Assertion '{assertion_id}' field '{field}': {}",
+            detail.into()
+        ),
+    )
+}
+
 /// Enforces the evidence and ambiguity contract for each semantic category.
 pub(crate) fn validate_classification(
     classification: &Classification,
@@ -332,50 +509,69 @@ pub(crate) fn validate_classification(
     index: &[IndexEntry],
 ) -> Result<(), AppError> {
     if classification.actual_outcome.trim().is_empty() {
-        return Err(fail(
-            "invalidInput",
-            format!(
-                "Assertion '{}' requires the actual outcome it checks",
-                assertion.id
-            ),
+        return Err(row_error(
+            &assertion.id,
+            "actualOutcome",
+            "The field must describe the outcome checked by the assertion",
         ));
     }
     if classification.rationale.trim().is_empty() {
-        return Err(fail(
-            "invalidInput",
-            format!("Assertion '{}' requires a rationale", assertion.id),
+        return Err(row_error(
+            &assertion.id,
+            "rationale",
+            "The field must explain the contract relationship",
         ));
     }
     match classification.kind {
         ClassificationKind::Documented => {
-            if classification.evidence_status != EvidenceStatus::Confirmed
-                || classification.citations.is_empty()
-            {
-                return Err(fail(
-                    "invalidInput",
-                    "Documented classifications require confirmed citations",
+            if classification.evidence_status != EvidenceStatus::Confirmed {
+                return Err(row_error(
+                    &assertion.id,
+                    "evidenceStatus",
+                    "Documented classifications require Confirmed evidence",
+                ));
+            }
+            if classification.citations.is_empty() {
+                return Err(row_error(
+                    &assertion.id,
+                    "citationHandles/citations",
+                    "Documented classifications require at least one exact evidence reference",
                 ));
             }
         }
         ClassificationKind::Implicit => {
             if classification.evidence_status != EvidenceStatus::Ambiguous {
-                return Err(fail(
-                    "invalidInput",
-                    "Implicit classifications must remain explicitly ambiguous",
+                return Err(row_error(
+                    &assertion.id,
+                    "evidenceStatus",
+                    "Implicit classifications require Ambiguous evidence",
                 ));
             }
         }
         ClassificationKind::Mixed => {
-            if classification.evidence_status != EvidenceStatus::Confirmed
-                || classification.citations.is_empty()
-                || classification
-                    .incidental_reason
-                    .as_deref()
-                    .is_none_or(str::is_empty)
+            if classification.evidence_status != EvidenceStatus::Confirmed {
+                return Err(row_error(
+                    &assertion.id,
+                    "evidenceStatus",
+                    "Mixed classifications require Confirmed evidence",
+                ));
+            }
+            if classification.citations.is_empty() {
+                return Err(row_error(
+                    &assertion.id,
+                    "citationHandles/citations",
+                    "Mixed classifications require documented-component evidence",
+                ));
+            }
+            if classification
+                .incidental_reason
+                .as_deref()
+                .is_none_or(str::is_empty)
             {
-                return Err(fail(
-                    "invalidInput",
-                    "Mixed classifications require confirmed promise evidence and the undocumented detail",
+                return Err(row_error(
+                    &assertion.id,
+                    "incidentalReason",
+                    "Mixed classifications require the undocumented detail",
                 ));
             }
         }
@@ -385,21 +581,23 @@ pub(crate) fn validate_classification(
                 .as_deref()
                 .is_none_or(str::is_empty)
             {
-                return Err(fail(
-                    "invalidInput",
+                return Err(row_error(
+                    &assertion.id,
+                    "incidentalReason",
                     "Incidental classifications require why no public promise applies",
                 ));
             }
         }
     }
-    for citation in &classification.citations {
-        validate_citation(citation, index)?;
+    for (position, citation) in classification.citations.iter().enumerate() {
+        validate_citation(&assertion.id, position, citation, index)?;
     }
-    for test in &classification.calling_test_ids {
+    for (position, test) in classification.calling_test_ids.iter().enumerate() {
         if !tests.contains(test.as_str()) {
-            return Err(fail(
-                "invalidInput",
-                format!("Classification references unknown calling test '{test}'"),
+            return Err(row_error(
+                &assertion.id,
+                &format!("callingTestIds[{position}]"),
+                format!("Unknown calling test '{test}'"),
             ));
         }
     }
@@ -411,35 +609,68 @@ pub(crate) fn validate_classification(
             .as_deref()
             .is_none_or(str::is_empty)
     {
-        return Err(fail(
-            "invalidInput",
-            "A shared assertion without calling tests requires an unlinked reason",
+        return Err(row_error(
+            &assertion.id,
+            "callingTestIds/unlinkedReason",
+            "A shared assertion without calling tests requires an explicit unlinked reason",
         ));
     }
     Ok(())
 }
 
 /// Requires every cited excerpt to be contained on the selected indexed line.
-fn validate_citation(citation: &Citation, index: &[IndexEntry]) -> Result<(), AppError> {
-    if citation.path.is_empty() || citation.line == 0 || citation.excerpt.trim().is_empty() {
-        return Err(fail(
-            "invalidInput",
-            "Citation path, line, and excerpt must be present",
+fn validate_citation(
+    assertion_id: &str,
+    position: usize,
+    citation: &Citation,
+    index: &[IndexEntry],
+) -> Result<(), AppError> {
+    let field = format!("citations[{position}]");
+    if citation.path.trim().is_empty() {
+        return Err(row_error(
+            assertion_id,
+            &format!("{field}.path"),
+            "Citation path must not be empty",
+        ));
+    }
+    if citation.line == 0 {
+        return Err(row_error(
+            assertion_id,
+            &format!("{field}.line"),
+            "Citation line must be positive",
+        ));
+    }
+    if citation.excerpt.trim().is_empty() {
+        return Err(row_error(
+            assertion_id,
+            &format!("{field}.excerpt"),
+            format!(
+                "Citation excerpt for evidence reference '{}:{}' must not be empty",
+                citation.path, citation.line
+            ),
         ));
     }
     let entry = index
         .iter()
         .find(|entry| entry.path == citation.path && entry.line == citation.line)
         .ok_or_else(|| {
-            fail(
-                "invalidInput",
-                "Citation line is not present in the audit index",
+            row_error(
+                assertion_id,
+                &field,
+                format!(
+                    "Evidence reference '{}:{}' is not present in the audit index",
+                    citation.path, citation.line
+                ),
             )
         })?;
     if citation.excerpt != entry.excerpt && !entry.excerpt.contains(citation.excerpt.trim()) {
-        return Err(fail(
-            "invalidInput",
-            "Citation excerpt does not match the indexed source line",
+        return Err(row_error(
+            assertion_id,
+            &format!("{field}.excerpt"),
+            format!(
+                "Evidence reference '{}:{}' does not match the indexed source line",
+                citation.path, citation.line
+            ),
         ));
     }
     Ok(())

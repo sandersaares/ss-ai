@@ -87,6 +87,14 @@ one state load and emits a bounded result per query. Read-only operations verify
 stored state digests without traversing source files; mutation and report
 operations rehash source content at their authority boundary.
 
+`submit` adds the agent-facing compact row boundary in front of `advance`.
+Snapshot-bound evidence handles resolve to exact indexed source lines inside
+the native utility. Explicit reuse requires equivalence confirmation and
+replaces citations and callers rather than inheriting them. Batch exports carry
+a machine record plus compact text display. Report results expose bounded
+completion counts so ordinary workflow completion does not require a trace
+read.
+
 The package boundaries follow the subject-owned, one-way dependency practices
 used by [cargo-release-plan](https://github.com/folo-rs/folo/blob/db33786ec25196696b46f38e2b60a03bd33ec913/packages/cargo-release-plan/docs/implementation.md)
 and [cargo-bench-history](https://github.com/folo-rs/folo/blob/db33786ec25196696b46f38e2b60a03bd33ec913/packages/cargo-bench-history/docs/implementation.md).

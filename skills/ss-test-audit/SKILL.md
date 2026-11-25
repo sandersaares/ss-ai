@@ -60,7 +60,9 @@ Panic sites in test-owned `Drop` implementations do not count when they exist on
 
 # Stage 3: classify assertions in batches
 
-Execute `next-batch` as specified in [commands.md](commands.md#export-the-next-assertion-batch). Keep the default count of 25. Read only the exported batch, its local context, and targeted evidence searches. For each assertion:
+Execute `next-batch` as specified in [commands.md](commands.md#export-the-next-assertion-batch). Keep the default count of 25. Read the returned `displayPath` for compact batch judgment. The companion `batchPath` is a machine-readable record whose `assertions` array is flat: each item is an assertion directly, not `{ assertion: ... }`. Do not use PowerShell JSON projection scripts to reinterpret it.
+
+Read only the exported batch display, its local context, and targeted evidence searches. For each assertion:
 
 1. Record the actual outcome the source predicate checks.
 2. Determine the public promise, if any, with exact `search` citations.
@@ -70,20 +72,24 @@ Execute `next-batch` as specified in [commands.md](commands.md#export-the-next-a
 
 Search API docs, design docs, public declarations, trait implementations, and inherited contracts using [commands.md](commands.md#search-evidence). Group independent evidence lookups into one `search` command by repeating `--query`; the command returns one result page per query. Supply `--kind` to narrow queries only when the target is already clear. Terms within one query are combined as an AND query.
 
-Write one strict classification batch matching [classification-batch.schema.json](schemas/classification-batch.schema.json). Preserve the batch's `auditId` and `snapshotSha256`; never copy an earlier batch token. Each citation's `path`, `line`, and exact `excerpt` must come from a search result or a batch context entry.
+Write one compact submission matching [compact-submission.schema.json](schemas/compact-submission.schema.json). Do not repeat the audit token; `submit` binds the rows to the current `batchPath`. Each `citationHandles` entry must be an exact `evidenceHandle` returned by search. Multiple citations are independent array entries.
 
-Apply the classification and export the next assertion batch through one `advance` command using [commands.md](commands.md#record-and-export-the-next-batch). `advance` is the normal transition after every classified batch. Use separate `record-batch` and `next-batch` only while recovering or inspecting an intermediate state.
+For a fresh row, supply assertion ID, classification, evidence status, actual outcome, rationale, citation handles, caller IDs, and applicable reasons directly.
 
-If the command reports stale state, malformed citations, duplicate IDs, or an already different classification, stop that batch and report the diagnostic without overwriting state. A failed next-batch publication after a successful record can be resumed by replaying the identical classification; the command reports idempotent `unchanged` records.
+To reuse an accepted row, supply `reuseFrom`, explicit `equivalenceConfirmed: true`, replacement `citationHandles`, and explicit `callingTestIds`. Do not reuse implicitly, infer equivalence, or omit caller attribution. An empty citation replacement is rejected rather than falling back to the prior assertion's evidence. If the reused assertion requires an unlinked reason, provide it explicitly.
 
-After every successful `advance`, use its `record.completed` and `record.remaining` fields to emit the following informational progress message in the conversation: `Classified C of T assertions; R remain. The batch completed N sites.`
+Submit the rows and export the next assertion batch through one `submit` command using [commands.md](commands.md#submit-a-compact-row-batch). `submit` is the normal transition after every classified batch. Use the lower-level `advance`, `record-batch`, and `next-batch` commands only while recovering or inspecting an intermediate state.
+
+If the command reports stale state, malformed citations, duplicate IDs, or an already different classification, stop that batch and report the diagnostic without overwriting state. Errors name the compact row assertion ID, field, and evidence reference. A failed next-batch publication after a successful record can be resumed by replaying the identical compact submission; record insertion remains idempotent.
+
+After every successful `submit`, use its `record.completed` and `record.remaining` fields to emit the following informational progress message in the conversation: `Classified C of T assertions; R remain. The batch completed N sites.`
 
 This progress message is not a completion, checkpoint, pause, handoff, request for input, or permission to end the turn. Do not wait for a reply after it. In the same skill invocation, immediately continue with the next required action even when `R` is zero:
 
-1. If `R` is greater than zero, read the `nextBatch.batchPath` file and classify its assertions without another CLI round trip.
+1. If `R` is greater than zero, read `nextBatch.displayPath` and classify its assertions without another CLI round trip. Retain `nextBatch.batchPath` unchanged for the subsequent compact submission.
 2. If `R` is zero, continue to stage 4 and run the final `report`; the report command verifies exact classification coverage and fails if the zero is stale or incorrect.
 
-Never stop after a progress message, after `advance` alone, after a partial batch, or because the returned `remaining` value is zero. Only a successful final `report` command followed by stage 5 establishes completion. A context limit or execution interruption may stop the invocation, but that is an interruption to be resumed from durable state, not successful completion.
+Never stop after a progress message, after `submit` alone, after a partial batch, or because the returned `remaining` value is zero. Only a successful final `report` command followed by stage 5 establishes completion. A context limit or execution interruption may stop the invocation, but that is an interruption to be resumed from durable state, not successful completion.
 
 Repeat the classification loop while `R` is greater than zero. Never declare completion from an assertion count, a progress message, or mutation summary alone.
 
@@ -106,6 +112,12 @@ Always show numerators and denominators. Mixed assertion sites enter neither num
 
 # Stage 5: summarize the execution
 
-Report completion only after `advance.record.remaining` is zero and the final native report command succeeds. The summary must state the audited repository and scopes, snapshot revision, test and assertion totals, classification totals, module rates, output paths, discovery cross-check, language coverage, and every material scan diagnostic or unresolved unsupported form.
+Report completion only after `submit.record.remaining` is zero and the final native report command succeeds. Read `tracePath`, `testInventoryPath`, and `summaryPath` from the report result; do not infer report paths under the state root. The trace shape is `rows[]`, with evidence in `rows[].assertion` and judgment in `rows[].classification`, not `assertions[]`.
+
+The report result also returns `noCountedAssertionCount`, `incidentalOnlyCount`, `unlinkedAssertionCount`, and `diagnosticCount`. The first two fields count tests; the unlinked field counts assertion sites and the diagnostic field counts scan diagnostics. Use those bounded counts for ordinary completion without opening the complete trace unless detailed validation requires it.
+
+The summary must state the audited repository and scopes, snapshot revision, test and assertion totals, classification totals, module rates, output paths, discovery cross-check, language coverage, and every material scan diagnostic or unresolved unsupported form.
+
+Execute native commands through their direct process boundary and inspect `$LASTEXITCODE`; a wrapper completing successfully is not evidence that the native command succeeded. In the rare case PowerShell is used for recovery, normalize projected arrays with `@(...)` and use literal string checks such as `.Contains()` rather than `-like` when Rust backticks are present.
 
 Do not omit smoke tests, unlinked shared assertions, parse fallbacks, or unsupported forms to make coverage appear complete.

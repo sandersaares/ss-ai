@@ -14,7 +14,7 @@ use ohno::AppError;
 use serde_json::{Value, json};
 use ss_ai_runtime::{Clock, Process, ProcessOutput};
 use ss_ai_test_audit::{
-    advance, initialize, next_batch, record_batch, report, search, search_many,
+    advance, initialize, next_batch, record_batch, report, search, search_many, submit,
 };
 use tempfile::TempDir;
 
@@ -123,6 +123,10 @@ mod tests {
 }
 
 #[test]
+#[expect(
+    clippy::cognitive_complexity,
+    reason = "The end-to-end test intentionally follows one complete audit contract"
+)]
 fn audits_parser_sites_with_resumable_evidence_batches() {
     let (_root, repository, state) = fixture();
     let summary = initialize(&repository, &[], &state, &NoProcess, &FixedClock).unwrap();
@@ -144,6 +148,9 @@ fn audits_parser_sites_with_resumable_evidence_batches() {
     let batch_summary = next_batch(&state, &batch_path, 25, &FixedClock).unwrap();
     let batch_summary: Value = serde_json::from_str(&batch_summary).unwrap();
     assert_eq!(batch_summary["batchCount"], 4);
+    let display = fs::read_to_string(batch_summary["displayPath"].as_str().unwrap()).unwrap();
+    assert!(display.contains("A000001 |"));
+    assert!(display.contains("expression:"));
     let batch: Value = serde_json::from_slice(&fs::read(batch_path).unwrap()).unwrap();
     let assertions = batch["assertions"].as_array().unwrap();
     assert_eq!(
@@ -230,6 +237,10 @@ fn audits_parser_sites_with_resumable_evidence_batches() {
     assert_eq!(summary["assertionCount"], 4);
     assert_eq!(summary["classificationCounts"]["Documented"], 2);
     assert_eq!(summary["classificationCounts"]["Incidental"], 2);
+    assert_eq!(summary["noCountedAssertionCount"], 1);
+    assert!(summary["incidentalOnlyCount"].as_u64().unwrap() > 0);
+    assert_eq!(summary["unlinkedAssertionCount"], 0);
+    assert!(summary["diagnosticCount"].as_u64().is_some());
     let trace: Value = serde_json::from_slice(
         &fs::read(Path::new(summary["tracePath"].as_str().unwrap())).unwrap(),
     )
@@ -418,6 +429,235 @@ fn advance_records_and_exports_the_next_batch_from_one_state_load() {
 }
 
 #[test]
+fn submit_resolves_multiple_handles_and_explicit_reuse() {
+    let (_root, repository, state) = fixture();
+    initialize(&repository, &[], &state, &NoProcess, &FixedClock).unwrap();
+    let first_batch_path = state.join("compact-batch-one.json");
+    next_batch(&state, &first_batch_path, 1, &FixedClock).unwrap();
+    let first_batch: Value = serde_json::from_slice(&fs::read(&first_batch_path).unwrap()).unwrap();
+    let searches = search_many(
+        &state,
+        &["ready operation".to_owned(), "shared".to_owned()],
+        None,
+        20,
+        &FixedClock,
+    )
+    .unwrap();
+    let searches: Value = serde_json::from_str(&searches).unwrap();
+    let handles = [
+        searches["results"][0]["matches"][0]["evidenceHandle"]
+            .as_str()
+            .unwrap()
+            .to_owned(),
+        searches["results"][1]["matches"][0]["evidenceHandle"]
+            .as_str()
+            .unwrap()
+            .to_owned(),
+    ];
+    let first_id = first_batch["assertions"][0]["id"].clone();
+    let first_submission_path = state.join("compact-submission-one.json");
+    fs::write(
+        &first_submission_path,
+        serde_json::to_vec_pretty(&json!({
+            "schemaVersion": 1,
+            "rows": [{
+                "assertionId": first_id,
+                "classification": "Incidental",
+                "evidenceStatus": "Confirmed",
+                "actualOutcome": "The predicate checks one exact source-level detail.",
+                "rationale": "The public contract does not promise this exact detail.",
+                "citationHandles": handles,
+                "incidentalReason": "The check is private test mechanics.",
+                "callingTestIds": []
+            }]
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+    let second_batch_path = state.join("compact-batch-two.json");
+    let second = submit(
+        &state,
+        &first_batch_path,
+        &first_submission_path,
+        &second_batch_path,
+        1,
+        &FixedClock,
+    )
+    .unwrap();
+    let second: Value = serde_json::from_str(&second).unwrap();
+    assert_eq!(second["record"]["completed"], 1);
+    let second_batch: Value =
+        serde_json::from_slice(&fs::read(&second_batch_path).unwrap()).unwrap();
+    let second_id = second_batch["assertions"][0]["id"].clone();
+    let second_submission_path = state.join("compact-submission-two.json");
+    fs::write(
+        &second_submission_path,
+        serde_json::to_vec_pretty(&json!({
+            "schemaVersion": 1,
+            "rows": [{
+                "assertionId": second_id,
+                "reuseFrom": first_id,
+                "equivalenceConfirmed": true,
+                "citationHandles": "Einvalid-reference-000001",
+                "callingTestIds": []
+            }]
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+    let third_batch_path = state.join("compact-batch-three.json");
+    let error = submit(
+        &state,
+        &second_batch_path,
+        &second_submission_path,
+        &third_batch_path,
+        1,
+        &FixedClock,
+    )
+    .unwrap_err();
+    assert!(error.to_string().contains("citationHandles"));
+    assert!(error.to_string().contains("Expected an array"));
+    assert!(error.to_string().contains(second_id.as_str().unwrap()));
+
+    fs::write(
+        &second_submission_path,
+        serde_json::to_vec_pretty(&json!({
+            "schemaVersion": 1,
+            "rows": [{
+                "assertionId": second_id,
+                "reuseFrom": first_id,
+                "equivalenceConfirmed": true,
+                "citationHandles": ["Einvalid-reference-000001"],
+                "callingTestIds": []
+            }]
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+    let error = submit(
+        &state,
+        &second_batch_path,
+        &second_submission_path,
+        &third_batch_path,
+        1,
+        &FixedClock,
+    )
+    .unwrap_err();
+    assert!(error.to_string().contains("citationHandles[0]"));
+    assert!(
+        error
+            .to_string()
+            .contains("not bound to this audit snapshot")
+    );
+    assert!(error.to_string().contains("Einvalid-reference-000001"));
+    assert!(error.to_string().contains(second_id.as_str().unwrap()));
+
+    let reuse_handle = searches["results"][0]["matches"][0]["evidenceHandle"]
+        .as_str()
+        .unwrap();
+    fs::write(
+        &second_submission_path,
+        serde_json::to_vec_pretty(&json!({
+            "schemaVersion": 1,
+            "rows": [{
+                "assertionId": second_id,
+                "reuseFrom": first_id,
+                "equivalenceConfirmed": true,
+                "citationHandles": [reuse_handle],
+                "callingTestIds": []
+            }]
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+    submit(
+        &state,
+        &second_batch_path,
+        &second_submission_path,
+        &third_batch_path,
+        25,
+        &FixedClock,
+    )
+    .unwrap();
+    let third_batch: Value = serde_json::from_slice(&fs::read(third_batch_path).unwrap()).unwrap();
+    assert_eq!(third_batch["assertions"].as_array().unwrap().len(), 2);
+}
+
+#[test]
+fn compact_submission_reports_empty_citation_replacement() {
+    let (_root, repository, state) = fixture();
+    initialize(&repository, &[], &state, &NoProcess, &FixedClock).unwrap();
+    let first_batch_path = state.join("first-batch.json");
+    next_batch(&state, &first_batch_path, 1, &FixedClock).unwrap();
+    let first_batch: Value =
+        serde_json::from_slice(&fs::read(first_batch_path.clone()).unwrap()).unwrap();
+    let first_id = first_batch["assertions"][0]["id"].clone();
+    let handle = serde_json::from_str::<Value>(
+        &search(&state, "ready operation", None, 20, &FixedClock).unwrap(),
+    )
+    .unwrap()["results"][0]["matches"][0]["evidenceHandle"]
+        .clone();
+    let first_submission_path = state.join("first-submission.json");
+    fs::write(
+        &first_submission_path,
+        serde_json::to_vec_pretty(&json!({
+            "schemaVersion": 1,
+            "rows": [{
+                "assertionId": first_id,
+                "classification": "Documented",
+                "evidenceStatus": "Confirmed",
+                "actualOutcome": "The source check has a public promise.",
+                "rationale": "The cited wording promises this behavior.",
+                "citationHandles": [handle],
+                "callingTestIds": []
+            }]
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+    let second_batch_path = state.join("second-batch.json");
+    submit(
+        &state,
+        &first_batch_path,
+        &first_submission_path,
+        &second_batch_path,
+        1,
+        &FixedClock,
+    )
+    .unwrap();
+    let second_batch: Value =
+        serde_json::from_slice(&fs::read(second_batch_path.clone()).unwrap()).unwrap();
+    let submission_path = state.join("empty-replacement.json");
+    fs::write(
+        &submission_path,
+        serde_json::to_vec_pretty(&json!({
+            "schemaVersion": 1,
+            "rows": [{
+                "assertionId": second_batch["assertions"][0]["id"],
+                "reuseFrom": first_id,
+                "equivalenceConfirmed": true,
+                "citationHandles": [],
+                "callingTestIds": []
+            }]
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+    let error = submit(
+        &state,
+        &second_batch_path,
+        &submission_path,
+        &state.join("unwritten.json"),
+        1,
+        &FixedClock,
+    )
+    .unwrap_err();
+    assert!(error.to_string().contains("Empty replacement"));
+    assert!(error.to_string().contains("reuse from"));
+    assert!(error.to_string().contains("citationHandles"));
+}
+
+#[test]
 fn rejects_batch_output_that_aliases_an_audited_file() {
     let (_root, repository, state) = fixture();
     initialize(&repository, &[], &state, &NoProcess, &FixedClock).unwrap();
@@ -470,7 +710,12 @@ fn rejects_unbound_citations_and_partial_reports_without_mutation() {
     )
     .unwrap();
     let error = record_batch(&state, &classification_path, &FixedClock).unwrap_err();
-    assert!(error.to_string().contains("excerpt does not match"));
+    assert!(
+        error
+            .to_string()
+            .contains("does not match the indexed source line")
+    );
+    assert!(error.to_string().contains("citations[0].excerpt"));
     let journal: Value =
         serde_json::from_slice(&fs::read(state.join("classifications.json")).unwrap()).unwrap();
     assert_eq!(journal["classifications"].as_array().unwrap().len(), 0);

@@ -60,6 +60,30 @@ pub fn report(state_directory: &Path, clock: &dyn Clock) -> Result<String, AppEr
     )?;
     let modules = module_summaries(&trace);
     let classification_counts = classification_counts(&trace);
+    let no_counted_assertion_count = tests
+        .iter()
+        .filter(|test| {
+            test.get("assertionCount")
+                .and_then(serde_json::Value::as_u64)
+                == Some(0)
+        })
+        .count();
+    let incidental_only_count = tests
+        .iter()
+        .filter(|test| {
+            test.get("incidentalOnly")
+                .and_then(serde_json::Value::as_bool)
+                == Some(true)
+        })
+        .count();
+    let unlinked_assertion_count = trace
+        .iter()
+        .filter(|row| {
+            row.assertion.containing_test_id.is_none()
+                && row.assertion.calling_test_ids.is_empty()
+                && row.classification.calling_test_ids.is_empty()
+        })
+        .count();
     let trace_document = json!({
         "schemaVersion": 1,
         "auditId": loaded.state.audit_id,
@@ -101,6 +125,10 @@ pub fn report(state_directory: &Path, clock: &dyn Clock) -> Result<String, AppEr
         "testCount": tests.len(),
         "assertionCount": trace.len(),
         "classificationCounts": classification_counts,
+        "noCountedAssertionCount": no_counted_assertion_count,
+        "incidentalOnlyCount": incidental_only_count,
+        "unlinkedAssertionCount": unlinked_assertion_count,
+        "diagnosticCount": loaded.inventory.diagnostics.len(),
         "tracePath": trace_path,
         "testInventoryPath": inventory_path,
         "summaryPath": summary_path,

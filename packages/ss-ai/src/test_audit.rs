@@ -7,7 +7,9 @@ use clap::error::ErrorKind;
 use clap::{Parser, Subcommand};
 use ohno::AppError;
 use ss_ai_runtime::{Process, caused_by};
-use ss_ai_test_audit::{advance, initialize, next_batch, record_batch, report, search_many};
+use ss_ai_test_audit::{
+    advance, initialize, next_batch, record_batch, report, search_many, submit,
+};
 
 use crate::Clock;
 
@@ -75,6 +77,19 @@ enum TestAuditCommand {
         #[arg(long, default_value_t = 25)]
         count: usize,
     },
+    /// Resolve compact evidence handles and submit one assertion batch.
+    Submit {
+        #[arg(long)]
+        state_directory: PathBuf,
+        #[arg(long)]
+        batch_path: PathBuf,
+        #[arg(long)]
+        submission_path: PathBuf,
+        #[arg(long)]
+        output_path: PathBuf,
+        #[arg(long, default_value_t = 25)]
+        count: usize,
+    },
     /// Require complete coverage and write the final trace and reports.
     Report {
         #[arg(long)]
@@ -138,6 +153,20 @@ where
             output_path,
             count,
         } => advance(&state_directory, &batch_path, &output_path, count, clock),
+        TestAuditCommand::Submit {
+            state_directory,
+            batch_path,
+            submission_path,
+            output_path,
+            count,
+        } => submit(
+            &state_directory,
+            &batch_path,
+            &submission_path,
+            &output_path,
+            count,
+            clock,
+        ),
         TestAuditCommand::Report { state_directory } => report(&state_directory, clock),
     }
 }

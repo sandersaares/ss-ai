@@ -42,8 +42,21 @@ commands remain available for recovery and intermediate inspection. Replaying
 an identical classification is idempotent, including after the record succeeds
 but next-batch output publication fails.
 
+The primary agent-facing `submit` operation resolves compact semantic rows and
+evidence handles into the same canonical classification batch, then delegates
+to the advance transaction. Evidence handles contain a snapshot prefix and
+exact index position, so native code resolves citations without accepting
+caller-supplied path/line pairs. Reuse requires an explicit source row and
+equivalence confirmation. Native code replaces, rather than inherits, reuse
+citations and caller IDs.
+
 Search accepts repeated independent queries and evaluates them from one index
 load. Query count, per-query result count, and batch sizes remain bounded.
+
+Batch export writes a machine record and a bounded text display under retained
+file transactions. Report results include no-assertion, incidental-only,
+unlinked-assertion, and diagnostic counts so completion does not require loading
+the complete trace.
 
 Static call matching links parser-visible helper names across indexed test bodies. The agent can add calling tests discovered through callbacks, traits, registration, or dynamic paths. A shared assertion without callers requires a reason; the tool does not silently assign it to every test.
 

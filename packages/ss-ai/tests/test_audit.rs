@@ -29,6 +29,7 @@ fn help_lists_the_native_workflow_without_provider_authentication() {
         "next-batch",
         "record-batch",
         "advance",
+        "submit",
         "report",
     ] {
         assert!(stdout.contains(command), "{command}");
@@ -37,7 +38,7 @@ fn help_lists_the_native_workflow_without_provider_authentication() {
 }
 
 #[test]
-fn executable_accepts_multi_query_search_and_advance() {
+fn executable_accepts_multi_query_search_and_compact_submit() {
     let root = TempDir::new().unwrap();
     let repository = root.path().join("repository");
     let state = root.path().join("state");
@@ -85,24 +86,19 @@ fn executable_accepts_multi_query_search_and_advance() {
         .unwrap();
     assert!(next.status.success());
     let batch: Value = serde_json::from_slice(&fs::read(&batch_path).unwrap()).unwrap();
-    let classification_path = state.join("classification.json");
+    let evidence_handle = search["results"][0]["matches"][0]["evidenceHandle"].clone();
+    let submission_path = state.join("submission.json");
     fs::write(
-        &classification_path,
+        &submission_path,
         serde_json::to_vec_pretty(&json!({
             "schemaVersion": 1,
-            "auditId": batch["auditId"],
-            "snapshotSha256": batch["snapshotSha256"],
-            "assertions": [{
+            "rows": [{
                 "assertionId": batch["assertions"][0]["id"],
                 "classification": "Documented",
                 "evidenceStatus": "Confirmed",
                 "actualOutcome": "The test observes the documented function value.",
                 "rationale": "The declaration and documentation establish the checked outcome.",
-                "citations": [{
-                    "path": "src/lib.rs",
-                    "line": 1,
-                    "excerpt": "/// A documented value."
-                }],
+                "citationHandles": [evidence_handle],
                 "callingTestIds": []
             }]
         }))
@@ -110,21 +106,24 @@ fn executable_accepts_multi_query_search_and_advance() {
     )
     .unwrap();
     let next_path = state.join("batch-two.json");
-    let advance = Command::new(env!("CARGO_BIN_EXE_ss-ai"))
-        .args(["test-audit", "advance", "--state-directory"])
+    let submit = Command::new(env!("CARGO_BIN_EXE_ss-ai"))
+        .args(["test-audit", "submit", "--state-directory"])
         .arg(&state)
         .args(["--batch-path"])
-        .arg(&classification_path)
+        .arg(&batch_path)
+        .args(["--submission-path"])
+        .arg(&submission_path)
         .args(["--output-path"])
         .arg(&next_path)
         .output()
         .unwrap();
     assert!(
-        advance.status.success(),
+        submit.status.success(),
         "{}",
-        String::from_utf8_lossy(&advance.stderr)
+        String::from_utf8_lossy(&submit.stderr)
     );
-    let advance: Value = serde_json::from_slice(&advance.stdout).unwrap();
-    assert_eq!(advance["record"]["remaining"], 0);
-    assert_eq!(advance["nextBatch"]["batchCount"], 0);
+    let submit: Value = serde_json::from_slice(&submit.stdout).unwrap();
+    assert_eq!(submit["record"]["remaining"], 0);
+    assert_eq!(submit["nextBatch"]["batchCount"], 0);
+    assert!(submit["nextBatch"]["displayPath"].is_string());
 }

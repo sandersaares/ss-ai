@@ -149,7 +149,7 @@ pub(crate) struct ClassificationBatch {
 }
 
 /// Distinguishes the four evidence relationships used by the audit report.
-#[derive(Debug, Clone, Deserialize, Serialize, Eq, PartialEq)]
+#[derive(Debug, Clone, Copy, Deserialize, Serialize, Eq, PartialEq)]
 pub(crate) enum ClassificationKind {
     Documented,
     Implicit,
@@ -158,7 +158,7 @@ pub(crate) enum ClassificationKind {
 }
 
 /// Distinguishes confirmed evidence from an intentionally ambiguous inference.
-#[derive(Debug, Clone, Deserialize, Serialize, Eq, PartialEq)]
+#[derive(Debug, Clone, Copy, Deserialize, Serialize, Eq, PartialEq)]
 pub(crate) enum EvidenceStatus {
     Confirmed,
     Ambiguous,
@@ -189,6 +189,41 @@ pub(crate) struct Citation {
     pub(crate) path: String,
     pub(crate) line: usize,
     pub(crate) excerpt: String,
+}
+
+/// Compact agent-authored rows resolved against the currently exported batch.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub(crate) struct CompactSubmission {
+    pub(crate) schema_version: u32,
+    pub(crate) rows: Vec<CompactSubmissionRow>,
+}
+
+/// Either supplies one complete judgment or explicitly reuses an accepted one.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub(crate) struct CompactSubmissionRow {
+    pub(crate) assertion_id: String,
+    #[serde(default)]
+    pub(crate) classification: Option<ClassificationKind>,
+    #[serde(default)]
+    pub(crate) evidence_status: Option<EvidenceStatus>,
+    #[serde(default)]
+    pub(crate) actual_outcome: Option<String>,
+    #[serde(default)]
+    pub(crate) rationale: Option<String>,
+    #[serde(default)]
+    pub(crate) citation_handles: Option<serde_json::Value>,
+    #[serde(default)]
+    pub(crate) incidental_reason: Option<String>,
+    #[serde(default)]
+    pub(crate) calling_test_ids: Option<serde_json::Value>,
+    #[serde(default)]
+    pub(crate) unlinked_reason: Option<String>,
+    #[serde(default)]
+    pub(crate) reuse_from: Option<String>,
+    #[serde(default)]
+    pub(crate) equivalence_confirmed: Option<bool>,
 }
 
 /// Persists accepted classifications separately from the immutable inventory.

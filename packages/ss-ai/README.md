@@ -132,6 +132,9 @@ ss-ai test-audit record-batch --state-directory "{{STATE_DIRECTORY}}" `
 ss-ai test-audit advance --state-directory "{{STATE_DIRECTORY}}" `
   --batch-path "{{CLASSIFICATION_BATCH_PATH}}" `
   --output-path "{{NEXT_BATCH_PATH}}" --count 25
+ss-ai test-audit submit --state-directory "{{STATE_DIRECTORY}}" `
+  --batch-path "{{BATCH_PATH}}" --submission-path "{{SUBMISSION_PATH}}" `
+  --output-path "{{NEXT_BATCH_PATH}}" --count 25
 ss-ai test-audit report --state-directory "{{STATE_DIRECTORY}}"
 ```
 
@@ -151,16 +154,26 @@ snapshot, unique assertion IDs, category-specific evidence, indexed citations,
 and known or explained shared callers. Identical records are idempotent.
 `advance` combines `record-batch` and `next-batch` in one process and returns
 both the durable record summary and the next batch path.
+`submit` is the preferred agent path: it accepts compact schema-backed rows plus
+snapshot-bound evidence handles, builds the canonical classification batch, and
+then follows the same advance transaction. Compact reuse requires explicit
+equivalence confirmation plus citation and caller replacements.
 
 For an audit with `T` assertions and `B = ceil(T / 25)`, the primary transition
 path uses at most `B + 3` structural invocations: one initialization, one
-initial batch, `B` advances, and one final report. Independent evidence
+initial batch, `B` submits, and one final report. Independent evidence
 queries do not add process startup per query when repeated in one `search`
 invocation.
 
 Read-only `search` and `next-batch` validate the immutable state files but do
-not rehash every audited source. `record-batch`, `advance`, and `report` verify
-current source hashes before accepting a mutation or emitting final reports.
+not rehash every audited source. `record-batch`, `advance`, `submit`, and
+`report` verify current source hashes before accepting a mutation or emitting
+final reports.
+
+Batch exports return `batchPath` and `displayPath`. The JSON batch has a flat
+`assertions[]` shape; the display removes PowerShell projection glue. Report
+results return all output paths and completion counts for no-assertion,
+incidental-only, unlinked, and diagnostic cases.
 
 Rust caller attribution comes from direct syntax in test functions. Production
 invariants and method names are not promoted to shared assertions, while

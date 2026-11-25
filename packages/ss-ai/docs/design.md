@@ -40,6 +40,12 @@ batch in one local command. Related evidence searches can be grouped in one
 invocation. Read-only operations use the immutable state snapshot; commands
 that accept judgments or emit final reports also verify current source files.
 
+The compact submission boundary accepts agent-owned semantic rows and
+snapshot-bound evidence handles, with explicit equivalence, citation, and
+caller choices for reuse. Batch and report results include compact presentation
+surfaces and bounded completion counts, reducing the need for ad hoc JSON
+projection and full-trace reads.
+
 Assertions count once at their source site. Tests with no counted predicate and
 shared helper assertions remain visible in the test inventory. Every accepted
 classification is bound to the same audit token and source snapshot. A report
