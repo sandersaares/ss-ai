@@ -41,8 +41,7 @@ retained capture, assignment, finding, and rendered document belongs to that
 identity before using it. Before final review publication, use the
 active-reservation `review check` before resuming retained work and require its
 target to match the review identity. After phase 8 completes, do not rerun
-`review check`: a submitted GitHub review is intentionally ineligible as
-`alreadyReviewed`. Resume phase 9 only after matching the cycle's journal and
+`review check`. Resume phase 9 only after matching the cycle's journal and
 review-state paths to its durable phase-8 completion record; the proactor's
 later completion command validates the active reservation's ownership. A
 phase-8 failure or ambiguous outcome still requires publication recovery.
@@ -498,9 +497,9 @@ handoff's established review identity. A successful `publication-result.json`
 the maintained checkpoint's `nothingToPublish` entry, or its successful
 tracker-completion entry is valid phase-8 evidence when its identity and final
 source commit match. Do not rerun the pre-publication `review check`; a
-submitted review must not be required to remain selection-eligible. Return the
-exact final reviewed source commit and the phase-8 outcome to the proactor for
-stage-5 reservation completion.
+submitted review or later commit age cannot invalidate the established
+reservation. Return the exact final reviewed source commit and the phase-8
+outcome to the proactor for stage-5 reservation completion.
 Standalone `ss-review` invocations resume from their own review checkpoint and
 artifacts without proactor identity, journal, or handoff evidence.
 

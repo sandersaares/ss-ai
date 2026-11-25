@@ -86,19 +86,20 @@ batch, or turn.
 
 Before final review publication, a resumed cycle runs the read-only
 `review check` command and requires a `confirmed` result for the active pull
-request. That check enforces candidate eligibility and active-claim ownership.
-After phase 8 completes, phase 9 does not repeat the eligibility check because
-GitHub reports a submitted review as `alreadyReviewed`. It instead validates
-the exact cycle's journal and durable phase-8 completion record. For a review
-with nothing to publish, the maintained checkpoint entry that binds the cycle
-identity, final source commit, destination, outcome, and reason is that durable
-record. After successful tracker publication, a checkpoint entry binds the
-tracker result, cycle identity, and final checked source commit for the same
-purpose. A failed or ambiguous phase-8 outcome remains in publication recovery
-and cannot enter phase 9. The stage-5 `review complete` command then validates
-the active claim and ownership without candidate eligibility. Completed
-cycles become immutable history before selection begins again, so a familiar
-fixed filename or a late worker result cannot make an earlier cycle active.
+request. That check enforces target availability and active-claim ownership.
+It does not reapply candidate eligibility, including reviewer state or commit
+recency. After phase 8 completes, phase 9 validates the exact cycle's journal
+and durable phase-8 completion record instead of repeating the pre-publication
+check. For a review with nothing to publish, the maintained checkpoint entry that binds the cycle
+identity, final source commit, destination, outcome, and
+reason is that durable record. After successful tracker publication, a checkpoint entry binds the
+tracker result, cycle identity, and final checked
+source commit for the same purpose. A failed or ambiguous phase-8 outcome
+remains in publication recovery and cannot enter phase 9. The stage-5 `review complete`
+command then validates the active claim and ownership without
+candidate eligibility. Completed cycles become immutable history before
+selection begins again, so a familiar fixed filename or a late worker result
+cannot make an earlier cycle active.
 
 The stage-5 aggregate remains in primary-session prose and must not become
 shared `ss-review` publication data. Before an `ss-review` GitHub summary is

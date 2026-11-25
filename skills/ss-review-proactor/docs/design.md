@@ -58,9 +58,10 @@ confirmation. Once stage 4 starts, the pull request, journal, review-state
 directory, and checkout form the established identity that the agent verifies
 after interruption or compaction. Completed cycles become immutable history
 before selection begins another cycle, and a stale result cannot reopen or
-advance work for a completed cycle. Pre-publication resumption verifies candidate
-eligibility and active ownership; phase-9 resumption preserves that identity
-without requiring the submitted review to remain selection-eligible.
+advance work for a completed cycle. Pre-publication resumption verifies target
+availability and active ownership without reapplying selection eligibility;
+phase-9 resumption preserves that identity through its durable completion
+evidence.
 
 ## Selection mode
 
