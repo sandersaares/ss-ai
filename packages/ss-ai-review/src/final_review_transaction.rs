@@ -1148,6 +1148,7 @@ mod tests {
     struct Provider {
         calls: Vec<String>,
         failure: Option<(&'static str, &'static str)>,
+        failure_on_call: Option<(&'static str, usize, &'static str)>,
         completion_error: Option<AppError>,
         bad_pre: bool,
         bad_post: bool,
@@ -1161,10 +1162,23 @@ mod tests {
 
     impl Provider {
         fn call(&mut self, name: &str) -> Result<(), AppError> {
+            let occurrence = self
+                .calls
+                .iter()
+                .filter(|call| call.as_str() == name)
+                .count()
+                .checked_add(1)
+                .expect("provider calls fit in usize");
             self.calls.push(name.to_owned());
             self.events.borrow_mut().push(format!("provider:{name}"));
             if let Some((operation, kind)) = self.failure
                 && operation == name
+            {
+                return Err(fail(kind, "Provider failure"));
+            }
+            if let Some((operation, expected, kind)) = self.failure_on_call
+                && operation == name
+                && occurrence == expected
             {
                 return Err(fail(kind, "Provider failure"));
             }
@@ -1344,6 +1358,49 @@ mod tests {
             );
             _ = check_prior_inner(&mut journal, &target("gitHub")).unwrap_err();
         }
+    }
+
+    #[test]
+    fn later_ado_finding_refusal_preserves_prior_receipt_and_prevents_approval() {
+        let mut journal = Memory::default();
+        let mut provider = Provider {
+            failure_on_call: Some(("add", 2, "permissionDenied")),
+            two_findings: true,
+            ..Provider::default()
+        };
+        let mut plan = plan();
+        let mut second = plan[0].clone();
+        second["findingId"] = json!("g");
+        plan.push(second);
+        let error = execute_inner(
+            &mut journal,
+            &mut provider,
+            &target("azureDevOps"),
+            &json!({"sourceCommit":"s", "mergeBaseCommit":"b"}),
+            &plan,
+            "summary",
+            true,
+            "2026-01-01T00:00:00Z",
+            "publication-result.json",
+        )
+        .unwrap_err();
+        assert_eq!(classification(&error), "permissionDenied");
+        assert_eq!(provider.calls, ["start", "add", "add"]);
+        let record = journal.record.as_ref().unwrap();
+        assert_eq!(record["status"], "failed");
+        assert_eq!(record["operations"][1]["outcome"], "succeeded");
+        assert_eq!(
+            record["operations"][1]["receipt"],
+            json!({"threadId":"thread","commentId":"comment"})
+        );
+        assert_eq!(record["operations"][2]["outcome"], "failed");
+        assert_eq!(record["operations"][3]["outcome"], "pending");
+        assert_eq!(record["operations"][4]["operation"], "approveReview");
+        assert_eq!(record["operations"][4]["outcome"], "pending");
+        assert_eq!(
+            classification(&check_prior_inner(&mut journal, &target("azureDevOps")).unwrap_err()),
+            "ambiguousWrite"
+        );
     }
 
     #[test]
