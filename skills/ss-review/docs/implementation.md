@@ -134,6 +134,14 @@ and each selected file's relative path and resolved parent and file locations.
 This keeps equally named files from distinct origins separate and changes the
 identity when a link is retargeted to different guidance.
 The command returns the root-to-prefix mapping for reference expansion and learning.
+Learning combines each source path's snapshot prefix with the corresponding
+mapping's original root path to locate the exact instruction file. It uses the
+`roots` entries for configured user-scoped sources and the separate
+`repositoryRoot` entry for explicitly authorized repository instructions. The
+orchestrator retains the mappings in its review checkpoint and uses the
+original path to identify an unambiguous enclosing Git repository before
+proposing a change. The snapshot remains immutable evidence; learning never
+edits the copied `instruction-set-source/` tree.
 Directory links are traversed with ancestry-cycle detection, including installed
 `.github/instructions` links. Discovery excludes the current review's session-state
 tree, resolving linked ancestors and links into its descendants so generated

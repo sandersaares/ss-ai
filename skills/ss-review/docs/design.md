@@ -797,7 +797,12 @@ Audit feedback is evidence about the review system as well as about an
 individual finding.
 
 Repeated rejection, removal, confusion, or missing guidance can motivate a
-focused improvement to the relevant instructions. Such a change is proposed in
-the repository that owns the guidance and remains subject to the user's approval
-and the ordinary contribution process. Learning improves future reviews without
-quietly rewriting the standard during the review that exposed the issue.
+focused improvement to the relevant instructions. The skill, user-scoped
+instruction files, and repository instructions are all eligible learning
+targets. A change to copied review artifacts cannot substitute for changing the
+original instruction source. When the original source path identifies one
+owning Git repository, the change is proposed there; otherwise the review
+reports the exact proposed change without guessing ownership. Every proposal
+remains subject to the user's approval and the ordinary contribution process.
+Learning improves future reviews without quietly rewriting the standard during
+the review that exposed the issue.
