@@ -287,6 +287,15 @@ impl Api<'_> {
                 continue;
             }
             let id = review.get("id").map(identifier).transpose()?;
+            // Only a bodyless comment review can be a container for inline replies.
+            // Replies do not change participation or invalidate completed work.
+            if state.eq_ignore_ascii_case("COMMENTED")
+                && review.get("body").and_then(Value::as_str) == Some("")
+                && let Some(id) = id.as_deref()
+                && self.github_review_contains_only_replies(target, id)?
+            {
+                continue;
+            }
             evidence.push(format!(
                 "github:{}:{state}",
                 id.as_deref().unwrap_or("unknown")
@@ -297,14 +306,6 @@ impl Api<'_> {
             if ["PENDING", "DISMISSED"]
                 .iter()
                 .any(|inactive| state.eq_ignore_ascii_case(inactive))
-            {
-                continue;
-            }
-            // Only a bodyless comment review can be a container for inline replies.
-            if state.eq_ignore_ascii_case("COMMENTED")
-                && review.get("body").and_then(Value::as_str) == Some("")
-                && let Some(id) = id.as_deref()
-                && self.github_review_contains_only_replies(target, id)?
             {
                 continue;
             }

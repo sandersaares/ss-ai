@@ -2260,6 +2260,49 @@ fn github_selection_distinguishes_reply_containers_from_submitted_reviews() {
 }
 
 #[test]
+fn github_reply_only_review_does_not_invalidate_completed_participation() {
+    let fingerprint = |reviews, comments| {
+        let mut steps = vec![
+            Step::read(
+                "repos/example/widgets/pulls/10/requested_reviewers?per_page=100",
+                json!([{"users":[{"id":42}],"teams":[]}]),
+            ),
+            Step::read(
+                "repos/example/widgets/pulls/10/reviews?per_page=100",
+                reviews,
+            ),
+        ];
+        if let Some(comments) = comments {
+            steps.push(Step::read(
+                "repos/example/widgets/pulls/10/reviews/7/comments?per_page=100",
+                comments,
+            ));
+        }
+        let script = Script::new(steps);
+        let clock = FakeClock::new();
+        let fingerprint = api(Platform::GitHub, &script, &clock)
+            .review_fingerprint(
+                &repository(Platform::GitHub).candidate(10.try_into().unwrap()),
+                &identity(Platform::GitHub),
+            )
+            .unwrap();
+        script.done();
+        fingerprint
+    };
+
+    let completed = fingerprint(json!([[]]), None);
+    let commented = json!([[{"id":7,"state":"COMMENTED","body":"","user":{"id":42}}]]);
+    assert_eq!(
+        completed,
+        fingerprint(
+            commented.clone(),
+            Some(json!([[{"id":2,"in_reply_to_id":1}]]))
+        )
+    );
+    assert_ne!(completed, fingerprint(commented, Some(json!([[{"id":2}]]))));
+}
+
+#[test]
 fn eligibility_exclusions_avoid_commit_reads_and_ignore_pending_reviews_or_teams() {
     for platform in [Platform::GitHub, Platform::AzureDevOps] {
         for exclusion in ["closed", "draft", "selfAuthored", "alreadyReviewer"] {

@@ -105,7 +105,7 @@ from the highest iteration identifier, matching capture and publication.
 
 Discussion records preserve service creation timestamps and comment/thread
 identifiers. Selection hashes the authenticated reviewer's assignment and
-complete review-state list into completion evidence. Claim ownership uses
-strict account identity, these identifiers, the session and token, the source
-revision, and that participation fingerprint; surrounding announcement prose
-is not ownership evidence.
+review-state list, excluding reply-only records, into completion evidence.
+Claim ownership uses strict account identity, these identifiers, the session
+and token, the source revision, and that participation fingerprint;
+surrounding announcement prose is not ownership evidence.
