@@ -17,7 +17,9 @@ use crate::clock::{is_recent, latest_commit};
 use crate::error::fail;
 use crate::identity::Identity;
 use crate::json::{array, boolean, field, identifier, text};
-use crate::selection::{Candidate, Comment, Provider, RemoteClaim, SelectionMode};
+use crate::selection::{
+    Candidate, Comment, Provider, RemoteClaim, ReservationTargetState, SelectionMode,
+};
 use crate::target::{Platform, Target, escape};
 use crate::transport::{Transport, ado_items};
 
@@ -753,6 +755,29 @@ impl Provider for Api<'_> {
             latest,
             source_commit,
             review_fingerprint,
+        })
+    }
+
+    /// Refreshes target availability without reading selection-only evidence.
+    fn reservation_target(&mut self, target: &Target) -> Result<ReservationTargetState, AppError> {
+        let pull_request = self.transport.request(&target.pr_api(), "GET", None)?;
+        let status = text(field(
+            &pull_request,
+            if target.platform == Platform::GitHub {
+                "state"
+            } else {
+                "status"
+            },
+        )?)?;
+        let open = if target.platform == Platform::GitHub {
+            "open"
+        } else {
+            "active"
+        };
+        Ok(if status == open {
+            ReservationTargetState::Open
+        } else {
+            ReservationTargetState::Closed
         })
     }
 

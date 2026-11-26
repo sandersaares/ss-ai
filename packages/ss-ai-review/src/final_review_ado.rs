@@ -133,7 +133,7 @@ fn canonical_path(path: &str) -> String {
     path.replace('\\', "/").trim_start_matches('/').to_owned()
 }
 
-/// Reads the cumulative changed-file identities for the selected iteration.
+/// Reads current and original changed-file identities for the selected iteration.
 pub(crate) fn file_identity(
     transport: &mut Transport<'_>,
     target: &Target,
@@ -159,16 +159,31 @@ pub(crate) fn file_identity(
             return Err(fail("service", "Unexpected change-list continuation"));
         }
         for change in array(field(&page.payload, "changeEntries")?)? {
-            let Some(item_path) = change.pointer("/item/path").and_then(Value::as_str) else {
-                continue;
-            };
             let Some(id) = change.get("changeTrackingId").filter(|v| !v.is_null()) else {
                 continue;
             };
-            positive(id)?;
-            let canonical = canonical_path(item_path);
-            if !canonical.is_empty() {
-                found.insert(canonical, id.clone());
+            let tracking_id = positive(id)?;
+            for item_path in [
+                change.pointer("/item/path").and_then(Value::as_str),
+                change.get("originalPath").and_then(Value::as_str),
+            ]
+            .into_iter()
+            .flatten()
+            {
+                let canonical = canonical_path(item_path);
+                if canonical.is_empty() {
+                    continue;
+                }
+                if let Some(existing) = found.get(&canonical) {
+                    if positive(existing)? != tracking_id {
+                        return Err(fail(
+                            "service",
+                            format!("Conflicting change tracking identities for path: {canonical}"),
+                        ));
+                    }
+                } else {
+                    found.insert(canonical, id.clone());
+                }
             }
         }
         let Some(next) = page.payload.get("nextSkip").filter(|v| !v.is_null()) else {
@@ -956,6 +971,149 @@ mod tests {
         )
         .unwrap();
         assert_eq!(ids, json!({"src/File ":42,"src/Foo.rs":43,"src/foo.rs":44}));
+        fixture.done();
+    }
+
+    #[test]
+    fn file_identity_preserves_deleted_original_paths() {
+        let pr = "proj/_apis/git/repositories/repo/pullRequests/7";
+        let threads = format!("{pr}/threads");
+        let changes = format!("{pr}/iterations/3/changes");
+        let cargo_path = "crates/observed_destination_memory/Cargo.toml";
+        let source_path = "crates/observed_destination_memory/src/lib.rs";
+        let fixture = Fixture::new(vec![
+            (
+                "GET",
+                url(&changes, "%24top=1000&"),
+                None,
+                json!({"changeEntries":[
+                    {"changeType":"delete","changeTrackingId":42,
+                     "originalPath":"/crates/observed_destination_memory/Cargo.toml"},
+                    {"changeType":"delete","changeTrackingId":43,
+                     "originalPath":"/crates/observed_destination_memory/src/lib.rs"}
+                ]}),
+            ),
+            (
+                "POST",
+                url(&threads, ""),
+                Some(json!({
+                    "comments":[{"parentCommentId":0,"content":"cargo","commentType":"text"}],
+                    "status":"active",
+                    "threadContext":{
+                        "filePath":"/crates/observed_destination_memory/Cargo.toml",
+                        "leftFileStart":{"line":16,"offset":1},
+                        "leftFileEnd":{"line":17,"offset":2}
+                    },
+                    "pullRequestThreadContext":{"changeTrackingId":42,
+                        "iterationContext":{"firstComparingIteration":3,
+                            "secondComparingIteration":3}}
+                })),
+                json!({"id":8,"comments":[{"id":1}]}),
+            ),
+            (
+                "POST",
+                url(&threads, ""),
+                Some(json!({
+                    "comments":[{"parentCommentId":0,"content":"source","commentType":"text"}],
+                    "status":"active",
+                    "threadContext":{
+                        "filePath":"/crates/observed_destination_memory/src/lib.rs",
+                        "leftFileStart":{"line":39,"offset":1},
+                        "leftFileEnd":{"line":42,"offset":2}
+                    },
+                    "pullRequestThreadContext":{"changeTrackingId":43,
+                        "iterationContext":{"firstComparingIteration":3,
+                            "secondComparingIteration":3}}
+                })),
+                json!({"id":9,"comments":[{"id":2}]}),
+            ),
+        ]);
+        let target = target();
+        let mut transport = Transport::new(&target, None, &fixture, &fixture, &fixture);
+        let ids = file_identity(
+            &mut transport,
+            &target,
+            &json!({"iterationId":3}),
+            &[cargo_path.into(), source_path.into()],
+        )
+        .unwrap();
+        assert_eq!(
+            ids,
+            json!({
+                "crates/observed_destination_memory/Cargo.toml":42,
+                "crates/observed_destination_memory/src/lib.rs":43
+            })
+        );
+        let mut review = review();
+        for operation in [
+            json!({"operation":"newLineThread","body":"cargo",
+                "anchor":{"kind":"line","path":cargo_path,"side":"left",
+                    "startLine":16,"endLine":17},
+                "changeTrackingId":ids[cargo_path]}),
+            json!({"operation":"newLineThread","body":"source",
+                "anchor":{"kind":"line","path":source_path,"side":"left",
+                    "startLine":39,"endLine":42},
+                "changeTrackingId":ids[source_path]}),
+        ] {
+            add(&mut transport, &target, &mut review, &operation).unwrap();
+        }
+        assert_eq!(review["published"].as_array().unwrap().len(), 2);
+        fixture.done();
+    }
+
+    #[test]
+    fn file_identity_binds_current_and_original_paths_to_one_change() {
+        let changes = "proj/_apis/git/repositories/repo/pullRequests/7/iterations/3/changes";
+        let fixture = Fixture::new(vec![(
+            "GET",
+            url(changes, "%24top=1000&"),
+            None,
+            json!({"changeEntries":[{
+                "changeType":"rename",
+                "changeTrackingId":42,
+                "item":{"path":"/src/new.rs"},
+                "originalPath":"/src/old.rs"
+            }]}),
+        )]);
+        let target = target();
+        let mut transport = Transport::new(&target, None, &fixture, &fixture, &fixture);
+        let ids = file_identity(
+            &mut transport,
+            &target,
+            &json!({"iterationId":3}),
+            &["src/new.rs".into(), "src/old.rs".into()],
+        )
+        .unwrap();
+        assert_eq!(ids, json!({"src/new.rs":42,"src/old.rs":42}));
+        fixture.done();
+    }
+
+    #[test]
+    fn file_identity_rejects_conflicting_path_identity() {
+        let changes = "proj/_apis/git/repositories/repo/pullRequests/7/iterations/3/changes";
+        let fixture = Fixture::new(vec![(
+            "GET",
+            url(changes, "%24top=1000&"),
+            None,
+            json!({"changeEntries":[
+                {"changeTrackingId":42,"item":{"path":"/src/file.rs"}},
+                {"changeTrackingId":43,"originalPath":"/src/file.rs"}
+            ]}),
+        )]);
+        let target = target();
+        let mut transport = Transport::new(&target, None, &fixture, &fixture, &fixture);
+        let error = file_identity(
+            &mut transport,
+            &target,
+            &json!({"iterationId":3}),
+            &["src/file.rs".into()],
+        )
+        .unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("Conflicting change tracking identities")
+        );
         fixture.done();
     }
 

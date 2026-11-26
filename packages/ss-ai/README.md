@@ -74,8 +74,10 @@ Read selection results' `status`, `target`, and `diagnostics`. `claimed`
 requires checkout preparation, then confirmation. A replacement `claimed`
 requires its own preparation. `confirmed` proceeds directly to `ss-review`.
 `check` verifies the active reservation immediately before publication without
-changing it. `--publish-to-closed-pull-request` relaxes only the closed-state
-eligibility check; ownership and source-bound evidence remain required.
+changing it. It checks target availability and active-claim ownership without
+reapplying candidate selection criteria such as reviewer state or commit
+recency. `--publish-to-closed-pull-request` relaxes only the closed-target
+check; ownership and source-bound evidence remain required.
 `complete` changes the owned active marker to completion evidence bound to the
 exact final reviewed source revision
 after the full review workflow finishes. `noCandidate` means this single-repository selection operation has no candidate;

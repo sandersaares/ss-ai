@@ -85,14 +85,14 @@ A user-authorized `ss-review-proactor` invocation may select and claim a pull
 request before handing it to this skill directly or through delegated execution.
 This scheduled entry retains the same human authority and uses the ordinary
 review workflow. The proactor owns activation before handoff. This skill
-verifies candidate eligibility and the active reservation before final
-publication. After publication, a submitted review is no longer expected to be
-selection-eligible; phase 9 preserves the exact established review identity
-and durable phase-8 completion record instead. A phase-8 outcome that requires
-no remote write records its identity, final source commit, destination,
-`nothingToPublish` outcome, and reason in the maintained checkpoint; that entry
-is completion evidence for phase 9. The proactor's completion command then
-verifies reservation ownership and marks the cycle complete. Standalone reviews
+verifies target availability and the active reservation before final
+publication without reapplying candidate selection criteria, including commit
+recency. Phase 9 preserves the exact established review identity and durable
+phase-8 completion record instead. A phase-8 outcome that requires no remote
+write records its identity, final source commit, destination, `nothingToPublish`
+outcome, and reason in the maintained checkpoint; that entry is completion
+evidence for phase 9. The proactor's completion command then verifies
+reservation ownership and marks the cycle complete. Standalone reviews
 record the same outcome without requiring a source commit or proactor handoff
 identity. Successful tracker publication also records an identity-bound
 completion checkpoint for proactor phase-9 resumption.
@@ -806,7 +806,12 @@ Audit feedback is evidence about the review system as well as about an
 individual finding.
 
 Repeated rejection, removal, confusion, or missing guidance can motivate a
-focused improvement to the relevant instructions. Such a change is proposed in
-the repository that owns the guidance and remains subject to the user's approval
-and the ordinary contribution process. Learning improves future reviews without
-quietly rewriting the standard during the review that exposed the issue.
+focused improvement to the relevant instructions. The skill, user-scoped
+instruction files, and repository instructions are all eligible learning
+targets. A change to copied review artifacts cannot substitute for changing the
+original instruction source. When the original source path identifies one
+owning Git repository, the change is proposed there; otherwise the review
+reports the exact proposed change without guessing ownership. Every proposal
+remains subject to the user's approval and the ordinary contribution process.
+Learning improves future reviews without quietly rewriting the standard during
+the review that exposed the issue.

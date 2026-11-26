@@ -141,7 +141,10 @@ Describe 'Multi-repository skill contracts' {
             Should -Match 'before final review\s+publication'
         $script:ProactorSkill |
             Should -Match 'do not rerun\s+`review check`'
-        $script:ProactorSkill | Should -Match 'produces `alreadyReviewed`'
+        $script:ProactorSkill |
+            Should -Match 'without reapplying candidate selection\s+criteria'
+        $script:ProactorImplementation |
+            Should -Match 'target availability and active-claim ownership'
         $script:ProactorSkill |
             Should -Match '`review complete`\s+command performs the remaining remote ownership'
         $script:ProactorCommands |
@@ -153,7 +156,7 @@ Describe 'Multi-repository skill contracts' {
         $script:ReviewImplementation |
             Should -Match 'After phase 8 completes'
         $script:ReviewImplementation |
-            Should -Match 'does not rerun the\s+candidate-eligibility check'
+            Should -Match 'does not rerun the\s+pre-publication active-reservation check'
     }
 
     It 'records no-write outcomes as phase-8 completion evidence' {
@@ -196,6 +199,17 @@ Describe 'Multi-repository skill contracts' {
             Should -Match 'successful tracker publication records a corresponding\s+checkpoint'
         $script:ProactorImplementation |
             Should -Match 'After successful tracker publication, a checkpoint entry binds the'
+    }
+
+    It 'routes learning to the original instruction source owner' {
+        $script:ReviewSkill |
+            Should -Match 'Treat user-scoped and repository instruction files as learning targets'
+        $script:ReviewSkill |
+            Should -Match 'identify the\s+enclosing Git worktree and owning repository'
+        $script:ReviewSkill |
+            Should -Match 'Never edit `instruction-set-source/`'
+        $script:ReviewSkill |
+            Should -Match 'never infer ownership from the\s+snapshot copy'
     }
 
     It 'aggregates autoreapproval results across repository runs' {
