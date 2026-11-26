@@ -109,10 +109,10 @@ appropriate to their stage, so a valid learning phase is not blocked by the
 review it just submitted.
 
 Automation is permitted only where the review contract already defines the
-decision. In particular, the narrow auto-approval categories are policy, not a
-substitute for a user who has not answered. This distinction lets the workflow
-remove predictable clerical decisions without manufacturing consent at an
-unresolved boundary.
+decision. In particular, the focus-area-guideline trace for auto-approval is
+policy, not a substitute for a user who has not answered. This distinction lets
+the workflow remove decisions already required by the review's guidance without
+manufacturing consent at an unresolved boundary.
 
 ## Error recovery
 
@@ -499,10 +499,19 @@ Publication still waits for the complete audit and the freshness check.
 Policy approval is a separate phase before the human audit, governed by
 `../auto-approval-rules.md`. A dedicated worker classifies each finding under
 those rules, recording either policy approval or the need for a user decision.
-Uncertain classifications require the user's judgment. Classification is
+The worker may approve a finding only when an exact applicable guideline in a
+focus area used by the review directly motivates it. Incidental discoveries
+without that clear trace require the user's judgment. Classification is
 resumable and never treats an unprocessed finding as approved or rejected.
 Review diagnostics distinguish policy-approved findings from user-approved
 findings, so automation is visible and is never represented as user consent.
+
+The review-work manifest defines the used focus-area set. An entry with
+`dispatch: "review"` is used even when its reviewers produced no findings; an
+entry with `dispatch: "excluded"` is outside the set because every reviewed file
+was excluded from that focus area's scope. The orchestrator passes the complete
+list of used immutable focus-area snapshot paths directly to the policy worker,
+which verifies and opens every listed file before classifying findings.
 
 The auto-approval worker does not rewrite findings, manufacture user feedback,
 or approve pull request merges. Findings needing renewed approval after a
