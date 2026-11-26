@@ -217,10 +217,18 @@ ss-ai test-audit report `
 | --- | --- |
 | `STATE_DIRECTORY` | Exact initialized audit state directory. |
 
-The successful report receipt provides `tracePath`, `testInventoryPath`, `summaryJsonPath`, `summaryPath`, `detailsJsonPath`, and `detailsPath`; do not assume a state-root report location. The standalone trace and test inventory serve consumers that need only one part of the detail report.
+The successful report receipt provides `summaryJsonPath`, `summaryPath`,
+`detailsJsonPath`, and `detailsPath`; do not assume a state-root report location.
+`details.json` is the canonical machine-readable row detail, while `summary.json`
+is the aggregate report.
 
 The paired JSON artifacts conform to [summary.schema.json](schemas/summary.schema.json)
 and [details.schema.json](schemas/details.schema.json). Their schema version is
 part of each file and changes only with the native utility's record contract.
 
-The trace JSON shape is `rows[]`; each row contains `assertion` and `classification`. The command checks exact coverage and does not publish a success report for an incomplete classification journal.
+The command checks exact coverage and does not publish a success report for an
+incomplete classification journal. On a nonzero result, preserve the exact
+command and diagnostic and follow
+[Recover from failure](SKILL.md#recover-from-failure). A concrete failure that
+requires user correction leaves the audit incomplete; do not infer completion
+from a prior `report` directive.

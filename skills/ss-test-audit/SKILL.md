@@ -90,11 +90,23 @@ Use the latest successful transition's `nextAction`, including on the initial ba
 - `report`: run stage 4 immediately, regardless of which supported path reached reporting.
 - Only a successful `report` with `nextAction: "complete"` and `finalResponseAllowed: true` authorizes a completed response.
 
+A concrete command or environment diagnostic that requires user action leaves
+the audit incomplete. Preserve the failed operation, its diagnostic, and the last
+successful state. Do not claim completion or continue dependent work. This path is
+for unrecoverable blockers, not transient or agent-correctable failures.
+
 ## Recover from failure
 
 Correct diagnosed row defects before retrying. Stop on stale state or a conflicting accepted classification; report the diagnostic without overwriting state. If export failed after the journal write succeeded, replay the identical compact submission with the original machine batch; record insertion is idempotent. Do not overwrite either input.
 
-Stop without claiming completion only for a concrete native diagnostic that names an assertion, field, or evidence problem and cannot be corrected without user input, or for an interruption explicitly reported by the execution platform. A user turn boundary, progress message, or long duration is not a runtime interruption. Preserve durable state and begin resumption by reading the last directive and corresponding batch.
+Stop without claiming completion for a concrete assertion, field, evidence,
+command, or environment diagnostic that cannot be corrected without user action,
+or for an interruption explicitly reported by the execution platform. Preserve
+the failed operation and exact diagnostic, report the audit as incomplete, and
+preserve durable state. Do not use this stop path for a transient or
+agent-correctable failure. A user turn boundary, progress message, or long
+duration is not a runtime interruption. Begin resumption by reading the last
+successful directive and corresponding batch.
 
 # Stage 4: validate and emit reports
 
@@ -102,8 +114,6 @@ Run `ss-ai test-audit report` using [commands.md](commands.md#emit-final-reports
 
 Deliver these generated paths:
 
-- `trace.json`: searchable assertion rows with source, actual outcome, classification, and citations;
-- `test-inventory.json`: every test with direct and shared assertion IDs, including smoke cases with no counted predicate;
 - `summary.md`: per-module totals and percentages, tests with incidental-only checks, tests with no counted assertion, and scan diagnostics.
 - `summary.json`: machine-readable audit summary defined by [summary.schema.json](schemas/summary.schema.json).
 - `details.md`: human-readable assertion trace, test inventory, and diagnostics.

@@ -71,23 +71,6 @@ pub fn report(state_directory: &Path, clock: &dyn Clock) -> Result<String, AppEr
     )?;
     let gaps = TestGaps::collect(&tests);
     let summary = build_summary(&loaded, &trace, &tests, module_summaries(&trace), &gaps);
-    let trace_document = json!({
-        "schemaVersion": 1,
-        "auditId": loaded.state.audit_id,
-        "snapshotSha256": loaded.state.snapshot_sha256,
-        "repositoryRevision": loaded.inventory.repository_revision,
-        "repositoryRoot": loaded.inventory.repository_root,
-        "scopePaths": loaded.inventory.scope_paths,
-        "classificationCounts": summary.classification_counts,
-        "modules": summary.modules,
-        "rows": trace,
-    });
-    let test_document = json!({
-        "schemaVersion": 1,
-        "auditId": loaded.state.audit_id,
-        "snapshotSha256": loaded.state.snapshot_sha256,
-        "tests": tests,
-    });
     let summary_text = render_summary(&summary, &gaps, &loaded.inventory.diagnostics);
     let details_document = json!({
         "schemaVersion": 1,
@@ -110,8 +93,6 @@ pub fn report(state_directory: &Path, clock: &dyn Clock) -> Result<String, AppEr
         &loaded.inventory.diagnostics,
     )?;
     let output_directory = publish_report(state_directory, clock, |staging| {
-        write_json(&staging.join("trace.json"), &trace_document, clock)?;
-        write_json(&staging.join("test-inventory.json"), &test_document, clock)?;
         write_json(&staging.join("details.json"), &details_document, clock)?;
         write_bytes(&staging.join("details.md"), details_text.as_bytes(), clock)?;
         // Even a stranded staging directory should not advertise completion when
@@ -135,8 +116,6 @@ pub fn report(state_directory: &Path, clock: &dyn Clock) -> Result<String, AppEr
         "fallibleValueCheckCount": summary.fallible_value_check_count,
         "conditionalAssertionCount": summary.conditional_assertion_count,
         "diagnosticCount": summary.diagnostic_count,
-        "tracePath": output_path_text(&output_directory.join("trace.json"))?,
-        "testInventoryPath": output_path_text(&output_directory.join("test-inventory.json"))?,
         "summaryJsonPath": output_path_text(&output_directory.join("summary.json"))?,
         "summaryPath": output_path_text(&output_directory.join("summary.md"))?,
         "detailsJsonPath": output_path_text(&output_directory.join("details.json"))?,

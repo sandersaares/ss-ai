@@ -194,7 +194,8 @@ Final reports standardize paired human and machine artifacts:
 diagnostic sections. Details use `assertionTrace`, `testInventory`, and
 `diagnostics` as their section names. Summary identity includes repository,
 revision, scope paths, indexed files, and language totals. The report also
-publishes standalone trace and test inventory projections.
+uses `details.json` as the canonical machine-readable assertion trace and test
+inventory.
 
 Rust caller attribution comes from direct syntax in test functions. Production
 invariants and method names are not promoted to shared assertions, while
@@ -207,9 +208,9 @@ pointer, join, ownership, and fixture extraction calls remain excluded.
 
 `report` rejects incomplete classification and publishes the artifacts together
 in one generation beneath `reports`. Open the successful receipt's
-`tracePath`, `testInventoryPath`, `summaryJsonPath`, `summaryPath`,
-`detailsJsonPath`, and `detailsPath`. The trace has one row per assertion. The test inventory retains
-direct and shared assertion IDs, including tests without counted predicates.
+`summaryJsonPath`, `summaryPath`, `detailsJsonPath`, and `detailsPath`. The
+detail trace has one row per assertion. The test inventory retains direct and
+shared assertion IDs, including tests without counted predicates.
 All rates are descriptive; the command does not score test quality. Rust is
 parser-backed; named non-Rust profiles are heuristic, and diagnostics preserve
 the exact coverage boundary.

@@ -491,6 +491,27 @@ fn smoke_without_assertions() {}
 
     let result = parse(report(&audit.state, &TestClock).unwrap());
     let details = read_json(artifact(&result, "detailsJsonPath"));
+    assert!(result.get("tracePath").is_none());
+    assert!(result.get("testInventoryPath").is_none());
+    let generation = artifact(&result, "detailsJsonPath").parent().unwrap();
+    let artifact_names = fs::read_dir(generation)
+        .unwrap()
+        .filter_map(|entry| {
+            let entry = entry.unwrap();
+            (entry
+                .path()
+                .extension()
+                .is_none_or(|extension| extension != "lock"))
+            .then(|| entry.file_name())
+        })
+        .collect::<BTreeSet<_>>();
+    assert_eq!(
+        artifact_names,
+        ["details.json", "details.md", "summary.json", "summary.md"]
+            .map(Into::into)
+            .into_iter()
+            .collect::<BTreeSet<_>>()
+    );
     assert_eq!(details["repositoryRoot"], audit.inventory["repositoryRoot"]);
     assert_eq!(details["scopePaths"], json!(["lib.rs"]));
     let callers = [agent, native].into_iter().collect::<BTreeSet<_>>();

@@ -54,8 +54,9 @@ load. Query count, per-query result count, and batch sizes remain bounded.
 Batch export writes a machine record and a bounded text display under retained
 file transactions, outside the report publication area. Report results include no-assertion, incidental-only,
 unlinked-assertion, and diagnostic counts so completion does not require loading
-the complete trace. The report publishes standalone `trace.json` and
-`test-inventory.json` projections for readers who need one part of the detail report.
+the complete trace. The report publishes `details.json` as the canonical
+machine-readable assertion trace and test inventory, paired with aggregate
+`summary.json`.
 
 The Rust visitor reconciles declarations and direct calls resolvable within
 one parsed file after visiting it, so declaration order does not matter.

@@ -287,13 +287,8 @@ fn audits_parser_sites_with_resumable_evidence_batches() {
     assert_eq!(summary["fallibleValueCheckCount"], 0);
     assert_eq!(summary["conditionalAssertionCount"], 0);
     assert!(summary["diagnosticCount"].as_u64().is_some());
-    let trace: Value =
-        from_slice(&fs::read(Path::new(summary["tracePath"].as_str().unwrap())).unwrap()).unwrap();
-    assert_eq!(trace["rows"].as_array().unwrap().len(), 4);
-    let test_inventory: Value =
-        from_slice(&fs::read(Path::new(summary["testInventoryPath"].as_str().unwrap())).unwrap())
-            .unwrap();
-    assert_eq!(test_inventory["tests"].as_array().unwrap().len(), 5);
+    assert!(summary.get("tracePath").is_none());
+    assert!(summary.get("testInventoryPath").is_none());
     let report_text = fs::read_to_string(summary["summaryPath"].as_str().unwrap()).unwrap();
     let summary_json: Value =
         from_slice(&fs::read(summary["summaryJsonPath"].as_str().unwrap()).unwrap()).unwrap();

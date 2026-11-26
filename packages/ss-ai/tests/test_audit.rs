@@ -5,6 +5,7 @@
 )]
 
 use std::fs;
+use std::path::Path;
 use std::process::Command;
 
 use serde_json::{Value, from_slice, json, to_vec_pretty};
@@ -166,11 +167,31 @@ fn executable_accepts_multi_query_search_and_compact_submit() {
     let details_text = fs::read_to_string(report["detailsPath"].as_str().unwrap()).unwrap();
     assert!(details_text.contains("checks_value"));
     assert!(details_text.contains(predicate));
+    assert_canonical_report_receipt(&report);
+}
 
-    let trace: Value =
-        from_slice(&fs::read(report["tracePath"].as_str().unwrap()).unwrap()).unwrap();
-    assert_eq!(trace["rows"][0]["assertion"]["expression"], predicate);
-    let inventory: Value =
-        from_slice(&fs::read(report["testInventoryPath"].as_str().unwrap()).unwrap()).unwrap();
-    assert_eq!(inventory["tests"][0]["name"], "checks_value");
+/// Verifies that the CLI receipt exposes only canonical paired report artifacts.
+fn assert_canonical_report_receipt(report: &Value) {
+    assert!(report.get("tracePath").is_none());
+    assert!(report.get("testInventoryPath").is_none());
+    assert!(
+        !report["detailsJsonPath"]
+            .as_str()
+            .map(Path::new)
+            .unwrap()
+            .parent()
+            .unwrap()
+            .join("trace.json")
+            .exists()
+    );
+    assert!(
+        !report["detailsJsonPath"]
+            .as_str()
+            .map(Path::new)
+            .unwrap()
+            .parent()
+            .unwrap()
+            .join("test-inventory.json")
+            .exists()
+    );
 }
