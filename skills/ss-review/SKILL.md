@@ -112,7 +112,8 @@ The workflow is split into multiple phases:
 6. Audit - presenting the remaining findings to the user for final review and approval.
 7. Freshness check - verifying that the findings we are about to publish are not already obsolete due to parallel work.
 8. Publication - approved findings are published to the author of the code under review.
-9. Learning - applying audit feedback to improve future iterations of the review process.
+9. Learning - applying audit feedback to improve the relevant instruction
+   sources and future iterations of the review process.
 
 Execute all phases in sequence for ordinary review. Self-review takes the explicit route above.
 
@@ -506,22 +507,43 @@ artifacts without proactor identity, journal, or handoff evidence.
 Analyze the audit feedback to identify:
 
 * Missing instructions or guidelines that should be considered in future reviews.
-* Instructions or guidelines that were unclear or ambiguous, and should be clarified for future reviews.
-* Other improvements to the review process that would make it more effective or efficient.
+* Instructions or guidelines that were incorrect, unclear, or ambiguous and
+  should be corrected or clarified for future reviews.
+* Other improvements to the review process that would make it more effective
+  or efficient.
 
 The evidence is in session state rather than in conversational recollection: `audit-decisions.json` holds policy classifications and audit verdicts, with the user's own words attached when supplied, and the `removed` list in `findings.json` holds what synthesis or freshness revalidation retired and why. Do not treat policy classifications as user feedback. A guideline that produced many rejected or removed findings is as informative as one that produced none.
 
 If changes are needed, create a new Git worktree to prepare a pull request in the relevant repo to update the instructions and guidelines based on the above analysis. If no changes are needed, simply state this fact without creating a pull request.
 
+Treat user-scoped and repository instruction files as learning targets with
+the same standing as the review skill. Use the focus-area source metadata to
+trace a finding or removed finding to its original instruction file, rather
+than assuming that every learning change belongs in `ss-ai`.
+
 The relevant repo depends on the specific instructions/guidelines that need updates:
 
-* The work being reviewed may have its own instructions and guidelines, in which case a pull request should be created in that repo.
-* User-scoped instructions come from the roots configured in `COPILOT_CUSTOM_INSTRUCTIONS_DIRS`. Use the source-root mapping returned during preparation to locate their owning repository; never assume that the skill's checkout owns them.
-* The skill's own `focus-areas.md` and workflow guidance belong to the `ss-ai` repository.
+* The work being reviewed may have its own instructions and guidelines. Create
+  a pull request in that repository when the learning change belongs to those
+  files.
+* User-scoped instructions come from the roots configured in
+  `COPILOT_CUSTOM_INSTRUCTIONS_DIRS`. Match the source path's snapshot prefix
+  to the retained `roots` mapping, then append the path beneath that prefix to
+  the mapping's original `path`. Use that exact original path to identify the
+  enclosing Git worktree and owning repository. A user-scoped change belongs
+  there when the repository is unambiguous; never infer ownership from the
+  snapshot copy or assume that the skill's checkout owns it.
+* The skill's own `focus-areas.md` and workflow guidance belong to the `ss-ai`
+  repository.
+
+Use the retained `repositoryRoot` mapping for separately authorized repository
+instructions in the same way. Never edit `instruction-set-source/`, generated
+focus areas, or other review artifacts as a substitute for changing their
+original source.
 
 If you cannot determine the correct repo for some changes, propose the changes directly to the user and ask how to best apply them. You may create multiple pull requests if the changes span multiple repos.
 
-When proposing chages, keep them minimal. Avoid verbose prose. One-liners are optimal.
+When proposing changes, keep them minimal. Avoid verbose prose. One-liners are optimal.
 
 Ask the user for approval before creating any pull requests, to avoid noise/chatter (e.g. perhaps the user considers the changes unnecessary because the current review was exceptional in some way).
 

@@ -201,6 +201,17 @@ Describe 'Multi-repository skill contracts' {
             Should -Match 'After successful tracker publication, a checkpoint entry binds the'
     }
 
+    It 'routes learning to the original instruction source owner' {
+        $script:ReviewSkill |
+            Should -Match 'Treat user-scoped and repository instruction files as learning targets'
+        $script:ReviewSkill |
+            Should -Match 'identify the\s+enclosing Git worktree and owning repository'
+        $script:ReviewSkill |
+            Should -Match 'Never edit `instruction-set-source/`'
+        $script:ReviewSkill |
+            Should -Match 'never infer ownership from the\s+snapshot copy'
+    }
+
     It 'aggregates autoreapproval results across repository runs' {
         $script:AutoreapproveSkill |
             Should -Match 'from every repository'
