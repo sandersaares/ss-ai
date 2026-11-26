@@ -3,6 +3,7 @@
 use std::cell::{Cell, RefCell};
 use std::collections::{BTreeMap, VecDeque};
 use std::io;
+use std::path::Path;
 use std::time::Duration;
 
 use jiff::Timestamp;
@@ -85,7 +86,11 @@ impl Clock for NoWait {
 }
 
 /// Runs the public publication preflight with isolated checkout-local state.
-fn preflight(pages: Vec<Value>, paths: &[&str], empty_iterations: bool) -> (AppError, Provider) {
+fn preflight(
+    pages: Vec<Value>,
+    paths: &[&str],
+    empty_iterations: bool,
+) -> (AppError, Provider, bool, bool) {
     let fixture: Value = from_str(include_str!(
         "../../../tests/fixtures/ss-review-native-capture/azure-devops.json"
     ))
@@ -110,8 +115,8 @@ fn preflight(pages: Vec<Value>, paths: &[&str], empty_iterations: bool) -> (AppE
         .enumerate()
         .map(|(index, path)| {
             json!({
-                "operation":"newFileThread","findingId":format!("F{index}"),"body":"finding",
-                "anchor":{"kind":"file","path":path}
+                "operation":"newLineThread","findingId":format!("F{index}"),"body":"finding",
+                "anchor":{"kind":"line","path":path,"side":"left","startLine":1,"endLine":2}
             })
         })
         .collect::<Vec<_>>();
@@ -141,12 +146,19 @@ fn preflight(pages: Vec<Value>, paths: &[&str], empty_iterations: bool) -> (AppE
         |_| panic!("capture is refused before hashing"),
     )
     .unwrap_err();
-    (error, provider)
+    let mut lock_path = path.as_os_str().to_owned();
+    lock_path.push(".lock");
+    (
+        error,
+        provider,
+        path.exists(),
+        Path::new(&lock_path).exists(),
+    )
 }
 
 #[test]
 fn cumulative_change_pages_keep_cursor_and_page_size() {
-    let (error, provider) = preflight(
+    let (error, provider, _, _) = preflight(
         vec![
             json!({"changeEntries":[{"changeTrackingId":1,"item":{"path":"/src/a.rs"}},{"changeTrackingId":2,"item":{"path":"/src/b.rs"}}],"nextSkip":2,"nextTop":1}),
             json!({"changeEntries":[{"changeTrackingId":3,"item":{"path":"\\src\\c.rs"}},{"changeTrackingId":4,"item":{"path":"/src/d.rs"}}],"nextSkip":4,"nextTop":1}),
@@ -170,6 +182,28 @@ fn cumulative_change_pages_keep_cursor_and_page_size() {
 }
 
 #[test]
+fn deleted_file_paths_resolve_before_writes_but_leave_no_early_failure_receipt() {
+    let (error, provider, result_exists, lock_exists) = preflight(
+        vec![json!({"changeEntries":[
+            {"changeType":"delete","changeTrackingId":41,
+             "originalPath":"/crates/observed_destination_memory/Cargo.toml"},
+            {"changeType":"delete","changeTrackingId":42,
+             "originalPath":"/crates/observed_destination_memory/src/lib.rs"}
+        ]})],
+        &[
+            "crates/observed_destination_memory/Cargo.toml",
+            "crates/observed_destination_memory/src/lib.rs",
+        ],
+        false,
+    );
+    assert_eq!(classification(&error), "permissionDenied");
+    assert!(error.to_string().contains("stop after paging"));
+    assert!(!result_exists);
+    assert!(lock_exists);
+    assert_eq!(provider.change_urls.borrow().len(), 1);
+}
+
+#[test]
 fn repeated_missing_or_empty_pages_do_not_fabricate_file_identity() {
     for (pages, expected) in [
         (
@@ -185,17 +219,21 @@ fn repeated_missing_or_empty_pages_do_not_fabricate_file_identity() {
         ),
         (vec![json!({"changeEntries":[]})], "src/a.rs"),
     ] {
-        let (error, provider) = preflight(pages, &["src/a.rs"], false);
+        let (error, provider, result_exists, lock_exists) = preflight(pages, &["src/a.rs"], false);
         assert_eq!(classification(&error), "service");
         assert!(error.to_string().contains(expected), "{error}");
         assert_eq!(provider.connections.get(), 1);
+        assert!(!result_exists);
+        assert!(lock_exists);
     }
 }
 
 #[test]
 fn publication_preflight_requires_an_iteration() {
-    let (error, provider) = preflight(vec![], &["src/a.rs"], true);
+    let (error, provider, result_exists, lock_exists) = preflight(vec![], &["src/a.rs"], true);
     assert_eq!(classification(&error), "service");
     assert!(error.to_string().contains("No Azure DevOps iteration"));
     assert!(provider.change_urls.borrow().is_empty());
+    assert!(!result_exists);
+    assert!(lock_exists);
 }

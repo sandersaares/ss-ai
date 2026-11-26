@@ -268,6 +268,20 @@ prose to audit and publication without granting approval or contacting a provide
 Individual decision input accepts mixed case and surrounding whitespace while
 stored decisions use the canonical vocabulary.
 
+## Final review publication
+
+Final review publication checks fresh provider evidence and binds every
+file anchor to the reviewed provider revision before remote review effects.
+Azure DevOps accepts the current and original paths from each iteration change,
+so right-side additions and edits and left-side deleted-file anchors resolve
+against the same change identity. Publication refuses unresolved or conflicting
+anchors before creating comments or changing the merge vote.
+
+The publication journal records each remote effect and readback. Azure DevOps
+publishes and verifies findings before casting a separate approved vote, then
+posts the summary. A failure after an effect preserves successful receipts and
+requires reconciliation rather than hiding or replaying an uncertain write.
+
 ## Tracker publication
 
 Tracker publication files approved findings in an independent GitHub or Azure
