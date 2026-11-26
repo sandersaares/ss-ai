@@ -283,14 +283,15 @@ impl Api<'_> {
                 continue;
             };
             let reviewer = Identity::from_account(target.platform, user)?;
-            if identity.may_match(&reviewer) {
-                let id = review
-                    .get("id")
-                    .map(identifier)
-                    .transpose()?
-                    .unwrap_or_else(|| "unknown".to_owned());
-                evidence.push(format!("github:{id}:{state}"));
+            if !identity.may_match(&reviewer) {
+                continue;
             }
+            let id = review.get("id").map(identifier).transpose()?;
+            evidence.push(format!(
+                "github:{}:{state}",
+                id.as_deref().unwrap_or("unknown")
+            ));
+
             // Pending and dismissed reviews do not count as active participation.
             // Ref: docs/design/review-selection.md, "Eligibility and ranking".
             if ["PENDING", "DISMISSED"]
@@ -299,14 +300,45 @@ impl Api<'_> {
             {
                 continue;
             }
-            if identity.may_match(&reviewer) {
-                participation.assigned = true;
-                participation.submitted_review = true;
+            // Only a bodyless comment review can be a container for inline replies.
+            if state.eq_ignore_ascii_case("COMMENTED")
+                && review.get("body").and_then(Value::as_str) == Some("")
+                && let Some(id) = id.as_deref()
+                && self.github_review_contains_only_replies(target, id)?
+            {
+                continue;
             }
+            participation.assigned = true;
+            participation.submitted_review = true;
         }
         participation.fingerprint =
             Self::participation_fingerprint(participation.assigned, &mut evidence);
         Ok(participation)
+    }
+
+    /// Confirms a review has replies but no standalone comments.
+    fn github_review_contains_only_replies(
+        &mut self,
+        target: &Target,
+        review_id: &str,
+    ) -> Result<bool, AppError> {
+        let comments = self.transport.list(&format!(
+            "{}/reviews/{}/comments",
+            target.pr_api(),
+            escape(review_id)
+        ))?;
+
+        // An empty response cannot establish that GitHub created the review for a reply.
+        let mut only_replies = !comments.is_empty();
+        for comment in comments {
+            let parent = comment
+                .get("in_reply_to_id")
+                .filter(|value| !value.is_null())
+                .map(identifier)
+                .transpose()?;
+            only_replies &= parent.is_some();
+        }
+        Ok(only_replies)
     }
 
     /// Reduces mutable service lists to stable reviewer participation evidence.

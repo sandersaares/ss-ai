@@ -31,6 +31,7 @@ metadata.
 
 GitHub assignment includes requested users and authors of active submitted
 reviews, but not team membership, pending reviews, or dismissed reviews.
+An inline reply alone does not count as a submitted review or an assignment.
 Azure DevOps entries with `hasDeclined: true` do not count as assignments.
 Entries with a false or absent flag count as assignments. A nonzero Azure
 DevOps vote represents a submitted review; a neutral or absent vote does not.

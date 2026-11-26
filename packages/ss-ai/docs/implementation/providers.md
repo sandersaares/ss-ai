@@ -89,6 +89,10 @@ GitHub reviewer evidence combines requested users and submitted review
 authors without expanding teams or treating pending and dismissed reviews as
 participation. Selection retains assignment and submitted-review evidence
 separately so `available` and `assigned` modes can apply distinct rules.
+GitHub can attach inline replies to a `COMMENTED` review record even when
+the reviewer only replied to a thread. For a record with an empty body,
+selection reads all review-comment pages and excludes it from participation
+only when it contains comments and every comment has a parent.
 Registration preserves team requests and adds only the authenticated login.
 Azure DevOps registration leaves any matching existing reviewer untouched and
 creates a neutral reviewer only when none matches.
