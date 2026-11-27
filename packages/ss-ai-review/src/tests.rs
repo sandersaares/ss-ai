@@ -197,6 +197,7 @@ impl Provider for FakeProvider {
                 thread_id: thread_id.clone(),
                 body: body.to_owned(),
                 created_at: "2026-09-28T10:00:00Z".to_owned(),
+                updated_at: "2026-09-28T10:00:00Z".to_owned(),
                 author: identity(target.platform),
             });
         Ok(RemoteClaim { id, thread_id })
@@ -289,7 +290,8 @@ fn select(
 fn competing() -> Comment {
     Comment { id: "competitor".to_owned(), thread_id: None, author: identity(Platform::GitHub),
         body: "Comment\n\n<!-- ss-review-proactor:v3 session=session-b claim=aaaaaaaa-1234-1234-1234-123456789abc state=reserved revision=source-10 review=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa -->".to_owned(),
-        created_at: "2026-09-28T09:59:00Z".to_owned() }
+        created_at: "2026-09-28T09:59:00Z".to_owned(),
+        updated_at: "2026-09-28T09:59:00Z".to_owned() }
 }
 
 #[test]
@@ -621,7 +623,7 @@ fn completed_available_review_is_not_selected_again() {
 }
 
 #[test]
-fn completion_preserves_the_reviewed_revision_when_source_changes() {
+fn recent_completed_review_blocks_a_changed_source_until_the_review_window_expires() {
     let clock = FakeClock::new();
     let mut provider = FakeProvider::new();
     let mut journal = MemoryJournal::default();
@@ -654,23 +656,53 @@ fn completion_preserves_the_reviewed_revision_when_source_changes() {
         "source-10",
     )
     .unwrap();
+    provider.comments.get_mut(&10).unwrap()[0].updated_at =
+        clock.now().strftime("%Y-%m-%dT%H:%M:%SZ").to_string();
 
     let mut next_journal = MemoryJournal::default();
     let next = run(
         &mut provider,
         &mut next_journal,
         &clock,
+        state.clone(),
+        "Reserving",
+        false,
+    )
+    .unwrap();
+    assert_eq!(next.target.unwrap().pull_request_id, 11);
+    assert_eq!(next.diagnostics[0].reason, "recentReview");
+
+    clock.advance(Duration::from_hours(48));
+    let mut boundary_journal = MemoryJournal::default();
+    let at_boundary = run(
+        &mut provider,
+        &mut boundary_journal,
+        &clock,
+        state.clone(),
+        "Reserving",
+        false,
+    )
+    .unwrap();
+    assert_eq!(at_boundary.target.unwrap().pull_request_id, 11);
+    assert_eq!(at_boundary.diagnostics[0].reason, "recentReview");
+
+    clock.advance(Duration::from_nanos(1));
+    let mut after_window_journal = MemoryJournal::default();
+    let after_window = run(
+        &mut provider,
+        &mut after_window_journal,
+        &clock,
         state,
         "Reserving",
         false,
     )
     .unwrap();
-    assert_eq!(next.target.unwrap().pull_request_id, 10);
+    assert_eq!(after_window.target.unwrap().pull_request_id, 10);
     assert!(
-        !next
+        !after_window
             .diagnostics
             .iter()
-            .any(|diagnostic| diagnostic.reason == "completedReview")
+            .any(|diagnostic| diagnostic.reason == "recentReview")
     );
 }
 
@@ -724,6 +756,7 @@ fn completed_assigned_review_is_not_selected_again() {
     assert_eq!(next.target.unwrap().pull_request_id, 11);
     assert_eq!(next.diagnostics[0].reason, "completedReview");
 
+    clock.advance(Duration::from_hours(48) + Duration::from_nanos(1));
     provider.review_fingerprint = "b".repeat(64);
     let mut rerequested_journal = MemoryJournal::default();
     let mut rerequested_state = initial(Platform::GitHub);
@@ -738,6 +771,29 @@ fn completed_assigned_review_is_not_selected_again() {
     )
     .unwrap();
     assert_eq!(rerequested.target.unwrap().pull_request_id, 10);
+}
+
+#[test]
+fn confirmation_discards_a_reservation_after_a_recent_completed_review_appears() {
+    let clock = FakeClock::new();
+    let mut provider = FakeProvider::new();
+    let mut journal = MemoryJournal::default();
+    select(&mut provider, &mut journal, &clock, false);
+
+    let mut completed = competing();
+    completed.id = "completed".to_owned();
+    completed.body = completed.body.replace("state=reserved", "state=completed");
+    completed.body = completed
+        .body
+        .replace("revision=source-10", "revision=source-9");
+    completed.author = identity(Platform::GitHub);
+    completed.updated_at = clock.now().strftime("%Y-%m-%dT%H:%M:%SZ").to_string();
+    provider.comments.entry(10).or_default().push(completed);
+
+    let replacement = select(&mut provider, &mut journal, &clock, true);
+    assert_eq!(replacement.target.unwrap().pull_request_id, 11);
+    assert_eq!(replacement.diagnostics[0].reason, "recentReview");
+    assert_eq!(provider.deletes, ["own-10"]);
 }
 
 fn marker_has_state(body: &str, expected: &str) -> bool {

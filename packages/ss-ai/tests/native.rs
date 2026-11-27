@@ -1047,7 +1047,7 @@ impl Http for AdoFlow {
                 assert_eq!(value["comments"][0]["parentCommentId"], 0);
                 assert_eq!(value["comments"][0]["commentType"], 1);
                 let thread = json!({"id":101,"status":"fixed","comments":[{"id":55,"content":value["comments"][0]["content"],
-                    "publishedDate":"2026-09-28T00:00:00Z","author":{"id":"reviewer-id","descriptor":"aad.reviewer"}}]});
+                    "publishedDate":"2026-09-28T00:00:00Z","lastContentUpdatedDate":"2026-09-28T00:00:00Z","author":{"id":"reviewer-id","descriptor":"aad.reviewer"}}]});
                 self.thread.replace(Some(thread.clone()));
                 self.writes.borrow_mut().push(value);
                 thread
@@ -1059,7 +1059,7 @@ impl Http for AdoFlow {
                 let value: Value = serde_json::from_slice(body.unwrap()).unwrap();
                 let content = value["content"].as_str().unwrap().to_owned();
                 let thread = json!({"id":101,"status":"fixed","comments":[{"id":55,"content":content,
-                    "publishedDate":"2026-09-28T00:00:00Z","author":{"id":"reviewer-id","descriptor":"aad.reviewer"}}]});
+                    "publishedDate":"2026-09-28T00:00:00Z","lastContentUpdatedDate":"2026-09-28T00:01:00Z","author":{"id":"reviewer-id","descriptor":"aad.reviewer"}}]});
                 self.thread.replace(Some(thread));
                 self.writes.borrow_mut().push(value);
                 json!({"id":55,"content":content})
@@ -1131,7 +1131,7 @@ fn ado_command_selection_and_confirmation_preserve_resolved_threads_and_schema_t
             let mut bytes = vec![0xEF, 0xBB, 0xBF];
             bytes.extend(serde_json::to_vec(&state).unwrap());
             fs::write(&path, bytes).unwrap();
-            service.thread.replace(Some(json!({"id":101,"status":"fixed","comments":[{"id":55,"content":body,"publishedDate":"2026-09-28T00:00:00.0000000Z","author":{"id":"reviewer-id","descriptor":"aad.reviewer"}}]})));
+            service.thread.replace(Some(json!({"id":101,"status":"fixed","comments":[{"id":55,"content":body,"publishedDate":"2026-09-28T00:00:00.0000000Z","lastContentUpdatedDate":"2026-09-28T00:00:00.0000000Z","author":{"id":"reviewer-id","descriptor":"aad.reviewer"}}]})));
         } else {
             let selected: Value =
                 serde_json::from_str(&run(&args, &service, &service, &clock).unwrap()).unwrap();

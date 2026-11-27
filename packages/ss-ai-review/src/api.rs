@@ -826,7 +826,7 @@ impl Provider for Api<'_> {
     /// Normalizes undeleted discussion evidence, including resolved Azure threads.
     ///
     /// Creation timestamps remain distinct from edit times so editing a reserved
-    /// marker cannot renew its reserved lifetime.
+    /// marker cannot renew its reserved lifetime while completion can use the edit.
     fn comments(&mut self, target: &Target) -> Result<Vec<Comment>, AppError> {
         let mut comments = Vec::new();
         match target.platform {
@@ -841,6 +841,7 @@ impl Provider for Api<'_> {
                         thread_id: None,
                         body: text(field(&comment, "body")?)?.to_owned(),
                         created_at: text(field(&comment, "created_at")?)?.to_owned(),
+                        updated_at: text(field(&comment, "updated_at")?)?.to_owned(),
                         author: Identity::from_account(target.platform, field(&comment, "user")?)?,
                     });
                 }
@@ -878,6 +879,7 @@ impl Provider for Api<'_> {
                                 .unwrap_or_default()
                                 .to_owned(),
                             created_at: text(field(comment, "publishedDate")?)?.to_owned(),
+                            updated_at: text(field(comment, "lastContentUpdatedDate")?)?.to_owned(),
                             author: Identity::from_account(
                                 target.platform,
                                 field(comment, "author")?,

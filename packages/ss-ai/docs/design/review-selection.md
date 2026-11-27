@@ -49,6 +49,11 @@ of the proactor's reviewer exclusions so other skills can reuse it.
 Candidates rank by descending latest commit time, then ascending pull request
 number. Selection rechecks eligibility and discussion before claiming. Any
 live claim excludes the candidate, including one from the same session.
+When the same reviewer completed a previous review, its completion marker also
+excludes the pull request for 48 hours after the marker's last content update,
+even if a later source revision or participation change made that review
+inapplicable. A completion marker that still matches the current source and
+reviewer participation continues to exclude the pull request after that window.
 
 ## Reservations and confirmation
 
@@ -77,12 +82,13 @@ The workflow changes the active claim to completed only after the full workflow
 succeeds. Completion verifies the active reservation's ownership without
 reapplying candidate eligibility, including commit recency. Completed markers
 block later selection in either mode by the same reviewer without creating an
-approval vote only while the source commit and reviewer participation
-fingerprint still match. Completion preserves the revision that the claim
-originally bound, not a later live head, while refreshing participation
-evidence from the completed review. A new source revision or a changed
-assignment/review state makes the completed marker historical rather than
-current.
+approval vote. They enforce the 48-hour review window after their last content
+update even when a new source revision or changed assignment/review state makes
+the completed review historical. Outside that window, a marker still blocks
+selection only while the source commit and reviewer participation fingerprint
+match. Completion preserves the revision that the claim originally bound, not
+a later live head, while refreshing participation evidence from the completed
+review.
 
 An invalid reserved claim is discarded. The utility deletes only its verified
 own comment, never another claim or an Azure DevOps thread. It then selects

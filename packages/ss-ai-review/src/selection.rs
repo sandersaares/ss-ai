@@ -17,7 +17,7 @@ use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 use crate::Clock;
-use crate::clock::{CLAIM_AGE, PREPARATION_AGE, timestamp};
+use crate::clock::{CLAIM_AGE, PREPARATION_AGE, REVIEW_AGE, timestamp};
 use crate::error::fail;
 use crate::identity::Identity;
 use crate::json::required_optional;
@@ -603,6 +603,8 @@ pub(crate) struct Comment {
     pub(crate) body: String,
     /// Service creation timestamp, not edit time, anchoring claim expiration.
     pub(crate) created_at: String,
+    /// Last content update anchoring completed-review recency.
+    pub(crate) updated_at: String,
     /// Account evidence needed before deleting the journal's recorded comment.
     pub(crate) author: Identity,
 }
@@ -713,20 +715,15 @@ pub(crate) fn run(
             clock.now(),
             initial.selection_mode,
         )?;
-        if let Some(reason) = fresh.reason {
-            initial.record(id, reason);
+        if let Some(reason) = &fresh.reason {
+            initial.record(id, reason.clone());
             continue;
         }
         let comments = provider.comments(&target)?;
-        if comments.iter().any(|comment| {
-            comment.author.same_account(&initial.identity)
-                && marker(&comment.body).is_some_and(|marker| {
-                    marker.state == ClaimState::Completed
-                        && fresh.source_commit.as_deref() == Some(marker.revision)
-                        && fresh.review_fingerprint.as_deref() == Some(marker.review_fingerprint)
-                })
-        }) {
-            initial.record(id, "completedReview");
+        if let Some(reason) =
+            completed_review_reason(&fresh, &comments, &initial.identity, clock.now())?
+        {
+            initial.record(id, reason);
             continue;
         }
         let mut has_live_claim = false;
@@ -846,8 +843,14 @@ fn confirm_claim(
             own_live |= comment.id == claim.id && comment.thread_id == claim.thread_id;
         }
     }
+    let completed_review = if candidate.reason.is_none() {
+        completed_review_reason(&candidate, &comments, &state.identity, clock.now())?
+    } else {
+        None
+    };
     let reason = candidate
         .reason
+        .or_else(|| completed_review.map(str::to_owned))
         .or_else(|| (!own_live).then(|| "claimMissingOrExpired".to_owned()))
         .or_else(|| (live_count > 1).then(|| "competingClaims".to_owned()));
     let id = candidate_id(target)?;
@@ -1147,6 +1150,45 @@ fn live(comment: &Comment, now: Timestamp) -> Result<bool, AppError> {
         .checked_add(CLAIM_AGE)
         .map_err(|error| crate::error::caused_by("service", "Claim lifetime overflow", error))?;
     Ok(expires > now)
+}
+
+/// Excludes exact or recently completed reviews without treating them as claims.
+///
+/// Exact source and participation matches remain historical completion evidence.
+/// A stale review prevents immediate re-admission until its comment's last content
+/// update falls outside the fixed review window.
+fn completed_review_reason(
+    candidate: &Candidate,
+    comments: &[Comment],
+    identity: &Identity,
+    now: Timestamp,
+) -> Result<Option<&'static str>, AppError> {
+    let cutoff = now
+        .checked_sub(REVIEW_AGE)
+        .map_err(|error| crate::error::caused_by("service", "Review age underflow", error))?;
+    let mut current = false;
+    let mut recent = false;
+    for comment in comments {
+        if !comment.author.same_account(identity) {
+            continue;
+        }
+        let Some(marker) = marker(&comment.body) else {
+            continue;
+        };
+        if marker.state != ClaimState::Completed {
+            continue;
+        }
+        current |= candidate.source_commit.as_deref() == Some(marker.revision)
+            && candidate.review_fingerprint.as_deref() == Some(marker.review_fingerprint);
+        recent |= timestamp(&comment.updated_at)? >= cutoff;
+    }
+    Ok(if current {
+        Some("completedReview")
+    } else if recent {
+        Some("recentReview")
+    } else {
+        None
+    })
 }
 
 #[cfg(test)]
