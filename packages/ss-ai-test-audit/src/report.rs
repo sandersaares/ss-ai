@@ -838,7 +838,8 @@ fn render_details(input: &DetailRender<'_>) -> Result<String, AppError> {
         for diagnostic in consistency_diagnostics {
             _ = writeln!(
                 output,
-                "- `{}` ({}): {}",
+                "- `{}` / {} ({}): {}",
+                diagnostic.priority,
                 diagnostic.kind,
                 diagnostic.assertion_ids.join(", "),
                 diagnostic.detail
@@ -857,6 +858,7 @@ fn consistency_diagnostics(trace: &[TraceRow<'_>]) -> Vec<ConsistencyDiagnostic>
             .any(|row| row.classification.kind == ClassificationKind::Mixed)
     {
         diagnostics.push(ConsistencyDiagnostic {
+            priority: "low".to_owned(),
             kind: "noMixedSites".to_owned(),
             assertion_ids: Vec::new(),
             detail: "No site uses Mixed; confirm compound documented and undocumented constraints were split in the reasoning rather than forced into one label".to_owned(),
@@ -881,9 +883,27 @@ fn consistency_diagnostics(trace: &[TraceRow<'_>]) -> Vec<ConsistencyDiagnostic>
             .collect::<BTreeSet<_>>();
         if predicates.len() > 1 {
             diagnostics.push(ConsistencyDiagnostic {
+                priority: "medium".to_owned(),
                 kind: "sharedRationaleDifferentPredicates".to_owned(),
                 assertion_ids: row_ids(rows),
                 detail: "One rationale explains different source predicates; verify that its contract claim applies to each".to_owned(),
+            });
+        }
+        let classifications = rows
+            .iter()
+            .map(|row| row.classification.kind)
+            .collect::<BTreeSet<_>>();
+        if rows.len() >= 5
+            && classifications.len() == 1
+            && rows
+                .first()
+                .is_some_and(|row| row.classification.rationale.chars().count() <= 120)
+        {
+            diagnostics.push(ConsistencyDiagnostic {
+                priority: "medium".to_owned(),
+                kind: "repeatedShortRationale".to_owned(),
+                assertion_ids: row_ids(rows),
+                detail: "This short rationale repeats across many sites; add the discriminating operation, condition, or permitted alternative before relying on it".to_owned(),
             });
         }
     }
@@ -894,6 +914,7 @@ fn consistency_diagnostics(trace: &[TraceRow<'_>]) -> Vec<ConsistencyDiagnostic>
             .collect::<BTreeSet<_>>();
         if classifications.len() > 1 {
             diagnostics.push(ConsistencyDiagnostic {
+                priority: "high".to_owned(),
                 kind: "samePredicateDifferentClassifications".to_owned(),
                 assertion_ids: row_ids(rows),
                 detail: "The same predicate has different classifications; record the distinct applicability condition".to_owned(),
@@ -922,6 +943,7 @@ fn consistency_diagnostics(trace: &[TraceRow<'_>]) -> Vec<ConsistencyDiagnostic>
             .collect::<BTreeSet<_>>();
         if classifications.len() > 1 {
             diagnostics.push(ConsistencyDiagnostic {
+                priority: "high".to_owned(),
                 kind: "citationSupportsConflictingClassifications".to_owned(),
                 assertion_ids: row_ids(rows),
                 detail: "One evidence range supports conflicting classifications; verify subject, conditions, and extracted facts".to_owned(),
@@ -929,6 +951,7 @@ fn consistency_diagnostics(trace: &[TraceRow<'_>]) -> Vec<ConsistencyDiagnostic>
         }
         if predicates.len() >= 3 {
             diagnostics.push(ConsistencyDiagnostic {
+                priority: "medium".to_owned(),
                 kind: "broadCitationReuse".to_owned(),
                 assertion_ids: row_ids(rows),
                 detail: "One evidence range supports several different predicates; verify each operation-specific relationship".to_owned(),
@@ -936,16 +959,32 @@ fn consistency_diagnostics(trace: &[TraceRow<'_>]) -> Vec<ConsistencyDiagnostic>
         }
     }
     diagnostics.sort_by(|left, right| {
-        (&left.kind, &left.assertion_ids, &left.detail).cmp(&(
-            &right.kind,
-            &right.assertion_ids,
-            &right.detail,
-        ))
+        (
+            priority_rank(&left.priority),
+            &left.kind,
+            &left.assertion_ids,
+            &left.detail,
+        )
+            .cmp(&(
+                priority_rank(&right.priority),
+                &right.kind,
+                &right.assertion_ids,
+                &right.detail,
+            ))
     });
     diagnostics.dedup_by(|left, right| {
         left.kind == right.kind && left.assertion_ids == right.assertion_ids
     });
     diagnostics
+}
+
+/// Orders actionable consistency defects before advisory sampling prompts.
+fn priority_rank(priority: &str) -> usize {
+    match priority {
+        "high" => 0,
+        "medium" => 1,
+        _ => 2,
+    }
 }
 
 /// Returns stable source-site identities for one consistency warning.

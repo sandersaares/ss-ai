@@ -79,6 +79,7 @@
         "type": "object",
         "additionalProperties": false,
         "required": [
+          "priority",
           "kind",
           "path",
           "line",
@@ -130,6 +131,7 @@
           "detail"
         ],
         "properties": {
+          "priority": { "enum": ["high", "medium", "low"] },
           "kind": {
             "type": "string",
             "minLength": 1

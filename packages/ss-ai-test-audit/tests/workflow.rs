@@ -17,8 +17,8 @@ use ohno::AppError;
 use serde_json::{Value, from_slice, from_str, json, to_vec_pretty};
 use ss_ai_runtime::{Clock, Process, ProcessOutput};
 use ss_ai_test_audit::{
-    advance, compare, initialize, inspect_evidence, next_batch, record_batch, report, search,
-    search_many, submit,
+    advance, compare, initialize, initialize_with_corrections, inspect_evidence, next_batch,
+    record_batch, report, search, search_many, submit,
 };
 use tempfile::TempDir;
 
@@ -215,6 +215,15 @@ fn audits_parser_sites_with_resumable_evidence_batches() {
     for row in assertions {
         assert!(display.contains(row["id"].as_str().unwrap()));
         assert!(display.contains(row["expression"].as_str().unwrap()));
+        if row["kind"] == "fallibleValueCheck" {
+            assert_eq!(row["candidateDisposition"], "includeForReview");
+            assert!(
+                row["candidateWitness"]
+                    .as_str()
+                    .unwrap()
+                    .contains("No recognized fixture")
+            );
+        }
     }
     assert_eq!(
         assertions
@@ -923,6 +932,130 @@ fn compare_reports_transition_and_caller_drift_without_selecting_a_winner() {
     assert_eq!(
         comparison["transitionMatrix"][0],
         json!({"left":"Incidental","right":"Implicit","count":1})
+    );
+}
+
+#[test]
+fn corrected_restart_replays_source_identical_work_after_an_accepted_batch() {
+    let root = unversioned_fixture_root();
+    let repository = root.path().join("repository");
+    let original_state = root.path().join("original-state");
+    fs::create_dir_all(repository.join("src")).unwrap();
+    fs::write(
+        repository.join("src/lib.rs"),
+        "#[test]\nfn genuine() { api_value().expect(\"API result\"); }\n#[cfg(test)]\nfn fixture(value: FixtureResult) {\n    value.expect(\"fixture placeholder\");\n}\n",
+    )
+    .unwrap();
+    initialize(&repository, &[], &original_state, &NoProcess, &FixedClock).unwrap();
+    let original_batch_path = original_state.join("batch-01.json");
+    let original_batch: Value =
+        from_str(&next_batch(&original_state, &original_batch_path, 1, &FixedClock).unwrap())
+            .unwrap();
+    let original_machine: Value =
+        from_slice(&fs::read(Path::new(original_batch["batchPath"].as_str().unwrap())).unwrap())
+            .unwrap();
+    assert_eq!(
+        original_machine["assertions"][0]["candidateDisposition"],
+        "includeForReview"
+    );
+    let original_record = json!({
+        "assertionId": "A000001",
+        "classification": "Incidental",
+        "evidenceStatus": "Confirmed",
+        "actualOutcome": "The helper exposes a result value.",
+        "rationale": "No public contract is declared in this fixture.",
+        "citationHandles": [],
+        "incidentalReason": "The fixture stands in for audited API behavior.",
+        "callingTestIds": []
+    });
+    let original_submission = original_state.join("submission-01.json");
+    fs::write(
+        &original_submission,
+        to_vec_pretty(&json!({
+            "schemaVersion": 1,
+            "batchFingerprint": original_batch["batchFingerprint"],
+            "rows": [original_record]
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+    let transition: Value = from_str(
+        &submit(
+            &original_state,
+            Path::new(original_batch["batchPath"].as_str().unwrap()),
+            &original_submission,
+            &original_state.join("batch-02.json"),
+            1,
+            &FixedClock,
+        )
+        .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(transition["nextAction"], "continue");
+    let preserved_journal = fs::read(original_state.join("classifications.json")).unwrap();
+
+    let correction = root.path().join("corrections.json");
+    fs::write(
+        &correction,
+        to_vec_pretty(&json!({
+            "schemaVersion": 1,
+            "repositoryRevision": "unversioned",
+            "corrections": [{
+                "path": "src/lib.rs",
+                "line": 5,
+                "endLine": 5,
+                "expression": "value.expect(\"fixture placeholder\")",
+                "reason": "The callback-local fixture result does not come from the audited API."
+            }]
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+    let corrected_state = root.path().join("corrected-state");
+    initialize_with_corrections(
+        &repository,
+        &[],
+        Some(&correction),
+        &corrected_state,
+        &NoProcess,
+        &FixedClock,
+    )
+    .unwrap();
+    let corrected_batch_path = corrected_state.join("batch-01.json");
+    let corrected_batch: Value =
+        from_str(&next_batch(&corrected_state, &corrected_batch_path, 25, &FixedClock).unwrap())
+            .unwrap();
+    let corrected_submission = corrected_state.join("submission-01.json");
+    fs::write(
+        &corrected_submission,
+        to_vec_pretty(&json!({
+            "schemaVersion": 1,
+            "batchFingerprint": corrected_batch["batchFingerprint"],
+            "rows": [original_record]
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+    let transition: Value = from_str(
+        &submit(
+            &corrected_state,
+            Path::new(corrected_batch["batchPath"].as_str().unwrap()),
+            &corrected_submission,
+            &corrected_state.join("batch-02.json"),
+            25,
+            &FixedClock,
+        )
+        .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(transition["nextAction"], "report");
+    let completed: Value = from_str(&report(&corrected_state, &FixedClock).unwrap()).unwrap();
+    assert_eq!(completed["assertionCount"], 1);
+    assert_eq!(completed["correctionCount"], 1);
+    assert_eq!(completed["nextAction"], "complete");
+    assert_eq!(
+        fs::read(original_state.join("classifications.json")).unwrap(),
+        preserved_journal
     );
 }
 

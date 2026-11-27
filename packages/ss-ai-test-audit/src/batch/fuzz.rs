@@ -41,6 +41,7 @@ fn snapshot() -> LoadedState {
             owner_end_line: SITES,
             test_code: true,
             fixture_excluded: false,
+            fixture_exclusion_reason: None,
             containing_test_id: Some("T000001".to_owned()),
             helper_name: None,
             calling_test_ids: Vec::new(),

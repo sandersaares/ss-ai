@@ -114,6 +114,12 @@ attributes do not become inclusion diagnostics.
 
 The inventory counts source sites, not runtime loop iterations or repeated trait names in one macro. Rust `#[should_panic]` counts at the expectation attribute, not at the deliberately triggered panic. Ordinary `unwrap` calls remain setup rather than predicates. Selected test-context `expect` calls that extract API values count as heuristic `fallibleValueCheck` sites; common fixture and synchronization accessors remain excluded. A rustdoc fence is a test case; a compile-only fence remains in the inventory with no counted predicate unless it contains one of the recognized static or fallible checks.
 
+Standalone `unwrap()` calls are setup unless another recognized predicate or
+contract-bearing assertion consumes their result. The rustdoc scanner therefore
+does not invent a predicate for a post-send `receiver.into_value().unwrap()`
+that is only formatted or printed. A counted let-else panic, explicit assertion,
+or test of the resulting value remains independently inventoried.
+
 The report computes assertion-site rates over classified rows and preserves test inventory entries independently. This prevents smoke tests and no-predicate doctests from disappearing while keeping their lack of checks explicit.
 
 Final reports add nonmutating consistency diagnostics for rationale reuse across

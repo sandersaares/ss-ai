@@ -169,7 +169,13 @@ pub(crate) fn inventory(
             column: assertion.column,
             expression: assertion.expression.clone(),
             file_sha256: assertion.file_sha256.clone(),
-            reason: "The source extracts a test-owned Some-backed option holder rather than a fallible audited API value".to_owned(),
+            reason: assertion
+                .fixture_exclusion_reason
+                .clone()
+                .unwrap_or_else(|| {
+                    "The source extracts test-owned fixture state rather than a fallible audited API value"
+                        .to_owned()
+                }),
         })
         .collect::<Vec<_>>();
     diagnostics.extend(corrections.iter().map(|correction| ScanDiagnostic {
@@ -734,6 +740,7 @@ fn scan_file(
     if language == "rust" {
         match syn::parse_file(text) {
             Ok(file) => {
+                let fixture_struct_fields = fixture_struct_fields(&file.items);
                 let mut collector = RustCollector {
                     tests,
                     assertions,
@@ -753,6 +760,8 @@ fn scan_file(
                     candidate_calls: BTreeMap::new(),
                     helper_assertions: Vec::new(),
                     visiting_direct_call_target: false,
+                    fixture_struct_fields,
+                    current_fixture_fields: BTreeSet::new(),
                 };
                 collector.visit_file(&file);
                 collector.link_helper_assertions();
@@ -1415,6 +1424,8 @@ struct RustCollector<'a, 'ast> {
     candidate_calls: BTreeMap<FunctionId, BTreeMap<String, CallerEvidence>>,
     helper_assertions: Vec<(usize, FunctionId)>,
     visiting_direct_call_target: bool,
+    fixture_struct_fields: BTreeMap<String, BTreeSet<String>>,
+    current_fixture_fields: BTreeSet<String>,
 }
 
 /// Separates diagnostic display names from the identities used for linking.
@@ -1560,6 +1571,9 @@ impl<'ast> RustCollector<'_, 'ast> {
         for input in &signature.inputs {
             if let FnArg::Typed(argument) = input {
                 record_bindings(&mut parameters.bindings, &argument.pat);
+                if let Some((name, kind)) = self.typed_fixture(&argument.pat, &argument.ty) {
+                    parameters.bindings.insert(name, Some(kind));
+                }
             }
         }
         self.blocks.push(parameters);
@@ -1632,6 +1646,7 @@ impl<'ast> RustCollector<'_, 'ast> {
             },
             test_code: self.functions.role.is_test(),
             fixture_excluded: false,
+            fixture_exclusion_reason: None,
             containing_test_id,
             helper_name: if self.functions.role.test_id().is_none() {
                 self.functions.name.clone()
@@ -1857,6 +1872,7 @@ impl<'ast> RustCollector<'_, 'ast> {
             return Some(kind);
         }
         match unparenthesized(expression) {
+            Expr::Reference(reference) => self.fixture_constructor(&reference.expr),
             Expr::Call(call) => {
                 let Expr::Path(function) = call.func.as_ref() else {
                     return None;
@@ -1991,6 +2007,19 @@ impl<'ast> RustCollector<'_, 'ast> {
         self.fixture_constructor(expression)
     }
 
+    /// Names unqualified concrete types used by test-only impls.
+    fn simple_type_name(ty: &Type) -> Option<String> {
+        match ty {
+            Type::Reference(reference) => Self::simple_type_name(&reference.elem),
+            Type::Path(path) if path.qself.is_none() => path
+                .path
+                .segments
+                .last()
+                .map(|segment| segment.ident.to_string()),
+            _ => None,
+        }
+    }
+
     /// Resolves an explicit standard-library path or directly imported type.
     fn fixture_type(&self, names: &[&Ident], absolute: bool) -> Option<FixtureKind> {
         let terminal = names.last()?.to_string();
@@ -2021,6 +2050,40 @@ impl<'ast> RustCollector<'_, 'ast> {
         .then_some(kind)
     }
 
+    /// Resolves a fixture marker from a typed parameter or local binding.
+    fn typed_fixture(&self, pattern: &Pat, ty: &Type) -> Option<(String, FixtureKind)> {
+        let Pat::Ident(ident) = pattern else {
+            return None;
+        };
+        if ident.by_ref.is_some() || ident.subpat.is_some() {
+            return None;
+        }
+        let kind = self.fixture_type_from_type(ty)?;
+        Some((ident.ident.to_string(), kind))
+    }
+
+    /// Looks through references to identify standard fixture-bearing parameters.
+    fn fixture_type_from_type(&self, ty: &Type) -> Option<FixtureKind> {
+        let selected = match ty {
+            Type::Reference(reference) => reference.elem.as_ref(),
+            Type::Path(_) => ty,
+            _ => return None,
+        };
+        let Type::Path(path) = selected else {
+            return None;
+        };
+        if path.qself.is_some() {
+            return None;
+        }
+        let names = path
+            .path
+            .segments
+            .iter()
+            .map(|segment| &segment.ident)
+            .collect::<Vec<_>>();
+        self.fixture_type(&names, path.path.leading_colon.is_some())
+    }
+
     /// Excludes calls only when their syntax identifies a fixture operation.
     fn is_fixture_access(&self, expression: &Expr) -> bool {
         let expression = unparenthesized(expression);
@@ -2036,6 +2099,18 @@ impl<'ast> RustCollector<'_, 'ast> {
             return false;
         }
         let fixture = self.fixture_kind(&call.receiver);
+        if matches!(call.method.to_string().as_str(), "as_mut" | "take")
+            && self.is_fixture_struct_field(&call.receiver)
+        {
+            return true;
+        }
+        if matches!(call.method.to_string().as_str(), "pop")
+            && let Expr::Path(path) = unparenthesized(&call.receiver)
+            && let Some(name) = path.path.get_ident()
+            && self.has_nonempty_witness(&name.to_string(), call.span().start().line)
+        {
+            return true;
+        }
         matches!(
             (fixture, call.method.to_string().as_str()),
             (Some(FixtureKind::Mutex), "lock" | "try_lock")
@@ -2049,6 +2124,58 @@ impl<'ast> RustCollector<'_, 'ast> {
                     "as_ref" | "as_mut" | "take" | "borrow" | "borrow_mut" | "lock" | "try_lock"
                 )
         )
+    }
+
+    /// Proves that a pop receiver was checked nonempty before this extraction.
+    fn has_nonempty_witness(&self, receiver: &str, call_line: usize) -> bool {
+        let start = self
+            .functions
+            .owner_line
+            .map_or(1, NonZeroUsize::get)
+            .min(call_line);
+        for line in (start..call_line).rev() {
+            let Some(source) = source_line(self.lines, line) else {
+                continue;
+            };
+            if source.contains(&format!("{receiver}.pop(")) {
+                return false;
+            }
+            if source.contains("assert") && length_asserts_nonempty(source, receiver) {
+                return true;
+            }
+        }
+        false
+    }
+
+    /// Explains why one syntactically proven fixture extraction is excluded.
+    fn fixture_exclusion_reason(expression: &Expr) -> String {
+        let expression = unparenthesized(expression);
+        if matches!(expression, Expr::Unsafe(_)) {
+            "The unsafe expression extracts fixture storage through a pointer or UnsafeCell-like accessor"
+                .to_owned()
+        } else if matches!(
+            expression,
+            Expr::MethodCall(call) if call.method == "pop"
+        ) {
+            "The collection was proven nonempty immediately before this pop extraction".to_owned()
+        } else {
+            "The receiver acquires or extracts test-owned synchronization or holder state"
+                .to_owned()
+        }
+    }
+
+    /// Identifies fields of this impl whose constructor supplies `Some(...)`.
+    fn is_fixture_struct_field(&self, expression: &Expr) -> bool {
+        let Expr::Field(field) = unparenthesized(expression) else {
+            return false;
+        };
+        matches!(
+            unparenthesized(&field.base),
+            Expr::Path(path) if path.path.is_ident("self")
+        ) && match &field.member {
+            syn::Member::Named(name) => self.current_fixture_fields.contains(&name.to_string()),
+            syn::Member::Unnamed(_) => false,
+        }
     }
 }
 
@@ -2146,7 +2273,15 @@ impl<'ast> Visit<'ast> for RustCollector<'_, 'ast> {
                 .is_some_and(|segment| segment.ident == "Drop")
         });
         let previous_drop_impl = replace(&mut self.test_drop_impl, drop_impl);
+        let previous_fixture_fields = replace(
+            &mut self.current_fixture_fields,
+            self.fixture_struct_fields
+                .get(&RustCollector::simple_type_name(&i.self_ty).unwrap_or_default())
+                .cloned()
+                .unwrap_or_default(),
+        );
         visit::visit_item_impl(self, i);
+        self.current_fixture_fields = previous_fixture_fields;
         self.test_drop_impl = previous_drop_impl;
         self.test_context = previous;
     }
@@ -2299,10 +2434,12 @@ impl<'ast> Visit<'ast> for RustCollector<'_, 'ast> {
                 i.span().end(),
             );
             if self.is_fixture_access(&i.receiver) {
+                let reason = Self::fixture_exclusion_reason(&i.receiver);
                 // Keep this candidate's ID stable for subsequent source sites,
                 // while removing the false predicate after scanning the file.
                 if let Some(assertion) = self.assertions.last_mut() {
                     assertion.fixture_excluded = true;
+                    assertion.fixture_exclusion_reason = Some(reason);
                 }
             }
         }
@@ -2553,6 +2690,98 @@ fn caller_evidence(
     }
 }
 
+/// Finds `Option` fields whose test-owned constructor always initializes them with `Some`.
+fn fixture_struct_fields(items: &[Item]) -> BTreeMap<String, BTreeSet<String>> {
+    fn collect(items: &[Item], result: &mut BTreeMap<String, BTreeSet<String>>) {
+        let option_fields = items
+            .iter()
+            .filter_map(|item| match item {
+                Item::Struct(struct_) => {
+                    let fields = struct_
+                        .fields
+                        .iter()
+                        .filter_map(|field| {
+                            let Type::Path(path) = &field.ty else {
+                                return None;
+                            };
+                            let is_option = path
+                                .path
+                                .segments
+                                .last()
+                                .is_some_and(|segment| segment.ident == "Option");
+                            let name = field.ident.as_ref()?.to_string();
+                            is_option.then_some(name)
+                        })
+                        .collect::<BTreeSet<_>>();
+                    (!fields.is_empty()).then(|| (struct_.ident.to_string(), fields))
+                }
+                _ => None,
+            })
+            .collect::<BTreeMap<_, _>>();
+        for item in items {
+            if let Item::Impl(impl_) = item
+                && let Some(name) = RustCollector::simple_type_name(&impl_.self_ty)
+                && let Some(fields) = option_fields.get(&name)
+            {
+                let mut initialized = BTreeSet::new();
+                for impl_item in &impl_.items {
+                    let ImplItem::Fn(function) = impl_item else {
+                        continue;
+                    };
+                    if function.sig.ident != "new" {
+                        continue;
+                    }
+                    let mut visitor = SomeFieldVisitor {
+                        fields,
+                        initialized: BTreeSet::new(),
+                    };
+                    visitor.visit_block(&function.block);
+                    initialized.extend(visitor.initialized);
+                }
+                result.entry(name).or_default().extend(initialized);
+            }
+            if let Item::Mod(module) = item
+                && let Some((_, nested)) = &module.content
+            {
+                collect(nested, result);
+            }
+        }
+    }
+
+    struct SomeFieldVisitor<'a> {
+        fields: &'a BTreeSet<String>,
+        initialized: BTreeSet<String>,
+    }
+
+    impl<'ast> Visit<'ast> for SomeFieldVisitor<'_> {
+        fn visit_expr_struct(&mut self, i: &'ast syn::ExprStruct) {
+            for field in &i.fields {
+                let syn::Member::Named(member) = &field.member else {
+                    continue;
+                };
+                let name = member.to_string();
+                if !self.fields.contains(&name) {
+                    continue;
+                }
+                let Expr::Call(call) = unparenthesized(&field.expr) else {
+                    continue;
+                };
+                let Expr::Path(path) = call.func.as_ref() else {
+                    continue;
+                };
+                if path.path.is_ident("Some") {
+                    self.initialized.insert(name);
+                }
+            }
+            visit::visit_expr_struct(self, i);
+        }
+    }
+
+    let mut result = BTreeMap::new();
+    collect(items, &mut result);
+    result
+}
+
 /// Recognizes pointer conversions and explicitly constructed literal fixtures.
 fn is_pointer_fixture_access(expression: &Expr) -> bool {
     let Expr::MethodCall(call) = unparenthesized(expression) else {
@@ -2561,9 +2790,11 @@ fn is_pointer_fixture_access(expression: &Expr) -> bool {
     if !call.args.is_empty() || (call.method != "as_ref" && call.method != "as_mut") {
         return false;
     }
+
     match unparenthesized(&call.receiver) {
         Expr::RawAddr(_) => true,
         Expr::Cast(cast) => matches!(cast.ty.as_ref(), Type::Ptr(_)),
+        Expr::MethodCall(get) if get.args.is_empty() && get.method == "get" => true,
         // A literal wrapped directly in `Some` cannot probe an API result.
         Expr::Call(constructor) => {
             matches!(constructor.func.as_ref(), Expr::Path(path) if path.path.is_ident("Some"))
@@ -2571,6 +2802,30 @@ fn is_pointer_fixture_access(expression: &Expr) -> bool {
         }
         _ => false,
     }
+}
+
+/// Recognizes common direct nonempty assertions without treating variable names as contracts.
+fn length_asserts_nonempty(source: &str, receiver: &str) -> bool {
+    let not_empty = format!("!{receiver}.is_empty()");
+    if source.contains(&not_empty) {
+        return true;
+    }
+    let len_marker = format!("{receiver}.len()");
+    let Some(after_len) = source.split_once(&len_marker).map(|(_, tail)| tail) else {
+        return false;
+    };
+    if !source.contains("assert_eq!(") {
+        return after_len.contains("> 0")
+            || after_len.contains(">= 1")
+            || after_len.contains("!= 0");
+    }
+    let Some((_, arguments)) = after_len.split_once(',') else {
+        return false;
+    };
+    arguments
+        .chars()
+        .find(char::is_ascii_digit)
+        .is_some_and(|digit| digit != '0')
 }
 
 /// Recognizes a generic type parameter whose trait bound can reject a call.
@@ -3022,6 +3277,7 @@ fn doctest_assertion(
         owner_end_line: test.end_line,
         test_code: true,
         fixture_excluded: false,
+        fixture_exclusion_reason: None,
         containing_test_id: Some(test.id.clone()),
         helper_name: None,
         calling_test_ids: Vec::new(),
@@ -3121,6 +3377,7 @@ fn scan_heuristically(
                 owner_end_line: test.map_or(line, |test| test.end_line),
                 test_code: true,
                 fixture_excluded: false,
+                fixture_exclusion_reason: None,
                 containing_test_id: test.map(|test| test.id.clone()),
                 helper_name: None,
                 calling_test_ids: test.map(|test| test.id.clone()).into_iter().collect(),

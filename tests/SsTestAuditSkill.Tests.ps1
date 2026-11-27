@@ -144,7 +144,10 @@ Describe 'ss-test-audit skill contract' {
                 assertionCount = 1; incidentalOnly = $false
             })
             diagnostics = @()
-            corrections = @(); consistencyDiagnostics = @()
+            corrections = @(); consistencyDiagnostics = @(@{
+                priority = 'medium'; kind = 'repeatedShortRationale'
+                assertionIds = @('A000001'); detail = 'The rationale repeats without a site-specific premise.'
+            })
         }
         Test-AuditRecord -Schema 'summary' -Record $summary | Should -BeTrue
         Test-AuditRecord -Schema 'details' -Record $details | Should -BeTrue

@@ -86,6 +86,14 @@ fresh submissions; do not copy old audit IDs, snapshot digests, evidence handles
 or source citations blindly. Export and classify from the new state. Discard
 old batch files as transition inputs; do not submit them to the corrected audit.
 
+Do not stop a successful `continue` loop merely because one inventory
+discrepancy is ambiguous. Record unsupported or ambiguous forms as a
+diagnostic/review limitation and continue classifying. For a proven fixture
+false positive, preserve the current state, create a revision-bound correction
+record, reinitialize a new audit, and replay only source-identical semantic work
+with fresh evidence handles. A changed denominator requires a corrected report,
+not an `Incidental` label or invented classification.
+
 # Stage 2: inspect inventory and cross-check discovery
 
 Do not raw-dump `inventory.json` or `search-index.jsonl` into the conversation. Use `next-batch` for assertions, `context` for the complete bounded enclosing test or helper, and `search` for targeted evidence.
@@ -97,6 +105,7 @@ Reconcile discrepancies before classification:
 - parser-backed Rust records `#[test]`, recognized test attributes, rustdoc code blocks, assertions, panic expectations, `static_assertions` checks (including `assert_eq_size!`), and direct failure branches;
 - compile-only checks count at a call site that instantiates an empty generic helper with trait bounds, rather than at the helper declaration;
 - fallible value access in test code may appear as `fallibleValueCheck` sites. Judge these individually: a standalone `.expect(...)` on an extracted API value can verify presence, while lock, pointer, join, ownership, and other fixture extraction remains excluded. Do not blanket-count every `unwrap` or `expect`;
+- an ordinary `.unwrap()` remains setup. In rustdoc examples, a post-send `unwrap()` used only to print or display a result is not an assertion site unless the resulting value participates in another recognized predicate;
 - recognized panic expectation helpers such as `assert_panics` count once, while a panic deliberately triggered inside that expectation does not count again;
 - C#, Java, JavaScript, TypeScript, Python, Go, Kotlin, and PowerShell use deliberately narrow text patterns;
 - unsupported source language text remains searchable but receives no assertion or test inventory;
@@ -126,9 +135,10 @@ Read only the exported batch display, its local context, and targeted evidence s
 2. State the weakest outcome the predicate actually demonstrates. Name the tested subject, preconditions, observation point, and polarity. Test names and panic messages are context, not evidence of a promise.
 3. Split independently constrained facts in the reasoning, including exact counts, values, order, traits, and message matching. Keep one classification row for the source site. Do not count the same nested expectation as an additional outer predicate.
 4. Identify the actual public operation and candidate authority. Prefer operation-specific public API wording and applicable traits, then explicitly authoritative public design contracts or independent examples. A public API used only for setup and private fixture comments can explain context but cannot create a promise by themselves.
-5. Ask whether a contract-conforming implementation may make this predicate fail for the stated subject and conditions. Decide whether the outcome is required, only permitted, or unaddressed. A missing search result does not prove absence; refine the search and preserve ambiguity.
-6. Use `Documented` when every checked fact is explicitly required; `Mixed` when a documented fact is combined with a distinct undocumented constraint; `Implicit` only for a named plausible public guarantee with a stated missing wording; otherwise use `Incidental` and name the fixture, private choice, setup, or permitted alternative. Do not use uncertainty alone as the reason for `Implicit`.
-7. Verify exact citations, caller attribution, and any explicit unlinked reason before submission. Reject an unlinked explanation when native or agent-confirmed effective callers already exist.
+5. Identify the decisive clause, not merely a nearby paragraph on the right API. State how it requires the observed predicate for this subject and precondition set. Distinguish a producer's state guarantee from an observer's query, permission (`may`) from obligation (`must`), and the first observation from later registration or cleanup states.
+6. Ask whether a contract-conforming implementation may make this predicate fail for the stated subject and conditions. Decide whether the outcome is required, only permitted, or unaddressed. A missing search result does not prove absence; refine the search and preserve ambiguity.
+7. Use `Documented` when every checked fact is explicitly required; `Mixed` when a documented fact is combined with a distinct undocumented constraint; `Implicit` only for a named plausible public guarantee with a stated missing wording; otherwise use `Incidental` and name the fixture, private choice, setup, or permitted alternative. Do not use uncertainty alone as the reason for `Implicit`.
+8. Verify exact citations, caller attribution, and any explicit unlinked reason before submission. Reject an unlinked explanation when native or agent-confirmed effective callers already exist.
 
 Use `unresolvedCallerReason` for a possible additional indirect caller that still
 needs inspection. Do not overload `evidenceStatus`, which remains tied to the
@@ -193,8 +203,11 @@ Run `ss-ai test-audit report` using [commands.md](commands.md#emit-final-reports
 
 Review `consistencyDiagnostics` before delivery. Investigate broad citation reuse,
 one rationale used for different predicates, and analogous predicates with
-different classifications. Treat warnings as review prompts, never automatic
-relabels. Record any corrected judgment in a fresh audit transition; do not
+different classifications. Handle `high` priority items before report delivery;
+use `medium` and `low` items as targeted calibration prompts, not automatic
+relabels. A repeated short rationale must still contain a discriminating
+operation, condition, missing premise, or permitted alternative. Record any
+corrected judgment in a fresh audit transition; do not
 silently edit completed reports.
 
 Deliver these generated paths:

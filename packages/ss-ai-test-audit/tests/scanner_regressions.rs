@@ -486,9 +486,12 @@ fn fixture_and_api_access() {
 
     let lock = std::sync::RwLock::new(0);
     lock.read().expect("fixture lock");
+    let hook = &std::sync::Mutex::new(None);
+    hook.lock().expect("fixture hook lock");
     let worker = std::thread::spawn(|| {});
     worker.join().expect("fixture thread");
     unsafe { (&raw const buffer).as_ref() }.expect("fixture pointer");
+    unsafe { storage.inner.get().as_ref() }.expect("fixture unsafe cell");
 }
 "#,
         );
@@ -507,6 +510,100 @@ fn fixture_and_api_access() {
             "fallibleValueCheck"
         );
     }
+}
+
+#[test]
+fn typed_mutex_parameters_and_unsafe_cell_getters_are_fixture_access() {
+    let inventory = scan(|repository| {
+        write(
+            repository,
+            "src/lib.rs",
+            r#"
+#[cfg(test)]
+fn release_hook(
+    hook: &std::sync::Mutex<Option<Box<dyn Fn()>>>,
+    storage: &Storage,
+) {
+    hook.lock().expect("fixture hook mutex");
+    let _event = unsafe { storage.inner.get().as_ref() }
+        .expect("fixture unsafe cell");
+    api_value().expect("genuine API result");
+}
+
+struct FixtureHolder {
+    receiver: Option<Box<i32>>,
+}
+
+#[cfg(test)]
+impl FixtureHolder {
+    fn new(receiver: Box<i32>) -> Self {
+        Self {
+            receiver: Some(receiver),
+        }
+    }
+
+    fn access(&mut self) {
+        self.receiver
+            .as_mut()
+            .expect("fixture receiver borrow");
+        self.receiver
+            .take()
+            .expect("fixture receiver extraction");
+    }
+}
+"#,
+        );
+    });
+    let sites = rows(&inventory, "assertions");
+    assert_eq!(sites.len(), 1);
+    assert_eq!(
+        sites[0]["expression"],
+        r#"api_value().expect("genuine API result")"#
+    );
+    assert_eq!(rows(&inventory, "corrections").len(), 4, "{inventory:#}");
+}
+
+#[test]
+fn excludes_pop_expect_only_after_a_positive_nonempty_witness() {
+    let inventory = scan(|repository| {
+        write(
+            repository,
+            "src/lib.rs",
+            r#"
+#[test]
+fn extractions() {
+    let mut unknown = values();
+    unknown.pop().expect("pop is the first presence check");
+
+    let mut known = values();
+    assert_eq!(known.len(), 1);
+    known.pop().expect("presence was already checked");
+}
+"#,
+        );
+    });
+    let sites = rows(&inventory, "assertions");
+    assert_eq!(
+        sites
+            .iter()
+            .filter(|site| site["kind"] == "fallibleValueCheck")
+            .count(),
+        1
+    );
+    assert!(sites.iter().any(|site| {
+        site["expression"]
+            .as_str()
+            .is_some_and(|expression| expression.contains("first presence check"))
+    }));
+    assert_eq!(
+        rows(&inventory, "corrections")
+            .iter()
+            .filter(|correction| correction["expression"]
+                .as_str()
+                .is_some_and(|expression| expression.contains("presence was already checked")))
+            .count(),
+        1
+    );
 }
 
 #[test]
@@ -754,12 +851,20 @@ fn rustdoc_flags_are_order_independent_and_ignored_fences_are_skipped() {
 //! ```rust
 //! let message = "assert!(fake_string())"; // assert!(fake_comment());
 //! assert_eq!(runs(), 1); assert!(another_check());
+//! let receiver = after_send();
+//! let message = receiver.into_value().unwrap();
+//! println!("Received message: {message}");
 //! ```
 "#,
         );
     });
     assert_eq!(rows(&inventory, "tests").len(), 4);
     assert_eq!(rows(&inventory, "assertions").len(), 6);
+    assert!(!rows(&inventory, "assertions").iter().any(|row| {
+        row["expression"]
+            .as_str()
+            .is_some_and(|expression| expression.contains("into_value().unwrap()"))
+    }));
     for marker in ["```rust,should_panic", "```edition2024, should_panic, rust"] {
         assert_eq!(assertion(&inventory, marker)["kind"], "panicExpectation");
     }

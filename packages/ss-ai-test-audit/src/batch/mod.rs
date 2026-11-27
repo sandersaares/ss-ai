@@ -276,6 +276,15 @@ fn compact_batch_display(batch: &Batch, fingerprint: &str) -> String {
                 diagnostic.detail
             );
         }
+        if let (Some(disposition), Some(witness)) = (
+            assertion.candidate_disposition.as_deref(),
+            assertion.candidate_witness.as_deref(),
+        ) {
+            _ = writeln!(
+                output,
+                "  candidate disposition: {disposition}; witness: {witness}"
+            );
+        }
     }
     output
 }
@@ -339,6 +348,12 @@ fn batch_assertion(
             .expression
             .push_str(" … [see source for full expression]");
     }
+    let candidate_disposition =
+        (assertion.kind == "fallibleValueCheck").then(|| "includeForReview".to_owned());
+    let candidate_witness = (assertion.kind == "fallibleValueCheck").then(|| {
+        "No recognized fixture, lock, pointer, join, or ownership extraction matched this receiver; semantic review is required"
+            .to_owned()
+    });
     BatchAssertion {
         assertion,
         test_name: test.map(|test| test.name.clone()),
@@ -346,6 +361,8 @@ fn batch_assertion(
         test_line: test.map(|test| test.line),
         context,
         diagnostics: relevant_diagnostics,
+        candidate_disposition,
+        candidate_witness,
     }
 }
 

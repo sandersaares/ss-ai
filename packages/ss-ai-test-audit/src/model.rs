@@ -108,6 +108,8 @@ pub(crate) struct AssertionSite {
     /// Retains stable source-site IDs while omitting a proven fixture check.
     #[serde(skip)]
     pub(crate) fixture_excluded: bool,
+    #[serde(skip)]
+    pub(crate) fixture_exclusion_reason: Option<String>,
     pub(crate) containing_test_id: Option<String>,
     pub(crate) helper_name: Option<String>,
     pub(crate) calling_test_ids: Vec<String>,
@@ -219,6 +221,8 @@ pub(crate) struct BatchAssertion {
     pub(crate) test_line: Option<NonZeroUsize>,
     pub(crate) context: Vec<BatchContextEntry>,
     pub(crate) diagnostics: Vec<ScanDiagnostic>,
+    pub(crate) candidate_disposition: Option<String>,
+    pub(crate) candidate_witness: Option<String>,
 }
 
 /// Bounds exported context to presentation metadata while retaining its handle-capable identity.
@@ -417,6 +421,7 @@ pub(crate) struct AuditSummary {
 #[derive(Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct ConsistencyDiagnostic {
+    pub(crate) priority: String,
     pub(crate) kind: String,
     pub(crate) assertion_ids: Vec<String>,
     pub(crate) detail: String,
