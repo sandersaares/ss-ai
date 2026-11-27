@@ -20,6 +20,6 @@ Placeholders to replace:
 | `SESSION_STATE` | Session state directory for this review. |
 | `FINDING_ID` | Identifier returned by the polling command, or identified by the review orchestrator as needing renewed user approval. |
 | `DECISION` | `auto-approved` or `needs-audit`, as determined by `auto-approval-rules.md`. |
-| `REASON` | The matched auto-approval category, or why the finding needs the user's judgment. |
+| `REASON` | The motivating focus-area path and guideline, or why no clear direct trace supports auto-approval. |
 | `PLAN_PATH` | Absolute path to the schema-validated decisions plan. |
 | `NOW_UTC` | Current UTC time as an RFC 3339 timestamp. |

@@ -102,6 +102,10 @@ submitted review. Registration includes declined entries so it preserves their
 votes, decline flags, and other metadata.
 Azure DevOps selection reads every iteration page and uses the source commit
 from the highest iteration identifier, matching capture and publication.
+Final review publication indexes both the current item path and `originalPath`
+from the selected iteration's complete change list. Both sides therefore share
+one change-tracking identity, including left-side anchors on deleted files;
+conflicting identities for the same canonical path fail before provider writes.
 
 Discussion records preserve service creation timestamps and comment/thread
 identifiers. Selection hashes the authenticated reviewer's assignment and
