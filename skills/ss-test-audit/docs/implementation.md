@@ -23,10 +23,14 @@ initial batch
 
 The inventory, source file digests, and search index bind each batch to one audit ID and snapshot digest. Initialization publishes the state record last so readers cannot treat a partially initialized directory as a ready audit. Every later read verifies the persisted state and index digests. Mutating commands additionally verify current source hashes. A changed source returns a stale-state failure before accepting a judgment against moved lines or emitting a final report.
 
-Audit state and inventory use schema version 4 and judgment rubric version 2. A
+Audit state and inventory use schema version 5 and judgment rubric version 2. A
 contract profile is part of snapshot identity but not the source evidence
 content digest. Native citation resolution chooses the most specific matching
 authority rule from that profile and binds its identifier into each citation.
+The profile parser accepts only source roles produced by the evidence index and
+initialization requires every declared authority rule to match at least one
+indexed path and role. The initialization receipt exports that closed role
+vocabulary for profile construction.
 A proven `Some(...)` fixture
 holder receives an assertion identifier while scanning, then leaves the
 effective inventory after all source IDs are assigned. This keeps identifiers
@@ -114,7 +118,9 @@ prepass identifies empty functions whose generic type parameters have trait
 bounds; direct calls from test-context code count at the enforcing invocation.
 The parser emits test-context `expect` method calls as `fallibleValueCheck`
 sites after excluding common lock, join, pointer, ownership, and fixture
-accessors. Test-created `Some(...)` option holders are tracked through `Rc`/`Arc`
+accessors. Synchronization access resolves from explicit standard-library
+constructors, typed parameters and fields of the current impl, including
+multiline method chains. Test-created `Some(...)` option holders are tracked through `Rc`/`Arc`
 clones and `RefCell` borrow guards without suppressing separately constructed
 API values inside the same callback. Contiguous cfg attributes on compile-time sites become
 `conditionalAssertion` diagnostics, preserving branch provenance. Inclusion
@@ -124,7 +130,7 @@ attributes do not become inclusion diagnostics.
 
 ## Count semantics
 
-The inventory counts source sites, not runtime loop iterations or repeated trait names in one macro. Rust `#[should_panic]` counts at the expectation attribute, not at the deliberately triggered panic. Ordinary `unwrap` calls remain setup rather than predicates. Selected test-context `expect` calls that extract API values count as heuristic `fallibleValueCheck` sites; common fixture and synchronization accessors remain excluded. A rustdoc fence is a test case; a compile-only fence remains in the inventory with no counted predicate unless it contains one of the recognized static or fallible checks.
+The inventory counts source sites, not runtime loop iterations or repeated trait names in one macro. Rust `#[should_panic]` counts at the expectation attribute, not at the deliberately triggered panic. Ordinary `unwrap` calls remain setup rather than predicates. Selected test-context `expect` calls that extract API values count as heuristic `fallibleValueCheck` sites; common fixture and synchronization accessors remain excluded. A rustdoc fence is a test case; a compile-only fence remains in the inventory with no counted predicate unless it contains one of the recognized static or fallible checks. An ignored Rust fence has kind `ignoredDoctest`, retains its source range, and contributes no predicates. The scanner deliberately does not parse ignored bodies, because Rustdoc does not execute them.
 
 Standalone `unwrap()` calls are setup unless another recognized predicate or
 contract-bearing assertion consumes their result. The rustdoc scanner therefore

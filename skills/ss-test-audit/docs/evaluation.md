@@ -33,6 +33,8 @@ The native regression suite covers:
 
 - alias, qualified cross-module, same-name decoy, and unresolved callback caller resolution;
 - complete contiguous documentation ranges, qualifiers and negation on continuation lines, public examples, and marker-only rejection;
+- ignored Rustdoc fences with inline reasons retained as unexecuted
+  `ignoredDoctest` inventory rows with no predicates;
 - `Some(...)`-backed fixture holders through `Rc`/`Arc` clones and `RefCell` borrow guards, with independent API values inside callbacks retained;
 - exact initialization corrections and refusal to reinterpret incompatible state;
 - explicit profile authority for public design versus private implementation,

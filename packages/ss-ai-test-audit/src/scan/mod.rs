@@ -33,6 +33,21 @@ use crate::model::{
     TestCase,
 };
 
+/// Names every structural role emitted by the evidence index.
+///
+/// Contract profiles reuse this closed vocabulary so initialization can reject
+/// labels that native citation provenance can never produce.
+pub(crate) const SOURCE_ROLES: [&str; 8] = [
+    "markdownDocumentation",
+    "markdownExample",
+    "rustExample",
+    "rustItemDoc",
+    "rustModuleDoc",
+    "rustPublicExample",
+    "rustTraitDoc",
+    "sourceLine",
+];
+
 /// Prevents one generated or unexpected file from making an audit unbounded.
 ///
 /// This cap accommodates ordinary source and generated documentation files
@@ -765,7 +780,7 @@ fn scan_file(
                     helper_assertions: Vec::new(),
                     visiting_direct_call_target: false,
                     fixture_struct_fields,
-                    current_fixture_fields: BTreeSet::new(),
+                    current_fixture_fields: BTreeMap::new(),
                 };
                 collector.visit_file(&file);
                 collector.link_helper_assertions();
@@ -1428,8 +1443,8 @@ struct RustCollector<'a, 'ast> {
     candidate_calls: BTreeMap<FunctionId, BTreeMap<String, CallerEvidence>>,
     helper_assertions: Vec<(usize, FunctionId)>,
     visiting_direct_call_target: bool,
-    fixture_struct_fields: BTreeMap<String, BTreeSet<String>>,
-    current_fixture_fields: BTreeSet<String>,
+    fixture_struct_fields: BTreeMap<String, BTreeMap<String, FixtureKind>>,
+    current_fixture_fields: BTreeMap<String, FixtureKind>,
 }
 
 /// Separates diagnostic display names from the identities used for linking.
@@ -1997,6 +2012,9 @@ impl<'ast> RustCollector<'_, 'ast> {
 
     /// Resolves only locally proven fixture bindings, never variable naming.
     fn fixture_kind(&self, expression: &Expr) -> Option<FixtureKind> {
+        if let Some(kind) = self.fixture_field_kind(expression) {
+            return Some(kind);
+        }
         if let Expr::Path(path) = unparenthesized(expression)
             && let Some(name) = path.path.get_ident()
         {
@@ -2104,7 +2122,7 @@ impl<'ast> RustCollector<'_, 'ast> {
         }
         let fixture = self.fixture_kind(&call.receiver);
         if matches!(call.method.to_string().as_str(), "as_mut" | "take")
-            && self.is_fixture_struct_field(&call.receiver)
+            && self.fixture_field_kind(&call.receiver) == Some(FixtureKind::OptionHolder)
         {
             return true;
         }
@@ -2168,17 +2186,20 @@ impl<'ast> RustCollector<'_, 'ast> {
         }
     }
 
-    /// Identifies fields of this impl whose constructor supplies `Some(...)`.
-    fn is_fixture_struct_field(&self, expression: &Expr) -> bool {
+    /// Resolves fields of the current impl only when syntax proves fixture access.
+    fn fixture_field_kind(&self, expression: &Expr) -> Option<FixtureKind> {
         let Expr::Field(field) = unparenthesized(expression) else {
-            return false;
+            return None;
         };
-        matches!(
+        if !matches!(
             unparenthesized(&field.base),
             Expr::Path(path) if path.path.is_ident("self")
-        ) && match &field.member {
-            syn::Member::Named(name) => self.current_fixture_fields.contains(&name.to_string()),
-            syn::Member::Unnamed(_) => false,
+        ) {
+            return None;
+        }
+        match &field.member {
+            syn::Member::Named(name) => self.current_fixture_fields.get(&name.to_string()).copied(),
+            syn::Member::Unnamed(_) => None,
         }
     }
 }
@@ -2648,14 +2669,41 @@ fn fixture_import<'ast>(
             _ => false,
         }
     }
+    /// Distinguishes explicit imports from glob imports that compete only by possibility.
+    fn explicitly_introduces(tree: &UseTree, name: &str) -> bool {
+        match tree {
+            UseTree::Path(path) => explicitly_introduces(&path.tree, name),
+            UseTree::Name(leaf) => leaf.ident == name,
+            UseTree::Rename(rename) => rename.rename == name,
+            UseTree::Group(group) => group
+                .items
+                .iter()
+                .any(|item| explicitly_introduces(item, name)),
+            UseTree::Glob(_) => false,
+        }
+    }
     if !matches!(unique_named_item(items.clone(), name), Ok(None)) {
         return Break(false);
     }
-    let mut imports = items.filter(|item| import_could_supply(item, name));
-    let Some(Item::Use(import)) = imports.next() else {
-        return Continue(());
-    };
-    Break(imports.next().is_none() && imports_path(&import.tree, &["std", namespace, name]))
+    let mut standard = false;
+    let mut possible = false;
+    let mut explicit_conflict = false;
+    for import in items.filter_map(|item| match item {
+        Item::Use(import) if import_could_supply(item, name) => Some(import),
+        _ => None,
+    }) {
+        possible = true;
+        if imports_path(&import.tree, &["std", namespace, name]) {
+            standard |= true;
+        } else if explicitly_introduces(&import.tree, name) {
+            explicit_conflict = true;
+        }
+    }
+    // An explicit Rust import takes precedence over competing glob imports.
+    (standard && !explicit_conflict)
+        .then_some(Break(true))
+        .or_else(|| possible.then_some(Break(false)))
+        .unwrap_or(Continue(()))
 }
 
 /// Marks pattern bindings as shadows until a fixture constructor proves their type.
@@ -2694,9 +2742,45 @@ fn caller_evidence(
     }
 }
 
-/// Finds `Option` fields whose test-owned constructor always initializes them with `Some`.
-fn fixture_struct_fields(items: &[Item]) -> BTreeMap<String, BTreeSet<String>> {
-    fn collect(items: &[Item], result: &mut BTreeMap<String, BTreeSet<String>>) {
+/// Resolves synchronization fields and `Option` holders in test-owned structs.
+fn fixture_struct_fields(items: &[Item]) -> BTreeMap<String, BTreeMap<String, FixtureKind>> {
+    fn sync_fixture_type(items: &[Item], ty: &Type) -> Option<FixtureKind> {
+        let Type::Path(path) = ty else {
+            return None;
+        };
+        if path.qself.is_some() {
+            return None;
+        }
+        let names = path
+            .path
+            .segments
+            .iter()
+            .map(|segment| &segment.ident)
+            .collect::<Vec<_>>();
+        let terminal = names.last()?.to_string();
+        let (namespace, kind) = match terminal.as_str() {
+            "Mutex" => ("sync", FixtureKind::Mutex),
+            "RwLock" => ("sync", FixtureKind::RwLock),
+            "JoinHandle" => ("thread", FixtureKind::JoinHandle),
+            _ => return None,
+        };
+        if matches!(
+            names.as_slice(),
+            [root, module, _] if *root == "std" && *module == namespace
+        ) {
+            return Some(kind);
+        }
+        if path.path.leading_colon.is_some() || names.len() != 1 {
+            return None;
+        }
+        matches!(
+            fixture_import(items.iter(), namespace, &terminal),
+            Break(true)
+        )
+        .then_some(kind)
+    }
+
+    fn collect(items: &[Item], result: &mut BTreeMap<String, BTreeMap<String, FixtureKind>>) {
         let option_fields = items
             .iter()
             .filter_map(|item| match item {
@@ -2723,6 +2807,27 @@ fn fixture_struct_fields(items: &[Item]) -> BTreeMap<String, BTreeSet<String>> {
             })
             .collect::<BTreeMap<_, _>>();
         for item in items {
+            let Item::Struct(struct_) = item else {
+                continue;
+            };
+            let fields = struct_
+                .fields
+                .iter()
+                .filter_map(|field| {
+                    Some((
+                        field.ident.as_ref()?.to_string(),
+                        sync_fixture_type(items, &field.ty)?,
+                    ))
+                })
+                .collect::<BTreeMap<_, _>>();
+            if !fields.is_empty() {
+                result
+                    .entry(struct_.ident.to_string())
+                    .or_default()
+                    .extend(fields);
+            }
+        }
+        for item in items {
             if let Item::Impl(impl_) = item
                 && let Some(name) = RustCollector::simple_type_name(&impl_.self_ty)
                 && let Some(fields) = option_fields.get(&name)
@@ -2742,7 +2847,11 @@ fn fixture_struct_fields(items: &[Item]) -> BTreeMap<String, BTreeSet<String>> {
                     visitor.visit_block(&function.block);
                     initialized.extend(visitor.initialized);
                 }
-                result.entry(name).or_default().extend(initialized);
+                result.entry(name).or_default().extend(
+                    initialized
+                        .into_iter()
+                        .map(|field| (field, FixtureKind::OptionHolder)),
+                );
             }
             if let Item::Mod(module) = item
                 && let Some((_, nested)) = &module.content
@@ -2982,6 +3091,7 @@ enum DocMode {
     Runs,
     ShouldPanic,
     CompileOnly,
+    Ignored,
 }
 
 impl DocFence {
@@ -3011,21 +3121,33 @@ impl DocFence {
 fn doctest_mode(info: &str) -> Option<DocMode> {
     let mut expects_panic = false;
     let mut compile_only = false;
-    for flag in info
+    let flags = info
         .split(|character: char| character == ',' || character.is_whitespace())
         .filter(|flag| !flag.is_empty())
-    {
+        .collect::<Vec<_>>();
+    let ignored = flags
+        .iter()
+        .any(|flag| *flag == "ignore" || flag.starts_with("ignore-"));
+    let mut in_reason = false;
+    for flag in flags {
         match flag {
             "should_panic" => expects_panic = true,
             "compile_fail" | "no_run" => compile_only = true,
-            "rust" | "test_harness" | "edition2015" | "edition2018" | "edition2021"
+            "ignore" | "rust" | "test_harness" | "edition2015" | "edition2018" | "edition2021"
             | "edition2024" => {}
-            // Includes `ignore` flags and other language identifiers; both
-            // are tracked as fences but do not contribute test sites.
+            _ if flag.starts_with("ignore-") => {}
+            _ if in_reason || flag.starts_with('(') && ignored => {
+                in_reason = !flag.ends_with(')');
+            }
             _ => return None,
         }
     }
-    Some(if compile_only {
+    if in_reason {
+        return None;
+    }
+    Some(if ignored {
+        DocMode::Ignored
+    } else if compile_only {
         DocMode::CompileOnly
     } else if expects_panic {
         DocMode::ShouldPanic
@@ -3119,7 +3241,12 @@ fn open_doctest(
     let test = TestCase {
         id: next_test_id(tests),
         name: format!("doctest at {line}"),
-        kind: "doctest".to_owned(),
+        kind: if mode == DocMode::Ignored {
+            "ignoredDoctest"
+        } else {
+            "doctest"
+        }
+        .to_owned(),
         language: input.language.to_owned(),
         path: input.path.to_owned(),
         line: parser_line(line),
@@ -3165,6 +3292,11 @@ fn finish_doctest(
         return;
     };
     test.end_line = end_line;
+    // Ignored rustdoc blocks remain in the test inventory for discovery parity,
+    // but rustdoc never executes or tests their source body.
+    if doc.mode == DocMode::Ignored {
+        return;
+    }
     doc.body.push('}');
     let block = match syn::parse_str::<Block>(&doc.body) {
         Ok(block) => block,

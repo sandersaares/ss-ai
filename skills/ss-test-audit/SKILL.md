@@ -79,10 +79,17 @@ Record the returned `auditId`, `snapshotSha256`, `contentSha256`,
 `contractProfileSha256`, counts, correction count, state paths, and diagnostics
 count in the session checkpoint.
 
-Persisted audit state and inventory use schema version 4 with judgment rubric
+Persisted audit state and inventory use schema version 5 with judgment rubric
 version 2. Use the same utility
 version throughout one audit. A reader rejects state from another schema version
 without changing it. Do not edit, migrate, or reinterpret an old inventory.
+
+Contract profile `sourceRoles` use the native evidence-index vocabulary:
+`markdownDocumentation`, `markdownExample`, `rustExample`, `rustItemDoc`,
+`rustModuleDoc`, `rustPublicExample`, `rustTraitDoc`, and `sourceLine`. An empty
+array matches every role under that rule's path. Initialization rejects an
+unknown role and any authority rule that matches no indexed source; use the
+returned `sourceRoles` array as the authoritative vocabulary.
 
 Use the optional initialization correction record from
 [inventory-corrections.schema.json](schemas/inventory-corrections.schema.json)
@@ -106,9 +113,18 @@ fresh submissions; do not copy old audit IDs, snapshot digests, evidence handles
 or source citations blindly. Export and classify from the new state. Discard
 old batch files as transition inputs; do not submit them to the corrected audit.
 
+An initialization correction is exclusion-only. It can remove an existing
+ambiguous assertion candidate but cannot insert a missing test record. Do not
+use a correction to acknowledge a runner-only test or to continue with an
+incomplete inventory.
+
 Do not stop a successful `continue` loop merely because one inventory
 discrepancy is ambiguous. Record unsupported or ambiguous forms as a
-diagnostic/review limitation and continue classifying. For a proven fixture
+diagnostic/review limitation and continue classifying. For a confirmed missing
+test row, preserve the state, stop the audit before semantic classification or
+reporting, and wait for a corrected scanner. Reinitialize a fresh immutable
+state at the same source revision; do not copy the old state or batch.
+For a proven fixture
 false positive, preserve the current state, create a revision-bound correction
 record, reinitialize a new audit, and replay only source-identical semantic work
 with fresh evidence handles. A changed denominator requires a corrected report,
@@ -120,6 +136,16 @@ Do not raw-dump `inventory.json` or `search-index.jsonl` into the conversation. 
 
 Compare the native inventory with an independent repository test-discovery method when the repository provides one, such as a language test runner's list mode. Verify the runner is available and run it in the audited checkout in the same invocation, or explicitly select its manifest (for example, `cargo test --manifest-path "{{AUDITED_MANIFEST}}" -- --list`, where `AUDITED_MANIFEST` is the absolute manifest path for that checkout in the runner's environment). For a platform-specific scope, match the audited platform; for a Linux scope from Windows, use WSL when available. If the matching environment or runner is unavailable, record a discovery limitation rather than relying on a host-only result or installing tools. Do not execute arbitrary test suites merely to invent a list.
 
+For Rustdoc, also run ignored-list mode when the source contains ignored
+fences, for example
+`cargo test --locked -p {{PACKAGE}} --doc -- --ignored --list`. Match native and
+runner records by repository-relative path and fence opening line. Ignored
+Rustdoc entries use `ignoredDoctest`, remain in the complete test inventory,
+carry no assertion IDs, and do not represent executed examples. Intentional
+exclusions need an explicit scanner diagnostic or a documented runner/platform
+reason. A supported runner-only row with no matching native test is a confirmed
+scanner omission, not an intentional exclusion and not a correction case.
+
 Reconcile discrepancies before classification:
 
 - parser-backed Rust records `#[test]`, recognized test attributes, rustdoc code blocks, assertions, panic expectations, `static_assertions` checks (including `assert_eq_size!`), and direct failure branches;
@@ -129,6 +155,10 @@ Reconcile discrepancies before classification:
 - an ordinary `.unwrap()` remains setup. In rustdoc examples, a post-send `unwrap()` used only to print or display a result is not an assertion site unless the resulting value participates in another recognized predicate;
 - recognized panic expectation helpers such as `assert_panics` count once, while a panic deliberately triggered inside that expectation does not count again;
 - C#, Java, JavaScript, TypeScript, Python, Go, Kotlin, and PowerShell use deliberately narrow text patterns;
+- multiline synchronization access is identified from the receiver's proven
+  `Mutex`, `RwLock`, or `JoinHandle` type, including fields typed in the current
+  impl. Recognized lock, pointer, join, ownership, and fixture extractions leave
+  the assertion denominator automatically and retain correction diagnostics;
 - unsupported source language text remains searchable but receives no assertion or test inventory;
 - syntax rejected by the Rust parser uses a Rust text fallback and carries a diagnostic.
 

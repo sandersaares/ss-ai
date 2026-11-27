@@ -29,8 +29,9 @@ ss-ai test-audit initialize `
 | `STATE_DIRECTORY` | New, empty directory outside the repository, even when `--scope-path` limits inventory. |
 
 On success, retain the returned state paths, `auditId`, `snapshotSha256`,
-`contentSha256`, `contractProfileSha256`, source revision, test count, assertion
-count, file count, diagnostic count, and correction count. On any failure,
+`contentSha256`, `contractProfileSha256`, `sourceRoles`, source revision, test
+count, assertion count, file count, diagnostic count, and correction count. On
+any failure,
 report the native diagnostic and do not create an alternate state schema.
 
 Each correction must match exactly one scanner expression at the named revision,
@@ -39,8 +40,13 @@ nonblank reason. The tool retains the
 excluded source site, source digest, stable assertion identifier, and reason in
 the immutable inventory and emits an `inventoryCorrection` diagnostic. Corrections
 apply only during initialization. If a persisted snapshot is missing or contains
-an incorrect correction, preserve it and initialize a new schema-version-4 state
+an incorrect correction, preserve it and initialize a new schema-version-5 state
 instead of editing the old files.
+
+Corrections remove exact assertion candidates. They cannot add missing test
+records. If independent discovery proves a runner-only test row, preserve the
+current state and initialize a fresh audit with a corrected utility after the
+scanner omission is fixed.
 
 Source discovery indexes text files up to and including 4 MiB. Larger files
 produce an `oversizedFile` diagnostic and do not enter the inventory or index.

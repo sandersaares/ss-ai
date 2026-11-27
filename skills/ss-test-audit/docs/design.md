@@ -17,7 +17,7 @@ The skill audits one repository and any selected set of existing file or directo
 
 The final trace contains exactly one classification row for each inventoried assertion. The test inventory contains every inventoried test and links direct and shared assertion IDs. Tests that execute smoke behavior without a counted predicate remain visible.
 
-Persisted audit state and inventory use schema version 4 with judgment rubric
+Persisted audit state and inventory use schema version 5 with judgment rubric
 version 2. Initialization requires an explicit contract-authority profile that
 names the public interface, audience, supported entry points, internal surfaces,
 accepted and rejected source authority, and unresolved policy. The profile has
@@ -79,7 +79,7 @@ passing test proves from why conforming behavior should pass.
 
 ## Language coverage
 
-Rust uses the repository's Rust syntax parser for test attributes, functions, assertion macros, panic expectations, static assertions, and unexpected-branch failures, with a separate rustdoc block scan. Direct calls to recognized panic-expectation helpers count as one site while deliberately triggered panics inside the helper argument do not. Production invariants and defensive failure branches remain out of the test inventory unless native syntax resolves a direct free-function or qualified-path test call within the same file. Rejected Rust file syntax receives an explicit line-pattern fallback diagnostic. Rustdoc fences use parsed macro invocations; unsupported snippets receive a diagnostic rather than text-based assertion counts. Compile-only fences retain the test entry without counting runtime predicates.
+Rust uses the repository's Rust syntax parser for test attributes, functions, assertion macros, panic expectations, static assertions, and unexpected-branch failures, with a separate rustdoc block scan. Direct calls to recognized panic-expectation helpers count as one site while deliberately triggered panics inside the helper argument do not. Production invariants and defensive failure branches remain out of the test inventory unless native syntax resolves a direct free-function or qualified-path test call within the same file. Rejected Rust file syntax receives an explicit line-pattern fallback diagnostic. Rustdoc fences use parsed macro invocations; unsupported snippets receive a diagnostic rather than text-based assertion counts. Compile-only fences retain the test entry without counting runtime predicates. Ignored Rust fences retain an `ignoredDoctest` test entry and no predicates, so an ignored-list cross-check can reconcile them without treating them as executed examples.
 
 Rust static-assertion macros include size-equality checks. A call into an empty
 generic helper with trait bounds counts at that call as a compile-time check.

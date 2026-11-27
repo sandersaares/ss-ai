@@ -913,6 +913,12 @@ fn compare_reports_transition_and_caller_drift_without_selecting_a_winner() {
         "#[cfg(test)]\nfn helper() { assert!(true); }\n#[test]\nfn checks() { let callback = helper; callback(); }\n",
     )
     .unwrap();
+    fs::create_dir_all(repository.join("docs")).unwrap();
+    fs::write(
+        repository.join("docs/design.md"),
+        "# CLI contract\n\nThe helper check is a public command behavior.\n",
+    )
+    .unwrap();
     let left_profile = contract_profile(root.path(), "left-policy");
     let right_profile = contract_profile(root.path(), "right-policy");
     initialize_with_profile(
@@ -1002,6 +1008,90 @@ fn compare_reports_transition_and_caller_drift_without_selecting_a_winner() {
             .any(|item| {
                 item["kind"] == "contractProfileMismatch" && item["priority"] == "high"
             })
+    );
+}
+
+#[test]
+fn profile_initialization_rejects_unknown_or_unmatched_source_roles() {
+    let root = unversioned_fixture_root();
+    let repository = root.path().join("repository");
+    fs::create_dir_all(repository.join("src")).unwrap();
+    fs::write(
+        repository.join("src/lib.rs"),
+        "/// A documented operation.\npub fn operation() {}\n",
+    )
+    .unwrap();
+    let profile = root.path().join("profile.json");
+    fs::write(
+        &profile,
+        to_vec_pretty(&json!({
+            "schemaVersion": 1,
+            "name": "library",
+            "interface": "Rust API",
+            "audience": "Rust callers",
+            "entryPoints": ["operation"],
+            "internalSurfaces": [],
+            "authorities": [{
+                "id": "unsupportedRole",
+                "pathPrefix": "src/",
+                "sourceRoles": ["publicApiDocumentation"],
+                "admissible": true,
+                "authority": "Public behavior",
+                "scope": "Operation docs"
+            }],
+            "unresolved": []
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+    let error = initialize_with_profile(
+        &repository,
+        &[],
+        None,
+        Some(&profile),
+        &root.path().join("unsupported"),
+        &NoProcess,
+        &FixedClock,
+    )
+    .unwrap_err();
+    assert!(error.to_string().contains("unsupported source role"));
+
+    fs::write(
+        &profile,
+        to_vec_pretty(&json!({
+            "schemaVersion": 1,
+            "name": "library",
+            "interface": "Rust API",
+            "audience": "Rust callers",
+            "entryPoints": ["operation"],
+            "internalSurfaces": [],
+            "authorities": [{
+                "id": "unmatchedRole",
+                "pathPrefix": "src/",
+                "sourceRoles": ["rustModuleDoc"],
+                "admissible": true,
+                "authority": "Public behavior",
+                "scope": "Operation docs"
+            }],
+            "unresolved": []
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+    let error = initialize_with_profile(
+        &repository,
+        &[],
+        None,
+        Some(&profile),
+        &root.path().join("unmatched"),
+        &NoProcess,
+        &FixedClock,
+    )
+    .unwrap_err();
+    assert!(
+        error
+            .to_string()
+            .contains("does not match any indexed source")
     );
 }
 
@@ -1599,19 +1689,19 @@ fn rejects_batch_output_that_aliases_an_audited_file() {
 }
 
 #[test]
-fn rejects_state_created_before_inventory_correction_contract() {
+fn rejects_state_created_before_ignored_doctest_inventory_contract() {
     let (_root, repository, state) = fixture(fixture_root());
     initialize_fixture(&repository, &state);
     let path = state.join("audit-state.json");
     let mut record: Value = from_slice(&fs::read(&path).unwrap()).unwrap();
-    record["schemaVersion"] = json!(1);
+    record["schemaVersion"] = json!(4);
     fs::write(&path, to_vec_pretty(&record).unwrap()).unwrap();
 
     let error = next_batch(&state, &state.join("batch.json"), 25, &FixedClock).unwrap_err();
     assert!(
         error
             .to_string()
-            .contains("Unsupported audit state schema version 1")
+            .contains("Unsupported audit state schema version 4")
     );
 }
 

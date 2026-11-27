@@ -117,6 +117,9 @@ Describe 'ss-test-audit skill contract' {
         Test-AuditRecord -Schema 'contract-profile' -Record $record | Should -BeTrue
         $record.entryPoints = @()
         Test-AuditRecord -Schema 'contract-profile' -Record $record | Should -BeFalse
+        $record.entryPoints = @('dure')
+        $record.authorities[0].sourceRoles = @('publicApiDocumentation')
+        Test-AuditRecord -Schema 'contract-profile' -Record $record | Should -BeFalse
     }
 
     It 'validates the completed summary and details as distinct records' {

@@ -28,7 +28,22 @@
         "properties": {
           "id": { "type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]*$" },
           "pathPrefix": { "type": "string", "minLength": 1 },
-          "sourceRoles": { "type": "array", "uniqueItems": true, "items": { "type": "string", "minLength": 1 } },
+          "sourceRoles": {
+            "type": "array",
+            "uniqueItems": true,
+            "items": {
+              "enum": [
+                "markdownDocumentation",
+                "markdownExample",
+                "rustExample",
+                "rustItemDoc",
+                "rustModuleDoc",
+                "rustPublicExample",
+                "rustTraitDoc",
+                "sourceLine"
+              ]
+            }
+          },
           "admissible": { "type": "boolean" },
           "authority": { "type": "string", "minLength": 1 },
           "scope": { "type": "string", "minLength": 1 }

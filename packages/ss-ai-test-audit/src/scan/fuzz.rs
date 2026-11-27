@@ -54,7 +54,7 @@ fn fuzz_doctest_fences_with_bounded_comment_sequences() {
                             lines: &lines,
                         },
                     );
-                    let recognized = !matches!(flags, "text" | "rust,ignore");
+                    let recognized = flags != "text";
                     assert_eq!(tests.len(), usize::from(recognized) + usize::from(closed));
                     for pair in tests.windows(2) {
                         let [earlier, later] = pair else {
@@ -83,7 +83,7 @@ fn fuzz_doctest_fences_with_bounded_comment_sequences() {
                     if closed || ending == "no close" {
                         assert_eq!(
                             contains("assert!(inside_once())"),
-                            recognized && flags != "no_run,rust"
+                            recognized && !matches!(flags, "no_run,rust" | "rust,ignore")
                         );
                         assert_eq!(contains("panic!(\"expected\")"), flags == "rust");
                     }

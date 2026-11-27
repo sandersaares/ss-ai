@@ -519,6 +519,9 @@ fn typed_mutex_parameters_and_unsafe_cell_getters_are_fixture_access() {
             repository,
             "src/lib.rs",
             r#"
+use std::sync::{Arc, RwLock};
+use rand::prelude::*;
+
 #[cfg(test)]
 fn release_hook(
     hook: &std::sync::Mutex<Option<Box<dyn Fn()>>>,
@@ -530,8 +533,10 @@ fn release_hook(
     api_value().expect("genuine API result");
 }
 
-struct FixtureHolder {
+pub(crate) struct FixtureHolder {
     receiver: Option<Box<i32>>,
+    #[cfg(test)]
+    override_value: RwLock<Option<i32>>,
 }
 
 #[cfg(test)]
@@ -539,6 +544,7 @@ impl FixtureHolder {
     fn new(receiver: Box<i32>) -> Self {
         Self {
             receiver: Some(receiver),
+            override_value: RwLock::new(None),
         }
     }
 
@@ -550,6 +556,14 @@ impl FixtureHolder {
             .take()
             .expect("fixture receiver extraction");
     }
+
+    #[cfg(test)]
+    fn set_override(&self, value: i32) {
+        *self
+            .override_value
+            .write()
+            .expect("override_value lock should never be poisoned") = Some(value);
+    }
 }
 "#,
         );
@@ -560,7 +574,12 @@ impl FixtureHolder {
         sites[0]["expression"],
         r#"api_value().expect("genuine API result")"#
     );
-    assert_eq!(rows(&inventory, "corrections").len(), 4, "{inventory:#}");
+    assert_eq!(rows(&inventory, "corrections").len(), 5, "{inventory:#}");
+    assert!(rows(&inventory, "corrections").iter().any(|correction| {
+        correction["expression"]
+            .as_str()
+            .is_some_and(|expression| expression.contains("\n            .write()"))
+    }));
 }
 
 #[test]
@@ -741,7 +760,7 @@ fn initialization_can_correct_an_exact_ambiguous_fixture_candidate() {
     )
     .unwrap();
     let inventory: Value = from_slice(&fs::read(state.join("inventory.json")).unwrap()).unwrap();
-    assert_eq!(inventory["schemaVersion"], 4);
+    assert_eq!(inventory["schemaVersion"], 5);
     assert!(rows(&inventory, "assertions").is_empty());
     let [correction] = rows(&inventory, "corrections") else {
         panic!("expected one exact inventory correction")
@@ -893,7 +912,7 @@ fn source_identity_is_independent_of_checkout_root() {
 }
 
 #[test]
-fn rustdoc_flags_are_order_independent_and_ignored_fences_are_skipped() {
+fn rustdoc_flags_are_order_independent_and_ignored_fences_are_inventoried() {
     let inventory = scan(|repository| {
         write(
             repository,
@@ -901,6 +920,10 @@ fn rustdoc_flags_are_order_independent_and_ignored_fences_are_skipped() {
             r#"
 //! ```rust,ignore
 //! assert!(ignored_first());
+//! ```
+//!
+//! ```rust ignore (benchmark)
+//! assert!(ignored_benchmark());
 //! ```
 //!
 //! ````ignore,rust
@@ -933,8 +956,24 @@ fn rustdoc_flags_are_order_independent_and_ignored_fences_are_skipped() {
 "#,
         );
     });
-    assert_eq!(rows(&inventory, "tests").len(), 4);
+    let tests = rows(&inventory, "tests");
+    assert_eq!(tests.len(), 7);
+    let ignored = tests
+        .iter()
+        .filter(|test| test["kind"] == "ignoredDoctest")
+        .collect::<Vec<_>>();
+    assert_eq!(ignored.len(), 3);
+    assert!(ignored.iter().all(|test| {
+        test["directAssertionIds"]
+            .as_array()
+            .is_some_and(Vec::is_empty)
+    }));
     assert_eq!(rows(&inventory, "assertions").len(), 6);
+    assert!(
+        !rows(&inventory, "diagnostics")
+            .iter()
+            .any(|diagnostic| diagnostic["kind"] == "rustdocParseLimitation")
+    );
     assert!(!rows(&inventory, "assertions").iter().any(|row| {
         row["expression"]
             .as_str()

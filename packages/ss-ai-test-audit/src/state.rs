@@ -1005,7 +1005,7 @@ pub(crate) fn citation_authority<'a>(
 }
 
 /// Matches directory prefixes at component boundaries rather than by spelling alone.
-fn profile_path_matches(path: &str, prefix: &str) -> bool {
+pub(crate) fn profile_path_matches(path: &str, prefix: &str) -> bool {
     prefix.ends_with('/') && path.starts_with(prefix)
         || path == prefix
         || path

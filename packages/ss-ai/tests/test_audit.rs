@@ -54,7 +54,7 @@ fn executable_accepts_multi_query_search_and_compact_submit() {
         "/// A documented value.\npub fn value() -> i32 { 1 }\n\n#[test]\nfn checks_value() { assert_eq!(value(), 1); }\n",
     )
     .unwrap();
-    let profile_path = write_contract_profile(root.path());
+    let profile_path = write_contract_profile(root.path(), "src/", "rustItemDoc");
 
     let initialize = Command::new(env!("CARGO_BIN_EXE_ss-ai"))
         .args(["test-audit", "initialize", "--repository-path"])
@@ -265,7 +265,7 @@ fn executable_accepts_exact_initialization_corrections() {
         .unwrap(),
     )
     .unwrap();
-    let profile_path = write_contract_profile(root.path());
+    let profile_path = write_contract_profile(root.path(), "tests/", "sourceLine");
 
     let output = Command::new(env!("CARGO_BIN_EXE_ss-ai"))
         .args(["test-audit", "initialize", "--repository-path"])
@@ -284,7 +284,13 @@ fn executable_accepts_exact_initialization_corrections() {
         String::from_utf8_lossy(&output.stderr)
     );
     let receipt: Value = from_slice(&output.stdout).unwrap();
-    assert_eq!(receipt["schemaVersion"], 4);
+    assert_eq!(receipt["schemaVersion"], 5);
+    assert!(
+        receipt["sourceRoles"]
+            .as_array()
+            .unwrap()
+            .contains(&json!("rustItemDoc"))
+    );
     assert_eq!(receipt["assertionCount"], 0);
     assert_eq!(receipt["correctionCount"], 1);
     let inventory: Value = from_slice(&fs::read(state.join("inventory.json")).unwrap()).unwrap();
@@ -296,7 +302,7 @@ fn executable_accepts_exact_initialization_corrections() {
 }
 
 /// Supplies the explicit public-source policy required by the CLI.
-fn write_contract_profile(root: &Path) -> std::path::PathBuf {
+fn write_contract_profile(root: &Path, path_prefix: &str, source_role: &str) -> std::path::PathBuf {
     let path = root.join("contract-profile.json");
     fs::write(
         &path,
@@ -309,8 +315,8 @@ fn write_contract_profile(root: &Path) -> std::path::PathBuf {
             "internalSurfaces": ["test fixtures"],
             "authorities": [{
                 "id": "rustPublicDocs",
-                "pathPrefix": "src/",
-                "sourceRoles": ["rustItemDoc", "rustPublicExample"],
+                "pathPrefix": path_prefix,
+                "sourceRoles": [source_role],
                 "admissible": true,
                 "authority": "public item documentation",
                 "scope": "documented Rust API behavior"

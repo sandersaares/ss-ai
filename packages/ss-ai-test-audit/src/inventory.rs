@@ -13,10 +13,10 @@ use crate::model::{
     ClassificationJournal, ContractProfile, IndexEntry, Inventory, InventoryCorrection,
     InventoryCorrectionRequest, RUBRIC_VERSION, RevisionKind, ScanDiagnostic,
 };
-use crate::scan::{digest, inventory};
+use crate::scan::{SOURCE_ROLES, digest, inventory};
 use crate::state::{
-    output_path, output_path_text, parse_json, require_version, state_paths, write_bytes,
-    write_json,
+    output_path, output_path_text, parse_json, profile_path_matches, require_version, state_paths,
+    write_bytes, write_json,
 };
 
 /// Keeps session references concise while retaining ample digest entropy.
@@ -128,6 +128,9 @@ fn initialize_with_inputs(
         apply_corrections(&mut inventory, correction_path, &repository_revision)?;
     }
     inventory.contract_profile = profile_path.map(read_contract_profile).transpose()?;
+    if let Some(profile) = inventory.contract_profile.as_ref() {
+        validate_contract_profile_sources(profile, &index)?;
+    }
     let index_bytes = index_lines(&index)?;
     inventory.tool_version.clear();
     inventory.tool_version.push_str(env!("CARGO_PKG_VERSION"));
@@ -209,6 +212,7 @@ fn initialize_with_inputs(
         "fileCount": inventory.files.len(),
         "diagnosticCount": inventory.diagnostics.len(),
         "correctionCount": inventory.corrections.len(),
+        "sourceRoles": SOURCE_ROLES,
     })
     .to_string())
 }
@@ -337,6 +341,20 @@ fn read_contract_profile(path: &Path) -> Result<ContractProfile, AppError> {
                 ),
             ));
         }
+        if authority
+            .source_roles
+            .iter()
+            .any(|role| !SOURCE_ROLES.contains(&role.as_str()))
+        {
+            return Err(fail(
+                "invalidInput",
+                format!(
+                    "Contract authority rule '{}' uses an unsupported source role; accepted roles: {}",
+                    authority.id,
+                    SOURCE_ROLES.join(", ")
+                ),
+            ));
+        }
     }
     for (position, left) in profile.authorities.iter().enumerate() {
         for right in profile.authorities.iter().skip(position.saturating_add(1)) {
@@ -360,6 +378,31 @@ fn read_contract_profile(path: &Path) -> Result<ContractProfile, AppError> {
         }
     }
     Ok(profile)
+}
+
+/// Requires every declared authority rule to match indexed source provenance.
+fn validate_contract_profile_sources(
+    profile: &ContractProfile,
+    index: &[IndexEntry],
+) -> Result<(), AppError> {
+    for rule in &profile.authorities {
+        let matched = index.iter().any(|entry| {
+            profile_path_matches(&entry.path, &rule.path_prefix)
+                && (rule.source_roles.is_empty() || rule.source_roles.contains(&entry.source_role))
+        });
+        if !matched {
+            return Err(fail(
+                "invalidInput",
+                format!(
+                    "Contract authority rule '{}' does not match any indexed source for path prefix '{}' and roles [{}]",
+                    rule.id,
+                    rule.path_prefix,
+                    rule.source_roles.join(", ")
+                ),
+            ));
+        }
+    }
+    Ok(())
 }
 
 /// Hashes the explicit profile independently from checkout paths.
