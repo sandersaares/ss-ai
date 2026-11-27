@@ -612,7 +612,7 @@ fn completed_available_review_is_not_selected_again() {
         &mut provider,
         &mut next_journal,
         &clock,
-        state.clone(),
+        state,
         "Reserving",
         false,
     )
@@ -656,6 +656,8 @@ fn recent_completed_review_blocks_a_changed_source_until_the_review_window_expir
         "source-10",
     )
     .unwrap();
+    provider.comments.get_mut(&10).unwrap()[0].updated_at =
+        clock.now().strftime("%Y-%m-%dT%H:%M:%SZ").to_string();
 
     let mut next_journal = MemoryJournal::default();
     let next = run(
@@ -670,7 +672,7 @@ fn recent_completed_review_blocks_a_changed_source_until_the_review_window_expir
     assert_eq!(next.target.unwrap().pull_request_id, 11);
     assert_eq!(next.diagnostics[0].reason, "recentReview");
 
-    clock.advance(Duration::from_hours(48) - Duration::from_mins(1));
+    clock.advance(Duration::from_hours(48));
     let mut boundary_journal = MemoryJournal::default();
     let at_boundary = run(
         &mut provider,
