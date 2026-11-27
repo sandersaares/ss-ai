@@ -26,6 +26,8 @@
           "line",
           "endLine",
           "expression",
+          "candidateRole",
+          "candidateDisposition",
           "reason"
         ],
         "properties": {
@@ -44,6 +46,12 @@
           "expression": {
             "type": "string",
             "minLength": 1
+          },
+          "candidateRole": {
+            "enum": ["fixtureSetup", "faultInjection", "cleanup"]
+          },
+          "candidateDisposition": {
+            "const": "excluded"
           },
           "reason": {
             "type": "string",

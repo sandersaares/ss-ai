@@ -722,6 +722,8 @@ fn initialization_can_correct_an_exact_ambiguous_fixture_candidate() {
                 "line": 4,
                 "endLine": 4,
                 "expression": "value.expect(\"fixture placeholder\")",
+                "candidateRole": "fixtureSetup",
+                "candidateDisposition": "excluded",
                 "reason": "The value is inserted by a test callback and its presence does not check the audited API."
             }]
         }))
@@ -739,13 +741,15 @@ fn initialization_can_correct_an_exact_ambiguous_fixture_candidate() {
     )
     .unwrap();
     let inventory: Value = from_slice(&fs::read(state.join("inventory.json")).unwrap()).unwrap();
-    assert_eq!(inventory["schemaVersion"], 3);
+    assert_eq!(inventory["schemaVersion"], 4);
     assert!(rows(&inventory, "assertions").is_empty());
     let [correction] = rows(&inventory, "corrections") else {
         panic!("expected one exact inventory correction")
     };
     assert_eq!(correction["assertionId"], "A000001");
     assert_eq!(correction["path"], "tests/correction.rs");
+    assert_eq!(correction["candidateRole"], "fixtureSetup");
+    assert_eq!(correction["candidateDisposition"], "excluded");
     assert_eq!(
         correction["reason"],
         "The value is inserted by a test callback and its presence does not check the audited API."
@@ -769,6 +773,8 @@ fn initialization_can_correct_an_exact_ambiguous_fixture_candidate() {
                 "line": 4,
                 "endLine": 4,
                 "expression": "value.expect(\"different expression\")",
+                "candidateRole": "fixtureSetup",
+                "candidateDisposition": "excluded",
                 "reason": "This must not match another source predicate."
             }]
         }))
@@ -789,6 +795,75 @@ fn initialization_can_correct_an_exact_ambiguous_fixture_candidate() {
             .to_string()
             .contains("does not match exactly one assertion")
     );
+}
+
+#[test]
+fn corrections_preserve_injected_fault_roles_without_excluding_observation_panics() {
+    let fixture = tempdir_in(env!("CARGO_TARGET_TMPDIR")).unwrap();
+    let repository = fixture.path().join("repository");
+    let state = fixture.path().join("state");
+    let correction = fixture.path().join("correction.json");
+    write(&repository, ".git", "gitdir: ../fixture-git");
+    write(
+        &repository,
+        "tests/fault.rs",
+        r#"#[test]
+fn observes_fault() {
+    let result = std::panic::catch_unwind(|| panic!("injected fault"));
+    assert!(result.is_err());
+}
+
+#[test]
+fn rejects_unexpected_branch() {
+    panic!("unexpected branch");
+}
+"#,
+    );
+    fs::write(
+        &correction,
+        serde_json::to_vec_pretty(&json!({
+            "schemaVersion": 1,
+            "repositoryRevision": "0123456789abcdef0123456789abcdef01234567",
+            "corrections": [{
+                "path": "tests/fault.rs",
+                "line": 3,
+                "endLine": 3,
+                "expression": "panic!(\"injected fault\")",
+                "candidateRole": "faultInjection",
+                "candidateDisposition": "excluded",
+                "reason": "This panic supplies a fault consumed by the later catch_unwind observation."
+            }]
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+
+    initialize_with_corrections(
+        &repository,
+        &[],
+        Some(&correction),
+        &state,
+        &FixtureGit,
+        &FixedClock,
+    )
+    .unwrap();
+    let inventory: Value = from_slice(&fs::read(state.join("inventory.json")).unwrap()).unwrap();
+    let assertions = rows(&inventory, "assertions");
+    assert!(
+        assertions
+            .iter()
+            .any(|assertion| { assertion["expression"] == "assert!(result.is_err())" })
+    );
+    assert!(
+        assertions
+            .iter()
+            .any(|assertion| { assertion["expression"] == "panic!(\"unexpected branch\")" })
+    );
+    let [correction] = rows(&inventory, "corrections") else {
+        panic!("expected one fault-injection correction")
+    };
+    assert_eq!(correction["candidateRole"], "faultInjection");
+    assert_eq!(correction["candidateDisposition"], "excluded");
 }
 
 #[test]

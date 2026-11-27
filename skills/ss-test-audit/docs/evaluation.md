@@ -6,16 +6,26 @@ Evaluation distinguishes input drift, scanner drift, and judgment drift. It uses
 
 ## Native evidence
 
-Completed audits retain the repository revision, scope, tool version, rubric version, checkout-independent content digest, and index digest. The `compare` command requires complete classification on both sides and reports:
+Completed audits retain the repository revision, scope, tool version, rubric
+version, checkout-independent content digest, index digest, and
+contract-profile identity. The `compare` command requires complete
+classification on both sides and reports:
 
 - matched and unmatched source-site identities;
 - classification transition counts and exact-label agreement;
 - changed rationale and evidence-status counts;
+- authority-rule use and policy transitions;
+- active and corrected denominator membership;
+- decisive-clause, observation-strength, and passing-counterexample drift;
+- candidate stimulus, setup, cleanup, and observation role drift;
 - effective native and agent-confirmed caller-set differences;
 - tests with no counted assertion; and
 - incidental-only test membership.
 
-Compare rates only after the content and index digests match. Investigate unmatched sites before interpreting a transition matrix. A higher net agreement is not sufficient evidence that a particular judgment is correct.
+Resolve contract-profile mismatches and denominator drift before interpreting
+classification transitions. Compare rates only for the common active set.
+Investigate unmatched sites before interpreting a transition matrix. A higher
+net agreement is not sufficient evidence that a particular judgment is correct.
 
 ## Deterministic acceptance cases
 
@@ -25,9 +35,13 @@ The native regression suite covers:
 - complete contiguous documentation ranges, qualifiers and negation on continuation lines, public examples, and marker-only rejection;
 - `Some(...)`-backed fixture holders through `Rc`/`Arc` clones and `RefCell` borrow guards, with independent API values inside callbacks retained;
 - exact initialization corrections and refusal to reinterpret incompatible state;
+- explicit profile authority for public design versus private implementation,
+  weak-observation counterexamples, `Mixed` component boundaries, and candidate
+  eligibility;
 - explicit incomplete and continuation receipts, including post-retry progress;
 - consistency warnings for reused rationale, conflicting identical predicates, and broad or conflicting citation reuse; and
-- checkout-independent content identity and completed-run comparison.
+- checkout-independent content identity and prioritized policy, denominator,
+  caller, and test-gap comparison.
 
 ## Human-adjudicated cases
 

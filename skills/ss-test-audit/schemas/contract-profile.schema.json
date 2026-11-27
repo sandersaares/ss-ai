@@ -1,0 +1,40 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schemaVersion",
+    "name",
+    "interface",
+    "audience",
+    "entryPoints",
+    "internalSurfaces",
+    "authorities",
+    "unresolved"
+  ],
+  "properties": {
+    "schemaVersion": { "const": 1 },
+    "name": { "type": "string", "minLength": 1 },
+    "interface": { "type": "string", "minLength": 1 },
+    "audience": { "type": "string", "minLength": 1 },
+    "entryPoints": { "type": "array", "minItems": 1, "uniqueItems": true, "items": { "type": "string", "minLength": 1 } },
+    "internalSurfaces": { "type": "array", "uniqueItems": true, "items": { "type": "string", "minLength": 1 } },
+    "authorities": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["id", "pathPrefix", "sourceRoles", "admissible", "authority", "scope"],
+        "properties": {
+          "id": { "type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]*$" },
+          "pathPrefix": { "type": "string", "minLength": 1 },
+          "sourceRoles": { "type": "array", "uniqueItems": true, "items": { "type": "string", "minLength": 1 } },
+          "admissible": { "type": "boolean" },
+          "authority": { "type": "string", "minLength": 1 },
+          "scope": { "type": "string", "minLength": 1 }
+        }
+      }
+    },
+    "unresolved": { "type": "array", "uniqueItems": true, "items": { "type": "string", "minLength": 1 } }
+  }
+}

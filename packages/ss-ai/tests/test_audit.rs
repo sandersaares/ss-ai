@@ -54,10 +54,13 @@ fn executable_accepts_multi_query_search_and_compact_submit() {
         "/// A documented value.\npub fn value() -> i32 { 1 }\n\n#[test]\nfn checks_value() { assert_eq!(value(), 1); }\n",
     )
     .unwrap();
+    let profile_path = write_contract_profile(root.path());
 
     let initialize = Command::new(env!("CARGO_BIN_EXE_ss-ai"))
         .args(["test-audit", "initialize", "--repository-path"])
         .arg(&repository)
+        .args(["--contract-profile-path"])
+        .arg(&profile_path)
         .args(["--state-directory"])
         .arg(&state)
         .output()
@@ -113,7 +116,9 @@ fn executable_accepts_multi_query_search_and_compact_submit() {
                 "actualOutcome": "The test observes the documented function value.",
                 "rationale": "The declaration and documentation establish the checked outcome.",
                 "citationHandles": [evidence_handle],
-                "callingTestIds": []
+                "callingTestIds": [],
+                "decisiveClause": "A documented value.",
+                "observationStrength": "exact"
             }]
         }))
         .unwrap(),
@@ -158,7 +163,7 @@ fn executable_accepts_multi_query_search_and_compact_submit() {
     assert_eq!(report["finalResponseAllowed"], true);
     let summary: Value =
         from_slice(&fs::read(report["summaryJsonPath"].as_str().unwrap()).unwrap()).unwrap();
-    assert_eq!(summary["schemaVersion"], 2);
+    assert_eq!(summary["schemaVersion"], 3);
     assert_eq!(summary["testCount"], report["testCount"]);
     assert_eq!(summary["classificationCounts"]["Documented"], 1);
     let summary_text = fs::read_to_string(report["summaryPath"].as_str().unwrap()).unwrap();
@@ -252,18 +257,23 @@ fn executable_accepts_exact_initialization_corrections() {
                 "line": 4,
                 "endLine": 4,
                 "expression": "holder.expect(\"fixture still present\")",
+                "candidateRole": "fixtureSetup",
+                "candidateDisposition": "excluded",
                 "reason": "This option is populated only by callback-local test state."
             }]
         }))
         .unwrap(),
     )
     .unwrap();
+    let profile_path = write_contract_profile(root.path());
 
     let output = Command::new(env!("CARGO_BIN_EXE_ss-ai"))
         .args(["test-audit", "initialize", "--repository-path"])
         .arg(&repository)
         .args(["--correction-path"])
         .arg(&correction_path)
+        .args(["--contract-profile-path"])
+        .arg(&profile_path)
         .args(["--state-directory"])
         .arg(&state)
         .output()
@@ -274,7 +284,7 @@ fn executable_accepts_exact_initialization_corrections() {
         String::from_utf8_lossy(&output.stderr)
     );
     let receipt: Value = from_slice(&output.stdout).unwrap();
-    assert_eq!(receipt["schemaVersion"], 3);
+    assert_eq!(receipt["schemaVersion"], 4);
     assert_eq!(receipt["assertionCount"], 0);
     assert_eq!(receipt["correctionCount"], 1);
     let inventory: Value = from_slice(&fs::read(state.join("inventory.json")).unwrap()).unwrap();
@@ -283,6 +293,34 @@ fn executable_accepts_exact_initialization_corrections() {
         inventory["corrections"][0]["fileSha256"],
         inventory["files"][0]["sha256"]
     );
+}
+
+/// Supplies the explicit public-source policy required by the CLI.
+fn write_contract_profile(root: &Path) -> std::path::PathBuf {
+    let path = root.join("contract-profile.json");
+    fs::write(
+        &path,
+        to_vec_pretty(&json!({
+            "schemaVersion": 1,
+            "name": "library API",
+            "interface": "Rust library",
+            "audience": "crate users",
+            "entryPoints": ["pub items"],
+            "internalSurfaces": ["test fixtures"],
+            "authorities": [{
+                "id": "rustPublicDocs",
+                "pathPrefix": "src/",
+                "sourceRoles": ["rustItemDoc", "rustPublicExample"],
+                "admissible": true,
+                "authority": "public item documentation",
+                "scope": "documented Rust API behavior"
+            }],
+            "unresolved": []
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+    path
 }
 
 /// Verifies that the CLI receipt exposes only canonical paired report artifacts.

@@ -1,18 +1,22 @@
 //! Reproducible comparison of completed test-audit judgments.
 
 use std::collections::{BTreeMap, BTreeSet};
+use std::path::Path;
 
 use ohno::AppError;
 use serde_json::{Value, json};
 use ss_ai_runtime::{Clock, fail};
 
-use crate::model::{Classification, ClassificationKind, TestCase};
+use crate::model::{
+    AssertionSite, CandidateDisposition, Classification, ClassificationKind, InventoryCorrection,
+    TestCase,
+};
 use crate::state::{LoadedState, load};
 
-/// Compares exact semantic classifications from two complete audit snapshots.
+/// Compares completed audits and groups drift by policy and membership.
 pub fn compare(
-    left_directory: &std::path::Path,
-    right_directory: &std::path::Path,
+    left_directory: &Path,
+    right_directory: &Path,
     clock: &dyn Clock,
 ) -> Result<String, AppError> {
     let left = load(left_directory, clock)?;
@@ -23,12 +27,19 @@ pub fn compare(
     let left_assertions = assertion_map(&left);
     let right_assertions = assertion_map(&right);
     let mut transition_counts: BTreeMap<(String, String), usize> = BTreeMap::new();
+    let mut policy_groups: BTreeMap<(String, String, String, String), BTreeSet<String>> =
+        BTreeMap::new();
     let mut matched = 0_usize;
     let mut exact_label_agreement = 0_usize;
     let mut changed_rationale = 0_usize;
     let mut changed_evidence_status = 0_usize;
     let mut changed_review_reason = 0_usize;
-    let mut caller_set_differences = 0_usize;
+    let mut decisive_clause_differences = BTreeSet::new();
+    let mut observation_strength_differences = BTreeSet::new();
+    let mut passing_counterexample_differences = BTreeSet::new();
+    let mut candidate_role_differences = BTreeSet::new();
+    let mut caller_set_differences = BTreeSet::new();
+    let mut agreement_sample = BTreeSet::new();
     let left_only_sites = left_assertions
         .keys()
         .filter(|key| !right_assertions.contains_key(*key))
@@ -50,22 +61,53 @@ pub fn compare(
             .entry((left_kind.to_owned(), right_kind.to_owned()))
             .or_default();
         *count = count.saturating_add(1);
+        let left_authority = authority_signature(left_classification);
+        let right_authority = authority_signature(right_classification);
         if left_classification.kind == right_classification.kind {
             exact_label_agreement = exact_label_agreement.saturating_add(1);
+            if agreement_sample.len() < 5 {
+                agreement_sample.insert(key.clone());
+            }
         }
-        if left_classification.rationale != right_classification.rationale {
-            changed_rationale = changed_rationale.saturating_add(1);
+        if left_classification.kind != right_classification.kind
+            || left_authority != right_authority
+        {
+            policy_groups
+                .entry((
+                    left_kind.to_owned(),
+                    right_kind.to_owned(),
+                    left_authority,
+                    right_authority,
+                ))
+                .or_default()
+                .insert(key.clone());
         }
-        if left_classification.evidence_status != right_classification.evidence_status {
-            changed_evidence_status = changed_evidence_status.saturating_add(1);
+        changed_rationale = changed_rationale.saturating_add(usize::from(
+            left_classification.rationale != right_classification.rationale,
+        ));
+        changed_evidence_status = changed_evidence_status.saturating_add(usize::from(
+            left_classification.evidence_status != right_classification.evidence_status,
+        ));
+        changed_review_reason = changed_review_reason.saturating_add(usize::from(
+            left_classification.review_reason != right_classification.review_reason,
+        ));
+        if left_classification.decisive_clause != right_classification.decisive_clause {
+            decisive_clause_differences.insert(key.clone());
         }
-        if left_classification.review_reason != right_classification.review_reason {
-            changed_review_reason = changed_review_reason.saturating_add(1);
+        if left_classification.observation_strength != right_classification.observation_strength {
+            observation_strength_differences.insert(key.clone());
+        }
+        if left_classification.passing_counterexample != right_classification.passing_counterexample
+        {
+            passing_counterexample_differences.insert(key.clone());
+        }
+        if left_classification.candidate_role != right_classification.candidate_role {
+            candidate_role_differences.insert(key.clone());
         }
         if effective_callers(left_assertion, left_classification, &left)
             != effective_callers(right_assertion, right_classification, &right)
         {
-            caller_set_differences = caller_set_differences.saturating_add(1);
+            caller_set_differences.insert(key.clone());
         }
     }
 
@@ -79,32 +121,143 @@ pub fn compare(
             })
         })
         .collect::<Vec<_>>();
+    let authority_transitions = policy_groups
+        .iter()
+        .map(
+            |((left, right, left_authority, right_authority), assertion_ids)| {
+                json!({
+                    "left": left,
+                    "right": right,
+                    "leftAuthorityRules": rule_list(left_authority),
+                    "rightAuthorityRules": rule_list(right_authority),
+                    "assertionKeys": assertion_ids,
+                    "count": assertion_ids.len()
+                })
+            },
+        )
+        .collect::<Vec<_>>();
     let left_gaps = gap_keys(&left);
     let right_gaps = gap_keys(&right);
-    let gap_comparison = |left: &BTreeSet<String>, right: &BTreeSet<String>| {
-        json!({
-            "leftOnly": left.difference(right).cloned().collect::<Vec<_>>(),
-            "rightOnly": right.difference(left).cloned().collect::<Vec<_>>(),
-            "both": left.intersection(right).cloned().collect::<Vec<_>>()
-        })
-    };
+    let denominator_differences = denominator_differences(&left, &right);
+    candidate_role_differences.extend(correction_role_differences(&left, &right));
+    let same_contract_profile =
+        left.state.contract_profile_sha256 == right.state.contract_profile_sha256;
+    let mut review_queue = Vec::new();
+    if !same_contract_profile {
+        review_queue.push(review_item(
+            "high",
+            "contractProfileMismatch",
+            "The runs used different contract-authority profiles; resolve that policy mismatch before interpreting row-level agreement",
+            &[],
+        ));
+    }
+    if !denominator_differences.is_empty() {
+        let keys = denominator_differences
+            .iter()
+            .filter_map(|value| value["assertionKey"].as_str().map(str::to_owned))
+            .collect::<Vec<_>>();
+        review_queue.push(review_item(
+            "high",
+            "denominatorDifference",
+            "Active assertion and correction membership differs; compare denominator membership separately from semantic labels",
+            &keys,
+        ));
+    }
+    for ((left_kind, right_kind, left_rules, right_rules), assertion_keys) in &policy_groups {
+        review_queue.push(review_item(
+            "high",
+            "authorityPolicyTransition",
+            format!(
+                "Transition {left_kind} to {right_kind} uses authority rules [{}] to [{}]",
+                rule_list(left_rules).join(", "),
+                rule_list(right_rules).join(", ")
+            ),
+            &assertion_keys.iter().cloned().collect::<Vec<_>>(),
+        ));
+    }
+    add_group_review(
+        &mut review_queue,
+        "medium",
+        "decisiveClauseDifference",
+        "The runs use different decisive wording for the same active assertion",
+        &decisive_clause_differences,
+    );
+    add_group_review(
+        &mut review_queue,
+        "medium",
+        "observationStrengthDifference",
+        "The runs claim different predicate strength for the same active assertion",
+        &observation_strength_differences,
+    );
+    add_group_review(
+        &mut review_queue,
+        "medium",
+        "passingCounterexampleDifference",
+        "The runs describe different alternatives that still satisfy the predicate",
+        &passing_counterexample_differences,
+    );
+    add_group_review(
+        &mut review_queue,
+        "medium",
+        "candidateRoleDifference",
+        "The runs disagree about whether a source candidate observes, arranges, injects, or cleans up",
+        &candidate_role_differences,
+    );
+    add_group_review(
+        &mut review_queue,
+        "medium",
+        "callerSetDifference",
+        "Effective caller identity differs; reconcile native and agent-confirmed links before comparing labels",
+        &caller_set_differences,
+    );
+    let changing_gaps = left_gaps
+        .0
+        .symmetric_difference(&right_gaps.0)
+        .chain(left_gaps.1.symmetric_difference(&right_gaps.1))
+        .cloned()
+        .collect::<BTreeSet<_>>();
+    add_group_review(
+        &mut review_queue,
+        "medium",
+        "testGapDifference",
+        "No-counted-assertion or incidental-only test membership differs between runs",
+        &changing_gaps,
+    );
+
     Ok(json!({
-        "schemaVersion": 1,
-        "comparableContent": left.state.content_sha256 == right.state.content_sha256,
+        "schemaVersion": 2,
+        "comparableContent": left.state.index_sha256 == right.state.index_sha256
+            && left.state.repository_revision == right.state.repository_revision
+            && left.state.scope_paths == right.state.scope_paths,
+        "sameContractProfile": same_contract_profile,
         "left": run_identity(&left),
         "right": run_identity(&right),
+        "commonActiveAssertionCount": matched,
         "matchedAssertionCount": matched,
         "exactLabelAgreementCount": exact_label_agreement,
         "exactLabelAgreementRate": ratio(exact_label_agreement, matched),
         "changedRationaleCount": changed_rationale,
         "changedEvidenceStatusCount": changed_evidence_status,
         "changedReviewReasonCount": changed_review_reason,
-        "callerSetDifferenceCount": caller_set_differences,
+        "decisiveClauseDifferenceCount": decisive_clause_differences.len(),
+        "observationStrengthDifferenceCount": observation_strength_differences.len(),
+        "passingCounterexampleDifferenceCount": passing_counterexample_differences.len(),
+        "candidateRoleDifferenceCount": candidate_role_differences.len(),
+        "callerSetDifferenceCount": caller_set_differences.len(),
         "leftOnlySites": left_only_sites,
         "rightOnlySites": right_only_sites,
+        "denominatorDifferenceCount": denominator_differences.len(),
+        "denominatorDifferences": denominator_differences,
         "transitionMatrix": transitions,
+        "authorityRuleUsage": {
+            "left": authority_rule_usage(&left),
+            "right": authority_rule_usage(&right)
+        },
+        "authorityRuleTransitions": authority_transitions,
         "noCountedAssertionTests": gap_comparison(&left_gaps.0, &right_gaps.0),
-        "incidentalOnlyTests": gap_comparison(&left_gaps.1, &right_gaps.1)
+        "incidentalOnlyTests": gap_comparison(&left_gaps.1, &right_gaps.1),
+        "agreementSampleAssertionKeys": agreement_sample.into_iter().take(5).collect::<Vec<_>>(),
+        "reviewQueue": review_queue
     })
     .to_string())
 }
@@ -125,9 +278,7 @@ fn require_complete(loaded: &LoadedState, side: &str) -> Result<(), AppError> {
 }
 
 /// Maps source identities to exact assertion and semantic records.
-fn assertion_map(
-    loaded: &LoadedState,
-) -> BTreeMap<String, (&crate::model::AssertionSite, &Classification)> {
+fn assertion_map(loaded: &LoadedState) -> BTreeMap<String, (&AssertionSite, &Classification)> {
     let classifications = loaded
         .journal
         .rows()
@@ -146,7 +297,7 @@ fn assertion_map(
 }
 
 /// Uses source provenance rather than audit-local identifiers for comparison.
-fn assertion_key(assertion: &crate::model::AssertionSite) -> String {
+fn assertion_key(assertion: &AssertionSite) -> String {
     format!(
         "{}:{}-{}:{}:{}:{}",
         assertion.path,
@@ -158,9 +309,22 @@ fn assertion_key(assertion: &crate::model::AssertionSite) -> String {
     )
 }
 
+/// Uses the same source identity for excluded inventory corrections.
+fn correction_key(correction: &InventoryCorrection) -> String {
+    format!(
+        "{}:{}-{}:{}:{}:{}",
+        correction.path,
+        correction.line,
+        correction.end_line,
+        correction.column,
+        correction.file_sha256,
+        correction.expression
+    )
+}
+
 /// Resolves audit-local test IDs to checkout-independent test identities.
 fn effective_callers(
-    assertion: &crate::model::AssertionSite,
+    assertion: &AssertionSite,
     classification: &Classification,
     loaded: &LoadedState,
 ) -> BTreeSet<String> {
@@ -224,6 +388,76 @@ fn gap_keys(loaded: &LoadedState) -> (BTreeSet<String>, BTreeSet<String>) {
     (no_counted, incidental_only)
 }
 
+/// Supplies active/excluded membership for every source candidate in both runs.
+fn denominator_differences(left: &LoadedState, right: &LoadedState) -> Vec<Value> {
+    let memberships = |loaded: &LoadedState| {
+        let mut memberships = BTreeMap::new();
+        for assertion in &loaded.inventory.assertions {
+            memberships.insert(
+                assertion_key(assertion),
+                json!({
+                    "membership": "active",
+                    "candidateRole": "observation",
+                    "reason": null
+                }),
+            );
+        }
+        for correction in &loaded.inventory.corrections {
+            memberships.insert(
+                correction_key(correction),
+                json!({
+                    "membership": "excluded",
+                    "candidateRole": correction.candidate_role,
+                    "candidateDisposition": CandidateDisposition::Excluded,
+                    "reason": correction.reason
+                }),
+            );
+        }
+        memberships
+    };
+    let left = memberships(left);
+    let right = memberships(right);
+    left.keys()
+        .chain(right.keys())
+        .cloned()
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .filter_map(|key| {
+            let left_membership = left.get(&key);
+            let right_membership = right.get(&key);
+            let same_membership = left_membership.and_then(|value| value["membership"].as_str())
+                == right_membership.and_then(|value| value["membership"].as_str());
+            if same_membership {
+                return None;
+            }
+            Some(json!({
+                "assertionKey": key,
+                "left": left_membership.cloned().unwrap_or_else(|| json!({"membership":"missing"})),
+                "right": right_membership.cloned().unwrap_or_else(|| json!({"membership":"missing"}))
+            }))
+        })
+        .collect()
+}
+
+/// Finds correction-role drift even when both runs exclude the same source site.
+fn correction_role_differences(left: &LoadedState, right: &LoadedState) -> BTreeSet<String> {
+    let roles = |loaded: &LoadedState| {
+        loaded
+            .inventory
+            .corrections
+            .iter()
+            .map(|correction| (correction_key(correction), correction.candidate_role))
+            .collect::<BTreeMap<_, _>>()
+    };
+    let left = roles(left);
+    let right = roles(right);
+    left.keys()
+        .chain(right.keys())
+        .filter(|key| left.get(*key) != right.get(*key))
+        .cloned()
+        .collect()
+}
+
 /// Uses source coordinates and names rather than generated test identifiers.
 fn test_key(test: &TestCase) -> String {
     format!("{}:{}:{}", test.path, test.line, test.name)
@@ -238,9 +472,99 @@ fn run_identity(loaded: &LoadedState) -> Value {
         "indexSha256": loaded.state.index_sha256,
         "toolVersion": loaded.state.tool_version,
         "rubricVersion": loaded.state.rubric_version,
+        "contractProfileSha256": loaded.state.contract_profile_sha256,
+        "contractProfileName": loaded.inventory.contract_profile.as_ref().map(|profile| profile.name.clone()),
+        "contractProfileInterface": loaded.inventory.contract_profile.as_ref().map(|profile| profile.interface.clone()),
         "repositoryRevision": loaded.state.repository_revision,
         "testCount": loaded.inventory.tests.len(),
-        "assertionCount": loaded.inventory.assertions.len()
+        "assertionCount": loaded.inventory.assertions.len(),
+        "correctionCount": loaded.inventory.corrections.len(),
+        "candidateCount": loaded.inventory.assertions.len()
+            .saturating_add(loaded.inventory.corrections.len())
+    })
+}
+
+/// Canonicalizes the contract rules cited by one judgment.
+fn authority_signature(classification: &Classification) -> String {
+    let mut rules = classification
+        .citations
+        .iter()
+        .map(|citation| {
+            citation
+                .authority_rule_id
+                .clone()
+                .unwrap_or_else(|| "unresolved".to_owned())
+        })
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .collect::<Vec<_>>();
+    if rules.is_empty() {
+        rules.push("none".to_owned());
+    }
+    rules.join("|")
+}
+
+/// Splits the canonical rule signature for the machine review queue.
+fn rule_list(signature: &str) -> Vec<&str> {
+    signature.split('|').collect()
+}
+
+/// Counts exact authority-rule use without converting it into a correctness score.
+fn authority_rule_usage(loaded: &LoadedState) -> BTreeMap<String, usize> {
+    let mut counts: BTreeMap<String, usize> = BTreeMap::new();
+    for classification in loaded.journal.rows() {
+        if classification.citations.is_empty() {
+            let count = counts.entry("none".to_owned()).or_default();
+            *count = count.saturating_add(1);
+            continue;
+        }
+        for citation in &classification.citations {
+            let rule = citation
+                .authority_rule_id
+                .clone()
+                .unwrap_or_else(|| "unresolved".to_owned());
+            let count = counts.entry(rule).or_default();
+            *count = count.saturating_add(1);
+        }
+    }
+    counts
+}
+
+/// Adds one nonempty group to the prioritized review queue.
+fn add_group_review(
+    review_queue: &mut Vec<Value>,
+    priority: &str,
+    kind: &str,
+    detail: &str,
+    keys: &BTreeSet<String>,
+) {
+    if !keys.is_empty() {
+        review_queue.push(review_item(
+            priority,
+            kind,
+            detail,
+            &keys.iter().cloned().collect::<Vec<_>>(),
+        ));
+    }
+}
+
+/// Builds one stable queue record without selecting a winning run.
+fn review_item(priority: &str, kind: &str, detail: impl Into<String>, keys: &[String]) -> Value {
+    json!({
+        "priority": priority,
+        "kind": kind,
+        "detail": detail.into(),
+        "assertionKeys": keys,
+        "count": keys.len()
+    })
+}
+
+/// Returns comparable test-gap membership without run-local test IDs.
+fn gap_comparison(left: &BTreeSet<String>, right: &BTreeSet<String>) -> Value {
+    json!({
+        "leftOnly": left.difference(right).cloned().collect::<Vec<_>>(),
+        "rightOnly": right.difference(left).cloned().collect::<Vec<_>>(),
+        "both": left.intersection(right).cloned().collect::<Vec<_>>()
     })
 }
 

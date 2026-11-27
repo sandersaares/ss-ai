@@ -7,11 +7,12 @@ use serde_json::Value;
 use ss_ai_runtime::fail;
 
 use crate::batch::{MAX_BATCH_SIZE, validate_classification};
+use crate::inventory::contract_profile_digest;
 use crate::model::{
     AssertionSite, Batch, Citation, Classification, ClassificationBatch, CompactSubmission,
-    CompactSubmissionRow, IndexEntry,
+    CompactSubmissionRow, ContractProfile, IndexEntry,
 };
-use crate::state::{LoadedState, evidence_index};
+use crate::state::{LoadedState, citation_authority, evidence_index};
 
 /// Binds one exported batch to the active immutable state token.
 pub(crate) fn validate_exported_batch(batch: &Batch, loaded: &LoadedState) -> Result<(), AppError> {
@@ -22,6 +23,9 @@ pub(crate) fn validate_exported_batch(batch: &Batch, loaded: &LoadedState) -> Re
         || batch.index_sha256 != loaded.state.index_sha256
         || batch.tool_version != loaded.state.tool_version
         || batch.rubric_version != loaded.state.rubric_version
+        || batch.contract_profile_sha256 != loaded.state.contract_profile_sha256
+        || contract_profile_digest(batch.contract_profile.as_ref())?
+            != batch.contract_profile_sha256
     {
         return Err(fail(
             "staleState",
@@ -106,9 +110,21 @@ pub(crate) fn resolve_submission(
                     format!("Exported assertion '{assertion_id}' is missing from inventory"),
                 )
             })?;
-        let classification =
-            resolve_submission_row(row, assertion, &accepted, &handles, &loaded.index)?;
-        validate_classification(&classification, assertion, &tests, &loaded.index)?;
+        let classification = resolve_submission_row(
+            row,
+            assertion,
+            &accepted,
+            &handles,
+            &loaded.index,
+            loaded.inventory.contract_profile.as_ref(),
+        )?;
+        validate_classification(
+            &classification,
+            assertion,
+            &tests,
+            &loaded.index,
+            loaded.inventory.contract_profile.as_ref(),
+        )?;
         classifications.push(classification);
     }
     if !rows.is_empty() {
@@ -133,10 +149,11 @@ fn resolve_submission_row(
     accepted: &BTreeMap<&str, &Classification>,
     handles: &BTreeMap<String, usize>,
     index: &[IndexEntry],
+    profile: Option<&ContractProfile>,
 ) -> Result<Classification, AppError> {
     match row.reuse_from.take() {
-        None => resolve_explicit_row(row, assertion, handles, index),
-        Some(reuse_from) => resolve_reuse_row(row, &reuse_from, accepted, handles, index),
+        None => resolve_explicit_row(row, assertion, handles, index, profile),
+        Some(reuse_from) => resolve_reuse_row(row, &reuse_from, accepted, handles, index, profile),
     }
 }
 
@@ -146,6 +163,7 @@ fn resolve_explicit_row(
     assertion: &AssertionSite,
     handles: &BTreeMap<String, usize>,
     index: &[IndexEntry],
+    profile: Option<&ContractProfile>,
 ) -> Result<Classification, AppError> {
     if row.equivalence_confirmed.is_some() {
         return Err(submission_error(
@@ -178,12 +196,18 @@ fn resolve_explicit_row(
             &citation_handles,
             handles,
             index,
+            profile,
         )?,
         incidental_reason: row.incidental_reason,
         calling_test_ids,
         unlinked_reason: row.unlinked_reason,
         unresolved_caller_reason: row.unresolved_caller_reason,
         review_reason: row.review_reason,
+        decisive_clause: row.decisive_clause,
+        observation_strength: row.observation_strength,
+        passing_counterexample: row.passing_counterexample,
+        candidate_role: row.candidate_role,
+        candidate_disposition: row.candidate_disposition,
     })
 }
 
@@ -194,6 +218,7 @@ fn resolve_reuse_row(
     accepted: &BTreeMap<&str, &Classification>,
     handles: &BTreeMap<String, usize>,
     index: &[IndexEntry],
+    profile: Option<&ContractProfile>,
 ) -> Result<Classification, AppError> {
     if row.equivalence_confirmed != Some(true) {
         return Err(submission_error(
@@ -260,12 +285,24 @@ fn resolve_reuse_row(
             &citation_handles,
             handles,
             index,
+            profile,
         )?,
         incidental_reason: source.incidental_reason.clone(),
         calling_test_ids,
         unlinked_reason: row.unlinked_reason,
         unresolved_caller_reason: row.unresolved_caller_reason,
         review_reason: row.review_reason,
+        decisive_clause: row
+            .decisive_clause
+            .or_else(|| source.decisive_clause.clone()),
+        observation_strength: row
+            .observation_strength
+            .or_else(|| source.observation_strength.clone()),
+        passing_counterexample: row
+            .passing_counterexample
+            .or_else(|| source.passing_counterexample.clone()),
+        candidate_role: row.candidate_role,
+        candidate_disposition: row.candidate_disposition,
     })
 }
 
@@ -312,6 +349,7 @@ fn resolve_citation_handles(
     handles: &[String],
     evidence: &BTreeMap<String, usize>,
     index: &[IndexEntry],
+    profile: Option<&ContractProfile>,
 ) -> Result<Vec<Citation>, AppError> {
     let mut citations = Vec::new();
     for (offset, handle) in handles.iter().enumerate() {
@@ -344,6 +382,7 @@ fn resolve_citation_handles(
             owner: entry.owner.clone(),
             source_role: entry.source_role.clone(),
             excerpt: entry.text.clone(),
+            authority_rule_id: citation_authority(profile, entry).map(|rule| rule.id.clone()),
         });
     }
     Ok(citations)

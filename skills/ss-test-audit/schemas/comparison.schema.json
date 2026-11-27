@@ -5,35 +5,67 @@
   "required": [
     "schemaVersion",
     "comparableContent",
+    "sameContractProfile",
     "left",
     "right",
+    "commonActiveAssertionCount",
     "matchedAssertionCount",
     "exactLabelAgreementCount",
     "exactLabelAgreementRate",
     "changedRationaleCount",
     "changedEvidenceStatusCount",
     "changedReviewReasonCount",
+    "decisiveClauseDifferenceCount",
+    "observationStrengthDifferenceCount",
+    "passingCounterexampleDifferenceCount",
+    "candidateRoleDifferenceCount",
     "callerSetDifferenceCount",
     "leftOnlySites",
     "rightOnlySites",
+    "denominatorDifferenceCount",
+    "denominatorDifferences",
     "transitionMatrix",
+    "authorityRuleUsage",
+    "authorityRuleTransitions",
     "noCountedAssertionTests",
-    "incidentalOnlyTests"
+    "incidentalOnlyTests",
+    "agreementSampleAssertionKeys",
+    "reviewQueue"
   ],
   "properties": {
-    "schemaVersion": { "const": 1 },
+    "schemaVersion": { "const": 2 },
     "comparableContent": { "type": "boolean" },
+    "sameContractProfile": { "type": "boolean" },
     "left": { "$ref": "#/$defs/runIdentity" },
     "right": { "$ref": "#/$defs/runIdentity" },
+    "commonActiveAssertionCount": { "type": "integer", "minimum": 0 },
     "matchedAssertionCount": { "type": "integer", "minimum": 0 },
     "exactLabelAgreementCount": { "type": "integer", "minimum": 0 },
     "exactLabelAgreementRate": { "type": "number", "minimum": 0, "maximum": 1 },
     "changedRationaleCount": { "type": "integer", "minimum": 0 },
     "changedEvidenceStatusCount": { "type": "integer", "minimum": 0 },
     "changedReviewReasonCount": { "type": "integer", "minimum": 0 },
+    "decisiveClauseDifferenceCount": { "type": "integer", "minimum": 0 },
+    "observationStrengthDifferenceCount": { "type": "integer", "minimum": 0 },
+    "passingCounterexampleDifferenceCount": { "type": "integer", "minimum": 0 },
+    "candidateRoleDifferenceCount": { "type": "integer", "minimum": 0 },
     "callerSetDifferenceCount": { "type": "integer", "minimum": 0 },
     "leftOnlySites": { "type": "array", "items": { "type": "string" } },
     "rightOnlySites": { "type": "array", "items": { "type": "string" } },
+    "denominatorDifferenceCount": { "type": "integer", "minimum": 0 },
+    "denominatorDifferences": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["assertionKey", "left", "right"],
+        "properties": {
+          "assertionKey": { "type": "string" },
+          "left": { "type": "object" },
+          "right": { "type": "object" }
+        }
+      }
+    },
     "transitionMatrix": {
       "type": "array",
       "items": {
@@ -47,8 +79,49 @@
         }
       }
     },
+    "authorityRuleUsage": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["left", "right"],
+      "properties": {
+        "left": { "type": "object", "additionalProperties": { "type": "integer", "minimum": 0 } },
+        "right": { "type": "object", "additionalProperties": { "type": "integer", "minimum": 0 } }
+      }
+    },
+    "authorityRuleTransitions": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["left", "right", "leftAuthorityRules", "rightAuthorityRules", "assertionKeys", "count"],
+        "properties": {
+          "left": { "type": "string" },
+          "right": { "type": "string" },
+          "leftAuthorityRules": { "type": "array", "items": { "type": "string" } },
+          "rightAuthorityRules": { "type": "array", "items": { "type": "string" } },
+          "assertionKeys": { "type": "array", "items": { "type": "string" } },
+          "count": { "type": "integer", "minimum": 0 }
+        }
+      }
+    },
     "noCountedAssertionTests": { "$ref": "#/$defs/gapMembership" },
-    "incidentalOnlyTests": { "$ref": "#/$defs/gapMembership" }
+    "incidentalOnlyTests": { "$ref": "#/$defs/gapMembership" },
+    "agreementSampleAssertionKeys": { "type": "array", "items": { "type": "string" } },
+    "reviewQueue": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["priority", "kind", "detail", "assertionKeys", "count"],
+        "properties": {
+          "priority": { "enum": ["high", "medium", "low"] },
+          "kind": { "type": "string", "minLength": 1 },
+          "detail": { "type": "string", "minLength": 1 },
+          "assertionKeys": { "type": "array", "items": { "type": "string" } },
+          "count": { "type": "integer", "minimum": 0 }
+        }
+      }
+    }
   },
   "$defs": {
     "runIdentity": {
@@ -61,9 +134,14 @@
         "indexSha256",
         "toolVersion",
         "rubricVersion",
+        "contractProfileSha256",
+        "contractProfileName",
+        "contractProfileInterface",
         "repositoryRevision",
         "testCount",
-        "assertionCount"
+        "assertionCount",
+        "correctionCount",
+        "candidateCount"
       ],
       "properties": {
         "auditId": { "type": "string", "minLength": 1 },
@@ -72,9 +150,14 @@
         "indexSha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
         "toolVersion": { "type": "string", "minLength": 1 },
         "rubricVersion": { "type": "string", "minLength": 1 },
+        "contractProfileSha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+        "contractProfileName": { "type": ["string", "null"], "minLength": 1 },
+        "contractProfileInterface": { "type": ["string", "null"], "minLength": 1 },
         "repositoryRevision": { "type": "string", "minLength": 1 },
         "testCount": { "type": "integer", "minimum": 0 },
-        "assertionCount": { "type": "integer", "minimum": 0 }
+        "assertionCount": { "type": "integer", "minimum": 0 },
+        "correctionCount": { "type": "integer", "minimum": 0 },
+        "candidateCount": { "type": "integer", "minimum": 0 }
       }
     },
     "gapMembership": {

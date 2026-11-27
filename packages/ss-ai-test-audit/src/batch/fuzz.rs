@@ -21,9 +21,10 @@ fn snapshot() -> LoadedState {
     let id = "audit";
     let digest = "snapshot";
     let state: AuditState = from_value(json!({
-        "schemaVersion": 3, "auditId": id, "snapshotSha256": digest, "indexSha256": "index",
+        "schemaVersion": 4, "auditId": id, "snapshotSha256": digest, "indexSha256": "index",
         "repositoryRoot": "repo", "repositoryRevision": "unversioned", "revisionKind": RevisionKind::Unversioned,
-        "scopePaths": [], "toolVersion": "test", "rubricVersion": "test", "contentSha256": "content",
+        "scopePaths": [], "toolVersion": "test", "rubricVersion": "test",
+        "contentSha256": "content", "contractProfileSha256": "profile",
         "scannedAt": "1970-01-01T00:00:00Z", "testCount": 1, "assertionCount": SITES
     })).unwrap();
     let assertions = (1..=SITES)
@@ -50,7 +51,7 @@ fn snapshot() -> LoadedState {
         })
         .collect();
     let inventory = Inventory {
-        schema_version: 3,
+        schema_version: 4,
         audit_id: id.to_owned(),
         repository_root: state.repository_root.clone(),
         repository_revision: state.repository_revision.clone(),
@@ -59,6 +60,7 @@ fn snapshot() -> LoadedState {
         tool_version: state.tool_version.clone(),
         rubric_version: state.rubric_version.clone(),
         content_sha256: state.content_sha256.clone(),
+        contract_profile: None,
         files: Vec::new(),
         tests: vec![from_value(json!({
             "id": "T000001", "name": "checks", "kind": "unit", "language": "rust", "path": "lib.rs",
@@ -70,13 +72,14 @@ fn snapshot() -> LoadedState {
     };
     let journal = ValidatedJournal::from_persisted(
         ClassificationJournal {
-            schema_version: 3,
+            schema_version: 4,
             audit_id: id.to_owned(),
             snapshot_sha256: digest.to_owned(),
             content_sha256: state.content_sha256.clone(),
             index_sha256: state.index_sha256.clone(),
             tool_version: state.tool_version.clone(),
             rubric_version: state.rubric_version.clone(),
+            contract_profile_sha256: state.contract_profile_sha256.clone(),
             classifications: Vec::new(),
         },
         &state,
@@ -106,6 +109,11 @@ fn judgment(site: usize, outcome: &str) -> Classification {
         unlinked_reason: None,
         unresolved_caller_reason: None,
         review_reason: None,
+        decisive_clause: None,
+        observation_strength: None,
+        passing_counterexample: None,
+        candidate_role: None,
+        candidate_disposition: None,
     }
 }
 

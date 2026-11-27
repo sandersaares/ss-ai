@@ -16,6 +16,7 @@ ss-ai test-audit initialize `
   --repository-path "{{REPOSITORY_PATH}}" `
   --scope-path "{{SCOPE_PATH}}" `
   --correction-path "{{INVENTORY_CORRECTION_PATH}}" `
+  --contract-profile-path "{{CONTRACT_PROFILE_PATH}}" `
   --state-directory "{{STATE_DIRECTORY}}"
 ```
 
@@ -24,16 +25,21 @@ ss-ai test-audit initialize `
 | `REPOSITORY_PATH` | Absolute path to the repository root or a path inside a Git working tree. |
 | `SCOPE_PATH` | Existing repository-relative or absolute file or directory for test and assertion inventory. Repeat `--scope-path` for multiple scopes; omit it for the repository-wide inventory. The evidence index covers the ordinary repository walk and any explicitly selected source outside it. |
 | `INVENTORY_CORRECTION_PATH` | Optional strict [inventory-corrections.schema.json](schemas/inventory-corrections.schema.json) file for exact ambiguous fixture-site exclusions. Omit when no reviewed corrections are needed. |
+| `CONTRACT_PROFILE_PATH` | Required strict [contract-profile.schema.json](schemas/contract-profile.schema.json) file defining the audited audience, supported entry points, internal surfaces, source authority, and unresolved policy. |
 | `STATE_DIRECTORY` | New, empty directory outside the repository, even when `--scope-path` limits inventory. |
 
-On success, retain the returned state paths, `auditId`, `snapshotSha256`, source revision, test count, assertion count, file count, diagnostic count, and correction count. On any failure, report the native diagnostic and do not create an alternate state schema.
+On success, retain the returned state paths, `auditId`, `snapshotSha256`,
+`contentSha256`, `contractProfileSha256`, source revision, test count, assertion
+count, file count, diagnostic count, and correction count. On any failure,
+report the native diagnostic and do not create an alternate state schema.
 
 Each correction must match exactly one scanner expression at the named revision,
-path, and line range and must include a nonblank reason. The tool retains the
+path, and line range and must include a candidate role, excluded disposition, and
+nonblank reason. The tool retains the
 excluded source site, source digest, stable assertion identifier, and reason in
 the immutable inventory and emits an `inventoryCorrection` diagnostic. Corrections
 apply only during initialization. If a persisted snapshot is missing or contains
-an incorrect correction, preserve it and initialize a new schema-version-3 state
+an incorrect correction, preserve it and initialize a new schema-version-4 state
 instead of editing the old files.
 
 Source discovery indexes text files up to and including 4 MiB. Larger files
@@ -208,7 +214,9 @@ Fresh rows:
       "actualOutcome": "The checked call returns the documented value.",
       "rationale": "The cited API documentation promises this outcome.",
       "citationHandles": ["E0123456789ab-000042"],
-      "callingTestIds": ["T000001"]
+      "callingTestIds": ["T000001"],
+      "decisiveClause": "The API returns the documented value.",
+      "observationStrength": "exact"
     }
   ]
 }
@@ -258,6 +266,13 @@ ss-ai test-audit submit `
 
 The command binds rows to the exported machine batch using `batchFingerprint`, resolves all evidence handles, and commits the validated classifications before exporting the next batch. Use separate `citationHandles` entries for multiple citations. The receipt's `directive` spells out the required next operation. For `nextAction: "continue"`, immediately read the returned `nextBatch.displayPath` and start judgment in the same invocation; retain `nextBatch.batchPath` for the next submission. A successful progress receipt is not a final response. Preserve the original inputs and [recover according to the point of failure](SKILL.md#recover-from-failure).
 
+For a `substring`, `presence`, or `other` observation used by `Documented` or
+`Mixed`, include `passingCounterexample`. For an uncertain fallible or
+control-flow candidate that remains active, include
+`candidateRole: "observation"` and `candidateDisposition: "included"`.
+Reinitialize with a correction for fixture setup, fault injection, or cleanup;
+submission cannot relabel those source sites into the active denominator.
+
 ## Compare completed audits
 
 ```powershell
@@ -278,10 +293,12 @@ ss-ai test-audit compare `
 | `LEFT_STATE_DIRECTORY` | First completed audit state used as one comparison side. |
 | `RIGHT_STATE_DIRECTORY` | Second completed audit state used as the other comparison side. |
 
-The command requires complete classification on both sides. It reports checkout-
-independent content comparability, per-site classification transitions, rationale
-and evidence-status drift, effective caller-set differences, unmatched sites, and
-test-gap membership. It never designates either run as the ground truth.
+The command requires complete classification on both sides. It reports
+checkout-independent content comparability, contract-profile identity,
+per-policy transition groups, denominator and correction drift, decisive-clause
+and observation-strength differences, effective caller-set differences,
+test-gap membership, and a prioritized review queue. It never designates either
+run as the ground truth.
 The result follows [comparison.schema.json](schemas/comparison.schema.json).
 
 ## Emit final reports

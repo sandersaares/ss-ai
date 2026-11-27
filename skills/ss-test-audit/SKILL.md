@@ -28,6 +28,16 @@ Use a new, empty state directory outside the repository, even for an audit limit
 
 A public promise must be wording in public API documentation or an authoritative public design contract that promises the checked behavior. Public declarations, type shape, naming, conventions, and private implementation comments can guide `Implicit` or locate evidence; none alone promises an undocumented exact behavior.
 
+Before initialization, derive one contract profile for the audited
+product/interface. Name its intended audience, supported entry points, explicitly
+internal surfaces, admissible behavioral sources, non-authoritative sources,
+and unresolved authority questions. A profile decision applies to every batch in
+that audit; do not reverse-engineer a policy separately for each assertion.
+Every citation receives the exact matching profile rule through native handle
+resolution. `Documented` and `Mixed` require at least one admissible rule, while
+a non-authoritative citation may remain as contextual evidence. A citation from
+an unresolved source remains a review limitation, not a silent promise.
+
 Treat tool output as inventory evidence, not semantic authority. Do not classify an assertion with a keyword rule. Read the assertion's source, containing test, called API, and only the targeted contract evidence needed to explain its outcome.
 
 Search handles bind a complete bounded documentation paragraph, list item, or
@@ -58,11 +68,19 @@ Use `Confirmed` only when the cited evidence establishes the claimed relationshi
 
 Use the absolute state directory path. If resuming, retain its exact path and skip initialization after verifying the retained `auditId`, repository, and snapshot summary from the last session.
 
-Run `ss-ai test-audit initialize` using the first recipe in [commands.md](commands.md#initialize). Pass `--scope-path` once for each resolved scope. If initialization reports an unsupported-language or parse-fallback diagnostic, retain that diagnostic as a coverage limit; do not describe the later inventory as exhaustive.
+Create the strict contract profile before initialization and run `ss-ai test-audit
+initialize` using the first recipe in [commands.md](commands.md#initialize).
+Pass `--contract-profile-path` and pass `--scope-path` once for each resolved
+scope. If initialization reports an unsupported-language or parse-fallback
+diagnostic, retain that diagnostic as a coverage limit; do not describe the
+later inventory as exhaustive.
 
-Record the returned `auditId`, `snapshotSha256`, counts, correction count, state paths, and diagnostics count in the session checkpoint.
+Record the returned `auditId`, `snapshotSha256`, `contentSha256`,
+`contractProfileSha256`, counts, correction count, state paths, and diagnostics
+count in the session checkpoint.
 
-Persisted audit state and inventory use schema version 3. Use the same utility
+Persisted audit state and inventory use schema version 4 with judgment rubric
+version 2. Use the same utility
 version throughout one audit. A reader rejects state from another schema version
 without changing it. Do not edit, migrate, or reinterpret an old inventory.
 
@@ -73,7 +91,9 @@ test fixture. Bind every entry to the exact audited repository revision, source
 path, line range, and scanner expression, and explain why the site is not an
 audited predicate. The scanner applies these reviewed exclusions before it
 publishes the immutable inventory and records them as provenance diagnostics.
-Pass the file with `--correction-path`; there is no post-initialization edit.
+Each correction states `candidateRole` (`fixtureSetup`, `faultInjection`, or
+`cleanup`) and `candidateDisposition: "excluded"`. Pass the file with
+`--correction-path`; there is no post-initialization edit.
 Never classify a known fixture extraction as `Incidental` merely to finish a
 batch, because that keeps it in assertion denominators.
 
@@ -105,6 +125,7 @@ Reconcile discrepancies before classification:
 - parser-backed Rust records `#[test]`, recognized test attributes, rustdoc code blocks, assertions, panic expectations, `static_assertions` checks (including `assert_eq_size!`), and direct failure branches;
 - compile-only checks count at a call site that instantiates an empty generic helper with trait bounds, rather than at the helper declaration;
 - fallible value access in test code may appear as `fallibleValueCheck` sites. Judge these individually: a standalone `.expect(...)` on an extracted API value can verify presence, while lock, pointer, join, ownership, and other fixture extraction remains excluded. Do not blanket-count every `unwrap` or `expect`;
+- a candidate export can distinguish an observation from fixture setup, fault injection, or cleanup. Resolve `fallibleValueCheck` and `unexpectedBranch` candidates before semantic classification. An included candidate must explicitly use `candidateRole: "observation"` and `candidateDisposition: "included"`; any other role requires a correction in a new initialization. Do not count a consumed injected fault as a second assertion;
 - an ordinary `.unwrap()` remains setup. In rustdoc examples, a post-send `unwrap()` used only to print or display a result is not an assertion site unless the resulting value participates in another recognized predicate;
 - recognized panic expectation helpers such as `assert_panics` count once, while a panic deliberately triggered inside that expectation does not count again;
 - C#, Java, JavaScript, TypeScript, Python, Go, Kotlin, and PowerShell use deliberately narrow text patterns;
@@ -131,13 +152,16 @@ Execute `next-batch` as specified in [commands.md](commands.md#export-the-next-a
 
 Read only the exported batch display, its local context, and targeted evidence searches. For each assertion:
 
-1. Confirm that the source site belongs in the denominator. Distinguish extracting an API result from acquiring a fixture, lock, guard, pointer, join result, or other test-owned storage. Use the initialization correction path for an uncertain inventory site; do not hide it by choosing `Incidental`.
+Before the numbered checks, read the contract profile exported in the batch and retain its declared audience, entry points, authority rules, and unresolved questions for this judgment.
+1. Confirm that the source site belongs in the denominator. Distinguish extracting an API result from acquiring a fixture, lock, guard, pointer, join result, or other test-owned storage. Distinguish a consumed fault stimulus, setup, cleanup, and an unexpected-branch observation. Use the initialization correction path for a non-observation candidate; do not hide it by choosing `Incidental`.
 2. State the weakest outcome the predicate actually demonstrates. Name the tested subject, preconditions, observation point, and polarity. Test names and panic messages are context, not evidence of a promise.
 3. Split independently constrained facts in the reasoning, including exact counts, values, order, traits, and message matching. Keep one classification row for the source site. Do not count the same nested expectation as an additional outer predicate.
 4. Identify the actual public operation and candidate authority. Prefer operation-specific public API wording and applicable traits, then explicitly authoritative public design contracts or independent examples. A public API used only for setup and private fixture comments can explain context but cannot create a promise by themselves.
 5. Identify the decisive clause, not merely a nearby paragraph on the right API. State how it requires the observed predicate for this subject and precondition set. Distinguish a producer's state guarantee from an observer's query, permission (`may`) from obligation (`must`), and the first observation from later registration or cleanup states.
+   Submit the clause verbatim in `decisiveClause`; the native validator requires it to occur in an admissible cited range.
 6. Ask whether a contract-conforming implementation may make this predicate fail for the stated subject and conditions. Decide whether the outcome is required, only permitted, or unaddressed. A missing search result does not prove absence; refine the search and preserve ambiguity.
-7. Use `Documented` when every checked fact is explicitly required; `Mixed` when a documented fact is combined with a distinct undocumented constraint; `Implicit` only for a named plausible public guarantee with a stated missing wording; otherwise use `Incidental` and name the fixture, private choice, setup, or permitted alternative. Do not use uncertainty alone as the reason for `Implicit`.
+   For a `substring`, `presence`, or `other` observation used by `Documented` or `Mixed`, record a concrete alternative result that still passes the predicate in `passingCounterexample`. This separates necessary conformance from evidence that would prove the claimed relationship.
+7. Use `Documented` when every checked fact is explicitly required; `Mixed` when a documented fact is combined with a distinct undocumented constraint; `Implicit` only for a named plausible public guarantee with a stated missing wording; otherwise use `Incidental` and name the fixture, private choice, setup, or permitted alternative. Do not use uncertainty alone as the reason for `Implicit`. Set `observationStrength` for every profile-backed row.
 8. Verify exact citations, caller attribution, and any explicit unlinked reason before submission. Reject an unlinked explanation when native or agent-confirmed effective callers already exist.
 
 Use `unresolvedCallerReason` for a possible additional indirect caller that still
@@ -161,7 +185,11 @@ citation.
 
 Write one compact submission matching [compact-submission.schema.json](schemas/compact-submission.schema.json). Copy the current batch result's `batchFingerprint` exactly; do not recompute it or copy a fingerprint from an earlier generation. `submit` uses that fingerprint to bind the rows to the exact current `batchPath`. Each `citationHandles` entry must be an exact `evidenceHandle` returned by search. Multiple citations are independent array entries.
 
-For a fresh row, supply assertion ID, classification, evidence status, actual outcome, rationale, citation handles, caller IDs, and applicable reasons directly.
+For a fresh row, supply assertion ID, classification, evidence status, actual
+outcome, rationale, citation handles, caller IDs, observation strength, and
+applicable reasons directly. `Documented` and `Mixed` also carry a decisive
+clause. Weak observations carry a passing counterexample. Uncertain source
+candidates carry candidate role and disposition.
 
 To reuse an accepted row, supply `reuseFrom`, explicit `equivalenceConfirmed: true`, replacement `citationHandles`, and explicit `callingTestIds`. Do not reuse implicitly, infer equivalence, or omit caller attribution. An empty citation replacement is rejected rather than falling back to the prior assertion's evidence. If the reused assertion requires an unlinked reason, provide it explicitly.
 
@@ -211,6 +239,12 @@ corrected judgment by initializing a new state directory at the same source
 snapshot, rerunning evidence selection, and replaying the revised judgments
 with fresh handles. Never submit a changed row to an existing completed
 classification journal; do not silently edit completed reports.
+
+When comparing completed runs, review the prioritized queue in order: contract
+profile mismatch, denominator and correction membership, authority-policy
+transitions, decisive-clause and observation-strength differences, candidate
+roles, caller-set drift, and test-gap drift. Agreement is not a winner signal.
+Inspect sampled agreeing sites as well as disagreements.
 
 Deliver these generated paths:
 

@@ -17,9 +17,16 @@ The skill audits one repository and any selected set of existing file or directo
 
 The final trace contains exactly one classification row for each inventoried assertion. The test inventory contains every inventoried test and links direct and shared assertion IDs. Tests that execute smoke behavior without a counted predicate remain visible.
 
-Persisted audit state and inventory use schema version 3. Initialization can
+Persisted audit state and inventory use schema version 4 with judgment rubric
+version 2. Initialization requires an explicit contract-authority profile that
+names the public interface, audience, supported entry points, internal surfaces,
+accepted and rejected source authority, and unresolved policy. The profile has
+an identity separate from the repository content and evidence digests, so
+comparisons can distinguish policy drift from source drift. Initialization can
 apply exact, revision-bound source-site corrections when syntax cannot prove
-whether an `expect` extracts a fixture. The immutable corrected inventory retains
+whether an `expect` extracts a fixture or a source candidate injects a fault.
+Every correction identifies fixture setup, fault injection, or cleanup and
+records the excluded disposition. The immutable corrected inventory retains
 the original assertion identifier, source location, expression, file digest, and
 reason, and emits a diagnostic so excluded sites remain explainable. Corrections
 cannot mutate an already published snapshot. Native readers reject incompatible
@@ -47,7 +54,8 @@ qualified calls from unresolved candidates; only effective callers enter caller
 IDs. Search records retain their structural source role and owner without treating
 that metadata as semantic authority. Final reports surface correction and
 consistency diagnostics, while the `compare` command evaluates completed runs
-without choosing either as ground truth.
+by contract-profile, authority, denominator, claim, observation, caller, and
+test-gap drift without choosing either as ground truth.
 
 Using the [classification boundaries](#classification-boundaries), the
 Markdown report shows per-module totals and percentages for:
@@ -62,6 +70,12 @@ The rates are descriptive audit measurements, not quality scores. Mixed sites en
 `Documented` requires exact public wording supporting the checked outcome. `Implicit` records a plausible public guarantee inferred from public shape, names, or conventions without wording for that exact behavior. `Mixed` combines a documented component and a separate undocumented constraint. `Incidental` identifies private mechanics, setup, or permitted behavior for which no public promise applies.
 
 Public observability alone does not create a public promise. A private implementation comment does not create a public promise. Ambiguous evidence remains ambiguous rather than receiving a fabricated citation.
+
+Profile-backed `Documented` and `Mixed` judgments name a decisive verbatim clause
+from an admissible citation and describe the strength of the source predicate.
+Weak substring, presence, or unconstrained observations also name a
+contract-relevant alternative that would still pass. This separates what a
+passing test proves from why conforming behavior should pass.
 
 ## Language coverage
 

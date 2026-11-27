@@ -77,6 +77,8 @@ Describe 'ss-test-audit skill contract' {
                 sourceRole = 'markdownDocumentation'; excerpt = 'Returns an empty collection.'
             })
             callingTestIds = @('T000001')
+            decisiveClause = 'Returns an empty collection.'
+            observationStrength = 'exact'
         }
         $record = @{ schemaVersion = 1; auditId = 'audit'; snapshotSha256 = 'a' * 64; assertions = @($row) }
         Test-AuditRecord -Schema 'classification-batch' -Record $record | Should -BeTrue
@@ -91,6 +93,7 @@ Describe 'ss-test-audit skill contract' {
                 @{
                     path = 'tests/check.rs'; line = 4; endLine = 4
                     expression = 'holder.as_mut().expect("fixture still present")'
+                    candidateRole = 'fixtureSetup'; candidateDisposition = 'excluded'
                     reason = 'The option holds callback-local test state rather than an audited API result.'
                 }
             )
@@ -100,11 +103,28 @@ Describe 'ss-test-audit skill contract' {
         Test-AuditRecord -Schema 'inventory-corrections' -Record $record | Should -BeFalse
     }
 
+    It 'validates an explicit contract-authority profile' {
+        $record = @{
+            schemaVersion = 1; name = 'CLI'; interface = 'command line'; audience = 'CLI users'
+            entryPoints = @('dure'); internalSurfaces = @('src/')
+            authorities = @(@{
+                id = 'publicDesign'; pathPrefix = 'docs/design.md'
+                sourceRoles = @('markdownDocumentation'); admissible = $true
+                authority = 'Public command behavior'; scope = 'CLI output'
+            })
+            unresolved = @()
+        }
+        Test-AuditRecord -Schema 'contract-profile' -Record $record | Should -BeTrue
+        $record.entryPoints = @()
+        Test-AuditRecord -Schema 'contract-profile' -Record $record | Should -BeFalse
+    }
+
     It 'validates the completed summary and details as distinct records' {
         $identity = @{
-            schemaVersion = 2; auditId = 'audit'; snapshotSha256 = 'a' * 64
+            schemaVersion = 3; auditId = 'audit'; snapshotSha256 = 'a' * 64
             contentSha256 = 'b' * 64; indexSha256 = 'c' * 64
-            toolVersion = '0.1.0'; rubricVersion = '1'
+            toolVersion = '0.1.0'; rubricVersion = '2'
+            contractProfileSha256 = 'e' * 64
             repositoryRevision = 'unversioned'; repositoryRoot = 'repository'; scopePaths = @()
         }
         $summary = $identity + @{
@@ -135,6 +155,8 @@ Describe 'ss-test-audit skill contract' {
                     })
                     incidentalReason = $null; callingTestIds = @(); unlinkedReason = $null
                     unresolvedCallerReason = $null; reviewReason = $null
+                    decisiveClause = 'Reports readiness.'; observationStrength = 'exact'
+                    passingCounterexample = $null; candidateRole = $null; candidateDisposition = $null
                 }
             })
             testInventory = @(@{
@@ -151,6 +173,7 @@ Describe 'ss-test-audit skill contract' {
                 priority = 'medium'; kind = 'repeatedShortRationale'
                 assertionIds = @('A000001'); detail = 'The rationale repeats without a site-specific premise.'
             })
+            contractProfile = $null
         }
         Test-AuditRecord -Schema 'summary' -Record $summary | Should -BeTrue
         Test-AuditRecord -Schema 'details' -Record $details | Should -BeTrue
@@ -168,18 +191,27 @@ Describe 'ss-test-audit skill contract' {
     It 'validates a completed audit comparison without selecting a winner' {
         $run = @{
             auditId = 'audit'; snapshotSha256 = 'a' * 64; contentSha256 = 'b' * 64
-            indexSha256 = 'c' * 64; toolVersion = '0.1.0'; rubricVersion = '1'
+            indexSha256 = 'c' * 64; toolVersion = '0.1.0'; rubricVersion = '2'
+            contractProfileSha256 = 'd' * 64; contractProfileName = $null
+            contractProfileInterface = $null
             repositoryRevision = 'unversioned'; testCount = 1; assertionCount = 1
+            correctionCount = 0; candidateCount = 1
         }
         $record = @{
-            schemaVersion = 1; comparableContent = $true; left = $run; right = $run
+            schemaVersion = 2; comparableContent = $true; sameContractProfile = $true
+            left = $run; right = $run; commonActiveAssertionCount = 1
             matchedAssertionCount = 1; exactLabelAgreementCount = 1
             exactLabelAgreementRate = 1; changedRationaleCount = 0
             changedEvidenceStatusCount = 0; changedReviewReasonCount = 0
-            callerSetDifferenceCount = 0
+            decisiveClauseDifferenceCount = 0; observationStrengthDifferenceCount = 0
+            passingCounterexampleDifferenceCount = 0; candidateRoleDifferenceCount = 0
+            callerSetDifferenceCount = 0; denominatorDifferenceCount = 0
             leftOnlySites = @(); rightOnlySites = @(); transitionMatrix = @()
+            denominatorDifferences = @()
+            authorityRuleUsage = @{ left = @{}; right = @{} }; authorityRuleTransitions = @()
             noCountedAssertionTests = @{ leftOnly = @(); rightOnly = @(); both = @() }
             incidentalOnlyTests = @{ leftOnly = @(); rightOnly = @(); both = @() }
+            agreementSampleAssertionKeys = @('source:1:1'); reviewQueue = @()
         }
         Test-AuditRecord -Schema 'comparison' -Record $record | Should -BeTrue
     }

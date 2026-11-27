@@ -12,14 +12,15 @@ use serde_json::{Value, json, to_value, to_vec_pretty};
 use ss_ai_runtime::{Clock, FileTransaction, caused_by, fail};
 
 use crate::model::{
-    AssertionSite, AuditState, Batch, BatchAssertion, BatchContextEntry, Citation, Classification,
-    ClassificationBatch, ClassificationJournal, ClassificationKind, CompactSubmission,
-    EvidenceStatus, IndexEntry, Inventory, ScanDiagnostic, TestCase,
+    AssertionSite, AuditState, Batch, BatchAssertion, BatchContextEntry, CandidateDisposition,
+    CandidateRole, Citation, Classification, ClassificationBatch, ClassificationJournal,
+    ClassificationKind, CompactSubmission, ContractAuthority, ContractProfile, EvidenceStatus,
+    IndexEntry, Inventory, ScanDiagnostic, TestCase,
 };
 use crate::scan::digest;
 use crate::state::{
-    LoadedState, create_output_parent, load, load_fresh, output_path_text, parse_json,
-    path_is_vacant, reject_input_alias, reject_source_alias, reject_state_destination,
+    LoadedState, citation_authority, create_output_parent, load, load_fresh, output_path_text,
+    parse_json, path_is_vacant, reject_input_alias, reject_source_alias, reject_state_destination,
     require_version, resolve_output_path, validate_journal, validate_source_snapshot,
 };
 use crate::submission::{resolve_submission, validate_exported_batch};
@@ -90,6 +91,8 @@ fn build_batch(loaded: &LoadedState, count: NonZeroUsize) -> Batch {
         index_sha256: loaded.state.index_sha256.clone(),
         tool_version: loaded.state.tool_version.clone(),
         rubric_version: loaded.state.rubric_version.clone(),
+        contract_profile_sha256: loaded.state.contract_profile_sha256.clone(),
+        contract_profile: loaded.inventory.contract_profile.clone(),
         assertions: selected,
         completed: completed.len(),
         remaining,
@@ -108,6 +111,7 @@ fn batch_summary(batch: &Batch, output: &str, display: &str, fingerprint: &str) 
         "indexSha256": batch.index_sha256,
         "toolVersion": batch.tool_version,
         "rubricVersion": batch.rubric_version,
+        "contractProfileSha256": batch.contract_profile_sha256,
         "batchFingerprint": fingerprint,
         "batchCount": batch.assertions.len(),
         "completed": batch.completed,
@@ -205,6 +209,34 @@ fn compact_batch_display(batch: &Batch, fingerprint: &str) -> String {
         "Audit {} snapshot {} completed {} remaining {}\nbatchFingerprint: {fingerprint}\n",
         batch.audit_id, batch.snapshot_sha256, batch.completed, batch.remaining,
     );
+    if let Some(profile) = &batch.contract_profile {
+        _ = writeln!(
+            output,
+            "contract profile: {} | interface: {} | audience: {} | digest: {}",
+            profile.name, profile.interface, profile.audience, batch.contract_profile_sha256
+        );
+        _ = writeln!(output, "  entry points: {}", profile.entry_points.join(","));
+        _ = writeln!(
+            output,
+            "  internal surfaces: {}",
+            profile.internal_surfaces.join(",")
+        );
+        for rule in &profile.authorities {
+            _ = writeln!(
+                output,
+                "  authority {}: {} | admissible={} | roles={} | authority={} | scope={}",
+                rule.id,
+                rule.path_prefix,
+                rule.admissible,
+                rule.source_roles.join(","),
+                rule.authority,
+                rule.scope
+            );
+        }
+        for unresolved in &profile.unresolved {
+            _ = writeln!(output, "  unresolved authority: {unresolved}");
+        }
+    }
     for assertion in &batch.assertions {
         let test = assertion
             .test_name
@@ -282,7 +314,14 @@ fn compact_batch_display(batch: &Batch, fingerprint: &str) -> String {
         ) {
             _ = writeln!(
                 output,
-                "  candidate disposition: {disposition}; witness: {witness}"
+                "  candidate role: {}; disposition: {disposition}; witness: {witness}",
+                assertion.candidate_role.map_or("-", |role| match role {
+                    CandidateRole::Observation => "observation",
+                    CandidateRole::FixtureSetup => "fixtureSetup",
+                    CandidateRole::FaultInjection => "faultInjection",
+                    CandidateRole::Cleanup => "cleanup",
+                    CandidateRole::Unresolved => "unresolved",
+                })
             );
         }
     }
@@ -348,11 +387,20 @@ fn batch_assertion(
             .expression
             .push_str(" … [see source for full expression]");
     }
-    let candidate_disposition =
-        (assertion.kind == "fallibleValueCheck").then(|| "includeForReview".to_owned());
-    let candidate_witness = (assertion.kind == "fallibleValueCheck").then(|| {
-        "No recognized fixture, lock, pointer, join, or ownership extraction matched this receiver; semantic review is required"
-            .to_owned()
+    let uncertain_candidate = matches!(
+        assertion.kind.as_str(),
+        "fallibleValueCheck" | "unexpectedBranch"
+    );
+    let candidate_role = uncertain_candidate.then_some(CandidateRole::Unresolved);
+    let candidate_disposition = uncertain_candidate.then(|| "includeForReview".to_owned());
+    let candidate_witness = uncertain_candidate.then(|| {
+        if assertion.kind == "fallibleValueCheck" {
+            "No recognized fixture, lock, pointer, join, or ownership extraction matched this receiver; determine whether it observes an API result"
+                .to_owned()
+        } else {
+            "Determine from local control flow whether this branch rejects the subject or injects a consumed fault"
+                .to_owned()
+        }
     });
     BatchAssertion {
         assertion,
@@ -361,6 +409,7 @@ fn batch_assertion(
         test_line: test.map(|test| test.line),
         context,
         diagnostics: relevant_diagnostics,
+        candidate_role,
         candidate_disposition,
         candidate_witness,
     }
@@ -608,6 +657,7 @@ impl ValidatedJournal {
             || journal.index_sha256 != state.index_sha256
             || journal.tool_version != state.tool_version
             || journal.rubric_version != state.rubric_version
+            || journal.contract_profile_sha256 != state.contract_profile_sha256
         {
             return Err(fail(
                 "invalidState",
@@ -694,7 +744,13 @@ fn accept_batch(
                 ),
             ));
         }
-        validate_classification(&classification, assertion, &tests, index)?;
+        validate_classification(
+            &classification,
+            assertion,
+            &tests,
+            index,
+            inventory.contract_profile.as_ref(),
+        )?;
         if let Some(previous) = existing.get(classification.assertion_id.as_str()) {
             if to_value(previous)? != to_value(&classification)? {
                 return Err(fail(
@@ -780,6 +836,7 @@ pub(crate) fn validate_classification(
     assertion: &AssertionSite,
     tests: &BTreeSet<&str>,
     index: &[IndexEntry],
+    profile: Option<&ContractProfile>,
 ) -> Result<(), AppError> {
     if classification.actual_outcome.trim().is_empty() {
         return Err(row_error(
@@ -793,6 +850,115 @@ pub(crate) fn validate_classification(
             &assertion.id,
             "rationale",
             "The field must explain the contract relationship",
+        ));
+    }
+    if is_category_only_rationale(&classification.rationale) {
+        return Err(row_error(
+            &assertion.id,
+            "rationale",
+            "The rationale must name an operation, premise, condition, or permitted alternative instead of only restating the category",
+        ));
+    }
+    if profile.is_some()
+        && matches!(
+            classification.kind,
+            ClassificationKind::Documented | ClassificationKind::Mixed
+        )
+        && classification
+            .decisive_clause
+            .as_deref()
+            .is_none_or(|clause| clause.trim().is_empty())
+    {
+        return Err(row_error(
+            &assertion.id,
+            "decisiveClause",
+            "Documented and Mixed judgments require the clause that requires the observed outcome",
+        ));
+    }
+    if profile.is_some()
+        && classification
+            .observation_strength
+            .as_deref()
+            .is_none_or(|strength| strength.trim().is_empty())
+    {
+        return Err(row_error(
+            &assertion.id,
+            "observationStrength",
+            "A contract-profile audit requires the strength of the observed predicate",
+        ));
+    }
+    if let Some(strength) = classification.observation_strength.as_deref()
+        && !matches!(
+            strength,
+            "exact" | "substring" | "presence" | "ordering" | "controlFlow" | "other"
+        )
+    {
+        return Err(row_error(
+            &assertion.id,
+            "observationStrength",
+            "Unknown observation strength; use exact, substring, presence, ordering, controlFlow, or other",
+        ));
+    }
+    if classification
+        .passing_counterexample
+        .as_deref()
+        .is_some_and(|counterexample| counterexample.trim().is_empty())
+    {
+        return Err(row_error(
+            &assertion.id,
+            "passingCounterexample",
+            "A passing counterexample must not be blank when supplied",
+        ));
+    }
+    if profile.is_some()
+        && matches!(
+            classification.kind,
+            ClassificationKind::Documented | ClassificationKind::Mixed
+        )
+        && matches!(
+            classification.observation_strength.as_deref(),
+            Some("substring" | "presence" | "other")
+        )
+        && classification
+            .passing_counterexample
+            .as_deref()
+            .is_none_or(|counterexample| counterexample.trim().is_empty())
+    {
+        return Err(row_error(
+            &assertion.id,
+            "passingCounterexample",
+            "Weak observations require a concrete contract-relevant alternative that still passes",
+        ));
+    }
+    if classification.candidate_role.is_some() != classification.candidate_disposition.is_some() {
+        return Err(row_error(
+            &assertion.id,
+            "candidateRole/candidateDisposition",
+            "Candidate role and disposition must be supplied together",
+        ));
+    }
+    if classification.candidate_role.is_some()
+        && (classification.candidate_role != Some(CandidateRole::Observation)
+            || classification.candidate_disposition != Some(CandidateDisposition::Included))
+    {
+        return Err(row_error(
+            &assertion.id,
+            "candidateRole/candidateDisposition",
+            "A non-observation or excluded candidate requires an inventory correction in a new audit",
+        ));
+    }
+    if profile.is_some()
+        && matches!(
+            assertion.kind.as_str(),
+            "fallibleValueCheck" | "unexpectedBranch"
+        )
+        && (classification.candidate_role != Some(CandidateRole::Observation)
+            || classification.candidate_disposition != Some(CandidateDisposition::Included))
+    {
+        return Err(row_error(
+            &assertion.id,
+            "candidateRole/candidateDisposition",
+            "Resolve this fallible or control-flow candidate as an included observation before semantic classification",
         ));
     }
     match classification.kind {
@@ -856,9 +1022,40 @@ pub(crate) fn validate_classification(
             incidental_reason.unwrap_or("An incidental reason must not be blank"),
         ));
     }
+    let decisive_clause = classification.decisive_clause.as_deref();
+    let mut authoritative_citation = false;
+    let mut decisive_citation = false;
     for (position, citation) in classification.citations.iter().enumerate() {
-        validate_citation(&assertion.id, position, citation, index)?;
+        let entry = validate_citation(&assertion.id, position, citation, index)?;
+        let authority =
+            validate_profile_authority(&assertion.id, position, citation, entry, profile)?;
+        if authority.is_some_and(|rule| rule.admissible) {
+            authoritative_citation = true;
+            decisive_citation |=
+                decisive_clause.is_some_and(|clause| citation.excerpt.contains(clause));
+        }
     }
+    if profile.is_some()
+        && matches!(
+            classification.kind,
+            ClassificationKind::Documented | ClassificationKind::Mixed
+        )
+        && !authoritative_citation
+    {
+        return Err(row_error(
+            &assertion.id,
+            "citations",
+            "Documented and Mixed judgments require at least one citation from an admissible authority",
+        ));
+    }
+    if profile.is_some() && decisive_clause.is_some() && !decisive_citation {
+        return Err(row_error(
+            &assertion.id,
+            "decisiveClause",
+            "The decisive clause must be present in an admissible exact cited range",
+        ));
+    }
+
     for (position, test) in classification.calling_test_ids.iter().enumerate() {
         if !tests.contains(test.as_str()) {
             return Err(row_error(
@@ -914,18 +1111,64 @@ pub(crate) fn validate_classification(
     Ok(())
 }
 
+/// Rejects boilerplate that supplies no site-specific judgment premise.
+fn is_category_only_rationale(rationale: &str) -> bool {
+    matches!(
+        rationale.trim().to_ascii_lowercase().as_str(),
+        "documented outcome of the public operation"
+            | "not a public promise"
+            | "plausible public guarantee; no wording promises this exact behavior"
+            | "incidental to the test"
+    )
+}
+
+/// Binds citation authority to exact profile and indexed provenance.
+fn validate_profile_authority<'a>(
+    assertion_id: &str,
+    position: usize,
+    citation: &Citation,
+    entry: &IndexEntry,
+    profile: Option<&'a ContractProfile>,
+) -> Result<Option<&'a ContractAuthority>, AppError> {
+    let Some(profile) = profile else {
+        if citation.authority_rule_id.is_some() {
+            return Err(row_error(
+                assertion_id,
+                &format!("citations[{position}].authorityRuleId"),
+                "Citation cannot name an authority rule without an active contract profile",
+            ));
+        }
+        return Ok(None);
+    };
+    let expected = citation_authority(Some(profile), entry);
+    let supplied = citation
+        .authority_rule_id
+        .as_deref()
+        .and_then(|id| profile.authorities.iter().find(|rule| rule.id == id));
+    if expected.is_none()
+        || expected.map(|rule| rule.id.as_str()) != supplied.map(|rule| rule.id.as_str())
+    {
+        return Err(row_error(
+            assertion_id,
+            &format!("citations[{position}].authorityRuleId"),
+            "Citation authority rule does not match the exact indexed source provenance",
+        ));
+    }
+    Ok(supplied)
+}
+
 /// Treats whitespace-only explanations as absent, but rejects them even if optional.
 fn reason_missing_or_blank(reason: Option<&str>, required: bool) -> bool {
     reason.map_or(required, |reason| reason.trim().is_empty())
 }
 
 /// Requires every cited excerpt to be contained on the selected indexed line.
-fn validate_citation(
+fn validate_citation<'a>(
     assertion_id: &str,
     position: usize,
     citation: &Citation,
-    index: &[IndexEntry],
-) -> Result<(), AppError> {
+    index: &'a [IndexEntry],
+) -> Result<&'a IndexEntry, AppError> {
     let field = format!("citations[{position}]");
     if citation.path.trim().is_empty() {
         return Err(row_error(
@@ -972,7 +1215,7 @@ fn validate_citation(
             ),
         ));
     }
-    Ok(())
+    Ok(entry)
 }
 
 #[cfg(test)]

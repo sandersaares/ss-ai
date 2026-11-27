@@ -2,15 +2,16 @@
 
 use std::collections::BTreeSet;
 use std::fs;
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 
 use ohno::AppError;
 use serde_json::{json, to_vec_pretty, to_writer};
 use ss_ai_runtime::{Clock, FileTransaction, Process, caused_by, fail};
 
 use crate::model::{
-    AUDIT_STATE_SCHEMA_VERSION, AuditState, ClassificationJournal, IndexEntry, Inventory,
-    InventoryCorrection, InventoryCorrectionRequest, RUBRIC_VERSION, RevisionKind, ScanDiagnostic,
+    AUDIT_STATE_SCHEMA_VERSION, AuditState, CandidateDisposition, CandidateRole,
+    ClassificationJournal, ContractProfile, IndexEntry, Inventory, InventoryCorrection,
+    InventoryCorrectionRequest, RUBRIC_VERSION, RevisionKind, ScanDiagnostic,
 };
 use crate::scan::{digest, inventory};
 use crate::state::{
@@ -31,9 +32,10 @@ pub fn initialize(
     process: &dyn Process,
     clock: &dyn Clock,
 ) -> Result<String, AppError> {
-    initialize_with_corrections(
+    initialize_with_inputs(
         repository_path,
         scopes,
+        None,
         None,
         state_directory,
         process,
@@ -46,6 +48,48 @@ pub fn initialize_with_corrections(
     repository_path: &Path,
     scopes: &[PathBuf],
     correction_path: Option<&Path>,
+    state_directory: &Path,
+    process: &dyn Process,
+    clock: &dyn Clock,
+) -> Result<String, AppError> {
+    initialize_with_inputs(
+        repository_path,
+        scopes,
+        correction_path,
+        None,
+        state_directory,
+        process,
+        clock,
+    )
+}
+
+/// Creates a snapshot with a contract-authority profile and optional exclusions.
+pub fn initialize_with_profile(
+    repository_path: &Path,
+    scopes: &[PathBuf],
+    correction_path: Option<&Path>,
+    profile_path: Option<&Path>,
+    state_directory: &Path,
+    process: &dyn Process,
+    clock: &dyn Clock,
+) -> Result<String, AppError> {
+    initialize_with_inputs(
+        repository_path,
+        scopes,
+        correction_path,
+        profile_path,
+        state_directory,
+        process,
+        clock,
+    )
+}
+
+/// Owns the single initialization transaction and immutable profile binding.
+fn initialize_with_inputs(
+    repository_path: &Path,
+    scopes: &[PathBuf],
+    correction_path: Option<&Path>,
+    profile_path: Option<&Path>,
     state_directory: &Path,
     process: &dyn Process,
     clock: &dyn Clock,
@@ -83,6 +127,7 @@ pub fn initialize_with_corrections(
     if let Some(correction_path) = correction_path {
         apply_corrections(&mut inventory, correction_path, &repository_revision)?;
     }
+    inventory.contract_profile = profile_path.map(read_contract_profile).transpose()?;
     let index_bytes = index_lines(&index)?;
     inventory.tool_version.clear();
     inventory.tool_version.push_str(env!("CARGO_PKG_VERSION"));
@@ -112,6 +157,7 @@ pub fn initialize_with_corrections(
         scope_paths: scopes,
         tool_version: inventory.tool_version.clone(),
         rubric_version: inventory.rubric_version.clone(),
+        contract_profile_sha256: contract_profile_digest(inventory.contract_profile.as_ref())?,
         content_sha256: inventory.content_sha256.clone(),
         scanned_at: clock.now().to_string(),
         test_count: inventory.tests.len(),
@@ -125,6 +171,7 @@ pub fn initialize_with_corrections(
         index_sha256: state.index_sha256.clone(),
         tool_version: state.tool_version.clone(),
         rubric_version: state.rubric_version.clone(),
+        contract_profile_sha256: state.contract_profile_sha256.clone(),
         classifications: Vec::new(),
     };
     write_bytes(
@@ -154,6 +201,7 @@ pub fn initialize_with_corrections(
         "indexSha256": state.index_sha256,
         "toolVersion": state.tool_version,
         "rubricVersion": state.rubric_version,
+        "contractProfileSha256": state.contract_profile_sha256,
         "repositoryRevision": repository_revision,
         "revisionKind": revision_kind,
         "testCount": state.test_count,
@@ -163,6 +211,165 @@ pub fn initialize_with_corrections(
         "correctionCount": inventory.corrections.len(),
     })
     .to_string())
+}
+
+/// Validates one agent-authored product and interface authority profile.
+fn read_contract_profile(path: &Path) -> Result<ContractProfile, AppError> {
+    let metadata = fs::metadata(path).map_err(|error| {
+        caused_by(
+            "invalidInput",
+            format!("Cannot inspect contract profile '{}'", path.display()),
+            error,
+        )
+    })?;
+    if !metadata.is_file() || metadata.len() > MAX_CORRECTION_BYTES {
+        return Err(fail(
+            "invalidInput",
+            format!(
+                "Contract profile '{}' must be a bounded regular file",
+                path.display()
+            ),
+        ));
+    }
+    let profile: ContractProfile = parse_json(&fs::read(path)?, "contract profile")?;
+    require_version(profile.schema_version, "contract profile")?;
+    if profile.name.trim().is_empty()
+        || profile.interface.trim().is_empty()
+        || profile.audience.trim().is_empty()
+        || profile.entry_points.is_empty()
+        || profile
+            .entry_points
+            .iter()
+            .any(|entry_point| entry_point.trim().is_empty())
+        || profile
+            .internal_surfaces
+            .iter()
+            .any(|surface| surface.trim().is_empty())
+        || profile
+            .unresolved
+            .iter()
+            .any(|unresolved| unresolved.trim().is_empty())
+    {
+        return Err(fail(
+            "invalidInput",
+            "Contract profile name, interface, audience, entry points, and unresolved records must be meaningful",
+        ));
+    }
+    for (label, values) in [
+        ("entry points", profile.entry_points.as_slice()),
+        ("internal surfaces", profile.internal_surfaces.as_slice()),
+        ("unresolved sources", profile.unresolved.as_slice()),
+    ] {
+        let unique = values.iter().map(String::as_str).collect::<BTreeSet<_>>();
+        if unique.len() != values.len() {
+            return Err(fail(
+                "invalidInput",
+                format!("Contract profile repeats a {label} value"),
+            ));
+        }
+    }
+    let mut ids = BTreeSet::new();
+    for authority in &profile.authorities {
+        if authority.id.trim().is_empty()
+            || authority.path_prefix.trim().is_empty()
+            || authority.authority.trim().is_empty()
+            || authority.scope.trim().is_empty()
+            || !ids.insert(authority.id.as_str())
+        {
+            return Err(fail(
+                "invalidInput",
+                format!(
+                    "Contract authority rule '{}' has incomplete or duplicate fields",
+                    authority.id
+                ),
+            ));
+        }
+        let mut identifier = authority.id.chars();
+        if !identifier
+            .next()
+            .is_some_and(|character| character.is_ascii_alphanumeric())
+            || !identifier.all(|character| {
+                character.is_ascii_alphanumeric() || matches!(character, '.' | '_' | '-')
+            })
+        {
+            return Err(fail(
+                "invalidInput",
+                format!(
+                    "Contract authority rule '{}' has an unsupported identifier",
+                    authority.id
+                ),
+            ));
+        }
+        if authority.path_prefix.starts_with('/')
+            || authority.path_prefix.contains('\\')
+            || Path::new(&authority.path_prefix)
+                .components()
+                .any(|component| {
+                    matches!(
+                        component,
+                        Component::Prefix(_) | Component::RootDir | Component::ParentDir
+                    )
+                })
+            || authority
+                .source_roles
+                .iter()
+                .any(|role| role.trim().is_empty())
+        {
+            return Err(fail(
+                "invalidInput",
+                format!(
+                    "Contract authority rule '{}' uses a non-repository-relative path or empty source role",
+                    authority.id
+                ),
+            ));
+        }
+        let roles = authority
+            .source_roles
+            .iter()
+            .map(String::as_str)
+            .collect::<BTreeSet<_>>();
+        if roles.len() != authority.source_roles.len() {
+            return Err(fail(
+                "invalidInput",
+                format!(
+                    "Contract authority rule '{}' repeats a source role",
+                    authority.id
+                ),
+            ));
+        }
+    }
+    for (position, left) in profile.authorities.iter().enumerate() {
+        for right in profile.authorities.iter().skip(position.saturating_add(1)) {
+            let overlapping = left.path_prefix == right.path_prefix
+                && (left.source_roles.is_empty()
+                    || right.source_roles.is_empty()
+                    || left
+                        .source_roles
+                        .iter()
+                        .any(|role| right.source_roles.contains(role)));
+            let same_specificity = left.source_roles.is_empty() == right.source_roles.is_empty();
+            if overlapping && same_specificity {
+                return Err(fail(
+                    "invalidInput",
+                    format!(
+                        "Contract authority rules '{}' and '{}' have ambiguous matching provenance",
+                        left.id, right.id
+                    ),
+                ));
+            }
+        }
+    }
+    Ok(profile)
+}
+
+/// Hashes the explicit profile independently from checkout paths.
+pub(crate) fn contract_profile_digest(
+    profile: Option<&ContractProfile>,
+) -> Result<String, AppError> {
+    Ok(match profile {
+        Some(profile) => digest(&to_vec_pretty(profile)?),
+        None => digest(b"unresolved-contract-profile"),
+    })
 }
 
 /// Hashes source-owned inventory content without checkout-specific absolute paths.
@@ -230,6 +437,16 @@ fn apply_corrections(
                 "Inventory correction fields path, expression, and reason must be nonempty",
             ));
         }
+        if matches!(
+            draft.candidate_role,
+            CandidateRole::Observation | CandidateRole::Unresolved
+        ) || draft.candidate_disposition != CandidateDisposition::Excluded
+        {
+            return Err(fail(
+                "invalidInput",
+                "Inventory corrections must identify fixtureSetup, faultInjection, or cleanup and exclude the candidate",
+            ));
+        }
         let matching = inventory
             .assertions
             .iter()
@@ -263,6 +480,8 @@ fn apply_corrections(
             column: assertion.column,
             expression: assertion.expression.clone(),
             file_sha256: assertion.file_sha256.clone(),
+            candidate_role: draft.candidate_role,
+            candidate_disposition: draft.candidate_disposition,
             reason: draft.reason,
         });
         inventory.diagnostics.push(ScanDiagnostic {

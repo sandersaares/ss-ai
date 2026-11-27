@@ -81,13 +81,15 @@ pub fn report(state_directory: &Path, clock: &dyn Clock) -> Result<String, AppEr
     );
     let summary_text = render_summary(&summary, &gaps, &loaded.inventory.diagnostics);
     let details_document = json!({
-        "schemaVersion": 2,
+        "schemaVersion": 3,
         "auditId": loaded.state.audit_id,
         "snapshotSha256": loaded.state.snapshot_sha256,
         "contentSha256": loaded.state.content_sha256,
         "indexSha256": loaded.state.index_sha256,
         "toolVersion": loaded.state.tool_version,
         "rubricVersion": loaded.state.rubric_version,
+        "contractProfileSha256": loaded.state.contract_profile_sha256,
+        "contractProfile": loaded.inventory.contract_profile,
         "repositoryRevision": loaded.inventory.repository_revision,
         "repositoryRoot": loaded.inventory.repository_root,
         "scopePaths": loaded.inventory.scope_paths,
@@ -127,6 +129,7 @@ pub fn report(state_directory: &Path, clock: &dyn Clock) -> Result<String, AppEr
         "indexSha256": summary.index_sha256,
         "toolVersion": summary.tool_version,
         "rubricVersion": summary.rubric_version,
+        "contractProfileSha256": summary.contract_profile_sha256,
         "testCount": summary.test_count,
         "assertionCount": summary.assertion_count,
         "classificationCounts": summary.classification_counts,
@@ -162,7 +165,7 @@ fn build_summary(
         *count = count.saturating_add(1);
     }
     AuditSummary {
-        schema_version: 2,
+        schema_version: 3,
         status: "complete".to_owned(),
         next_action: "complete".to_owned(),
         final_response_allowed: true,
@@ -172,6 +175,7 @@ fn build_summary(
         index_sha256: loaded.state.index_sha256.clone(),
         tool_version: loaded.state.tool_version.clone(),
         rubric_version: loaded.state.rubric_version.clone(),
+        contract_profile_sha256: loaded.state.contract_profile_sha256.clone(),
         repository_root: loaded.inventory.repository_root.clone(),
         repository_revision: loaded.inventory.repository_revision.clone(),
         scope_paths: loaded.inventory.scope_paths.clone(),
@@ -498,12 +502,13 @@ fn render_summary(
     );
     _ = writeln!(
         output,
-        "Audit: `{audit_id}`  \nSnapshot: `{}`  \nContent digest: `{}`  \nIndex digest: `{}`  \nTool version: `{}`  \nRubric version: `{}`  \nRepository: `{}`  \nRevision: `{revision}`  \nScope: `{}`  \nIndexed files: {file_count}\n",
+        "Audit: `{audit_id}`  \nSnapshot: `{}`  \nContent digest: `{}`  \nIndex digest: `{}`  \nTool version: `{}`  \nRubric version: `{}`  \nContract profile digest: `{}`  \nRepository: `{}`  \nRevision: `{revision}`  \nScope: `{}`  \nIndexed files: {file_count}\n",
         summary.snapshot_sha256,
         summary.content_sha256,
         summary.index_sha256,
         summary.tool_version,
         summary.rubric_version,
+        summary.contract_profile_sha256,
         repository_root,
         if scope_paths.is_empty() {
             "<repository>".to_owned()
@@ -822,11 +827,13 @@ fn render_details(input: &DetailRender<'_>) -> Result<String, AppError> {
         for correction in corrections {
             _ = writeln!(
                 output,
-                "- `{}` at `{}:{}-{}`: {}",
+                "- `{}` at `{}:{}-{}` ({}, {}): {}",
                 correction.assertion_id,
                 correction.path,
                 correction.line,
                 correction.end_line,
+                to_string(&correction.candidate_role)?,
+                to_string(&correction.candidate_disposition)?,
                 correction.reason
             );
         }

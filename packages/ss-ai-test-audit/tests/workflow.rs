@@ -17,8 +17,8 @@ use ohno::AppError;
 use serde_json::{Value, from_slice, from_str, json, to_vec_pretty};
 use ss_ai_runtime::{Clock, Process, ProcessOutput};
 use ss_ai_test_audit::{
-    advance, compare, initialize, initialize_with_corrections, inspect_evidence, next_batch,
-    record_batch, report, search, search_many, submit,
+    advance, compare, initialize, initialize_with_corrections, initialize_with_profile,
+    inspect_evidence, next_batch, record_batch, report, search, search_many, submit,
 };
 use tempfile::TempDir;
 
@@ -109,6 +109,44 @@ fn initialize_fixture(repository: &Path, state: &Path) -> String {
         root: repository.to_str().unwrap().to_owned(),
     };
     initialize(repository, &[], state, &process, &FixedClock).unwrap()
+}
+
+/// Writes one explicit policy for profile-backed workflow scenarios.
+fn contract_profile(root: &Path, name: &str) -> PathBuf {
+    let path = root.join(format!("{name}.json"));
+    fs::write(
+        &path,
+        to_vec_pretty(&json!({
+            "schemaVersion": 1,
+            "name": name,
+            "interface": "CLI",
+            "audience": "command-line users",
+            "entryPoints": ["cli"],
+            "internalSurfaces": ["src/"],
+            "authorities": [
+                {
+                    "id": "publicDesign",
+                    "pathPrefix": "docs/design.md",
+                    "sourceRoles": ["markdownDocumentation"],
+                    "admissible": true,
+                    "authority": "maintainer policy for public command behavior",
+                    "scope": "CLI observations"
+                },
+                {
+                    "id": "privateSource",
+                    "pathPrefix": "src/",
+                    "sourceRoles": [],
+                    "admissible": false,
+                    "authority": "private implementation context",
+                    "scope": "mechanics only"
+                }
+            ],
+            "unresolved": ["Trait contracts outside the repository require an explicit source."]
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+    path
 }
 
 /// Populates a selected root with matching repository and state directories.
@@ -323,7 +361,7 @@ fn audits_parser_sites_with_resumable_evidence_batches() {
     let report_text = fs::read_to_string(summary["summaryPath"].as_str().unwrap()).unwrap();
     let summary_json: Value =
         from_slice(&fs::read(summary["summaryJsonPath"].as_str().unwrap()).unwrap()).unwrap();
-    assert_eq!(summary_json["schemaVersion"], 2);
+    assert_eq!(summary_json["schemaVersion"], 3);
     assert_eq!(summary_json["auditId"], summary["auditId"]);
     assert_eq!(summary_json["testCount"], summary["testCount"]);
     assert_eq!(summary_json["status"], "complete");
@@ -875,8 +913,28 @@ fn compare_reports_transition_and_caller_drift_without_selecting_a_winner() {
         "#[cfg(test)]\nfn helper() { assert!(true); }\n#[test]\nfn checks() { let callback = helper; callback(); }\n",
     )
     .unwrap();
-    initialize(&repository, &[], &left, &NoProcess, &FixedClock).unwrap();
-    initialize(&repository, &[], &right, &NoProcess, &FixedClock).unwrap();
+    let left_profile = contract_profile(root.path(), "left-policy");
+    let right_profile = contract_profile(root.path(), "right-policy");
+    initialize_with_profile(
+        &repository,
+        &[],
+        None,
+        Some(&left_profile),
+        &left,
+        &NoProcess,
+        &FixedClock,
+    )
+    .unwrap();
+    initialize_with_profile(
+        &repository,
+        &[],
+        None,
+        Some(&right_profile),
+        &right,
+        &NoProcess,
+        &FixedClock,
+    )
+    .unwrap();
     let inventory: Value = from_slice(&fs::read(left.join("inventory.json")).unwrap()).unwrap();
     let assertion_id = &inventory["assertions"][0]["id"];
     let test_id = &inventory["tests"][0]["id"];
@@ -898,7 +956,8 @@ fn compare_reports_transition_and_caller_drift_without_selecting_a_winner() {
             "actualOutcome": "The predicate observes a boolean.",
             "rationale": "This run's explanation is intentionally different.",
             "citations": [],
-            "callingTestIds": [test_id]
+            "callingTestIds": [test_id],
+            "observationStrength": "presence"
         });
         if let Some(reason) = reason {
             row["incidentalReason"] = json!(reason);
@@ -918,7 +977,9 @@ fn compare_reports_transition_and_caller_drift_without_selecting_a_winner() {
         record_batch(state, &path, &FixedClock).unwrap();
     }
     let comparison: Value = from_str(&compare(&left, &right, &FixedClock).unwrap()).unwrap();
+    assert_eq!(comparison["schemaVersion"], 2);
     assert_eq!(comparison["comparableContent"], true);
+    assert_eq!(comparison["sameContractProfile"], false);
     assert_eq!(comparison["matchedAssertionCount"], 1);
     assert_eq!(comparison["exactLabelAgreementRate"], 0.0);
     assert_eq!(comparison["changedReviewReasonCount"], 0);
@@ -932,6 +993,284 @@ fn compare_reports_transition_and_caller_drift_without_selecting_a_winner() {
     assert_eq!(
         comparison["transitionMatrix"][0],
         json!({"left":"Incidental","right":"Implicit","count":1})
+    );
+    assert!(
+        comparison["reviewQueue"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|item| {
+                item["kind"] == "contractProfileMismatch" && item["priority"] == "high"
+            })
+    );
+}
+
+#[test]
+fn profiles_enforce_authority_observation_strength_and_candidate_roles() {
+    let root = unversioned_fixture_root();
+    let repository = root.path().join("repository");
+    let state = root.path().join("state");
+    fs::create_dir_all(repository.join("src")).unwrap();
+    fs::create_dir_all(repository.join("docs")).unwrap();
+    fs::write(
+        repository.join("docs/design.md"),
+        "# CLI output\n\nThe CLI header must contain the literal ID label. The session ID must occupy the first output column.\n",
+    )
+    .unwrap();
+    fs::write(
+        repository.join("src/lib.rs"),
+        r#"pub fn render() -> String { "ID\t4".to_owned() }
+pub fn api_value() -> Option<u32> { Some(4) }
+
+#[test]
+fn weak_heading() { assert!(render().contains("ID")); }
+
+#[test]
+fn mixed_layout() { assert_eq!(render(), "ID\t4"); }
+
+#[test]
+fn candidate_value() { api_value().expect("present"); }
+"#,
+    )
+    .unwrap();
+    let profile = contract_profile(root.path(), "dure-cli");
+    initialize_with_profile(
+        &repository,
+        &[],
+        None,
+        Some(&profile),
+        &state,
+        &NoProcess,
+        &FixedClock,
+    )
+    .unwrap();
+    let batch_path = state.join("batch-01.json");
+    let batch_receipt: Value =
+        from_str(&next_batch(&state, &batch_path, 3, &FixedClock).unwrap()).unwrap();
+    let batch: Value =
+        from_slice(&fs::read(batch_receipt["batchPath"].as_str().unwrap()).unwrap()).unwrap();
+    assert_eq!(batch["contractProfile"]["name"], "dure-cli");
+    let display = fs::read_to_string(batch_receipt["displayPath"].as_str().unwrap()).unwrap();
+    assert!(display.contains("entry points: cli"));
+    assert!(display.contains("internal surfaces: src/"));
+    let assertions = batch["assertions"].as_array().unwrap();
+    let assertion_id = |text: &str| {
+        assertions
+            .iter()
+            .find(|row| row["expression"].as_str().unwrap().contains(text))
+            .unwrap()["id"]
+            .clone()
+    };
+    let public_search: Value = from_str(
+        &search_many(
+            &state,
+            &["literal ID label".to_owned()],
+            None,
+            10,
+            &FixedClock,
+        )
+        .unwrap(),
+    )
+    .unwrap();
+    let private_search: Value = from_str(
+        &search_many(&state, &["pub fn render".to_owned()], None, 10, &FixedClock).unwrap(),
+    )
+    .unwrap();
+    let public_handle = public_search["results"][0]["matches"][0]["evidenceHandle"].clone();
+    let private_handle = private_search["results"][0]["matches"][0]["evidenceHandle"].clone();
+    let mut rows = json!([
+        {
+            "assertionId": assertion_id("contains(\"ID\")"),
+            "classification": "Documented",
+            "evidenceStatus": "Confirmed",
+            "actualOutcome": "The rendered output contains the ID label.",
+            "rationale": "The public CLI contract requires the header label, but the substring observation does not prove its position.",
+            "citationHandles": [public_handle],
+            "callingTestIds": [],
+            "decisiveClause": "The CLI header must contain the literal ID label.",
+            "observationStrength": "substring",
+            "passingCounterexample": "A diagnostic line outside the header contains ID while the header remains wrong."
+        },
+        {
+            "assertionId": assertion_id("assert_eq!(render()"),
+            "classification": "Mixed",
+            "evidenceStatus": "Confirmed",
+            "actualOutcome": "The exact rendered string contains the required first-column ID and a specific separator.",
+            "rationale": "The public CLI contract requires the first-column session ID while the exact tab separator is only an implementation choice.",
+            "citationHandles": [public_handle],
+            "incidentalReason": "The exact tab-separated layout is an undocumented detail.",
+            "callingTestIds": [],
+            "decisiveClause": "The session ID must occupy the first output column.",
+            "observationStrength": "exact"
+        },
+        {
+            "assertionId": assertion_id("api_value().expect"),
+            "classification": "Incidental",
+            "evidenceStatus": "Confirmed",
+            "actualOutcome": "The returned optional value is present.",
+            "rationale": "This helper result demonstrates availability in the test setup, not a separate documented CLI promise.",
+            "citationHandles": [],
+            "incidentalReason": "Presence of the private helper result is fixture context.",
+            "callingTestIds": [],
+            "observationStrength": "presence",
+            "candidateRole": "observation",
+            "candidateDisposition": "included"
+        }
+    ]);
+    let submission = state.join("submission.json");
+    let write_submission = |rows: &Value| {
+        fs::write(
+            &submission,
+            to_vec_pretty(&json!({
+                "schemaVersion": 1,
+                "batchFingerprint": batch_receipt["batchFingerprint"],
+                "rows": rows
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+    };
+    rows[0]["passingCounterexample"] = Value::Null;
+    write_submission(&rows);
+    let error = submit(
+        &state,
+        Path::new(batch_receipt["batchPath"].as_str().unwrap()),
+        &submission,
+        &state.join("invalid-counterexample.json"),
+        3,
+        &FixedClock,
+    )
+    .unwrap_err();
+    assert!(error.to_string().contains("passingCounterexample"));
+
+    rows[0]["passingCounterexample"] =
+        json!("A non-header line contains ID while the header remains wrong.");
+    rows[0]["citationHandles"] = json!([private_handle]);
+    rows[0]["decisiveClause"] = json!("pub fn render() -> String");
+    rows[0]["observationStrength"] = json!("exact");
+    write_submission(&rows);
+    let error = submit(
+        &state,
+        Path::new(batch_receipt["batchPath"].as_str().unwrap()),
+        &submission,
+        &state.join("invalid-authority.json"),
+        3,
+        &FixedClock,
+    )
+    .unwrap_err();
+    assert!(error.to_string().contains("admissible authority"));
+
+    rows[0]["citationHandles"] = json!([public_handle]);
+    rows[0]["decisiveClause"] = json!("The CLI header must contain the literal ID label.");
+    rows[0]["observationStrength"] = json!("substring");
+    write_submission(&rows);
+    submit(
+        &state,
+        Path::new(batch_receipt["batchPath"].as_str().unwrap()),
+        &submission,
+        &state.join("batch-02.json"),
+        3,
+        &FixedClock,
+    )
+    .unwrap();
+    let receipt: Value = from_str(&report(&state, &FixedClock).unwrap()).unwrap();
+    assert_eq!(receipt["nextAction"], "complete");
+    assert_eq!(receipt["contractProfileSha256"].as_str().unwrap().len(), 64);
+    let details: Value =
+        from_slice(&fs::read(receipt["detailsJsonPath"].as_str().unwrap()).unwrap()).unwrap();
+    assert_eq!(details["contractProfile"]["interface"], "CLI");
+    assert_eq!(
+        details["assertionTrace"][0]["classification"]["observationStrength"],
+        "substring"
+    );
+}
+
+#[test]
+fn compare_reports_fault_injection_as_denominator_drift() {
+    let root = unversioned_fixture_root();
+    let repository = root.path().join("repository");
+    let left = root.path().join("left");
+    let right = root.path().join("right");
+    fs::create_dir_all(repository.join("src")).unwrap();
+    fs::write(
+        repository.join("src/lib.rs"),
+        "#[test]\nfn injects() { panic!(\"injected fault\"); }\n",
+    )
+    .unwrap();
+    initialize(&repository, &[], &left, &NoProcess, &FixedClock).unwrap();
+    let left_inventory: Value =
+        from_slice(&fs::read(left.join("inventory.json")).unwrap()).unwrap();
+    let left_state: Value = from_slice(&fs::read(left.join("audit-state.json")).unwrap()).unwrap();
+    let left_batch = left.join("classification.json");
+    fs::write(
+        &left_batch,
+        to_vec_pretty(&json!({
+            "schemaVersion": 1,
+            "auditId": left_state["auditId"],
+            "snapshotSha256": left_state["snapshotSha256"],
+            "assertions": [{
+                "assertionId": left_inventory["assertions"][0]["id"],
+                "classification": "Incidental",
+                "evidenceStatus": "Confirmed",
+                "actualOutcome": "The test deliberately injects a panic.",
+                "rationale": "This source site supplies a fault consumed by the surrounding test rather than checking a public operation.",
+                "citations": [],
+                "incidentalReason": "The panic is a test stimulus.",
+                "callingTestIds": []
+            }]
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+    record_batch(&left, &left_batch, &FixedClock).unwrap();
+
+    let correction = root.path().join("correction.json");
+    fs::write(
+        &correction,
+        to_vec_pretty(&json!({
+            "schemaVersion": 1,
+            "repositoryRevision": "unversioned",
+            "corrections": [{
+                "path": "src/lib.rs",
+                "line": 2,
+                "endLine": 2,
+                "expression": "panic!(\"injected fault\")",
+                "candidateRole": "faultInjection",
+                "candidateDisposition": "excluded",
+                "reason": "The source site injects a consumed fault rather than observing a promise."
+            }]
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+    initialize_with_corrections(
+        &repository,
+        &[],
+        Some(&correction),
+        &right,
+        &NoProcess,
+        &FixedClock,
+    )
+    .unwrap();
+
+    let comparison: Value = from_str(&compare(&left, &right, &FixedClock).unwrap()).unwrap();
+    assert_eq!(comparison["comparableContent"], true);
+    assert_eq!(comparison["commonActiveAssertionCount"], 0);
+    assert_eq!(comparison["denominatorDifferenceCount"], 1);
+    assert_eq!(
+        comparison["denominatorDifferences"][0]["left"]["membership"],
+        "active"
+    );
+    assert_eq!(
+        comparison["denominatorDifferences"][0]["right"]["candidateRole"],
+        "faultInjection"
+    );
+    assert!(
+        comparison["reviewQueue"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|item| { item["kind"] == "denominatorDifference" && item["priority"] == "high" })
     );
 }
 
@@ -1005,6 +1344,8 @@ fn corrected_restart_replays_source_identical_work_after_an_accepted_batch() {
                 "line": 5,
                 "endLine": 5,
                 "expression": "value.expect(\"fixture placeholder\")",
+                "candidateRole": "fixtureSetup",
+                "candidateDisposition": "excluded",
                 "reason": "The callback-local fixture result does not come from the audited API."
             }]
         }))

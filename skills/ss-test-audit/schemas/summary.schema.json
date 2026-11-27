@@ -13,6 +13,7 @@
     "indexSha256",
     "toolVersion",
     "rubricVersion",
+    "contractProfileSha256",
     "repositoryRoot",
     "repositoryRevision",
     "scopePaths",
@@ -34,7 +35,7 @@
   ],
   "properties": {
     "schemaVersion": {
-      "const": 2
+      "const": 3
     },
     "status": {
       "const": "complete"
@@ -68,6 +69,10 @@
     "rubricVersion": {
       "type": "string",
       "minLength": 1
+    },
+    "contractProfileSha256": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
     },
     "repositoryRoot": {
       "type": "string",

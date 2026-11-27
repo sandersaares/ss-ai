@@ -28,8 +28,9 @@ use syn::{
 };
 
 use crate::model::{
-    AUDIT_STATE_SCHEMA_VERSION, AssertionSite, CallerEvidence, IndexEntry, IndexedFile, Inventory,
-    InventoryCorrection, RevisionKind, ScanDiagnostic, TestCase,
+    AUDIT_STATE_SCHEMA_VERSION, AssertionSite, CallerEvidence, CandidateDisposition, CandidateRole,
+    IndexEntry, IndexedFile, Inventory, InventoryCorrection, RevisionKind, ScanDiagnostic,
+    TestCase,
 };
 
 /// Prevents one generated or unexpected file from making an audit unbounded.
@@ -169,6 +170,8 @@ pub(crate) fn inventory(
             column: assertion.column,
             expression: assertion.expression.clone(),
             file_sha256: assertion.file_sha256.clone(),
+            candidate_role: CandidateRole::FixtureSetup,
+            candidate_disposition: CandidateDisposition::Excluded,
             reason: assertion
                 .fixture_exclusion_reason
                 .clone()
@@ -206,6 +209,7 @@ pub(crate) fn inventory(
         tool_version: String::new(),
         rubric_version: String::new(),
         content_sha256: String::new(),
+        contract_profile: None,
         files: indexed_files,
         tests,
         assertions,

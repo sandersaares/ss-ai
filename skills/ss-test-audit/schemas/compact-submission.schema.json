@@ -98,9 +98,38 @@
         "reviewReason": {
           "type": "string",
           "minLength": 1
+        },
+        "decisiveClause": {
+          "type": "string",
+          "minLength": 1
+        },
+        "observationStrength": {
+          "enum": ["exact", "substring", "presence", "ordering", "controlFlow", "other"]
+        },
+        "passingCounterexample": {
+          "type": "string",
+          "minLength": 1
+        },
+        "candidateRole": {
+          "enum": ["observation", "fixtureSetup", "faultInjection", "cleanup"]
+        },
+        "candidateDisposition": {
+          "enum": ["included"]
         }
       },
       "allOf": [
+        {
+          "if": {
+            "properties": {
+              "classification": { "enum": ["Documented", "Mixed"] },
+              "observationStrength": { "enum": ["substring", "presence", "other"] }
+            },
+            "required": ["classification", "observationStrength"]
+          },
+          "then": {
+            "required": ["passingCounterexample"]
+          }
+        },
         {
           "if": {
             "properties": {
@@ -113,6 +142,7 @@
             ]
           },
           "then": {
+            "required": ["decisiveClause", "observationStrength"],
             "properties": {
               "evidenceStatus": {
                 "const": "Confirmed"
@@ -154,9 +184,7 @@
             ]
           },
           "then": {
-            "required": [
-              "incidentalReason"
-            ],
+            "required": ["incidentalReason", "decisiveClause", "observationStrength"],
             "properties": {
               "evidenceStatus": {
                 "const": "Confirmed"
@@ -235,6 +263,23 @@
         "reviewReason": {
           "type": "string",
           "minLength": 1
+        },
+        "decisiveClause": {
+          "type": "string",
+          "minLength": 1
+        },
+        "observationStrength": {
+          "enum": ["exact", "substring", "presence", "ordering", "controlFlow", "other"]
+        },
+        "passingCounterexample": {
+          "type": "string",
+          "minLength": 1
+        },
+        "candidateRole": {
+          "enum": ["observation", "fixtureSetup", "faultInjection", "cleanup"]
+        },
+        "candidateDisposition": {
+          "enum": ["included"]
         }
       }
     }

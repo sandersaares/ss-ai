@@ -10,6 +10,8 @@
     "indexSha256",
     "toolVersion",
     "rubricVersion",
+    "contractProfileSha256",
+    "contractProfile",
     "repositoryRevision",
     "repositoryRoot",
     "scopePaths",
@@ -21,7 +23,7 @@
   ],
   "properties": {
     "schemaVersion": {
-      "const": 2
+      "const": 3
     },
     "auditId": {
       "type": "string",
@@ -46,6 +48,13 @@
     "rubricVersion": {
       "type": "string",
       "minLength": 1
+    },
+    "contractProfileSha256": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "contractProfile": {
+      "type": ["object", "null"]
     },
     "repositoryRevision": {
       "type": "string",
@@ -105,6 +114,8 @@
           "column",
           "expression",
           "fileSha256",
+          "candidateRole",
+          "candidateDisposition",
           "reason"
         ],
         "properties": {
@@ -115,6 +126,8 @@
           "column": { "type": "integer", "minimum": 1 },
           "expression": { "type": "string", "minLength": 1 },
           "fileSha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+          "candidateRole": { "enum": ["fixtureSetup", "faultInjection", "cleanup"] },
+          "candidateDisposition": { "const": "excluded" },
           "reason": { "type": "string", "minLength": 1 }
         }
       }
@@ -215,6 +228,7 @@
             "endLine": { "type": "integer", "minimum": 1 },
             "owner": { "type": "string" },
             "sourceRole": { "type": "string", "minLength": 1 },
+            "authorityRuleId": { "type": ["string", "null"], "minLength": 1 },
             "excerpt": { "type": "string", "minLength": 1 }
           }
         },
@@ -224,7 +238,9 @@
           "required": [
             "assertionId", "classification", "evidenceStatus", "actualOutcome",
             "rationale", "citations", "incidentalReason", "callingTestIds",
-            "unlinkedReason", "unresolvedCallerReason", "reviewReason"
+            "unlinkedReason", "unresolvedCallerReason", "reviewReason",
+            "decisiveClause", "observationStrength", "passingCounterexample",
+            "candidateRole", "candidateDisposition"
           ],
           "properties": {
             "assertionId": { "type": "string", "pattern": "^A[0-9]{6}$" },
@@ -240,7 +256,21 @@
             },
             "unlinkedReason": { "type": ["string", "null"], "minLength": 1 },
             "unresolvedCallerReason": { "type": ["string", "null"], "minLength": 1 },
-            "reviewReason": { "type": ["string", "null"], "minLength": 1 }
+            "reviewReason": { "type": ["string", "null"], "minLength": 1 },
+            "decisiveClause": { "type": ["string", "null"], "minLength": 1 },
+            "observationStrength": {
+              "type": ["string", "null"],
+              "enum": ["exact", "substring", "presence", "ordering", "controlFlow", "other", null]
+            },
+            "passingCounterexample": { "type": ["string", "null"], "minLength": 1 },
+            "candidateRole": {
+              "type": ["string", "null"],
+              "enum": ["observation", "fixtureSetup", "faultInjection", "cleanup", "unresolved", null]
+            },
+            "candidateDisposition": {
+              "type": ["string", "null"],
+              "enum": ["included", "excluded", null]
+            }
           }
         },
         "traceRow": {

@@ -23,7 +23,11 @@ initial batch
 
 The inventory, source file digests, and search index bind each batch to one audit ID and snapshot digest. Initialization publishes the state record last so readers cannot treat a partially initialized directory as a ready audit. Every later read verifies the persisted state and index digests. Mutating commands additionally verify current source hashes. A changed source returns a stale-state failure before accepting a judgment against moved lines or emitting a final report.
 
-Audit state and inventory use schema version 3. A proven `Some(...)` fixture
+Audit state and inventory use schema version 4 and judgment rubric version 2. A
+contract profile is part of snapshot identity but not the source evidence
+content digest. Native citation resolution chooses the most specific matching
+authority rule from that profile and binds its identifier into each citation.
+A proven `Some(...)` fixture
 holder receives an assertion identifier while scanning, then leaves the
 effective inventory after all source IDs are assigned. This keeps identifiers
 for later sites stable without including fixture extraction in denominators.
@@ -34,7 +38,8 @@ For syntax that cannot reliably classify fixture ownership, initialization can
 consume one strict correction request. Native code requires the exact repository
 revision, path, line range, and scanner expression to match exactly one source
 site before exclusion. The corrected inventory persists the original assertion
-ID, column, expression, file digest, and reason and adds an
+ID, column, expression, file digest, candidate role, excluded disposition, and
+reason and adds an
 `inventoryCorrection` diagnostic. Corrections apply before the inventory digest
 and audit identity are computed. Existing snapshots cannot be edited in place.
 
@@ -47,6 +52,13 @@ while retaining a fresh source boundary for durable judgments and publication.
 ## Classification ingestion
 
 The agent writes one strict batch with the active audit ID and snapshot digest. Native validation rejects unknown or repeated assertion IDs and requires category-specific fields. Citations must select an exact indexed path and line, and their excerpt must match that line. Documented and mixed categories require confirmed citations. Implicit requires ambiguous evidence. Incidental and mixed classifications require an explicit undocumented-mechanics explanation.
+
+For profile-backed rows, native validation requires an observation-strength
+record, binds decisive clauses to admissible cited ranges, and requires a
+passing counterexample for weak observations. A fallible-value or
+unexpected-branch candidate that remains active must carry an included
+observation role. Excluded setup, fault-injection, and cleanup candidates can
+enter only through a revision-bound inventory correction.
 
 The `advance` operation records the batch and exports the next batch
 using one validated state load. Separate `record-batch` and `next-batch`
@@ -128,7 +140,10 @@ conflicting citation reuse, and audits with no `Mixed` sites. Summary and detail
 records carry tool and rubric versions, source and index digests, correction
 counts, and these diagnostics. The native `compare` command uses source
 provenance rather than audit-local IDs to report classification transitions,
-effective caller-set drift, and test-gap membership between complete runs.
+contract-profile and authority-rule drift, active/corrected denominator
+membership, decisive-clause and observation-strength drift, effective
+caller-set drift, and test-gap membership between complete runs. Its prioritized
+review queue treats policy and denominator questions before downstream labels.
 
 ## Failure and coverage semantics
 

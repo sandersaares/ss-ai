@@ -12,6 +12,6 @@ mod submission;
 
 pub use batch::{advance, next_batch, record_batch, submit};
 pub use compare::compare;
-pub use inventory::{initialize, initialize_with_corrections};
+pub use inventory::{initialize, initialize_with_corrections, initialize_with_profile};
 pub use report::report;
 pub use state::{inspect_assertion, inspect_evidence, search, search_many};

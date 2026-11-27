@@ -12,9 +12,11 @@ use serde_json::{Value, from_slice, json, to_vec_pretty};
 use ss_ai_runtime::{Clock, FileTransaction, caused_by, fail, read_bytes};
 
 use crate::batch::ValidatedJournal;
+use crate::inventory::contract_profile_digest;
 use crate::model::{
-    AUDIT_STATE_SCHEMA_VERSION, AssertionSite, AuditState, ClassificationJournal, IndexEntry,
-    IndexedFile, Inventory, RUBRIC_VERSION, TestCase,
+    AUDIT_STATE_SCHEMA_VERSION, AssertionSite, AuditState, ClassificationJournal,
+    ContractAuthority, ContractProfile, IndexEntry, IndexedFile, Inventory, RUBRIC_VERSION,
+    TestCase,
 };
 use crate::scan::digest;
 
@@ -82,6 +84,7 @@ pub fn search_many(
         "indexSha256": loaded.state.index_sha256,
         "toolVersion": loaded.state.tool_version,
         "rubricVersion": loaded.state.rubric_version,
+        "contractProfileSha256": loaded.state.contract_profile_sha256,
         "results": results,
         "queryCount": queries.len()
     })
@@ -199,6 +202,7 @@ pub fn inspect_assertion(
         "indexSha256": loaded.state.index_sha256,
         "toolVersion": loaded.state.tool_version,
         "rubricVersion": loaded.state.rubric_version,
+        "contractProfileSha256": loaded.state.contract_profile_sha256,
         "assertion": assertion,
         "containingTest": containing_test,
         "owner": {
@@ -329,6 +333,7 @@ pub fn inspect_evidence(
         "schemaVersion": 1,
         "auditId": loaded.state.audit_id,
         "snapshotSha256": loaded.state.snapshot_sha256,
+        "contractProfileSha256": loaded.state.contract_profile_sha256,
         "evidenceHandle": evidence_handle,
         "path": entry.path,
         "line": entry.line,
@@ -414,6 +419,8 @@ pub(crate) fn load(state_directory: &Path, clock: &dyn Clock) -> Result<LoadedSt
         || inventory.tool_version != state.tool_version
         || inventory.rubric_version != state.rubric_version
         || inventory.content_sha256 != state.content_sha256
+        || contract_profile_digest(inventory.contract_profile.as_ref())?
+            != state.contract_profile_sha256
     {
         return Err(fail(
             "invalidState",
@@ -966,9 +973,44 @@ pub(crate) fn validate_journal(
                 ),
             ));
         }
-        crate::batch::validate_classification(classification, assertion, &tests, index)?;
+        crate::batch::validate_classification(
+            classification,
+            assertion,
+            &tests,
+            index,
+            inventory.contract_profile.as_ref(),
+        )?;
     }
     Ok(())
+}
+
+/// Resolves one exact authority rule for a citation under the active profile.
+pub(crate) fn citation_authority<'a>(
+    profile: Option<&'a ContractProfile>,
+    entry: &IndexEntry,
+) -> Option<&'a ContractAuthority> {
+    let profile = profile?;
+    profile
+        .authorities
+        .iter()
+        .filter(|rule| {
+            profile_path_matches(&entry.path, &rule.path_prefix)
+                && (rule.source_roles.is_empty()
+                    || rule
+                        .source_roles
+                        .iter()
+                        .any(|role| role == &entry.source_role))
+        })
+        .max_by_key(|rule| (rule.path_prefix.len(), !rule.source_roles.is_empty()))
+}
+
+/// Matches directory prefixes at component boundaries rather than by spelling alone.
+fn profile_path_matches(path: &str, prefix: &str) -> bool {
+    prefix.ends_with('/') && path.starts_with(prefix)
+        || path == prefix
+        || path
+            .strip_prefix(prefix)
+            .is_some_and(|suffix| suffix.starts_with('/'))
 }
 
 /// Supplies a diagnostic map of state file paths to skill recipes.

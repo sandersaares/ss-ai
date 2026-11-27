@@ -7,10 +7,10 @@ use serde::de::Error as _;
 use serde::{Deserialize, Deserializer, Serialize};
 use serde_json::Value;
 
-/// Identifies persisted state with provenance-rich evidence and caller records.
-pub(crate) const AUDIT_STATE_SCHEMA_VERSION: u32 = 3;
+/// Identifies persisted state with explicit contract-authority policy.
+pub(crate) const AUDIT_STATE_SCHEMA_VERSION: u32 = 4;
 /// Identifies the semantic judgment rubric used by this utility build.
-pub(crate) const RUBRIC_VERSION: &str = "1";
+pub(crate) const RUBRIC_VERSION: &str = "2";
 
 /// Identifies the immutable inventory snapshot and its repository provenance.
 #[derive(Clone, Deserialize, Serialize)]
@@ -26,6 +26,7 @@ pub(crate) struct AuditState {
     pub(crate) scope_paths: Vec<String>,
     pub(crate) tool_version: String,
     pub(crate) rubric_version: String,
+    pub(crate) contract_profile_sha256: String,
     pub(crate) content_sha256: String,
     pub(crate) scanned_at: String,
     pub(crate) test_count: usize,
@@ -53,6 +54,7 @@ pub(crate) struct Inventory {
     pub(crate) tool_version: String,
     pub(crate) rubric_version: String,
     pub(crate) content_sha256: String,
+    pub(crate) contract_profile: Option<ContractProfile>,
     pub(crate) files: Vec<IndexedFile>,
     pub(crate) tests: Vec<TestCase>,
     pub(crate) assertions: Vec<AssertionSite>,
@@ -157,6 +159,10 @@ pub(crate) struct InventoryCorrectionDraft {
     pub(crate) line: NonZeroUsize,
     pub(crate) end_line: usize,
     pub(crate) expression: String,
+    /// Explains whether the excluded source site arranges, injects, or cleans up.
+    pub(crate) candidate_role: CandidateRole,
+    /// Requires the reviewer to state that the source candidate leaves the denominator.
+    pub(crate) candidate_disposition: CandidateDisposition,
     pub(crate) reason: String,
 }
 
@@ -173,7 +179,70 @@ pub(crate) struct InventoryCorrection {
     pub(crate) expression: String,
     /// Binds the correction to the exact audited source bytes.
     pub(crate) file_sha256: String,
+    /// Identifies why the candidate is a denominator correction.
+    pub(crate) candidate_role: CandidateRole,
+    /// Preserves the eligibility result independently from the semantic label.
+    pub(crate) candidate_disposition: CandidateDisposition,
     pub(crate) reason: String,
+}
+
+/// Distinguishes a counted observation from candidate stimulus and setup sites.
+#[derive(Debug, Clone, Copy, Deserialize, Serialize, Eq, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub(crate) enum CandidateRole {
+    Observation,
+    FixtureSetup,
+    FaultInjection,
+    Cleanup,
+    Unresolved,
+}
+
+/// Records whether a candidate entered or left the active assertion denominator.
+#[derive(Debug, Clone, Copy, Deserialize, Serialize, Eq, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub(crate) enum CandidateDisposition {
+    Included,
+    Excluded,
+}
+
+/// Establishes one interface's audience and admissible promise sources.
+#[derive(Clone, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub(crate) struct ContractProfile {
+    /// Identifies the profile record grammar independently from the audit schema.
+    pub(crate) schema_version: u32,
+    /// Names the policy so comparison receipts remain interpretable.
+    pub(crate) name: String,
+    /// Identifies the product-facing interface governed by the profile.
+    pub(crate) interface: String,
+    /// Identifies the users to whom the interface promises behavior.
+    pub(crate) audience: String,
+    /// Lists supported public invocation or construction surfaces.
+    pub(crate) entry_points: Vec<String>,
+    /// Lists explicitly internal surfaces that must not create public promises.
+    pub(crate) internal_surfaces: Vec<String>,
+    /// Resolves indexed source provenance to admitted or contextual authority.
+    pub(crate) authorities: Vec<ContractAuthority>,
+    /// Retains unresolved source-policy questions for reviewer follow-up.
+    pub(crate) unresolved: Vec<String>,
+}
+
+/// Names one admitted or rejected evidence source for a contract profile.
+#[derive(Clone, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub(crate) struct ContractAuthority {
+    /// Binds citations to one stable authority rule.
+    pub(crate) id: String,
+    /// Matches repository-relative evidence paths; longer prefixes take priority.
+    pub(crate) path_prefix: String,
+    /// Restricts the rule to structural source roles, or all roles when empty.
+    pub(crate) source_roles: Vec<String>,
+    /// Distinguishes promise support from non-authoritative context.
+    pub(crate) admissible: bool,
+    /// Explains the rule's role in the selected public-interface policy.
+    pub(crate) authority: String,
+    /// Defines the behavioral scope in which the source is applicable.
+    pub(crate) scope: String,
 }
 
 /// Carries one searchable line with immutable source provenance.
@@ -205,6 +274,9 @@ pub(crate) struct Batch {
     pub(crate) index_sha256: String,
     pub(crate) tool_version: String,
     pub(crate) rubric_version: String,
+    pub(crate) contract_profile_sha256: String,
+    /// Exposes the complete authority policy used to judge the exported sites.
+    pub(crate) contract_profile: Option<ContractProfile>,
     pub(crate) assertions: Vec<BatchAssertion>,
     pub(crate) completed: usize,
     pub(crate) remaining: usize,
@@ -221,7 +293,11 @@ pub(crate) struct BatchAssertion {
     pub(crate) test_line: Option<NonZeroUsize>,
     pub(crate) context: Vec<BatchContextEntry>,
     pub(crate) diagnostics: Vec<ScanDiagnostic>,
+    /// Prompts explicit eligibility review for ambiguous value and branch candidates.
+    pub(crate) candidate_role: Option<CandidateRole>,
+    /// Describes the batch hint without committing the semantic denominator decision.
     pub(crate) candidate_disposition: Option<String>,
+    /// Names the deterministic evidence that leaves the candidate ambiguous.
     pub(crate) candidate_witness: Option<String>,
 }
 
@@ -288,6 +364,21 @@ pub(crate) struct Classification {
     pub(crate) unresolved_caller_reason: Option<String>,
     #[serde(default)]
     pub(crate) review_reason: Option<String>,
+    #[serde(default)]
+    /// Quotes the admissible clause that requires the observed outcome.
+    pub(crate) decisive_clause: Option<String>,
+    #[serde(default)]
+    /// Identifies the weakest fact the literal predicate can establish.
+    pub(crate) observation_strength: Option<String>,
+    #[serde(default)]
+    /// Names a contract-relevant alternative that still makes the predicate pass.
+    pub(crate) passing_counterexample: Option<String>,
+    #[serde(default)]
+    /// Records why an uncertain source candidate belongs in the denominator.
+    pub(crate) candidate_role: Option<CandidateRole>,
+    #[serde(default)]
+    /// Records the eligibility decision separately from the semantic category.
+    pub(crate) candidate_disposition: Option<CandidateDisposition>,
 }
 
 /// Anchors agent evidence to an exact indexed source line.
@@ -301,6 +392,9 @@ pub(crate) struct Citation {
     pub(crate) owner: String,
     pub(crate) source_role: String,
     pub(crate) excerpt: String,
+    #[serde(default)]
+    /// Binds this range to the exact contract-profile authority decision.
+    pub(crate) authority_rule_id: Option<String>,
 }
 
 /// Names the citation field when a full input supplies a zero line.
@@ -344,6 +438,21 @@ pub(crate) struct CompactSubmissionRow {
     #[serde(default)]
     pub(crate) review_reason: Option<String>,
     #[serde(default)]
+    /// Quotes the admissible clause that requires the observed outcome.
+    pub(crate) decisive_clause: Option<String>,
+    #[serde(default)]
+    /// Identifies the weakest fact the literal predicate can establish.
+    pub(crate) observation_strength: Option<String>,
+    #[serde(default)]
+    /// Names a contract-relevant alternative that still makes the predicate pass.
+    pub(crate) passing_counterexample: Option<String>,
+    #[serde(default)]
+    /// Records why an uncertain source candidate belongs in the denominator.
+    pub(crate) candidate_role: Option<CandidateRole>,
+    #[serde(default)]
+    /// Records the eligibility decision separately from the semantic category.
+    pub(crate) candidate_disposition: Option<CandidateDisposition>,
+    #[serde(default)]
     pub(crate) reuse_from: Option<String>,
     #[serde(default)]
     pub(crate) equivalence_confirmed: Option<bool>,
@@ -360,6 +469,7 @@ pub(crate) struct ClassificationJournal {
     pub(crate) index_sha256: String,
     pub(crate) tool_version: String,
     pub(crate) rubric_version: String,
+    pub(crate) contract_profile_sha256: String,
     pub(crate) classifications: Vec<Classification>,
 }
 
@@ -397,6 +507,7 @@ pub(crate) struct AuditSummary {
     pub(crate) index_sha256: String,
     pub(crate) tool_version: String,
     pub(crate) rubric_version: String,
+    pub(crate) contract_profile_sha256: String,
     pub(crate) repository_root: String,
     pub(crate) repository_revision: String,
     pub(crate) scope_paths: Vec<String>,
