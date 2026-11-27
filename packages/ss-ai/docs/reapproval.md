@@ -12,6 +12,11 @@ reorganization is not significant by itself. Insufficient evidence is uncertain,
 not permission. Native operations validate evidence and publication; the agent
 supplies the semantic judgments.
 
+Assessment assignments contain an immutable snapshot of applicable user-scoped
+instructions and recursively referenced guidance, including resolved targets,
+referrers, and inherited scope. Workers use only that completed snapshot;
+unavailable or incompletely expanded guidance keeps the assessment unfinished.
+
 ## Approval recognition
 
 The provider's applicable account-owned approval event and its approved source
