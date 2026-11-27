@@ -180,8 +180,10 @@ cannot itself become significance, and partial completion never permits approval
 Only complete insignificant work can become a live
 publication; dry runs end without remote writes. Unknown content and
 insufficient evidence cannot become success-shaped empty work. The policy permits
-renewal unless changes introduce significant design changes, likely performance
-regressions, or likely correctness regressions; it does not restrict edit categories.
+renewal unless cumulative changes substantially affect user-visible behavior or
+usage, likely introduce a material correctness or performance regression, or make
+a public API violate active user-scoped guidance. Minor API reorganization is
+not significant by itself, and the policy does not restrict edit categories.
 
 A significant or uncertain live assessment produces an attributed standalone needs-review
 comment with a hidden marker. The comment contains a readable list of reasons

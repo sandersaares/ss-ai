@@ -5,8 +5,10 @@
 Reapproval preserves the authenticated user's approval across later source
 changes without conducting an initial review. The installed
 [significance policy](../../../skills/ss-autoreapprove/significance.md)
-permits renewal unless there are significant design changes, likely performance
-regressions, or likely correctness regressions. Insufficient evidence is uncertain,
+permits renewal unless cumulative changes substantially affect user-visible
+behavior or usage, likely introduce a material correctness or performance
+regression, or make a public API violate active user-scoped guidance. Minor API
+reorganization is not significant by itself. Insufficient evidence is uncertain,
 not permission. Native operations validate evidence and publication; the agent
 supplies the semantic judgments.
 
