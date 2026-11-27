@@ -8,8 +8,8 @@ use clap::{Parser, Subcommand};
 use ohno::AppError;
 use ss_ai_runtime::{Process, caused_by};
 use ss_ai_test_audit::{
-    advance, initialize, initialize_with_corrections, next_batch, record_batch, report,
-    search_many, submit,
+    advance, compare, initialize, initialize_with_corrections, inspect_assertion, next_batch,
+    record_batch, report, search_many, submit,
 };
 
 use crate::Clock;
@@ -51,6 +51,13 @@ enum TestAuditCommand {
         /// Uses a reviewable page while allowing narrower targeted searches.
         #[arg(long, default_value_t = 50)]
         limit: usize,
+    },
+    /// Show complete bounded owner source for one assertion.
+    Context {
+        #[arg(long)]
+        state_directory: PathBuf,
+        #[arg(long)]
+        assertion_id: String,
     },
     /// Export the next bounded assertion batch without consuming it.
     NextBatch {
@@ -94,6 +101,13 @@ enum TestAuditCommand {
         /// Maximum assertions exported after recording; the byte limit can make it smaller.
         #[arg(long, default_value_t = 25)]
         count: usize,
+    },
+    /// Compare two completed snapshots without choosing either as ground truth.
+    Compare {
+        #[arg(long)]
+        left_state_directory: PathBuf,
+        #[arg(long)]
+        right_state_directory: PathBuf,
     },
     /// Require complete coverage and write the final trace and reports.
     Report {
@@ -155,6 +169,10 @@ where
             kind,
             limit,
         } => search_many(&state_directory, &queries, kind.as_deref(), limit, clock),
+        TestAuditCommand::Context {
+            state_directory,
+            assertion_id,
+        } => inspect_assertion(&state_directory, &assertion_id, clock),
         TestAuditCommand::NextBatch {
             state_directory,
             output_path,
@@ -184,6 +202,10 @@ where
             count,
             clock,
         ),
+        TestAuditCommand::Compare {
+            left_state_directory,
+            right_state_directory,
+        } => compare(&left_state_directory, &right_state_directory, clock),
         TestAuditCommand::Report { state_directory } => report(&state_directory, clock),
     }
 }

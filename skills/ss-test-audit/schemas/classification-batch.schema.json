@@ -71,6 +71,9 @@
               "required": [
                 "path",
                 "line",
+                "endLine",
+                "owner",
+                "sourceRole",
                 "excerpt"
               ],
               "properties": {
@@ -81,6 +84,17 @@
                 "line": {
                   "type": "integer",
                   "minimum": 1
+                },
+                "endLine": {
+                  "type": "integer",
+                  "minimum": 1
+                },
+                "owner": {
+                  "type": "string"
+                },
+                "sourceRole": {
+                  "type": "string",
+                  "minLength": 1
                 },
                 "excerpt": {
                   "type": "string",
@@ -102,6 +116,14 @@
             }
           },
           "unlinkedReason": {
+            "type": "string",
+            "minLength": 1
+          },
+          "unresolvedCallerReason": {
+            "type": "string",
+            "minLength": 1
+          },
+          "reviewReason": {
             "type": "string",
             "minLength": 1
           }

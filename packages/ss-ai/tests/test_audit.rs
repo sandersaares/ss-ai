@@ -28,10 +28,12 @@ fn help_lists_the_native_workflow_without_provider_authentication() {
     for command in [
         "initialize",
         "search",
+        "context",
         "next-batch",
         "record-batch",
         "advance",
         "submit",
+        "compare",
         "report",
     ] {
         assert!(stdout.contains(command), "{command}");
@@ -91,6 +93,7 @@ fn executable_accepts_multi_query_search_and_compact_submit() {
     let next: Value = from_slice(&next.stdout).unwrap();
     let batch_path = next["batchPath"].as_str().unwrap();
     let batch: Value = from_slice(&fs::read(batch_path).unwrap()).unwrap();
+    assert_context_card(&state, &batch);
     let evidence_handle = search["results"][0]["matches"][0]["evidenceHandle"].clone();
     let submission_path = state.join("submission.json");
     fs::write(
@@ -150,7 +153,7 @@ fn executable_accepts_multi_query_search_and_compact_submit() {
     assert_eq!(report["finalResponseAllowed"], true);
     let summary: Value =
         from_slice(&fs::read(report["summaryJsonPath"].as_str().unwrap()).unwrap()).unwrap();
-    assert_eq!(summary["schemaVersion"], 1);
+    assert_eq!(summary["schemaVersion"], 2);
     assert_eq!(summary["testCount"], report["testCount"]);
     assert_eq!(summary["classificationCounts"]["Documented"], 1);
     let summary_text = fs::read_to_string(report["summaryPath"].as_str().unwrap()).unwrap();
@@ -168,6 +171,34 @@ fn executable_accepts_multi_query_search_and_compact_submit() {
     assert!(details_text.contains("checks_value"));
     assert!(details_text.contains(predicate));
     assert_canonical_report_receipt(&report);
+}
+
+/// Verifies complete owner context through the executable boundary.
+fn assert_context_card(state: &Path, batch: &Value) {
+    let context = Command::new(env!("CARGO_BIN_EXE_ss-ai"))
+        .args(["test-audit", "context", "--state-directory"])
+        .arg(state)
+        .args(["--assertion-id"])
+        .arg(batch["assertions"][0]["id"].as_str().unwrap())
+        .output()
+        .unwrap();
+    assert!(
+        context.status.success(),
+        "{}",
+        String::from_utf8_lossy(&context.stderr)
+    );
+    let context: Value = from_slice(&context.stdout).unwrap();
+    assert!(
+        context["owner"]["source"]
+            .as_str()
+            .unwrap()
+            .contains("fn checks_value()")
+    );
+    assert_eq!(context["assertion"]["id"], batch["assertions"][0]["id"]);
+    assert_eq!(context["containingTest"]["name"], "checks_value");
+    assert!(
+        context["bindingCandidates"].is_array() && context["relatedEvidenceCandidates"].is_array()
+    );
 }
 
 #[test]
@@ -215,7 +246,7 @@ fn executable_accepts_exact_initialization_corrections() {
         String::from_utf8_lossy(&output.stderr)
     );
     let receipt: Value = from_slice(&output.stdout).unwrap();
-    assert_eq!(receipt["schemaVersion"], 2);
+    assert_eq!(receipt["schemaVersion"], 3);
     assert_eq!(receipt["assertionCount"], 0);
     assert_eq!(receipt["correctionCount"], 1);
     let inventory: Value = from_slice(&fs::read(state.join("inventory.json")).unwrap()).unwrap();

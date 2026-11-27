@@ -247,6 +247,77 @@ fn unrelated() { external_crate::check(); }
 }
 
 #[test]
+fn resolves_unique_cross_file_imports_and_qualified_helpers_without_name_guesses() {
+    let inventory = scan(|repository| {
+        write(
+            repository,
+            "src/lib.rs",
+            "
+mod helpers;
+mod decoy;
+pub(crate) use helpers::*;
+
+#[cfg(test)]
+mod tests {
+    use crate::{shared as renamed};
+    #[test]
+    fn imported_and_qualified() {
+        renamed();
+        crate::decoy::shared();
+    }
+    #[test]
+    fn indirect_callback_remains_unresolved() {
+        let callback: fn() = crate::helpers::callback_only;
+        callback();
+    }
+}
+
+#[cfg(test)]
+mod sibling {
+    fn renamed() {}
+    #[test]
+    fn local_name_is_not_an_import() { renamed(); }
+}
+",
+        );
+        write(
+            repository,
+            "src/helpers.rs",
+            "
+pub(crate) fn shared() { assert!(first_contract()); }
+pub(crate) fn callback_only() { assert!(callback_contract()); }
+",
+        );
+        write(
+            repository,
+            "src/decoy.rs",
+            "
+pub(crate) fn shared() { assert!(second_contract()); }
+",
+        );
+    });
+    let shared = assertion(&inventory, "assert!(first_contract())");
+    assert_eq!(shared["callingTestIds"].as_array().unwrap().len(), 1);
+    assert_eq!(shared["callerEvidence"][0]["kind"], "nativeImport");
+    assert!(
+        shared["callerEvidence"][0]["expression"]
+            .as_str()
+            .unwrap()
+            .contains("renamed()")
+    );
+    let decoy = assertion(&inventory, "assert!(second_contract())");
+    assert_eq!(decoy["callingTestIds"].as_array().unwrap().len(), 1);
+    assert_eq!(decoy["callerEvidence"][0]["kind"], "nativeQualified");
+    let unresolved = assertion(&inventory, "assert!(callback_contract())");
+    assert!(unresolved["callingTestIds"].as_array().unwrap().is_empty());
+    assert!(unresolved["callerEvidence"].as_array().unwrap().is_empty());
+    assert_eq!(
+        unresolved["unresolvedCallerCandidates"][0]["kind"],
+        "unresolvedCandidate"
+    );
+}
+
+#[test]
 fn compile_checks_require_the_matching_bounded_function() {
     let inventory = scan(|repository| {
         write(
@@ -464,24 +535,40 @@ fn second_callback() {
     let mut holder = receiver_holder.borrow_mut();
     holder.as_mut().expect("receiver still held");
 }
+
+#[test]
+fn sync_callback() {
+    let receiver_holder: Arc<Mutex<Option<Pin<Box<_>>>>> =
+        Arc::new(Mutex::new(Some(Box::pin(receiver))));
+    let receiver_for_waker = Arc::clone(&receiver_holder);
+    run(move || {
+        let mut holder = receiver_for_waker
+            .lock()
+            .expect("receiver mutex is not poisoned");
+        holder.as_mut().expect("receiver still held");
+    });
+    let mut holder = receiver_holder.lock().expect("receiver mutex is not poisoned");
+    holder.as_mut().expect("receiver still held");
+}
 "#,
         );
     });
     let sites = rows(&inventory, "assertions");
     assert_eq!(sites.len(), 2);
     let corrections = rows(&inventory, "corrections");
-    assert_eq!(corrections.len(), 4);
+    assert_eq!(corrections.len(), 8);
     assert!(corrections.iter().all(|correction| {
-        correction["expression"]
-            .as_str()
-            .is_some_and(|expression| expression.contains("receiver still held"))
+        correction["expression"].as_str().is_some_and(|expression| {
+            expression.contains("receiver still held")
+                || expression.contains("receiver mutex is not poisoned")
+        })
     }));
     assert_eq!(
         rows(&inventory, "diagnostics")
             .iter()
             .filter(|diagnostic| diagnostic["kind"] == "fixtureAccessExcluded")
             .count(),
-        4
+        8
     );
     assert!(
         sites
@@ -543,7 +630,7 @@ fn initialization_can_correct_an_exact_ambiguous_fixture_candidate() {
     )
     .unwrap();
     let inventory: Value = from_slice(&fs::read(state.join("inventory.json")).unwrap()).unwrap();
-    assert_eq!(inventory["schemaVersion"], 2);
+    assert_eq!(inventory["schemaVersion"], 3);
     assert!(rows(&inventory, "assertions").is_empty());
     let [correction] = rows(&inventory, "corrections") else {
         panic!("expected one exact inventory correction")
@@ -593,6 +680,32 @@ fn initialization_can_correct_an_exact_ambiguous_fixture_candidate() {
             .to_string()
             .contains("does not match exactly one assertion")
     );
+}
+
+#[test]
+fn source_identity_is_independent_of_checkout_root() {
+    let mut identities = Vec::new();
+    for _ in 0..2 {
+        let fixture = tempdir_in(env!("CARGO_TARGET_TMPDIR")).unwrap();
+        let repository = fixture.path().join("repository");
+        let state = fixture.path().join("state");
+        write(&repository, ".git", "gitdir: ../fixture-git");
+        write(
+            &repository,
+            "src/lib.rs",
+            "/// A stable promise.\npub fn value() -> i32 { 1 }\n",
+        );
+        initialize(&repository, &[], &state, &FixtureGit, &FixedClock).unwrap();
+        let state: Value = from_slice(&fs::read(state.join("audit-state.json")).unwrap()).unwrap();
+        identities.push((
+            state["snapshotSha256"].as_str().unwrap().to_owned(),
+            state["contentSha256"].as_str().unwrap().to_owned(),
+            state["indexSha256"].as_str().unwrap().to_owned(),
+        ));
+    }
+    assert_ne!(identities[0].0, identities[1].0);
+    assert_eq!(identities[0].1, identities[1].1);
+    assert_eq!(identities[0].2, identities[1].2);
 }
 
 #[test]

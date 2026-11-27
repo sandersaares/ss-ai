@@ -10,7 +10,7 @@ use ss_ai_runtime::{Clock, FileTransaction, Process, caused_by, fail};
 
 use crate::model::{
     AUDIT_STATE_SCHEMA_VERSION, AuditState, ClassificationJournal, IndexEntry, Inventory,
-    InventoryCorrection, InventoryCorrectionRequest, RevisionKind, ScanDiagnostic,
+    InventoryCorrection, InventoryCorrectionRequest, RUBRIC_VERSION, RevisionKind, ScanDiagnostic,
 };
 use crate::scan::{digest, inventory};
 use crate::state::{
@@ -83,6 +83,12 @@ pub fn initialize_with_corrections(
     if let Some(correction_path) = correction_path {
         apply_corrections(&mut inventory, correction_path, &repository_revision)?;
     }
+    let index_bytes = index_lines(&index)?;
+    inventory.tool_version.clear();
+    inventory.tool_version.push_str(env!("CARGO_PKG_VERSION"));
+    inventory.rubric_version.clear();
+    inventory.rubric_version.push_str(RUBRIC_VERSION);
+    inventory.content_sha256 = content_digest(&inventory, &index_bytes)?;
     let inventory_material = to_vec_pretty(&inventory)?;
     let audit_id = digest(&inventory_material);
     inventory.audit_id.clear();
@@ -91,7 +97,6 @@ pub fn initialize_with_corrections(
         .push_str(audit_id.get(..AUDIT_ID_HEX_CHARACTERS).unwrap_or_default());
     let inventory_bytes = to_vec_pretty(&inventory)?;
     let snapshot_sha256 = digest(&inventory_bytes);
-    let index_bytes = index_lines(&index)?;
     let index_sha256 = digest(&index_bytes);
     let state = AuditState {
         schema_version: AUDIT_STATE_SCHEMA_VERSION,
@@ -105,14 +110,21 @@ pub fn initialize_with_corrections(
         repository_revision: repository_revision.clone(),
         revision_kind,
         scope_paths: scopes,
+        tool_version: inventory.tool_version.clone(),
+        rubric_version: inventory.rubric_version.clone(),
+        content_sha256: inventory.content_sha256.clone(),
         scanned_at: clock.now().to_string(),
         test_count: inventory.tests.len(),
         assertion_count: inventory.assertions.len(),
     };
     let journal = ClassificationJournal {
-        schema_version: 1,
+        schema_version: AUDIT_STATE_SCHEMA_VERSION,
         audit_id: state.audit_id.clone(),
         snapshot_sha256: state.snapshot_sha256.clone(),
+        content_sha256: state.content_sha256.clone(),
+        index_sha256: state.index_sha256.clone(),
+        tool_version: state.tool_version.clone(),
+        rubric_version: state.rubric_version.clone(),
         classifications: Vec::new(),
     };
     write_bytes(
@@ -138,6 +150,10 @@ pub fn initialize_with_corrections(
         "paths": state_paths(&state_directory)?,
         "auditId": state.audit_id,
         "snapshotSha256": state.snapshot_sha256,
+        "contentSha256": state.content_sha256,
+        "indexSha256": state.index_sha256,
+        "toolVersion": state.tool_version,
+        "rubricVersion": state.rubric_version,
         "repositoryRevision": repository_revision,
         "revisionKind": revision_kind,
         "testCount": state.test_count,
@@ -147,6 +163,20 @@ pub fn initialize_with_corrections(
         "correctionCount": inventory.corrections.len(),
     })
     .to_string())
+}
+
+/// Hashes source-owned inventory content without checkout-specific absolute paths.
+fn content_digest(inventory: &Inventory, index_bytes: &[u8]) -> Result<String, AppError> {
+    Ok(digest(&to_vec_pretty(&json!({
+        "repositoryRevision": inventory.repository_revision,
+        "scopePaths": inventory.scope_paths,
+        "files": inventory.files,
+        "tests": inventory.tests,
+        "assertions": inventory.assertions,
+        "diagnostics": inventory.diagnostics,
+        "corrections": inventory.corrections,
+        "indexSha256": digest(index_bytes),
+    }))?))
 }
 
 /// Binds exact source predicates to the corrected inventory before publication.

@@ -7,8 +7,10 @@ use serde::de::Error as _;
 use serde::{Deserialize, Deserializer, Serialize};
 use serde_json::Value;
 
-/// Identifies persisted state with explicit inventory-correction provenance.
-pub(crate) const AUDIT_STATE_SCHEMA_VERSION: u32 = 2;
+/// Identifies persisted state with provenance-rich evidence and caller records.
+pub(crate) const AUDIT_STATE_SCHEMA_VERSION: u32 = 3;
+/// Identifies the semantic judgment rubric used by this utility build.
+pub(crate) const RUBRIC_VERSION: &str = "1";
 
 /// Identifies the immutable inventory snapshot and its repository provenance.
 #[derive(Clone, Deserialize, Serialize)]
@@ -22,6 +24,9 @@ pub(crate) struct AuditState {
     pub(crate) repository_revision: String,
     pub(crate) revision_kind: RevisionKind,
     pub(crate) scope_paths: Vec<String>,
+    pub(crate) tool_version: String,
+    pub(crate) rubric_version: String,
+    pub(crate) content_sha256: String,
     pub(crate) scanned_at: String,
     pub(crate) test_count: usize,
     pub(crate) assertion_count: usize,
@@ -45,6 +50,9 @@ pub(crate) struct Inventory {
     pub(crate) repository_revision: String,
     pub(crate) revision_kind: RevisionKind,
     pub(crate) scope_paths: Vec<String>,
+    pub(crate) tool_version: String,
+    pub(crate) rubric_version: String,
+    pub(crate) content_sha256: String,
     pub(crate) files: Vec<IndexedFile>,
     pub(crate) tests: Vec<TestCase>,
     pub(crate) assertions: Vec<AssertionSite>,
@@ -92,6 +100,8 @@ pub(crate) struct AssertionSite {
     pub(crate) column: NonZeroUsize,
     pub(crate) expression: String,
     pub(crate) file_sha256: String,
+    pub(crate) owner_line: NonZeroUsize,
+    pub(crate) owner_end_line: usize,
     /// Transient ownership marker used before serializing the immutable inventory.
     #[serde(skip)]
     pub(crate) test_code: bool,
@@ -101,6 +111,21 @@ pub(crate) struct AssertionSite {
     pub(crate) containing_test_id: Option<String>,
     pub(crate) helper_name: Option<String>,
     pub(crate) calling_test_ids: Vec<String>,
+    pub(crate) caller_evidence: Vec<CallerEvidence>,
+    pub(crate) unresolved_caller_candidates: Vec<CallerEvidence>,
+}
+
+/// Binds one native caller edge to the exact syntax that establishes it.
+#[derive(Clone, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub(crate) struct CallerEvidence {
+    pub(crate) kind: String,
+    pub(crate) test_id: String,
+    pub(crate) path: String,
+    pub(crate) line: NonZeroUsize,
+    pub(crate) end_line: usize,
+    pub(crate) column: NonZeroUsize,
+    pub(crate) expression: String,
 }
 
 /// Preserves unsupported syntax and completeness observations for the reviewer.
@@ -155,8 +180,11 @@ pub(crate) struct InventoryCorrection {
 pub(crate) struct IndexEntry {
     pub(crate) path: String,
     pub(crate) line: NonZeroUsize,
+    pub(crate) end_line: NonZeroUsize,
     pub(crate) language: String,
     pub(crate) kind: String,
+    pub(crate) owner: String,
+    pub(crate) source_role: String,
     pub(crate) excerpt: String,
     pub(crate) repository_revision: String,
     pub(crate) file_sha256: String,
@@ -169,6 +197,10 @@ pub(crate) struct Batch {
     pub(crate) schema_version: u32,
     pub(crate) audit_id: String,
     pub(crate) snapshot_sha256: String,
+    pub(crate) content_sha256: String,
+    pub(crate) index_sha256: String,
+    pub(crate) tool_version: String,
+    pub(crate) rubric_version: String,
     pub(crate) assertions: Vec<BatchAssertion>,
     pub(crate) completed: usize,
     pub(crate) remaining: usize,
@@ -184,6 +216,7 @@ pub(crate) struct BatchAssertion {
     pub(crate) test_path: Option<String>,
     pub(crate) test_line: Option<NonZeroUsize>,
     pub(crate) context: Vec<IndexEntry>,
+    pub(crate) diagnostics: Vec<ScanDiagnostic>,
 }
 
 /// Validates the caller's batch envelope before recording semantic judgments.
@@ -197,7 +230,7 @@ pub(crate) struct ClassificationBatch {
 }
 
 /// Distinguishes the four evidence relationships used by the audit report.
-#[derive(Debug, Clone, Copy, Deserialize, Serialize, Eq, PartialEq)]
+#[derive(Debug, Clone, Copy, Deserialize, Serialize, Eq, Ord, PartialEq, PartialOrd)]
 pub(crate) enum ClassificationKind {
     Documented,
     Implicit,
@@ -228,6 +261,10 @@ pub(crate) struct Classification {
     pub(crate) calling_test_ids: Vec<String>,
     #[serde(default)]
     pub(crate) unlinked_reason: Option<String>,
+    #[serde(default)]
+    pub(crate) unresolved_caller_reason: Option<String>,
+    #[serde(default)]
+    pub(crate) review_reason: Option<String>,
 }
 
 /// Anchors agent evidence to an exact indexed source line.
@@ -237,6 +274,9 @@ pub(crate) struct Citation {
     pub(crate) path: String,
     #[serde(deserialize_with = "citation_line")]
     pub(crate) line: NonZeroUsize,
+    pub(crate) end_line: NonZeroUsize,
+    pub(crate) owner: String,
+    pub(crate) source_role: String,
     pub(crate) excerpt: String,
 }
 
@@ -277,6 +317,10 @@ pub(crate) struct CompactSubmissionRow {
     #[serde(default)]
     pub(crate) unlinked_reason: Option<String>,
     #[serde(default)]
+    pub(crate) unresolved_caller_reason: Option<String>,
+    #[serde(default)]
+    pub(crate) review_reason: Option<String>,
+    #[serde(default)]
     pub(crate) reuse_from: Option<String>,
     #[serde(default)]
     pub(crate) equivalence_confirmed: Option<bool>,
@@ -289,6 +333,10 @@ pub(crate) struct ClassificationJournal {
     pub(crate) schema_version: u32,
     pub(crate) audit_id: String,
     pub(crate) snapshot_sha256: String,
+    pub(crate) content_sha256: String,
+    pub(crate) index_sha256: String,
+    pub(crate) tool_version: String,
+    pub(crate) rubric_version: String,
     pub(crate) classifications: Vec<Classification>,
 }
 
@@ -322,6 +370,10 @@ pub(crate) struct AuditSummary {
     pub(crate) final_response_allowed: bool,
     pub(crate) audit_id: String,
     pub(crate) snapshot_sha256: String,
+    pub(crate) content_sha256: String,
+    pub(crate) index_sha256: String,
+    pub(crate) tool_version: String,
+    pub(crate) rubric_version: String,
     pub(crate) repository_root: String,
     pub(crate) repository_revision: String,
     pub(crate) scope_paths: Vec<String>,
@@ -337,5 +389,16 @@ pub(crate) struct AuditSummary {
     pub(crate) fallible_value_check_count: usize,
     pub(crate) conditional_assertion_count: usize,
     pub(crate) diagnostic_count: usize,
+    pub(crate) correction_count: usize,
+    pub(crate) consistency_diagnostic_count: usize,
     pub(crate) modules: Vec<ModuleSummary>,
+}
+
+/// Explains a review warning without changing accepted classifications.
+#[derive(Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct ConsistencyDiagnostic {
+    pub(crate) kind: String,
+    pub(crate) assertion_ids: Vec<String>,
+    pub(crate) detail: String,
 }

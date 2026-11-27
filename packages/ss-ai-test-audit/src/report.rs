@@ -13,8 +13,8 @@ use serde_json::{json, to_string};
 use ss_ai_runtime::{Clock, LockMode, ResourceLock, fail};
 
 use crate::model::{
-    AuditSummary, Classification, ClassificationKind, ModuleSummary, ScanDiagnostic, TestCase,
-    TraceRow,
+    AuditSummary, Classification, ClassificationKind, ConsistencyDiagnostic, InventoryCorrection,
+    ModuleSummary, ScanDiagnostic, TestCase, TraceRow,
 };
 use crate::state::{
     LoadedState, load_fresh, output_path, output_path_text, path_is_vacant,
@@ -70,28 +70,44 @@ pub fn report(state_directory: &Path, clock: &dyn Clock) -> Result<String, AppEr
         &loaded.inventory.repository_revision,
     )?;
     let gaps = TestGaps::collect(&tests);
-    let summary = build_summary(&loaded, &trace, &tests, module_summaries(&trace), &gaps);
+    let consistency_diagnostics = consistency_diagnostics(&trace);
+    let summary = build_summary(
+        &loaded,
+        &trace,
+        &tests,
+        module_summaries(&trace),
+        &gaps,
+        consistency_diagnostics.len(),
+    );
     let summary_text = render_summary(&summary, &gaps, &loaded.inventory.diagnostics);
     let details_document = json!({
-        "schemaVersion": 1,
+        "schemaVersion": 2,
         "auditId": loaded.state.audit_id,
         "snapshotSha256": loaded.state.snapshot_sha256,
+        "contentSha256": loaded.state.content_sha256,
+        "indexSha256": loaded.state.index_sha256,
+        "toolVersion": loaded.state.tool_version,
+        "rubricVersion": loaded.state.rubric_version,
         "repositoryRevision": loaded.inventory.repository_revision,
         "repositoryRoot": loaded.inventory.repository_root,
         "scopePaths": loaded.inventory.scope_paths,
         "assertionTrace": trace,
         "testInventory": tests,
         "diagnostics": loaded.inventory.diagnostics,
+        "corrections": loaded.inventory.corrections,
+        "consistencyDiagnostics": consistency_diagnostics,
     });
-    let details_text = render_details(
-        &loaded.state.audit_id,
-        &loaded.inventory.repository_root,
-        &loaded.inventory.repository_revision,
-        &loaded.inventory.scope_paths,
-        &tests,
-        &trace,
-        &loaded.inventory.diagnostics,
-    )?;
+    let details_text = render_details(&DetailRender {
+        audit_id: &loaded.state.audit_id,
+        repository_root: &loaded.inventory.repository_root,
+        revision: &loaded.inventory.repository_revision,
+        scope_paths: &loaded.inventory.scope_paths,
+        tests: &tests,
+        trace: &trace,
+        diagnostics: &loaded.inventory.diagnostics,
+        corrections: &loaded.inventory.corrections,
+        consistency_diagnostics: &consistency_diagnostics,
+    })?;
     let output_directory = publish_report(state_directory, clock, |staging| {
         write_json(&staging.join("details.json"), &details_document, clock)?;
         write_bytes(&staging.join("details.md"), details_text.as_bytes(), clock)?;
@@ -107,6 +123,10 @@ pub fn report(state_directory: &Path, clock: &dyn Clock) -> Result<String, AppEr
         "nextAction": summary.next_action,
         "finalResponseAllowed": summary.final_response_allowed,
         "auditId": summary.audit_id,
+        "contentSha256": summary.content_sha256,
+        "indexSha256": summary.index_sha256,
+        "toolVersion": summary.tool_version,
+        "rubricVersion": summary.rubric_version,
         "testCount": summary.test_count,
         "assertionCount": summary.assertion_count,
         "classificationCounts": summary.classification_counts,
@@ -116,6 +136,8 @@ pub fn report(state_directory: &Path, clock: &dyn Clock) -> Result<String, AppEr
         "fallibleValueCheckCount": summary.fallible_value_check_count,
         "conditionalAssertionCount": summary.conditional_assertion_count,
         "diagnosticCount": summary.diagnostic_count,
+        "correctionCount": summary.correction_count,
+        "consistencyDiagnosticCount": summary.consistency_diagnostic_count,
         "summaryJsonPath": output_path_text(&output_directory.join("summary.json"))?,
         "summaryPath": output_path_text(&output_directory.join("summary.md"))?,
         "detailsJsonPath": output_path_text(&output_directory.join("details.json"))?,
@@ -132,6 +154,7 @@ fn build_summary(
     tests: &[TestReportRow<'_>],
     modules: Vec<ModuleSummary>,
     gaps: &TestGaps<'_>,
+    consistency_diagnostic_count: usize,
 ) -> AuditSummary {
     let mut languages: BTreeMap<&str, usize> = BTreeMap::new();
     for file in &loaded.inventory.files {
@@ -139,12 +162,16 @@ fn build_summary(
         *count = count.saturating_add(1);
     }
     AuditSummary {
-        schema_version: 1,
+        schema_version: 2,
         status: "complete".to_owned(),
         next_action: "complete".to_owned(),
         final_response_allowed: true,
         audit_id: loaded.state.audit_id.clone(),
         snapshot_sha256: loaded.state.snapshot_sha256.clone(),
+        content_sha256: loaded.state.content_sha256.clone(),
+        index_sha256: loaded.state.index_sha256.clone(),
+        tool_version: loaded.state.tool_version.clone(),
+        rubric_version: loaded.state.rubric_version.clone(),
         repository_root: loaded.inventory.repository_root.clone(),
         repository_revision: loaded.inventory.repository_revision.clone(),
         scope_paths: loaded.inventory.scope_paths.clone(),
@@ -179,6 +206,8 @@ fn build_summary(
             .filter(|diagnostic| diagnostic.kind == "conditionalAssertion")
             .count(),
         diagnostic_count: loaded.inventory.diagnostics.len(),
+        correction_count: loaded.inventory.corrections.len(),
+        consistency_diagnostic_count,
         modules,
     }
 }
@@ -438,8 +467,12 @@ fn render_summary(
     );
     _ = writeln!(
         output,
-        "Audit: `{audit_id}`  \nSnapshot: `{}`  \nRepository: `{}`  \nRevision: `{revision}`  \nScope: `{}`  \nIndexed files: {file_count}\n",
+        "Audit: `{audit_id}`  \nSnapshot: `{}`  \nContent digest: `{}`  \nIndex digest: `{}`  \nTool version: `{}`  \nRubric version: `{}`  \nRepository: `{}`  \nRevision: `{revision}`  \nScope: `{}`  \nIndexed files: {file_count}\n",
         summary.snapshot_sha256,
+        summary.content_sha256,
+        summary.index_sha256,
+        summary.tool_version,
+        summary.rubric_version,
         repository_root,
         if scope_paths.is_empty() {
             "<repository>".to_owned()
@@ -495,7 +528,17 @@ fn render_summary(
         "- Conditional assertion diagnostics: {}",
         summary.conditional_assertion_count
     );
-    _ = writeln!(output, "- Scan diagnostics: {}\n", summary.diagnostic_count);
+    _ = writeln!(output, "- Scan diagnostics: {}", summary.diagnostic_count);
+    _ = writeln!(
+        output,
+        "- Inventory corrections: {}",
+        summary.correction_count
+    );
+    _ = writeln!(
+        output,
+        "- Consistency diagnostics: {}\n",
+        summary.consistency_diagnostic_count
+    );
     output.push_str(
         "No explicitly documented promise counts plausible guarantees without exact wording (`Implicit`) \
          and checks that no public promise requires (`Incidental`). No public-contract check counts \
@@ -602,16 +645,33 @@ fn render_summary(
     output
 }
 
+/// Supplies the complete evidence set for one human detail rendering.
+#[derive(Clone, Copy)]
+struct DetailRender<'a> {
+    audit_id: &'a str,
+    repository_root: &'a str,
+    revision: &'a str,
+    scope_paths: &'a [String],
+    tests: &'a [TestReportRow<'a>],
+    trace: &'a [TraceRow<'a>],
+    diagnostics: &'a [ScanDiagnostic],
+    corrections: &'a [InventoryCorrection],
+    consistency_diagnostics: &'a [ConsistencyDiagnostic],
+}
+
 /// Renders the complete human-readable companion to `details.json`.
-fn render_details(
-    audit_id: &str,
-    repository_root: &str,
-    revision: &str,
-    scope_paths: &[String],
-    tests: &[TestReportRow<'_>],
-    trace: &[TraceRow<'_>],
-    diagnostics: &[ScanDiagnostic],
-) -> Result<String, AppError> {
+fn render_details(input: &DetailRender<'_>) -> Result<String, AppError> {
+    let DetailRender {
+        audit_id,
+        repository_root,
+        revision,
+        scope_paths,
+        tests,
+        trace,
+        diagnostics,
+        corrections,
+        consistency_diagnostics,
+    } = *input;
     let mut output = String::new();
     _ = writeln!(
         output,
@@ -661,6 +721,26 @@ fn render_details(
         if let Some(reason) = &row.classification.unlinked_reason {
             _ = writeln!(output, "- Unlinked reason: {reason}");
         }
+        if let Some(reason) = &row.classification.unresolved_caller_reason {
+            _ = writeln!(output, "- Unresolved caller candidate: {reason}");
+        }
+        if let Some(reason) = &row.classification.review_reason {
+            _ = writeln!(output, "- Review reason: {reason}");
+        }
+        for evidence in &row.assertion.caller_evidence {
+            _ = writeln!(
+                output,
+                "- Native caller evidence ({}): `{}` `{}:{}`",
+                evidence.kind, evidence.test_id, evidence.path, evidence.line
+            );
+        }
+        for candidate in &row.assertion.unresolved_caller_candidates {
+            _ = writeln!(
+                output,
+                "- Unresolved caller candidate: `{}` `{}:{}` {}",
+                candidate.test_id, candidate.path, candidate.line, candidate.expression
+            );
+        }
         for citation in &row.classification.citations {
             _ = writeln!(
                 output,
@@ -704,7 +784,146 @@ fn render_details(
             );
         }
     }
+    output.push_str("\n## Inventory corrections\n\n");
+    if corrections.is_empty() {
+        output.push_str("No inventory corrections.\n");
+    } else {
+        for correction in corrections {
+            _ = writeln!(
+                output,
+                "- `{}` at `{}:{}-{}`: {}",
+                correction.assertion_id,
+                correction.path,
+                correction.line,
+                correction.end_line,
+                correction.reason
+            );
+        }
+    }
+    output.push_str("\n## Consistency diagnostics\n\n");
+    if consistency_diagnostics.is_empty() {
+        output.push_str("No consistency diagnostics.\n");
+    } else {
+        for diagnostic in consistency_diagnostics {
+            _ = writeln!(
+                output,
+                "- `{}` ({}): {}",
+                diagnostic.kind,
+                diagnostic.assertion_ids.join(", "),
+                diagnostic.detail
+            );
+        }
+    }
     Ok(output)
+}
+
+/// Flags review patterns without changing semantic judgments or rates.
+fn consistency_diagnostics(trace: &[TraceRow<'_>]) -> Vec<ConsistencyDiagnostic> {
+    let mut diagnostics = Vec::new();
+    if !trace.is_empty()
+        && !trace
+            .iter()
+            .any(|row| row.classification.kind == ClassificationKind::Mixed)
+    {
+        diagnostics.push(ConsistencyDiagnostic {
+            kind: "noMixedSites".to_owned(),
+            assertion_ids: Vec::new(),
+            detail: "No site uses Mixed; confirm compound documented and undocumented constraints were split in the reasoning rather than forced into one label".to_owned(),
+        });
+    }
+    let mut by_rationale: BTreeMap<&str, Vec<&TraceRow<'_>>> = BTreeMap::new();
+    let mut by_expression: BTreeMap<&str, Vec<&TraceRow<'_>>> = BTreeMap::new();
+    for row in trace {
+        by_rationale
+            .entry(row.classification.rationale.as_str())
+            .or_default()
+            .push(row);
+        by_expression
+            .entry(row.assertion.expression.as_str())
+            .or_default()
+            .push(row);
+    }
+    for rows in by_rationale.values() {
+        let predicates = rows
+            .iter()
+            .map(|row| row.assertion.expression.as_str())
+            .collect::<BTreeSet<_>>();
+        if predicates.len() > 1 {
+            diagnostics.push(ConsistencyDiagnostic {
+                kind: "sharedRationaleDifferentPredicates".to_owned(),
+                assertion_ids: row_ids(rows),
+                detail: "One rationale explains different source predicates; verify that its contract claim applies to each".to_owned(),
+            });
+        }
+    }
+    for rows in by_expression.values() {
+        let classifications = rows
+            .iter()
+            .map(|row| row.classification.kind)
+            .collect::<BTreeSet<_>>();
+        if classifications.len() > 1 {
+            diagnostics.push(ConsistencyDiagnostic {
+                kind: "samePredicateDifferentClassifications".to_owned(),
+                assertion_ids: row_ids(rows),
+                detail: "The same predicate has different classifications; record the distinct applicability condition".to_owned(),
+            });
+        }
+    }
+
+    let mut by_citation: BTreeMap<(String, NonZeroUsize, NonZeroUsize), Vec<&TraceRow<'_>>> =
+        BTreeMap::new();
+    for row in trace {
+        for citation in &row.classification.citations {
+            by_citation
+                .entry((citation.path.clone(), citation.line, citation.end_line))
+                .or_default()
+                .push(row);
+        }
+    }
+    for rows in by_citation.values() {
+        let classifications = rows
+            .iter()
+            .map(|row| row.classification.kind)
+            .collect::<BTreeSet<_>>();
+        let predicates = rows
+            .iter()
+            .map(|row| row.assertion.expression.as_str())
+            .collect::<BTreeSet<_>>();
+        if classifications.len() > 1 {
+            diagnostics.push(ConsistencyDiagnostic {
+                kind: "citationSupportsConflictingClassifications".to_owned(),
+                assertion_ids: row_ids(rows),
+                detail: "One evidence range supports conflicting classifications; verify subject, conditions, and extracted facts".to_owned(),
+            });
+        }
+        if predicates.len() >= 3 {
+            diagnostics.push(ConsistencyDiagnostic {
+                kind: "broadCitationReuse".to_owned(),
+                assertion_ids: row_ids(rows),
+                detail: "One evidence range supports several different predicates; verify each operation-specific relationship".to_owned(),
+            });
+        }
+    }
+    diagnostics.sort_by(|left, right| {
+        (&left.kind, &left.assertion_ids, &left.detail).cmp(&(
+            &right.kind,
+            &right.assertion_ids,
+            &right.detail,
+        ))
+    });
+    diagnostics.dedup_by(|left, right| {
+        left.kind == right.kind && left.assertion_ids == right.assertion_ids
+    });
+    diagnostics
+}
+
+/// Returns stable source-site identities for one consistency warning.
+fn row_ids(rows: &[&TraceRow<'_>]) -> Vec<String> {
+    rows.iter()
+        .map(|row| row.assertion.id.clone())
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .collect()
 }
 
 /// Escapes table delimiters in Markdown without changing the report data.

@@ -1,5 +1,6 @@
 //! Deterministic source inventory with parser-backed Rust analysis.
 
+use std::collections::btree_map::Entry;
 use std::collections::{BTreeMap, BTreeSet};
 use std::ffi::OsStr;
 use std::fs::{self, File};
@@ -19,14 +20,14 @@ use ss_ai_runtime::{caused_by, fail};
 use syn::spanned::Spanned;
 use syn::visit::Visit;
 use syn::{
-    Arm, Attribute, Block, Expr, ExprCall, ExprClosure, ExprConst, ExprMethodCall, Field, FnArg,
-    ImplItem, ImplItemConst, ImplItemFn, Item, ItemConst, ItemFn, ItemImpl, ItemMod, ItemStatic,
-    Local, Macro, Meta, Pat, PatIdent, Signature, Stmt, StmtMacro, TraitItem, TraitItemConst, Type,
-    UseTree, Variant, WherePredicate, visit,
+    Arm, Attribute, Block, Expr, ExprCall, ExprClosure, ExprConst, ExprMethodCall, ExprPath, Field,
+    FnArg, ImplItem, ImplItemConst, ImplItemFn, Item, ItemConst, ItemFn, ItemImpl, ItemMod,
+    ItemStatic, ItemUse, Local, Macro, Meta, Pat, PatIdent, Signature, Stmt, StmtMacro, TraitItem,
+    TraitItemConst, Type, UseTree, Variant, Visibility, WherePredicate, visit,
 };
 
 use crate::model::{
-    AUDIT_STATE_SCHEMA_VERSION, AssertionSite, IndexEntry, IndexedFile, Inventory,
+    AUDIT_STATE_SCHEMA_VERSION, AssertionSite, CallerEvidence, IndexEntry, IndexedFile, Inventory,
     InventoryCorrection, RevisionKind, ScanDiagnostic, TestCase,
 };
 
@@ -37,7 +38,7 @@ use crate::model::{
 const MAX_FILE_BYTES: usize = 4 * 1024 * 1024;
 /// Keeps local evidence around a predicate without letting one long line crowd
 /// out other results in the agent's context.
-const MAX_INDEX_EXCERPT_CHARACTERS: usize = 500;
+const MAX_INDEX_EXCERPT_CHARACTERS: usize = 2_000;
 
 /// Scans selected repository paths without modifying the working tree.
 pub(crate) fn inventory(
@@ -181,6 +182,7 @@ pub(crate) fn inventory(
         ),
     }));
     assertions.retain(|assertion| !assertion.fixture_excluded);
+    resolve_imported_callers(repository_root, &tests, &mut assertions)?;
     attach_assertions(&mut tests, &mut assertions);
     refresh_cross_checks(&mut diagnostics, &assertions);
     verify_indexed_files(repository_root, &indexed_files)?;
@@ -195,6 +197,9 @@ pub(crate) fn inventory(
         repository_revision: repository_revision.to_owned(),
         revision_kind,
         scope_paths: scope_paths.to_vec(),
+        tool_version: String::new(),
+        rubric_version: String::new(),
+        content_sha256: String::new(),
         files: indexed_files,
         tests,
         assertions,
@@ -407,20 +412,255 @@ fn append_index(
     file_sha256: &str,
     lines: &[&str],
 ) {
-    for (offset, text) in lines.iter().enumerate() {
-        if text.trim().is_empty() {
+    let ranges = evidence_ranges(lines, language);
+    for range in ranges {
+        let Some(excerpt) = range.excerpt(lines) else {
+            continue;
+        };
+        if !has_meaningful_excerpt(&excerpt) {
             continue;
         }
         entries.push(IndexEntry {
             path: path.to_owned(),
-            line: NonZeroUsize::MIN.saturating_add(offset),
+            line: parser_line(range.start),
+            end_line: parser_line(range.end),
             language: language.to_owned(),
-            kind: index_kind(path, text),
-            excerpt: truncate(text.trim(), MAX_INDEX_EXCERPT_CHARACTERS),
+            kind: index_kind(path, &excerpt),
+            owner: range.owner,
+            source_role: range.source_role,
+            excerpt: truncate(excerpt.trim(), MAX_INDEX_EXCERPT_CHARACTERS),
             repository_revision: repository_revision.to_owned(),
             file_sha256: file_sha256.to_owned(),
         });
     }
+}
+
+/// Bounds one complete paragraph, list item, doc block, or source line.
+struct EvidenceRange {
+    start: usize,
+    end: usize,
+    owner: String,
+    source_role: String,
+}
+
+impl EvidenceRange {
+    /// Joins its exact source lines before the bounded index projection.
+    fn excerpt(&self, lines: &[&str]) -> Option<String> {
+        let slice = lines.get(self.start.saturating_sub(1)..self.end)?;
+        Some(slice.join("\n"))
+    }
+}
+
+/// Groups documentation without broadening ordinary source lines.
+fn evidence_ranges(lines: &[&str], language: &str) -> Vec<EvidenceRange> {
+    let mut ranges = Vec::new();
+    let mut current_heading = String::new();
+    let mut index = 0;
+    while index < lines.len() {
+        let Some(text) = lines.get(index).copied() else {
+            break;
+        };
+        let trimmed = text.trim_start();
+        if text.trim().is_empty() {
+            index = index.saturating_add(1);
+            continue;
+        }
+        if language == "markdown" {
+            if trimmed.starts_with('#') {
+                current_heading.clear();
+                current_heading.push_str(trimmed.trim_start_matches('#').trim());
+            }
+            if trimmed.starts_with("```") {
+                let mut fence_end = index.saturating_add(1);
+                while fence_end < lines.len() {
+                    let Some(next) = lines.get(fence_end) else {
+                        break;
+                    };
+                    fence_end = fence_end.saturating_add(1);
+                    if next.trim_start().starts_with("```") {
+                        break;
+                    }
+                }
+                ranges.push(EvidenceRange {
+                    start: index.saturating_add(1),
+                    end: fence_end,
+                    owner: current_heading.clone(),
+                    source_role: "markdownExample".to_owned(),
+                });
+                index = fence_end;
+                continue;
+            }
+            let end = lines
+                .iter()
+                .enumerate()
+                .skip(index.saturating_add(1))
+                .find(|(_, next)| next.trim().is_empty())
+                .map_or(lines.len(), |(next, _)| next);
+            ranges.push(EvidenceRange {
+                start: index.saturating_add(1),
+                end,
+                owner: current_heading.clone(),
+                source_role: "markdownDocumentation".to_owned(),
+            });
+            index = end.saturating_add(1);
+            continue;
+        }
+        if trimmed.starts_with("///") || trimmed.starts_with("//!") {
+            let end = lines
+                .iter()
+                .enumerate()
+                .skip(index.saturating_add(1))
+                .find(|(_, next)| {
+                    !next.trim_start().starts_with("///") && !next.trim_start().starts_with("//!")
+                })
+                .map_or(lines.len(), |(next, _)| next);
+            let owner = lines
+                .iter()
+                .skip(end)
+                .take(12)
+                .map(|line| line.trim())
+                .find(|line| {
+                    !line.is_empty()
+                        && !line.starts_with('#')
+                        && !line.starts_with("///")
+                        && !line.starts_with("//!")
+                })
+                .map_or_else(|| "module documentation".to_owned(), path_owner);
+            rust_doc_ranges(
+                lines,
+                index,
+                end,
+                &owner,
+                trimmed.starts_with("//!"),
+                &mut ranges,
+            );
+            index = end;
+            continue;
+        }
+        ranges.push(EvidenceRange {
+            start: index.saturating_add(1),
+            end: index.saturating_add(1),
+            owner: path_owner(text),
+            source_role: "sourceLine".to_owned(),
+        });
+        index = index.saturating_add(1);
+    }
+    ranges
+}
+
+/// Splits rustdoc prose from fenced examples while retaining complete paragraphs.
+fn rust_doc_ranges(
+    lines: &[&str],
+    start: usize,
+    end: usize,
+    owner: &str,
+    module_doc: bool,
+    ranges: &mut Vec<EvidenceRange>,
+) {
+    let mut cursor = start;
+    while cursor < end {
+        let Some(line) = lines.get(cursor).copied() else {
+            break;
+        };
+        let content = rust_doc_content(line);
+        if content.trim().is_empty() {
+            cursor = cursor.saturating_add(1);
+            continue;
+        }
+        let mut range_end = cursor.saturating_add(1);
+        let example = content.trim_start().starts_with("```");
+        if example {
+            let mut closed = false;
+            while range_end < end {
+                let Some(line) = lines.get(range_end).copied() else {
+                    break;
+                };
+                let following = rust_doc_content(line);
+                range_end = range_end.saturating_add(1);
+                if following.trim_start().starts_with("```") {
+                    closed = true;
+                    break;
+                }
+            }
+            if !closed {
+                range_end = end;
+            }
+        } else {
+            while range_end < end {
+                let Some(line) = lines.get(range_end).copied() else {
+                    break;
+                };
+                let following = rust_doc_content(line);
+                if following.trim().is_empty() || following.trim_start().starts_with("```") {
+                    break;
+                }
+                range_end = range_end.saturating_add(1);
+            }
+        }
+        let source_role = if example && owner.trim_start().starts_with("pub ") {
+            "rustPublicExample"
+        } else if example {
+            "rustExample"
+        } else if module_doc {
+            "rustModuleDoc"
+        } else if owner.trim_start().starts_with("pub trait")
+            || owner.trim_start().starts_with("trait ")
+        {
+            "rustTraitDoc"
+        } else {
+            "rustItemDoc"
+        }
+        .to_owned();
+        ranges.push(EvidenceRange {
+            start: cursor.saturating_add(1),
+            end: range_end,
+            owner: owner.to_owned(),
+            source_role,
+        });
+        cursor = range_end;
+    }
+}
+
+/// Removes the documentation marker before paragraph and fence detection.
+fn rust_doc_content(line: &str) -> &str {
+    let line = line.trim_start();
+    line.strip_prefix("///")
+        .or_else(|| line.strip_prefix("//!"))
+        .unwrap_or(line)
+        .trim_start()
+}
+
+/// Names the nearest obvious declaration without treating it as semantic authority.
+fn path_owner(line: &str) -> String {
+    let line = line.trim();
+    if line.starts_with("fn ")
+        || line.starts_with("pub fn ")
+        || line.starts_with("pub(crate) fn ")
+        || line.starts_with("struct ")
+        || line.starts_with("pub struct ")
+        || line.starts_with("trait ")
+        || line.starts_with("pub trait ")
+    {
+        line.split(['{', ';'])
+            .next()
+            .unwrap_or(line)
+            .trim()
+            .to_owned()
+    } else {
+        String::new()
+    }
+}
+
+/// Rejects comment-marker-only records rather than presenting them as evidence.
+fn has_meaningful_excerpt(excerpt: &str) -> bool {
+    excerpt.lines().any(|line| {
+        let line = line
+            .trim()
+            .trim_start_matches("///")
+            .trim_start_matches("//!")
+            .trim();
+        !line.is_empty() && line != "*" && line != "/**" && line != "*/"
+    })
 }
 
 /// Labels evidence shapes while retaining every indexed source line.
@@ -499,7 +739,9 @@ fn scan_file(
                     test_context: is_test_path(path),
                     test_drop_impl: false,
                     calls: BTreeMap::new(),
+                    candidate_calls: BTreeMap::new(),
                     helper_assertions: Vec::new(),
+                    visiting_direct_call_target: false,
                 };
                 collector.visit_file(&file);
                 collector.link_helper_assertions();
@@ -577,6 +819,571 @@ fn scan_file(
     }
 }
 
+/// Resolves explicit crate imports and qualified calls across Rust source files.
+fn resolve_imported_callers(
+    repository_root: &Path,
+    tests: &[TestCase],
+    assertions: &mut [AssertionSite],
+) -> Result<(), AppError> {
+    let mut crates: BTreeMap<PathBuf, Vec<String>> = BTreeMap::new();
+    for path in tests.iter().map(|test| &test.path).chain(
+        assertions
+            .iter()
+            .filter(|assertion| assertion.helper_name.is_some())
+            .map(|assertion| &assertion.path),
+    ) {
+        if let Some(root) = rust_crate_root(repository_root, path) {
+            crates.entry(root).or_default().push(path.clone());
+        }
+    }
+    for (crate_root, mut paths) in crates {
+        paths.sort();
+        paths.dedup();
+        resolve_crate_callers(repository_root, &crate_root, &paths, tests, assertions)?;
+    }
+    Ok(())
+}
+
+/// Locates the nearest Cargo package owning one repository-relative Rust path.
+fn rust_crate_root(repository_root: &Path, path: &str) -> Option<PathBuf> {
+    let absolute = repository_root.join(path);
+    for ancestor in absolute.ancestors().skip(1) {
+        if ancestor.join("Cargo.toml").is_file() {
+            return Some(ancestor.to_owned());
+        }
+        if ancestor == repository_root {
+            break;
+        }
+    }
+    if absolute.starts_with(repository_root.join("src")) {
+        return Some(repository_root.to_owned());
+    }
+    None
+}
+
+/// Maps one helper's module and exported name to all of its source assertions.
+#[derive(Clone, Debug)]
+struct HelperTarget {
+    module: Vec<String>,
+    name: String,
+    assertion_indexes: Vec<usize>,
+}
+
+/// Adds unambiguous imported or qualified callers within one Cargo package.
+fn resolve_crate_callers(
+    repository_root: &Path,
+    crate_root: &Path,
+    paths: &[String],
+    tests: &[TestCase],
+    assertions: &mut [AssertionSite],
+) -> Result<(), AppError> {
+    let mut targets: BTreeMap<(Vec<String>, String), Vec<usize>> = BTreeMap::new();
+    for (index, assertion) in assertions.iter().enumerate() {
+        let Some(name) = assertion.helper_name.as_deref() else {
+            continue;
+        };
+        let Some(module) = rust_module(crate_root, repository_root, &assertion.path) else {
+            continue;
+        };
+        targets
+            .entry((module, name.to_owned()))
+            .or_default()
+            .push(index);
+    }
+    if targets.is_empty() {
+        return Ok(());
+    }
+    let helper_targets = targets
+        .iter()
+        .map(|((module, name), assertion_indexes)| HelperTarget {
+            module: module.clone(),
+            name: name.clone(),
+            assertion_indexes: assertion_indexes.clone(),
+        })
+        .collect::<Vec<_>>();
+
+    let mut exports: BTreeMap<String, Vec<usize>> = BTreeMap::new();
+    let crate_source = crate_root.join("src/lib.rs");
+    if let (true, Some(bytes)) = (crate_source.is_file(), read_source(&crate_source)?)
+        && let Ok(source) = String::from_utf8(bytes)
+        && let Ok(file) = syn::parse_file(&source)
+    {
+        collect_crate_exports(&file, &helper_targets, &mut exports);
+    }
+
+    for relative in paths {
+        if !relative.ends_with(".rs") {
+            continue;
+        }
+        let path = repository_root.join(relative);
+        let Some(bytes) = read_source(&path)? else {
+            continue;
+        };
+        let Ok(source) = String::from_utf8(bytes) else {
+            continue;
+        };
+        let Ok(file) = syn::parse_file(&source) else {
+            continue;
+        };
+        let lines = source.lines().collect::<Vec<_>>();
+        let mut collector = ImportedCallerCollector {
+            path: relative,
+            lines: &lines,
+            tests,
+            imports: Vec::new(),
+            targets: &helper_targets,
+            exports: &exports,
+            current_test_id: None,
+            additions: Vec::new(),
+            candidate_additions: Vec::new(),
+        };
+        collector.visit_file(&file);
+        for (index, evidence) in collector.additions {
+            let Some(assertion) = assertions.get_mut(index) else {
+                return Err(fail(
+                    "invalidState",
+                    format!("Caller resolver references unknown assertion index {index}"),
+                ));
+            };
+            if !assertion.calling_test_ids.contains(&evidence.test_id) {
+                assertion.calling_test_ids.push(evidence.test_id.clone());
+            }
+            assertion.caller_evidence.push(evidence);
+        }
+        for (index, evidence) in collector.candidate_additions {
+            let Some(assertion) = assertions.get_mut(index) else {
+                return Err(fail(
+                    "invalidState",
+                    format!("Caller resolver references unknown assertion index {index}"),
+                ));
+            };
+            assertion.unresolved_caller_candidates.push(evidence);
+        }
+    }
+    for assertion in assertions {
+        assertion.calling_test_ids.sort();
+        assertion.calling_test_ids.dedup();
+        assertion.caller_evidence.sort_by(|left, right| {
+            (
+                left.test_id.as_str(),
+                left.kind.as_str(),
+                left.path.as_str(),
+                left.line,
+                left.column,
+            )
+                .cmp(&(
+                    right.test_id.as_str(),
+                    right.kind.as_str(),
+                    right.path.as_str(),
+                    right.line,
+                    right.column,
+                ))
+        });
+        assertion.caller_evidence.dedup_by(|left, right| {
+            left.test_id == right.test_id
+                && left.kind == right.kind
+                && left.path == right.path
+                && left.line == right.line
+                && left.column == right.column
+        });
+        assertion
+            .unresolved_caller_candidates
+            .sort_by(|left, right| {
+                (
+                    left.test_id.as_str(),
+                    left.path.as_str(),
+                    left.line,
+                    left.column,
+                )
+                    .cmp(&(
+                        right.test_id.as_str(),
+                        right.path.as_str(),
+                        right.line,
+                        right.column,
+                    ))
+            });
+        assertion
+            .unresolved_caller_candidates
+            .dedup_by(|left, right| {
+                left.test_id == right.test_id
+                    && left.path == right.path
+                    && left.line == right.line
+                    && left.column == right.column
+            });
+        assertion
+            .unresolved_caller_candidates
+            .sort_by(|left, right| {
+                (
+                    left.test_id.as_str(),
+                    left.path.as_str(),
+                    left.line,
+                    left.column,
+                )
+                    .cmp(&(
+                        right.test_id.as_str(),
+                        right.path.as_str(),
+                        right.line,
+                        right.column,
+                    ))
+            });
+        assertion
+            .unresolved_caller_candidates
+            .dedup_by(|left, right| {
+                left.test_id == right.test_id
+                    && left.path == right.path
+                    && left.line == right.line
+                    && left.column == right.column
+            });
+    }
+    Ok(())
+}
+
+/// Converts a `src`-rooted Rust filename into its declared module path.
+fn rust_module(crate_root: &Path, repository_root: &Path, relative: &str) -> Option<Vec<String>> {
+    let absolute = repository_root.join(relative);
+    let relative = absolute.strip_prefix(crate_root.join("src")).ok()?;
+    let mut components = relative
+        .with_extension("")
+        .iter()
+        .map(|component| component.to_string_lossy().into_owned())
+        .collect::<Vec<_>>();
+    if components.last().is_some_and(|name| name == "mod") {
+        _ = components.pop();
+    }
+    if components.first().is_some_and(|name| name == "lib")
+        || components.first().is_some_and(|name| name == "main")
+    {
+        return Some(Vec::new());
+    }
+    Some(components)
+}
+
+/// Represents one exact import target from a crate-qualified use declaration.
+#[derive(Clone, Debug, Eq, PartialEq)]
+enum ImportedSymbol {
+    Root(String),
+    Module(Vec<String>, String),
+}
+
+/// Retains only unambiguous crate imports directly visible in one item scope.
+fn scope_imports(items: &[Item]) -> BTreeMap<String, Option<ImportedSymbol>> {
+    let mut imports = BTreeMap::new();
+    for item in items {
+        if let Item::Use(import) = item {
+            record_import(import, &mut imports);
+        }
+    }
+    imports
+}
+
+/// Retains function-local crate imports without applying them outside the body.
+fn scope_imports_from_block(block: &Block) -> BTreeMap<String, Option<ImportedSymbol>> {
+    let mut imports = BTreeMap::new();
+    for statement in &block.stmts {
+        if let Stmt::Item(Item::Use(import)) = statement {
+            record_import(import, &mut imports);
+        }
+    }
+    imports
+}
+
+/// Records one explicit crate import and marks conflicting aliases ambiguous.
+fn record_import(import: &ItemUse, imports: &mut BTreeMap<String, Option<ImportedSymbol>>) {
+    for (segments, local) in use_routes(&import.tree, &[]) {
+        if !segments.first().is_some_and(|segment| segment == "crate") {
+            continue;
+        }
+        let Some(route) = segments.get(1..) else {
+            continue;
+        };
+        let target = match route {
+            [name] => ImportedSymbol::Root(name.clone()),
+            [module @ .., name] if !module.is_empty() => {
+                ImportedSymbol::Module(module.to_vec(), name.clone())
+            }
+            _ => continue,
+        };
+        match imports.entry(local) {
+            Entry::Vacant(entry) => {
+                entry.insert(Some(target));
+            }
+            Entry::Occupied(mut entry) => {
+                if entry
+                    .get()
+                    .as_ref()
+                    .is_some_and(|existing| existing != &target)
+                {
+                    entry.insert(None);
+                }
+            }
+        }
+    }
+}
+
+/// Flattens use declarations while retaining alias and crate path information.
+fn use_routes(tree: &UseTree, parent: &[String]) -> Vec<(Vec<String>, String)> {
+    match tree {
+        UseTree::Path(path) => {
+            let mut segments = parent.to_vec();
+            segments.push(path.ident.to_string());
+            use_routes(&path.tree, &segments)
+        }
+        UseTree::Name(name) => {
+            let ident = name.ident.to_string();
+            let mut segments = parent.to_vec();
+            segments.push(ident.clone());
+            vec![(segments, ident)]
+        }
+        UseTree::Rename(rename) => {
+            let mut segments = parent.to_vec();
+            segments.push(rename.ident.to_string());
+            vec![(segments, rename.rename.to_string())]
+        }
+        UseTree::Group(group) => group
+            .items
+            .iter()
+            .flat_map(|item| use_routes(item, parent))
+            .collect(),
+        UseTree::Glob(_) => {
+            let mut segments = parent.to_vec();
+            segments.push("*".to_owned());
+            vec![(segments, "*".to_owned())]
+        }
+    }
+}
+
+/// Records helper names exported from one package root.
+fn collect_crate_exports(
+    file: &syn::File,
+    helpers: &[HelperTarget],
+    exports: &mut BTreeMap<String, Vec<usize>>,
+) {
+    for item in &file.items {
+        let Item::Use(import) = item else {
+            continue;
+        };
+        if matches!(import.vis, Visibility::Inherited) {
+            continue;
+        }
+        for (segments, local) in use_routes(&import.tree, &[]) {
+            let segments = if segments.first().is_some_and(|first| first == "crate") {
+                segments.get(1..).unwrap_or_default().to_vec()
+            } else {
+                segments
+            };
+            match segments.as_slice() {
+                [module @ .., wildcard] if wildcard == "*" && !module.is_empty() => {
+                    for (helper_index, helper) in helpers
+                        .iter()
+                        .enumerate()
+                        .filter(|(_, helper)| helper.module == module)
+                    {
+                        exports
+                            .entry(helper.name.clone())
+                            .or_default()
+                            .push(helper_index);
+                    }
+                }
+                [module @ .., name] if !module.is_empty() => {
+                    for (helper_index, _helper) in helpers
+                        .iter()
+                        .enumerate()
+                        .filter(|(_, helper)| helper.module == module && helper.name == *name)
+                    {
+                        exports.entry(local.clone()).or_default().push(helper_index);
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+    for indexes in exports.values_mut() {
+        indexes.sort_unstable();
+        indexes.dedup();
+    }
+}
+
+/// Resolves registered test calls only from explicit crate imports or paths.
+struct ImportedCallerCollector<'a> {
+    path: &'a str,
+    lines: &'a [&'a str],
+    tests: &'a [TestCase],
+    imports: Vec<BTreeMap<String, Option<ImportedSymbol>>>,
+    targets: &'a [HelperTarget],
+    exports: &'a BTreeMap<String, Vec<usize>>,
+    current_test_id: Option<&'a str>,
+    additions: Vec<(usize, CallerEvidence)>,
+    candidate_additions: Vec<(usize, CallerEvidence)>,
+}
+
+impl ImportedCallerCollector<'_> {
+    /// Resolves one call path to a unique helper definition.
+    fn resolve(&self, path: &ExprPath) -> Option<(Vec<usize>, &'static str)> {
+        if path.qself.is_some() {
+            return None;
+        }
+        let names = path
+            .path
+            .segments
+            .iter()
+            .map(|segment| segment.ident.to_string())
+            .collect::<Vec<_>>();
+        if names.first().is_some_and(|name| name == "crate") {
+            return self.resolve_segments(names.get(1..).unwrap_or_default(), "nativeQualified");
+        }
+        if names.len() == 1 {
+            let local = names.first()?;
+            let target = self
+                .imports
+                .iter()
+                .rev()
+                .take(2)
+                .find_map(|scope| scope.get(local))
+                .and_then(Option::as_ref)?;
+            return self.resolve_imported(target, "nativeImport");
+        }
+        None
+    }
+
+    /// Resolves an explicit imported alias without accepting broad globs.
+    fn resolve_imported(
+        &self,
+        imported: &ImportedSymbol,
+        kind: &'static str,
+    ) -> Option<(Vec<usize>, &'static str)> {
+        match imported {
+            ImportedSymbol::Root(name) => self.resolve_export(name).map(|indexes| (indexes, kind)),
+            ImportedSymbol::Module(module, name) => unique_helper_indexes(
+                self.targets
+                    .iter()
+                    .filter(|target| target.module == *module && target.name == *name),
+            )
+            .map(|x| (x, kind)),
+        }
+    }
+
+    /// Resolves crate-qualified symbols through module identity or root exports.
+    fn resolve_segments(
+        &self,
+        segments: &[String],
+        kind: &'static str,
+    ) -> Option<(Vec<usize>, &'static str)> {
+        match segments {
+            [name] => self.resolve_export(name).map(|indexes| (indexes, kind)),
+            [module @ .., name] if !module.is_empty() => unique_helper_indexes(
+                self.targets
+                    .iter()
+                    .filter(|target| target.module == module && target.name == *name),
+            )
+            .map(|x| (x, kind)),
+            _ => None,
+        }
+    }
+
+    /// Resolves a crate export only when it names one helper definition.
+    fn resolve_export(&self, name: &str) -> Option<Vec<usize>> {
+        let mut unique = self
+            .exports
+            .get(name)?
+            .iter()
+            .copied()
+            .collect::<BTreeSet<_>>();
+        let target = unique.pop_first()?;
+        if !unique.is_empty() {
+            return None;
+        }
+        Some(self.targets.get(target)?.assertion_indexes.clone())
+    }
+}
+
+impl<'ast> Visit<'ast> for ImportedCallerCollector<'ast> {
+    fn visit_file(&mut self, i: &'ast syn::File) {
+        self.imports.push(scope_imports(&i.items));
+        visit::visit_file(self, i);
+        _ = self.imports.pop();
+    }
+
+    fn visit_item_mod(&mut self, i: &'ast ItemMod) {
+        if let Some((_, items)) = &i.content {
+            self.imports.push(scope_imports(items));
+            for item in items {
+                self.visit_item(item);
+            }
+            _ = self.imports.pop();
+        }
+    }
+
+    fn visit_item_fn(&mut self, i: &'ast ItemFn) {
+        let test = self.tests.iter().find(|test| {
+            test.path == self.path
+                && i.sig.ident == test.name
+                && test.line.get() <= i.sig.ident.span().start().line
+                && i.block.span().end().line <= test.end_line
+        });
+        let previous = self.current_test_id;
+        if let Some(test) = test {
+            self.current_test_id = Some(&test.id);
+        }
+        self.imports.push(scope_imports_from_block(&i.block));
+        visit::visit_item_fn(self, i);
+        _ = self.imports.pop();
+        self.current_test_id = previous;
+    }
+
+    fn visit_expr_call(&mut self, i: &'ast ExprCall) {
+        let resolved = if let (Some(test_id), Expr::Path(path)) =
+            (self.current_test_id, i.func.as_ref())
+            && let Some((indexes, kind)) = self.resolve(path)
+        {
+            let evidence = caller_evidence(self.path, self.lines, test_id, i.span(), kind, i);
+            for index in indexes {
+                self.additions.push((index, evidence.clone()));
+            }
+            true
+        } else {
+            false
+        };
+        if !resolved {
+            self.visit_expr(&i.func);
+        }
+        for argument in &i.args {
+            self.visit_expr(argument);
+        }
+    }
+
+    fn visit_expr_path(&mut self, i: &'ast ExprPath) {
+        if let (Some(test_id), Some((indexes, _))) = (self.current_test_id, self.resolve(i)) {
+            let evidence = CallerEvidence {
+                kind: "unresolvedCandidate".to_owned(),
+                test_id: test_id.to_owned(),
+                path: self.path.to_owned(),
+                line: parser_line(i.span().start().line),
+                end_line: i.span().end().line,
+                column: NonZeroUsize::MIN.saturating_add(
+                    source_line(self.lines, i.span().start().line)
+                        .map_or(0, |text| byte_column(text, i.span().start())),
+                ),
+                expression: source_slice(self.lines, i.span().start(), i.span().end()),
+            };
+            for index in indexes {
+                self.candidate_additions.push((index, evidence.clone()));
+            }
+        }
+        visit::visit_expr_path(self, i);
+    }
+}
+
+/// Collapses multiple assertion sites from one helper, rejecting ambiguous names.
+fn unique_helper_indexes<'a>(
+    targets: impl Iterator<Item = &'a HelperTarget>,
+) -> Option<Vec<usize>> {
+    let targets = targets.collect::<Vec<_>>();
+    let [target] = targets.as_slice() else {
+        return None;
+    };
+    Some(target.assertion_indexes.clone())
+}
+
 /// Visits Rust syntax and keeps resolution local to one parsed file.
 struct RustCollector<'a, 'ast> {
     tests: &'a mut Vec<TestCase>,
@@ -593,8 +1400,10 @@ struct RustCollector<'a, 'ast> {
     in_const: bool,
     test_context: bool,
     test_drop_impl: bool,
-    calls: BTreeMap<FunctionId, BTreeMap<String, bool>>,
+    calls: BTreeMap<FunctionId, BTreeMap<String, NativeCall>>,
+    candidate_calls: BTreeMap<FunctionId, BTreeMap<String, CallerEvidence>>,
     helper_assertions: Vec<(usize, FunctionId)>,
+    visiting_direct_call_target: bool,
 }
 
 /// Separates diagnostic display names from the identities used for linking.
@@ -605,6 +1414,8 @@ struct FunctionContext {
     helper: Option<FunctionId>,
     expects_panic: bool,
     test_destructor: bool,
+    owner_line: Option<NonZeroUsize>,
+    owner_end_line: usize,
     // Function items cannot capture variables from an enclosing function.
     first_binding_scope: usize,
 }
@@ -635,6 +1446,12 @@ impl FunctionRole {
 
 /// Identifies a declaration by its position within the current parsed file.
 type FunctionId = (usize, usize);
+
+/// Retains the syntax edge needed to prove one native test-to-helper call.
+struct NativeCall {
+    normal: bool,
+    evidence: CallerEvidence,
+}
 
 /// Holds block-local declarations and the bindings seen before the current use.
 #[derive(Default)]
@@ -709,6 +1526,15 @@ impl<'ast> RustCollector<'_, 'ast> {
                 helper,
                 expects_panic: panic_attribute.is_some(),
                 test_destructor: test_destructor && function_is_test,
+                owner_line: Some(parser_line(
+                    attributes
+                        .iter()
+                        .map(|attribute| attribute.span().start().line)
+                        .chain(once(signature.ident.span().start().line))
+                        .min()
+                        .unwrap_or_else(|| signature.ident.span().start().line),
+                )),
+                owner_end_line: block.span().end().line,
                 first_binding_scope: self.blocks.len(),
             },
         );
@@ -784,6 +1610,15 @@ impl<'ast> RustCollector<'_, 'ast> {
             ),
             expression: source_slice(self.lines, start, end),
             file_sha256: self.file_sha256.to_owned(),
+            owner_line: self
+                .functions
+                .owner_line
+                .unwrap_or_else(|| parser_line(line)),
+            owner_end_line: if self.functions.owner_end_line == 0 {
+                end_line
+            } else {
+                self.functions.owner_end_line
+            },
             test_code: self.functions.role.is_test(),
             fixture_excluded: false,
             containing_test_id,
@@ -793,24 +1628,75 @@ impl<'ast> RustCollector<'_, 'ast> {
                 None
             },
             calling_test_ids: Vec::new(),
+            caller_evidence: Vec::new(),
+            unresolved_caller_candidates: Vec::new(),
         });
     }
 
     /// Applies calls after visiting the whole file, regardless of declaration order.
     fn link_helper_assertions(&mut self) {
         for &(index, helper) in &self.helper_assertions {
-            if let (Some(assertion), Some(callers)) =
-                (self.assertions.get_mut(index), self.calls.get(&helper))
-            {
+            let Some(assertion) = self.assertions.get_mut(index) else {
+                continue;
+            };
+            if let Some(callers) = self.calls.get(&helper) {
                 assertion.calling_test_ids.extend(
                     callers
                         .iter()
-                        .filter(|&(_, normal_call)| {
-                            *normal_call || assertion.kind != "unexpectedBranch"
-                        })
+                        .filter(|(_, call)| call.normal || assertion.kind != "unexpectedBranch")
                         .map(|(test_id, _)| test_id.clone()),
                 );
+                assertion.caller_evidence.extend(
+                    callers
+                        .iter()
+                        .filter(|(_, call)| call.normal || assertion.kind != "unexpectedBranch")
+                        .map(|(_, call)| call.evidence.clone()),
+                );
+                assertion.caller_evidence.sort_by(|left, right| {
+                    (left.test_id.as_str(), &left.path, left.line, left.column).cmp(&(
+                        right.test_id.as_str(),
+                        &right.path,
+                        right.line,
+                        right.column,
+                    ))
+                });
+                assertion.caller_evidence.dedup_by(|left, right| {
+                    left.test_id == right.test_id
+                        && left.path == right.path
+                        && left.line == right.line
+                        && left.column == right.column
+                });
             }
+            assertion.unresolved_caller_candidates.extend(
+                self.candidate_calls
+                    .get(&helper)
+                    .into_iter()
+                    .flat_map(|candidates| candidates.values().cloned()),
+            );
+            assertion
+                .unresolved_caller_candidates
+                .sort_by(|left, right| {
+                    (
+                        left.test_id.as_str(),
+                        left.path.as_str(),
+                        left.line,
+                        left.column,
+                    )
+                        .cmp(&(
+                            right.test_id.as_str(),
+                            right.path.as_str(),
+                            right.line,
+                            right.column,
+                        ))
+                });
+            assertion
+                .unresolved_caller_candidates
+                .dedup_by(|left, right| {
+                    left.test_id == right.test_id
+                        && left.path == right.path
+                        && left.line == right.line
+                        && left.column == right.column
+                });
         }
     }
 
@@ -835,7 +1721,9 @@ impl<'ast> RustCollector<'_, 'ast> {
             self.push_range("panicExpectation", i.func.span().start(), i.span().end());
             self.functions.expects_panic = true;
         }
+        let previous_target = replace(&mut self.visiting_direct_call_target, true);
         self.visit_expr(&i.func);
+        self.visiting_direct_call_target = previous_target;
         for argument in &i.args {
             self.visit_expr(argument);
         }
@@ -847,6 +1735,11 @@ impl<'ast> RustCollector<'_, 'ast> {
         let Expr::Path(path) = unparenthesized(expression) else {
             return None;
         };
+        self.resolve_function_path(path)
+    }
+
+    /// Resolves one already-unwrapped function path.
+    fn resolve_function_path(&self, path: &ExprPath) -> Option<&'ast ItemFn> {
         if path.qself.is_some() || path.path.leading_colon.is_some() {
             return None;
         }
@@ -974,10 +1867,19 @@ impl<'ast> RustCollector<'_, 'ast> {
                     && matches!(qualifiers, [root, namespace] if *root == "std" && *namespace == "thread"))
                 .then_some(FixtureKind::JoinHandle)
             }
-            Expr::MethodCall(call) => (call.args.is_empty()
-                && matches!(call.method.to_string().as_str(), "borrow" | "borrow_mut")
-                && self.fixture_kind(&call.receiver) == Some(FixtureKind::OptionHolder))
-            .then_some(FixtureKind::OptionHolder),
+            Expr::MethodCall(call) => {
+                let method = call.method.to_string();
+                let holder_access = call.args.is_empty()
+                    && matches!(
+                        method.as_str(),
+                        "borrow" | "borrow_mut" | "lock" | "try_lock"
+                    )
+                    && self.fixture_kind(&call.receiver) == Some(FixtureKind::OptionHolder);
+                let extracted_holder = call.args.len() == 1
+                    && method == "expect"
+                    && self.is_fixture_access(&call.receiver);
+                (holder_access || extracted_holder).then_some(FixtureKind::OptionHolder)
+            }
             _ => None,
         }
     }
@@ -1016,7 +1918,7 @@ impl<'ast> RustCollector<'_, 'ast> {
             && names.len() == 2
             && names
                 .first()
-                .is_some_and(|owner| matches!(owner.as_str(), "Rc" | "Arc" | "RefCell"))
+                .is_some_and(|owner| matches!(owner.as_str(), "Rc" | "Arc" | "RefCell" | "Mutex"))
         {
             let is_holder = |inner: &Expr| {
                 let Expr::Call(inner) = unparenthesized(inner) else {
@@ -1048,12 +1950,9 @@ impl<'ast> RustCollector<'_, 'ast> {
                 let Expr::Path(container) = inner.func.as_ref() else {
                     return None;
                 };
-                if !container
-                    .path
-                    .segments
-                    .iter()
-                    .any(|segment| segment.ident == "RefCell")
-                {
+                if !container.path.segments.iter().any(|segment| {
+                    matches!(segment.ident.to_string().as_str(), "RefCell" | "Mutex")
+                }) {
                     return None;
                 }
                 inner.args.first()?
@@ -1136,7 +2035,7 @@ impl<'ast> RustCollector<'_, 'ast> {
                 | (Some(FixtureKind::JoinHandle), "join")
                 | (
                     Some(FixtureKind::OptionHolder),
-                    "as_ref" | "as_mut" | "take"
+                    "as_ref" | "as_mut" | "take" | "borrow" | "borrow_mut" | "lock" | "try_lock"
                 )
         )
     }
@@ -1344,12 +2243,28 @@ impl<'ast> Visit<'ast> for RustCollector<'_, 'ast> {
             if let Some(test_id) = self.functions.role.test_id() {
                 // A regular call is enough to link even if this caller also
                 // invokes the helper inside a panic expectation.
-                *self
+                let call = self
                     .calls
                     .entry(function_id(function))
                     .or_default()
                     .entry(test_id.clone())
-                    .or_default() |= !self.functions.expects_panic;
+                    .or_insert_with(|| NativeCall {
+                        normal: false,
+                        evidence: caller_evidence(
+                            self.path,
+                            self.lines,
+                            test_id,
+                            i.span(),
+                            if matches!(i.func.as_ref(), Expr::Path(path) if path.path.segments.len() > 1)
+                            {
+                                "nativeQualified"
+                            } else {
+                                "nativeDirect"
+                            },
+                            i,
+                        ),
+                    });
+                call.normal |= !self.functions.expects_panic;
             }
             if function.block.stmts.is_empty() && function_has_bounded_type_parameter(&function.sig)
             {
@@ -1388,6 +2303,34 @@ impl<'ast> Visit<'ast> for RustCollector<'_, 'ast> {
         for argument in &i.args {
             self.visit_expr(argument);
         }
+    }
+
+    fn visit_expr_path(&mut self, i: &'ast ExprPath) {
+        if self.visiting_direct_call_target || !self.functions.role.is_test() {
+            visit::visit_expr_path(self, i);
+            return;
+        }
+        if let (Some(function), Some(test_id)) =
+            (self.resolve_function_path(i), self.functions.role.test_id())
+        {
+            self.candidate_calls
+                .entry(function_id(function))
+                .or_default()
+                .entry(test_id.clone())
+                .or_insert_with(|| CallerEvidence {
+                    kind: "unresolvedCandidate".to_owned(),
+                    test_id: test_id.clone(),
+                    path: self.path.to_owned(),
+                    line: parser_line(i.span().start().line),
+                    end_line: i.span().end().line,
+                    column: NonZeroUsize::MIN.saturating_add(
+                        source_line(self.lines, i.span().start().line)
+                            .map_or(0, |text| byte_column(text, i.span().start())),
+                    ),
+                    expression: source_slice(self.lines, i.span().start(), i.span().end()),
+                });
+        }
+        visit::visit_expr_path(self, i);
     }
 }
 
@@ -1538,6 +2481,29 @@ fn record_bindings(bindings: &mut BTreeMap<String, Option<FixtureKind>>, pattern
         }
     }
     Bindings(bindings).visit_pat(pattern);
+}
+
+/// Captures the exact syntax that links a registered test to a native helper.
+fn caller_evidence(
+    path: &str,
+    lines: &[&str],
+    test_id: &str,
+    span: Span,
+    kind: &str,
+    call: &ExprCall,
+) -> CallerEvidence {
+    let start = span.start();
+    CallerEvidence {
+        kind: kind.to_owned(),
+        test_id: test_id.to_owned(),
+        path: path.to_owned(),
+        line: parser_line(start.line),
+        end_line: span.end().line,
+        column: NonZeroUsize::MIN.saturating_add(
+            source_line(lines, start.line).map_or(0, |text| byte_column(text, start)),
+        ),
+        expression: source_slice(lines, call.span().start(), call.span().end()),
+    }
 }
 
 /// Recognizes pointer conversions and explicitly constructed literal fixtures.
@@ -2005,11 +2971,15 @@ fn doctest_assertion(
         column,
         expression,
         file_sha256: file_sha256.to_owned(),
+        owner_line: test.line,
+        owner_end_line: test.end_line,
         test_code: true,
         fixture_excluded: false,
         containing_test_id: Some(test.id.clone()),
         helper_name: None,
         calling_test_ids: Vec::new(),
+        caller_evidence: Vec::new(),
+        unresolved_caller_candidates: Vec::new(),
     }
 }
 
@@ -2084,8 +3054,7 @@ fn scan_heuristically(
             .iter()
             .rev()
             .filter_map(|candidate| tests.get(*candidate))
-            .find(|test| line >= test.line.get() && line <= test.end_line)
-            .map(|test| test.id.clone());
+            .find(|test| line >= test.line.get() && line <= test.end_line);
         if let Some(kind) = heuristic_assertion_kind(language, source_line) {
             assertions.push(AssertionSite {
                 id: next_assertion_id(assertions),
@@ -2101,11 +3070,15 @@ fn scan_heuristically(
                 ),
                 expression: source_line.trim().to_owned(),
                 file_sha256: file_sha256.to_owned(),
+                owner_line: test.map_or_else(|| parser_line(line), |test| test.line),
+                owner_end_line: test.map_or(line, |test| test.end_line),
                 test_code: true,
                 fixture_excluded: false,
-                containing_test_id: test.clone(),
+                containing_test_id: test.map(|test| test.id.clone()),
                 helper_name: None,
-                calling_test_ids: test.into_iter().collect(),
+                calling_test_ids: test.map(|test| test.id.clone()).into_iter().collect(),
+                caller_evidence: Vec::new(),
+                unresolved_caller_candidates: Vec::new(),
             });
         }
     }
@@ -2287,6 +3260,7 @@ fn attach_assertions(tests: &mut [TestCase], assertions: &mut Vec<AssertionSite>
         assertion.test_code
             || assertion.containing_test_id.is_some()
             || !assertion.calling_test_ids.is_empty()
+            || !assertion.unresolved_caller_candidates.is_empty()
     });
     for assertion in assertions.iter() {
         if let Some(test_id) = &assertion.containing_test_id

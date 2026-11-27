@@ -14,7 +14,7 @@ use ss_ai_runtime::{Clock, FileTransaction, caused_by, fail};
 use crate::model::{
     AssertionSite, AuditState, Batch, BatchAssertion, Citation, Classification,
     ClassificationBatch, ClassificationJournal, ClassificationKind, CompactSubmission,
-    EvidenceStatus, IndexEntry, Inventory, TestCase,
+    EvidenceStatus, IndexEntry, Inventory, ScanDiagnostic, TestCase,
 };
 use crate::scan::digest;
 use crate::state::{
@@ -73,12 +73,23 @@ fn build_batch(loaded: &LoadedState, count: NonZeroUsize) -> Batch {
         .iter()
         .filter(|assertion| !completed.contains(assertion.id.as_str()))
         .take(count.get())
-        .map(|assertion| batch_assertion(assertion, &loaded.inventory.tests, &loaded.index))
+        .map(|assertion| {
+            batch_assertion(
+                assertion,
+                &loaded.inventory.tests,
+                &loaded.index,
+                &loaded.inventory.diagnostics,
+            )
+        })
         .collect::<Vec<_>>();
     Batch {
-        schema_version: 1,
+        schema_version: crate::model::AUDIT_STATE_SCHEMA_VERSION,
         audit_id: loaded.state.audit_id.clone(),
         snapshot_sha256: loaded.state.snapshot_sha256.clone(),
+        content_sha256: loaded.state.content_sha256.clone(),
+        index_sha256: loaded.state.index_sha256.clone(),
+        tool_version: loaded.state.tool_version.clone(),
+        rubric_version: loaded.state.rubric_version.clone(),
         assertions: selected,
         completed: completed.len(),
         remaining,
@@ -93,6 +104,10 @@ fn batch_summary(batch: &Batch, output: &str, display: &str, fingerprint: &str) 
         "displayPath": display,
         "auditId": batch.audit_id,
         "snapshotSha256": batch.snapshot_sha256,
+        "contentSha256": batch.content_sha256,
+        "indexSha256": batch.index_sha256,
+        "toolVersion": batch.tool_version,
+        "rubricVersion": batch.rubric_version,
         "batchFingerprint": fingerprint,
         "batchCount": batch.assertions.len(),
         "completed": batch.completed,
@@ -213,11 +228,52 @@ fn compact_batch_display(batch: &Batch, fingerprint: &str) -> String {
             "  expression: {}",
             assertion.assertion.expression.replace('\n', " ")
         );
+        for evidence in &assertion.assertion.caller_evidence {
+            _ = writeln!(
+                output,
+                "  native caller {}: {} {}:{}-{} {}",
+                evidence.kind,
+                evidence.test_id,
+                evidence.path,
+                evidence.line,
+                evidence.end_line,
+                evidence.expression.replace('\n', " ")
+            );
+        }
+        for candidate in &assertion.assertion.unresolved_caller_candidates {
+            _ = writeln!(
+                output,
+                "  unresolved caller candidate: {} {}:{}-{} {}",
+                candidate.test_id,
+                candidate.path,
+                candidate.line,
+                candidate.end_line,
+                candidate.expression.replace('\n', " ")
+            );
+        }
         for entry in &assertion.context {
             _ = writeln!(
                 output,
-                "  context {}:{}: {}",
-                entry.path, entry.line, entry.excerpt
+                "  context {}:{}-{} [{}] owner={}: {}",
+                entry.path,
+                entry.line,
+                entry.end_line,
+                entry.source_role,
+                entry.owner,
+                entry.excerpt
+            );
+        }
+        for diagnostic in &assertion.diagnostics {
+            _ = writeln!(
+                output,
+                "  diagnostic {} {}:{} {}",
+                diagnostic.kind,
+                diagnostic.path,
+                diagnostic
+                    .line
+                    .map(|line| line.to_string())
+                    .unwrap_or_default(),
+                diagnostic.detail
             );
         }
     }
@@ -229,6 +285,7 @@ fn batch_assertion(
     assertion: &AssertionSite,
     tests: &[TestCase],
     index: &[IndexEntry],
+    diagnostics: &[ScanDiagnostic],
 ) -> BatchAssertion {
     let test = assertion
         .containing_test_id
@@ -250,6 +307,16 @@ fn batch_assertion(
         })
         .cloned()
         .collect();
+    let relevant_diagnostics = diagnostics
+        .iter()
+        .filter(|diagnostic| {
+            diagnostic.path == assertion.path
+                && diagnostic
+                    .line
+                    .is_some_and(|line| (assertion.line.get()..=assertion.end_line).contains(&line))
+        })
+        .cloned()
+        .collect();
     let mut assertion = assertion.clone();
     if assertion.expression.len() > MAX_EXPRESSION_BYTES {
         let end = assertion
@@ -266,6 +333,7 @@ fn batch_assertion(
         test_path: test.map(|test| test.path.clone()),
         test_line: test.map(|test| test.line),
         context,
+        diagnostics: relevant_diagnostics,
     }
 }
 
@@ -494,7 +562,7 @@ impl ValidatedJournal {
         inventory: &Inventory,
         index: &[IndexEntry],
     ) -> Result<Self, AppError> {
-        require_version(journal.schema_version, "classification journal")?;
+        crate::state::require_audit_version(journal.schema_version, "classification journal")?;
         if journal.audit_id != state.audit_id {
             return Err(fail(
                 "invalidState",
@@ -505,6 +573,16 @@ impl ValidatedJournal {
             return Err(fail(
                 "invalidState",
                 "Classification journal does not match the snapshot digest",
+            ));
+        }
+        if journal.content_sha256 != state.content_sha256
+            || journal.index_sha256 != state.index_sha256
+            || journal.tool_version != state.tool_version
+            || journal.rubric_version != state.rubric_version
+        {
+            return Err(fail(
+                "invalidState",
+                "Classification journal does not match the audit provenance",
             ));
         }
         validate_journal(inventory, &journal, index)?;
@@ -775,6 +853,35 @@ pub(crate) fn validate_classification(
             },
         ));
     }
+    if !unlinked && classification.unlinked_reason.is_some() {
+        return Err(row_error(
+            &assertion.id,
+            "unlinkedReason",
+            "The field must be omitted when native or agent-confirmed callers exist",
+        ));
+    }
+    if classification
+        .unresolved_caller_reason
+        .as_deref()
+        .is_some_and(|reason| reason.trim().is_empty())
+    {
+        return Err(row_error(
+            &assertion.id,
+            "unresolvedCallerReason",
+            "An unresolved caller reason must not be blank when supplied",
+        ));
+    }
+    if classification
+        .review_reason
+        .as_deref()
+        .is_some_and(|reason| reason.trim().is_empty())
+    {
+        return Err(row_error(
+            &assertion.id,
+            "reviewReason",
+            "A review reason must not be blank when supplied",
+        ));
+    }
     Ok(())
 }
 
@@ -822,7 +929,11 @@ fn validate_citation(
                 ),
             )
         })?;
-    if citation.excerpt != entry.excerpt && !entry.excerpt.contains(citation.excerpt.trim()) {
+    if citation.end_line != entry.end_line
+        || citation.owner != entry.owner
+        || citation.source_role != entry.source_role
+        || (citation.excerpt != entry.excerpt && !entry.excerpt.contains(citation.excerpt.trim()))
+    {
         return Err(row_error(
             assertion_id,
             &format!("{field}.excerpt"),

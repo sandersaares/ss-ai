@@ -63,11 +63,16 @@ Workflow transitions distinguish continuation from completion explicitly.
 Recording work never authorizes a final response. Only a successful final
 report both completes the audit and permits its final summary.
 
-Persisted audit state and inventory use schema version 2. A test-audit
+Persisted audit state and inventory use schema version 3. A test-audit
 initialization can apply exact revision-bound corrections to ambiguous fixture
 extraction sites while retaining their source provenance in the immutable
 inventory. Corrections apply before snapshot identity is committed; later readers
 reject incompatible state rather than editing or migrating it.
+
+Test-audit evidence remains snapshot bound while exposing complete bounded
+documentation ranges, owner context, native caller spans, unresolved caller
+candidates, reproducibility identities, and nonmutating consistency diagnostics.
+Completed audits can be compared by source provenance without selecting a winner.
 
 Assertions count once at their source site. Tests with no counted predicate and
 shared helper assertions remain visible in the test inventory. Every accepted

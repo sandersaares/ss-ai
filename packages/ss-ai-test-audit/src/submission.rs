@@ -11,13 +11,17 @@ use crate::model::{
     AssertionSite, Batch, Citation, Classification, ClassificationBatch, CompactSubmission,
     CompactSubmissionRow, IndexEntry,
 };
-use crate::state::{LoadedState, evidence_index, require_version};
+use crate::state::{LoadedState, evidence_index};
 
 /// Binds one exported batch to the active immutable state token.
 pub(crate) fn validate_exported_batch(batch: &Batch, loaded: &LoadedState) -> Result<(), AppError> {
-    require_version(batch.schema_version, "exported assertion batch")?;
+    crate::state::require_audit_version(batch.schema_version, "exported assertion batch")?;
     if batch.audit_id != loaded.state.audit_id
         || batch.snapshot_sha256 != loaded.state.snapshot_sha256
+        || batch.content_sha256 != loaded.state.content_sha256
+        || batch.index_sha256 != loaded.state.index_sha256
+        || batch.tool_version != loaded.state.tool_version
+        || batch.rubric_version != loaded.state.rubric_version
     {
         return Err(fail(
             "staleState",
@@ -178,6 +182,8 @@ fn resolve_explicit_row(
         incidental_reason: row.incidental_reason,
         calling_test_ids,
         unlinked_reason: row.unlinked_reason,
+        unresolved_caller_reason: row.unresolved_caller_reason,
+        review_reason: row.review_reason,
     })
 }
 
@@ -258,6 +264,8 @@ fn resolve_reuse_row(
         incidental_reason: source.incidental_reason.clone(),
         calling_test_ids,
         unlinked_reason: row.unlinked_reason,
+        unresolved_caller_reason: row.unresolved_caller_reason,
+        review_reason: row.review_reason,
     })
 }
 
@@ -332,6 +340,9 @@ fn resolve_citation_handles(
         citations.push(Citation {
             path: entry.path.clone(),
             line: entry.line,
+            end_line: entry.end_line,
+            owner: entry.owner.clone(),
+            source_role: entry.source_role.clone(),
             excerpt: entry.excerpt.clone(),
         });
     }

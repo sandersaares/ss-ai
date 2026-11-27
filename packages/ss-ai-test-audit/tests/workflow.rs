@@ -4,6 +4,7 @@
     reason = "The test selects fixed fields from its own generated records."
 )]
 
+use std::collections::BTreeSet;
 use std::env::{temp_dir, var_os};
 use std::fmt::Write as _;
 use std::fs;
@@ -16,7 +17,7 @@ use ohno::AppError;
 use serde_json::{Value, from_slice, from_str, json, to_vec_pretty};
 use ss_ai_runtime::{Clock, Process, ProcessOutput};
 use ss_ai_test_audit::{
-    advance, initialize, next_batch, record_batch, report, search, search_many, submit,
+    advance, compare, initialize, next_batch, record_batch, report, search, search_many, submit,
 };
 use tempfile::TempDir;
 
@@ -179,12 +180,29 @@ fn audits_parser_sites_with_resumable_evidence_batches() {
 
     let evidence = search(&state, "ready operation", None, 20, &FixedClock).unwrap();
     let evidence: Value = from_str(&evidence).unwrap();
+    let ready_evidence = evidence["results"][0]["matches"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|entry| entry["excerpt"] == "/// Returns whether the operation is ready.")
+        .unwrap()
+        .clone();
+    assert!(ready_evidence["sourceRole"] == "rustItemDoc" && ready_evidence["endLine"] == 3);
+    let example = search(
+        &state,
+        "assert ready",
+        Some("documentation"),
+        20,
+        &FixedClock,
+    )
+    .unwrap();
+    let example: Value = from_str(&example).unwrap();
     assert!(
-        evidence["results"][0]["matches"]
+        example["results"][0]["matches"]
             .as_array()
             .unwrap()
             .iter()
-            .any(|entry| entry["excerpt"] == "/// Returns whether the operation is ready.")
+            .any(|entry| entry["sourceRole"] == "rustPublicExample")
     );
     let batch_path = state.join("batches/one.json");
     let batch_summary = next_batch(&state, &batch_path, 25, &FixedClock).unwrap();
@@ -234,7 +252,10 @@ fn audits_parser_sites_with_resumable_evidence_batches() {
                     "citations": [{
                         "path": "src/lib.rs",
                         "line": 3,
-                        "excerpt": "/// Returns whether the operation is ready."
+                        "endLine": ready_evidence["endLine"],
+                        "owner": ready_evidence["owner"],
+                        "sourceRole": ready_evidence["sourceRole"],
+                        "excerpt": ready_evidence["excerpt"]
                     }],
                     "callingTestIds": []
                 })
@@ -292,7 +313,7 @@ fn audits_parser_sites_with_resumable_evidence_batches() {
     let report_text = fs::read_to_string(summary["summaryPath"].as_str().unwrap()).unwrap();
     let summary_json: Value =
         from_slice(&fs::read(summary["summaryJsonPath"].as_str().unwrap()).unwrap()).unwrap();
-    assert_eq!(summary_json["schemaVersion"], 1);
+    assert_eq!(summary_json["schemaVersion"], 2);
     assert_eq!(summary_json["auditId"], summary["auditId"]);
     assert_eq!(summary_json["testCount"], summary["testCount"]);
     assert_eq!(summary_json["status"], "complete");
@@ -308,6 +329,13 @@ fn audits_parser_sites_with_resumable_evidence_batches() {
         from_slice(&fs::read(summary["detailsJsonPath"].as_str().unwrap()).unwrap()).unwrap();
     assert_eq!(details_json["assertionTrace"].as_array().unwrap().len(), 4);
     assert_eq!(details_json["testInventory"].as_array().unwrap().len(), 5);
+    assert!(
+        details_json["consistencyDiagnostics"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|diagnostic| diagnostic["kind"] == "sharedRationaleDifferentPredicates")
+    );
     let details_text = fs::read_to_string(summary["detailsPath"].as_str().unwrap()).unwrap();
     assert!(details_text.contains("assert!(ready())"));
     assert!(details_text.contains("smoke"));
@@ -826,6 +854,216 @@ fn compact_submission_reports_empty_citation_replacement() {
 }
 
 #[test]
+fn compare_reports_transition_and_caller_drift_without_selecting_a_winner() {
+    let root = unversioned_fixture_root();
+    let repository = root.path().join("repository");
+    let left = root.path().join("left");
+    let right = root.path().join("right");
+    fs::create_dir_all(repository.join("src")).unwrap();
+    fs::write(
+        repository.join("src/lib.rs"),
+        "#[cfg(test)]\nfn helper() { assert!(true); }\n#[test]\nfn checks() { let callback = helper; callback(); }\n",
+    )
+    .unwrap();
+    initialize(&repository, &[], &left, &NoProcess, &FixedClock).unwrap();
+    initialize(&repository, &[], &right, &NoProcess, &FixedClock).unwrap();
+    let inventory: Value = from_slice(&fs::read(left.join("inventory.json")).unwrap()).unwrap();
+    let assertion_id = &inventory["assertions"][0]["id"];
+    let test_id = &inventory["tests"][0]["id"];
+    for (state, classification, status, reason) in [
+        (
+            &left,
+            "Incidental",
+            "Confirmed",
+            Some("This checks only fixture state."),
+        ),
+        (&right, "Implicit", "Ambiguous", None),
+    ] {
+        let state_record: Value =
+            from_slice(&fs::read(state.join("audit-state.json")).unwrap()).unwrap();
+        let mut row = json!({
+            "assertionId": assertion_id,
+            "classification": classification,
+            "evidenceStatus": status,
+            "actualOutcome": "The predicate observes a boolean.",
+            "rationale": "This run's explanation is intentionally different.",
+            "citations": [],
+            "callingTestIds": [test_id]
+        });
+        if let Some(reason) = reason {
+            row["incidentalReason"] = json!(reason);
+        }
+        let path = state.join("classification.json");
+        fs::write(
+            &path,
+            to_vec_pretty(&json!({
+                "schemaVersion": 1,
+                "auditId": state_record["auditId"],
+                "snapshotSha256": state_record["snapshotSha256"],
+                "assertions": [row]
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+        record_batch(state, &path, &FixedClock).unwrap();
+    }
+    let comparison: Value = from_str(&compare(&left, &right, &FixedClock).unwrap()).unwrap();
+    assert_eq!(comparison["comparableContent"], true);
+    assert_eq!(comparison["matchedAssertionCount"], 1);
+    assert_eq!(comparison["exactLabelAgreementRate"], 0.0);
+    assert_eq!(comparison["changedReviewReasonCount"], 0);
+    assert!(
+        comparison["noCountedAssertionTests"]["both"]
+            .as_array()
+            .unwrap()
+            .is_empty()
+    );
+    assert_eq!(comparison["transitionMatrix"].as_array().unwrap().len(), 1);
+    assert_eq!(
+        comparison["transitionMatrix"][0],
+        json!({"left":"Incidental","right":"Implicit","count":1})
+    );
+}
+
+#[test]
+fn search_preserves_qualified_ranges_and_rejects_marker_only_evidence() {
+    let root = unversioned_fixture_root();
+    let repository = root.path().join("repository");
+    let state = root.path().join("state");
+    fs::create_dir_all(repository.join("src")).unwrap();
+    fs::write(
+        repository.join("src/lib.rs"),
+        "/// The operation does\n/// not discard an unobserved item.\npub fn retains() {}\n\n///\nfn private_marker() {}\n",
+    )
+    .unwrap();
+    fs::create_dir_all(repository.join("docs")).unwrap();
+    fs::write(
+        repository.join("docs/example.md"),
+        "# Example\n\n```rust\nlet retained = value();\n\nassert!(retained);\n```\n",
+    )
+    .unwrap();
+    initialize(&repository, &[], &state, &NoProcess, &FixedClock).unwrap();
+    let result = search_many(
+        &state,
+        &[
+            "not discard".to_owned(),
+            "///".to_owned(),
+            "assert retained".to_owned(),
+        ],
+        None,
+        20,
+        &FixedClock,
+    )
+    .unwrap();
+    let result: Value = from_str(&result).unwrap();
+    let qualified = &result["results"][0]["matches"][0];
+    assert_eq!(qualified["line"], 1);
+    assert_eq!(qualified["endLine"], 2);
+    assert_eq!(qualified["owner"], "pub fn retains()");
+    assert_eq!(qualified["sourceRole"], "rustItemDoc");
+    assert!(
+        qualified["excerpt"]
+            .as_str()
+            .unwrap()
+            .contains("not discard")
+    );
+    assert!(
+        result["results"][1]["matches"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|entry| entry["owner"] != "fn private_marker()")
+    );
+    let example = &result["results"][2]["matches"][0];
+    assert_eq!(example["sourceRole"], "markdownExample");
+    assert!(example["excerpt"].as_str().unwrap().contains("\n\n"));
+    assert!(example["excerpt"].as_str().unwrap().contains("```"));
+}
+
+#[test]
+fn reports_broad_and_conflicting_citation_reuse_as_warnings() {
+    let root = unversioned_fixture_root();
+    let repository = root.path().join("repository");
+    let state = root.path().join("state");
+    fs::create_dir_all(repository.join("src")).unwrap();
+    fs::write(
+        repository.join("src/lib.rs"),
+        "/// Ready values are available.\npub fn ready() -> bool { true }\n#[test]\nfn first() { assert!(ready()); }\n#[test]\nfn second() { assert!(!ready() == false); }\n#[test]\nfn third() { assert!(matches!(ready(), true)); }\n",
+    )
+    .unwrap();
+    initialize(&repository, &[], &state, &NoProcess, &FixedClock).unwrap();
+    let search: Value = from_str(
+        &search(
+            &state,
+            "Ready values",
+            Some("documentation"),
+            20,
+            &FixedClock,
+        )
+        .unwrap(),
+    )
+    .unwrap();
+    let evidence = &search["results"][0]["matches"][0];
+    let batch_path = state.join("batch.json");
+    let batch: Value =
+        from_str(&next_batch(&state, &batch_path, 25, &FixedClock).unwrap()).unwrap();
+    let batch: Value =
+        from_slice(&fs::read(batch["batchPath"].as_str().unwrap()).unwrap()).unwrap();
+    let rows = batch["assertions"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .enumerate()
+        .map(|(position, assertion)| {
+            let documented = position < 2;
+            json!({
+                "assertionId": assertion["id"],
+                "classification": if documented { "Documented" } else { "Implicit" },
+                "evidenceStatus": if documented { "Confirmed" } else { "Ambiguous" },
+                "actualOutcome": "The test observes readiness.",
+                "rationale": "The same cited sentence explains each readiness observation.",
+                "citations": [{
+                    "path": evidence["path"],
+                    "line": evidence["line"],
+                    "endLine": evidence["endLine"],
+                    "owner": evidence["owner"],
+                    "sourceRole": evidence["sourceRole"],
+                    "excerpt": evidence["excerpt"]
+                }],
+                "callingTestIds": []
+            })
+        })
+        .collect::<Vec<_>>();
+    let state_record: Value =
+        from_slice(&fs::read(state.join("audit-state.json")).unwrap()).unwrap();
+    let classification_path = state.join("classification.json");
+    fs::write(
+        &classification_path,
+        to_vec_pretty(&json!({
+            "schemaVersion": 1,
+            "auditId": state_record["auditId"],
+            "snapshotSha256": state_record["snapshotSha256"],
+            "assertions": rows
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+    record_batch(&state, &classification_path, &FixedClock).unwrap();
+    let report: Value = from_str(&report(&state, &FixedClock).unwrap()).unwrap();
+    let details: Value =
+        from_slice(&fs::read(report["detailsJsonPath"].as_str().unwrap()).unwrap()).unwrap();
+    let kinds = details["consistencyDiagnostics"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|diagnostic| diagnostic["kind"].as_str().unwrap())
+        .collect::<BTreeSet<_>>();
+    assert!(kinds.contains("broadCitationReuse"));
+    assert!(kinds.contains("citationSupportsConflictingClassifications"));
+    assert!(kinds.contains("sharedRationaleDifferentPredicates"));
+}
+
+#[test]
 fn rejects_batch_output_that_aliases_an_audited_file() {
     let (_root, repository, state) = fixture(fixture_root());
     initialize_fixture(&repository, &state);
@@ -883,6 +1121,9 @@ fn rejects_unbound_citations_and_partial_reports_without_mutation() {
             "citations": [{
                 "path": "src/lib.rs",
                 "line": 3,
+                "endLine": 3,
+                "owner": "pub fn ready() -> bool",
+                "sourceRole": "rustItemDoc",
                 "excerpt": "not the source line"
             }],
             "callingTestIds": []

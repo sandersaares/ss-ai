@@ -64,7 +64,32 @@ ss-ai test-audit search `
 | `EVIDENCE_KIND` | Optional `documentation`, `publicDeclaration`, `traitImplementation`, `test`, or `source`; omit `--kind` to search all indexed lines. |
 | `LIMIT` | Result bound from 1 through 200. Use 50 unless a narrower or broader page is justified. |
 
-Use each `results` entry's `matches` as citation candidates. Submit the returned `evidenceHandle` rather than reconstructing a citation from `path`, `line`, and `excerpt`. Refine truncated results. Find a matching citation for `Documented` and for the documented component of `Mixed`. A diagnostic search can end without a match after reasonable targeted queries and after ruling out truncation; this can support an `Implicit` or `Incidental` explanation. One empty query does not prove that no public promise exists.
+Use each `results` entry's `matches` as citation candidates. Submit the returned `evidenceHandle` rather than reconstructing a citation from `path`, `line`, `endLine`, `owner`, `sourceRole`, and `excerpt`. The native command preserves a bounded contiguous paragraph, list item, or source line rather than only the matching line. Refine truncated results. Find a matching citation for `Documented` and for the documented component of `Mixed`. A diagnostic search can end without a match after reasonable targeted queries and after ruling out truncation; this can support an `Implicit` or `Incidental` explanation. One empty query does not prove that no public promise exists.
+
+## Inspect assertion context
+
+```powershell
+#Requires -Version 7.6
+
+if ($PSVersionTable.PSVersion -lt [version]'7.6') { throw 'PowerShell 7.6 or later is required.' }
+Set-StrictMode -Version Latest
+$ErrorActionPreference = 'Stop'
+$PSNativeCommandUseErrorActionPreference = $true
+
+ss-ai test-audit context `
+  --state-directory "{{STATE_DIRECTORY}}" `
+  --assertion-id "{{ASSERTION_ID}}"
+```
+
+| Placeholder | Description |
+| --- | --- |
+| `STATE_DIRECTORY` | Exact initialized audit state directory. |
+| `ASSERTION_ID` | One assertion identifier from the current batch. |
+
+The command returns the assertion card, complete bounded enclosing test or
+helper source, native caller spans, unresolved caller candidates, and nested
+assertion identifiers. It rechecks source freshness. Use targeted `search`
+recipes for definitions and public promises after this local owner context.
 
 ## Export the next assertion batch
 
@@ -209,6 +234,32 @@ ss-ai test-audit submit `
 
 The command binds rows to the exported machine batch using `batchFingerprint`, resolves all evidence handles, and commits the validated classifications before exporting the next batch. Use separate `citationHandles` entries for multiple citations. The receipt's `directive` spells out the required next operation. For `nextAction: "continue"`, immediately read the returned `nextBatch.displayPath` and start judgment in the same invocation; retain `nextBatch.batchPath` for the next submission. A successful progress receipt is not a final response. Preserve the original inputs and [recover according to the point of failure](SKILL.md#recover-from-failure).
 
+## Compare completed audits
+
+```powershell
+#Requires -Version 7.6
+
+if ($PSVersionTable.PSVersion -lt [version]'7.6') { throw 'PowerShell 7.6 or later is required.' }
+Set-StrictMode -Version Latest
+$ErrorActionPreference = 'Stop'
+$PSNativeCommandUseErrorActionPreference = $true
+
+ss-ai test-audit compare `
+  --left-state-directory "{{LEFT_STATE_DIRECTORY}}" `
+  --right-state-directory "{{RIGHT_STATE_DIRECTORY}}"
+```
+
+| Placeholder | Description |
+| --- | --- |
+| `LEFT_STATE_DIRECTORY` | First completed audit state used as one comparison side. |
+| `RIGHT_STATE_DIRECTORY` | Second completed audit state used as the other comparison side. |
+
+The command requires complete classification on both sides. It reports checkout-
+independent content comparability, per-site classification transitions, rationale
+and evidence-status drift, effective caller-set differences, unmatched sites, and
+test-gap membership. It never designates either run as the ground truth.
+The result follows [comparison.schema.json](schemas/comparison.schema.json).
+
 ## Emit final reports
 
 ```powershell
@@ -235,6 +286,8 @@ is the aggregate report.
 The paired JSON artifacts conform to [summary.schema.json](schemas/summary.schema.json)
 and [details.schema.json](schemas/details.schema.json). Their schema version is
 part of each file and changes only with the native utility's record contract.
+The report retains correction provenance, caller evidence, range citations,
+reproducibility identities, and nonmutating consistency diagnostics.
 
 The command checks exact coverage and does not publish a success report for an
 incomplete classification journal. On a nonzero result, preserve the exact

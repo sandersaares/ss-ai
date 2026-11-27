@@ -425,10 +425,20 @@ fn record_transitions_require_nonblank_reasons_and_never_allow_a_final_response(
         parse(record_batch(&audit.state, &audit.classification(&row), &TestClock).unwrap());
     assert_eq!(progress["nextAction"], "continue");
     assert_eq!(progress["finalResponseAllowed"], false);
-    let path = audit.classification(&incidental(
-        &audit.inventory["assertions"][1]["id"],
-        "citations",
-    ));
+    let linked_id = &audit.inventory["assertions"][1]["id"];
+    let mut linked = incidental(linked_id, "citations");
+    linked["unlinkedReason"] = json!("This linked site has no caller.");
+    let error = record_batch(&audit.state, &audit.classification(&linked), &TestClock).unwrap_err();
+    assert!(error.to_string().contains("unlinkedReason"));
+    linked.as_object_mut().unwrap().remove("unlinkedReason");
+    linked["unresolvedCallerReason"] =
+        json!("A callback registration may add a second indirect caller.");
+    linked["reviewReason"] = json!(" \t");
+    let error = record_batch(&audit.state, &audit.classification(&linked), &TestClock).unwrap_err();
+    assert!(error.to_string().contains("reviewReason"));
+    linked["reviewReason"] =
+        json!("The public contract's applicability to the callback still needs review.");
+    let path = audit.classification(&linked);
     let terminal = parse(record_batch(&audit.state, &path, &TestClock).unwrap());
     assert_eq!(terminal["nextAction"], "report");
     assert_eq!(terminal["finalResponseAllowed"], false);

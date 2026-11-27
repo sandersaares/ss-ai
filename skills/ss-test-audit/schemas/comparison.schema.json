@@ -1,0 +1,91 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schemaVersion",
+    "comparableContent",
+    "left",
+    "right",
+    "matchedAssertionCount",
+    "exactLabelAgreementCount",
+    "exactLabelAgreementRate",
+    "changedRationaleCount",
+    "changedEvidenceStatusCount",
+    "changedReviewReasonCount",
+    "callerSetDifferenceCount",
+    "leftOnlySites",
+    "rightOnlySites",
+    "transitionMatrix",
+    "noCountedAssertionTests",
+    "incidentalOnlyTests"
+  ],
+  "properties": {
+    "schemaVersion": { "const": 1 },
+    "comparableContent": { "type": "boolean" },
+    "left": { "$ref": "#/$defs/runIdentity" },
+    "right": { "$ref": "#/$defs/runIdentity" },
+    "matchedAssertionCount": { "type": "integer", "minimum": 0 },
+    "exactLabelAgreementCount": { "type": "integer", "minimum": 0 },
+    "exactLabelAgreementRate": { "type": "number", "minimum": 0, "maximum": 1 },
+    "changedRationaleCount": { "type": "integer", "minimum": 0 },
+    "changedEvidenceStatusCount": { "type": "integer", "minimum": 0 },
+    "changedReviewReasonCount": { "type": "integer", "minimum": 0 },
+    "callerSetDifferenceCount": { "type": "integer", "minimum": 0 },
+    "leftOnlySites": { "type": "array", "items": { "type": "string" } },
+    "rightOnlySites": { "type": "array", "items": { "type": "string" } },
+    "transitionMatrix": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["left", "right", "count"],
+        "properties": {
+          "left": { "type": "string" },
+          "right": { "type": "string" },
+          "count": { "type": "integer", "minimum": 0 }
+        }
+      }
+    },
+    "noCountedAssertionTests": { "$ref": "#/$defs/gapMembership" },
+    "incidentalOnlyTests": { "$ref": "#/$defs/gapMembership" }
+  },
+  "$defs": {
+    "runIdentity": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "auditId",
+        "snapshotSha256",
+        "contentSha256",
+        "indexSha256",
+        "toolVersion",
+        "rubricVersion",
+        "repositoryRevision",
+        "testCount",
+        "assertionCount"
+      ],
+      "properties": {
+        "auditId": { "type": "string", "minLength": 1 },
+        "snapshotSha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+        "contentSha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+        "indexSha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+        "toolVersion": { "type": "string", "minLength": 1 },
+        "rubricVersion": { "type": "string", "minLength": 1 },
+        "repositoryRevision": { "type": "string", "minLength": 1 },
+        "testCount": { "type": "integer", "minimum": 0 },
+        "assertionCount": { "type": "integer", "minimum": 0 }
+      }
+    },
+    "gapMembership": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["leftOnly", "rightOnly", "both"],
+      "properties": {
+        "leftOnly": { "type": "array", "items": { "type": "string" } },
+        "rightOnly": { "type": "array", "items": { "type": "string" } },
+        "both": { "type": "array", "items": { "type": "string" } }
+      }
+    }
+  }
+}

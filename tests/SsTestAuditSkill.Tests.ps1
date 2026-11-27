@@ -34,7 +34,10 @@ Describe 'ss-test-audit skill contract' {
                 $command.CommandElements[2].Value
             }
         }
-        @($nativeCommands) | Should -Be @('initialize', 'search', 'next-batch', 'record-batch', 'advance', 'submit', 'report')
+        @($nativeCommands) | Should -Be @(
+            'initialize', 'search', 'context', 'next-batch', 'record-batch', 'advance',
+            'submit', 'compare', 'report'
+        )
         foreach ($name in @('SKILL.md', 'commands.md')) {
             $document = Get-Content -LiteralPath (Join-Path $script:Skill $name) -Raw
             foreach ($link in [regex]::Matches($document, '\]\(([^/#:)][^#):]*)(?:#[^)]*)?\)')) {
@@ -69,7 +72,10 @@ Describe 'ss-test-audit skill contract' {
         $row = @{
             assertionId = 'A000001'; classification = 'Documented'; evidenceStatus = 'Confirmed'
             actualOutcome = 'The method returns an empty collection.'; rationale = 'The API documents the empty case.'
-            citations = @(@{ path = 'README.md'; line = 1; excerpt = 'Returns an empty collection.' })
+            citations = @(@{
+                path = 'README.md'; line = 1; endLine = 1; owner = '# API'
+                sourceRole = 'markdownDocumentation'; excerpt = 'Returns an empty collection.'
+            })
             callingTestIds = @('T000001')
         }
         $record = @{ schemaVersion = 1; auditId = 'audit'; snapshotSha256 = 'a' * 64; assertions = @($row) }
@@ -96,7 +102,9 @@ Describe 'ss-test-audit skill contract' {
 
     It 'validates the completed summary and details as distinct records' {
         $identity = @{
-            schemaVersion = 1; auditId = 'audit'; snapshotSha256 = 'a' * 64
+            schemaVersion = 2; auditId = 'audit'; snapshotSha256 = 'a' * 64
+            contentSha256 = 'b' * 64; indexSha256 = 'c' * 64
+            toolVersion = '0.1.0'; rubricVersion = '1'
             repositoryRevision = 'unversioned'; repositoryRoot = 'repository'; scopePaths = @()
         }
         $summary = $identity + @{
@@ -105,13 +113,37 @@ Describe 'ss-test-audit skill contract' {
             moduleCount = 0; classificationCounts = @{}; modules = @(); diagnosticCount = 0
             noCountedAssertionCount = 0; incidentalOnlyCount = 0; unlinkedAssertionCount = 0
             fallibleValueCheckCount = 0; conditionalAssertionCount = 0
+            correctionCount = 0
+            consistencyDiagnosticCount = 0
         }
-        $details = $identity + @{ assertionTrace = @(); testInventory = @(); diagnostics = @() }
+        $details = $identity + @{
+            assertionTrace = @(); testInventory = @(); diagnostics = @()
+            corrections = @(); consistencyDiagnostics = @()
+        }
         Test-AuditRecord -Schema 'summary' -Record $summary | Should -BeTrue
         Test-AuditRecord -Schema 'details' -Record $details | Should -BeTrue
         $summary.finalResponseAllowed = $false
         Test-AuditRecord -Schema 'summary' -Record $summary | Should -BeFalse
         $details.Remove('testInventory')
         Test-AuditRecord -Schema 'details' -Record $details | Should -BeFalse
+    }
+
+    It 'validates a completed audit comparison without selecting a winner' {
+        $run = @{
+            auditId = 'audit'; snapshotSha256 = 'a' * 64; contentSha256 = 'b' * 64
+            indexSha256 = 'c' * 64; toolVersion = '0.1.0'; rubricVersion = '1'
+            repositoryRevision = 'unversioned'; testCount = 1; assertionCount = 1
+        }
+        $record = @{
+            schemaVersion = 1; comparableContent = $true; left = $run; right = $run
+            matchedAssertionCount = 1; exactLabelAgreementCount = 1
+            exactLabelAgreementRate = 1; changedRationaleCount = 0
+            changedEvidenceStatusCount = 0; changedReviewReasonCount = 0
+            callerSetDifferenceCount = 0
+            leftOnlySites = @(); rightOnlySites = @(); transitionMatrix = @()
+            noCountedAssertionTests = @{ leftOnly = @(); rightOnly = @(); both = @() }
+            incidentalOnlyTests = @{ leftOnly = @(); rightOnly = @(); both = @() }
+        }
+        Test-AuditRecord -Schema 'comparison' -Record $record | Should -BeTrue
     }
 }

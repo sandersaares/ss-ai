@@ -22,6 +22,8 @@ use crate::scan::digest;
 const MAX_SEARCH_RESULTS: usize = 200;
 /// Keeps one multi-query evidence call bounded even when every query returns a full page.
 const MAX_SEARCH_QUERIES: usize = 10;
+/// Bounds one complete owner-context response while retaining ordinary test bodies.
+const MAX_ASSERTION_CONTEXT_BYTES: usize = 128 * 1024;
 /// Keeps evidence handles compact while retaining snapshot-bound identity.
 const EVIDENCE_SNAPSHOT_PREFIX_CHARACTERS: usize = 12;
 
@@ -76,10 +78,172 @@ pub fn search_many(
         "schemaVersion": 1,
         "auditId": loaded.state.audit_id,
         "snapshotSha256": loaded.state.snapshot_sha256,
+        "contentSha256": loaded.state.content_sha256,
+        "indexSha256": loaded.state.index_sha256,
+        "toolVersion": loaded.state.tool_version,
+        "rubricVersion": loaded.state.rubric_version,
         "results": results,
         "queryCount": queries.len()
     })
     .to_string())
+}
+
+/// Returns one assertion card with its complete bounded enclosing owner source.
+pub fn inspect_assertion(
+    state_directory: &Path,
+    assertion_id: &str,
+    clock: &dyn Clock,
+) -> Result<String, AppError> {
+    let loaded = load_fresh(state_directory, clock)?;
+    let assertion = loaded
+        .inventory
+        .assertions
+        .iter()
+        .find(|assertion| assertion.id == assertion_id)
+        .ok_or_else(|| {
+            fail(
+                "invalidInput",
+                format!("Unknown assertion '{assertion_id}'"),
+            )
+        })?;
+    let containing_test = assertion
+        .containing_test_id
+        .as_deref()
+        .and_then(|id| loaded.inventory.tests.iter().find(|test| test.id == id));
+    let source =
+        fs::read_to_string(Path::new(&loaded.inventory.repository_root).join(&assertion.path))
+            .map_err(|error| {
+                caused_by(
+                    "staleState",
+                    format!("Cannot read assertion owner '{}'", assertion.path),
+                    error,
+                )
+            })?;
+    let lines = source.lines().collect::<Vec<_>>();
+    let start = assertion.owner_line.get();
+    let end = assertion.owner_end_line.min(lines.len());
+    let owner_text = lines
+        .get(start.saturating_sub(1)..end)
+        .ok_or_else(|| {
+            fail(
+                "invalidState",
+                format!("Assertion '{assertion_id}' has an invalid owner range"),
+            )
+        })?
+        .join("\n");
+    if owner_text.len() > MAX_ASSERTION_CONTEXT_BYTES {
+        return Err(fail(
+            "invalidInput",
+            format!("Assertion '{assertion_id}' owner context exceeds the bounded response size"),
+        ));
+    }
+    let nested_assertions = loaded
+        .inventory
+        .assertions
+        .iter()
+        .filter(|candidate| {
+            candidate.path == assertion.path
+                && candidate.owner_line == assertion.owner_line
+                && candidate.owner_end_line == assertion.owner_end_line
+        })
+        .map(|candidate| candidate.id.as_str())
+        .collect::<Vec<_>>();
+    let binding_candidates = lines
+        .iter()
+        .enumerate()
+        .skip(start.saturating_sub(1))
+        .take(end.saturating_sub(start).saturating_add(1))
+        .filter(|(_, line)| {
+            let line = line.trim_start();
+            line.starts_with("let ")
+                || line.starts_with("const ")
+                || line.contains(".get_or_insert")
+                || line.contains(" = ")
+        })
+        .map(|(offset, line)| {
+            json!({
+                "line": offset.saturating_add(1),
+                "source": line,
+            })
+        })
+        .collect::<Vec<_>>();
+    let terms = identifier_terms(&assertion.expression);
+    let related_evidence_candidates = loaded
+        .index
+        .iter()
+        .filter(|entry| {
+            entry.path != assertion.path || entry.line.get() < start || entry.line.get() > end
+        })
+        .filter(|entry| {
+            let excerpt = entry.excerpt.to_ascii_lowercase();
+            terms.iter().any(|term| excerpt.contains(term))
+        })
+        .take(24)
+        .map(|entry| {
+            json!({
+                "path": entry.path,
+                "line": entry.line,
+                "endLine": entry.end_line,
+                "owner": entry.owner,
+                "sourceRole": entry.source_role,
+                "excerpt": entry.excerpt,
+                "status": "candidate"
+            })
+        })
+        .collect::<Vec<_>>();
+    Ok(json!({
+        "schemaVersion": 1,
+        "auditId": loaded.state.audit_id,
+        "snapshotSha256": loaded.state.snapshot_sha256,
+        "contentSha256": loaded.state.content_sha256,
+        "indexSha256": loaded.state.index_sha256,
+        "toolVersion": loaded.state.tool_version,
+        "rubricVersion": loaded.state.rubric_version,
+        "assertion": assertion,
+        "containingTest": containing_test,
+        "owner": {
+            "path": assertion.path,
+            "line": assertion.owner_line,
+            "endLine": assertion.owner_end_line,
+            "source": owner_text
+        },
+        "nestedAssertionIds": nested_assertions,
+        "bindingCandidates": binding_candidates,
+        "relatedEvidenceCandidates": related_evidence_candidates
+    })
+    .to_string())
+}
+
+/// Extracts conservative lexical hints without claiming symbol resolution.
+fn identifier_terms(expression: &str) -> Vec<String> {
+    let mut current = String::new();
+    let mut terms = Vec::new();
+    for character in expression.chars().chain(std::iter::once(' ')) {
+        if character.is_ascii_alphanumeric() || character == '_' {
+            current.push(character);
+        } else if !current.is_empty() {
+            let lower = current.to_ascii_lowercase();
+            if lower.len() >= 4
+                && !matches!(
+                    lower.as_str(),
+                    "assert"
+                        | "expect"
+                        | "unwrap"
+                        | "matches"
+                        | "result"
+                        | "value"
+                        | "true"
+                        | "false"
+                )
+            {
+                terms.push(lower);
+            }
+            current.clear();
+        }
+    }
+    terms.sort();
+    terms.dedup();
+    terms
 }
 
 /// Executes one bounded AND-term query against the already validated index.
@@ -119,8 +283,11 @@ fn search_query(
                 "evidenceHandle": evidence_handle(snapshot_sha256, offset),
                 "path": entry.path,
                 "line": entry.line,
+                "endLine": entry.end_line,
                 "language": entry.language,
                 "kind": entry.kind,
+                "owner": entry.owner,
+                "sourceRole": entry.source_role,
                 "excerpt": entry.excerpt,
                 "repositoryRevision": entry.repository_revision,
                 "fileSha256": entry.file_sha256
@@ -181,6 +348,9 @@ pub(crate) fn load(state_directory: &Path, clock: &dyn Clock) -> Result<LoadedSt
         || inventory.repository_revision != state.repository_revision
         || inventory.revision_kind != state.revision_kind
         || inventory.scope_paths != state.scope_paths
+        || inventory.tool_version != state.tool_version
+        || inventory.rubric_version != state.rubric_version
+        || inventory.content_sha256 != state.content_sha256
     {
         return Err(fail(
             "invalidState",
@@ -462,20 +632,22 @@ fn parse_index(bytes: &[u8]) -> Result<Vec<IndexEntry>, AppError> {
 
 /// Ensures citations cannot refer to a line or hash absent from the snapshot.
 fn validate_index(inventory: &Inventory, index: &[IndexEntry]) -> Result<(), AppError> {
-    let files: BTreeMap<&str, &str> = inventory
+    let files: BTreeMap<&str, &IndexedFile> = inventory
         .files
         .iter()
-        .map(|file| (file.path.as_str(), file.sha256.as_str()))
+        .map(|file| (file.path.as_str(), file))
         .collect();
     for entry in index {
-        let Some(expected_hash) = files.get(entry.path.as_str()) else {
+        let Some(file) = files.get(entry.path.as_str()) else {
             return Err(fail(
                 "invalidState",
                 format!("Search index references unknown file '{}'", entry.path),
             ));
         };
-        if expected_hash != &entry.file_sha256
-            || entry.repository_revision != inventory.repository_revision
+        let hash_matches = file.sha256 == entry.file_sha256;
+        let revision_matches = entry.repository_revision == inventory.repository_revision;
+        let range_valid = entry.line <= entry.end_line && entry.end_line.get() <= file.line_count;
+        if !hash_matches || !revision_matches || !range_valid || entry.source_role.trim().is_empty()
         {
             return Err(fail(
                 "invalidState",
@@ -534,8 +706,14 @@ fn validate_inventory(inventory: &Inventory) -> Result<(), AppError> {
                 format!("Assertion '{}' references an unknown file", assertion.id),
             ));
         };
-        if assertion.end_line < assertion.line.get()
-            || assertion.end_line > file.line_count
+        let assertion_range_valid =
+            assertion.line.get() <= assertion.end_line && assertion.end_line <= file.line_count;
+        let owner_start_valid = assertion.owner_line <= assertion.line;
+        let owner_contains_assertion = assertion.owner_end_line >= assertion.end_line;
+        let owner_within_file = assertion.owner_end_line <= file.line_count;
+        let owner_range_valid = owner_start_valid && owner_contains_assertion && owner_within_file;
+        if !assertion_range_valid
+            || !owner_range_valid
             || assertion.expression.trim().is_empty()
             || assertion.file_sha256 != file.sha256
         {
@@ -569,6 +747,44 @@ fn validate_inventory(inventory: &Inventory) -> Result<(), AppError> {
                 return Err(fail(
                     "invalidState",
                     format!("Assertion '{}' references an unknown caller", assertion.id),
+                ));
+            }
+        }
+        for evidence in assertion
+            .caller_evidence
+            .iter()
+            .chain(&assertion.unresolved_caller_candidates)
+        {
+            let Some(caller) = tests.get(evidence.test_id.as_str()) else {
+                return Err(fail(
+                    "invalidState",
+                    format!(
+                        "Assertion '{}' has caller evidence for an unknown test",
+                        assertion.id
+                    ),
+                ));
+            };
+            let Some(call_file) = files.get(evidence.path.as_str()) else {
+                return Err(fail(
+                    "invalidState",
+                    format!(
+                        "Assertion '{}' has caller evidence in an unknown file",
+                        assertion.id
+                    ),
+                ));
+            };
+            let caller_range_valid = evidence.line.get() <= evidence.end_line
+                && evidence.line >= caller.line
+                && evidence.end_line <= caller.end_line
+                && evidence.end_line <= call_file.line_count;
+            if caller.path != evidence.path
+                || !caller_range_valid
+                || evidence.kind.trim().is_empty()
+                || evidence.expression.trim().is_empty()
+            {
+                return Err(fail(
+                    "invalidState",
+                    format!("Assertion '{}' has invalid caller provenance", assertion.id),
                 ));
             }
         }

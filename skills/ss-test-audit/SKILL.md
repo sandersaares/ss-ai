@@ -30,6 +30,15 @@ A public promise must be wording in public API documentation or an authoritative
 
 Treat tool output as inventory evidence, not semantic authority. Do not classify an assertion with a keyword rule. Read the assertion's source, containing test, called API, and only the targeted contract evidence needed to explain its outcome.
 
+Search handles bind a complete bounded documentation paragraph, list item, or
+source line and identify its end line, owner, and structural source role. Use
+those fields to preserve qualifiers, negation, cfg conditions, and context.
+The source role is provenance, not authority; an excerpt in a public example or
+authoritative design can still require independent wording before generalizing
+it. A same-site doctest illustrates that scenario and is not independent proof
+of a broader promise. Private implementation, fixture, and test comments explain
+mechanics but do not become public promises.
+
 # Classification contract
 
 Use exactly one classification for every assertion site:
@@ -49,7 +58,7 @@ Run `ss-ai test-audit initialize` using the first recipe in [commands.md](comman
 
 Record the returned `auditId`, `snapshotSha256`, counts, correction count, state paths, and diagnostics count in the session checkpoint.
 
-Persisted audit state and inventory use schema version 2. Use the same utility
+Persisted audit state and inventory use schema version 3. Use the same utility
 version throughout one audit. A reader rejects state from another schema version
 without changing it. Do not edit, migrate, or reinterpret an old inventory.
 
@@ -75,7 +84,7 @@ old batch files as transition inputs; do not submit them to the corrected audit.
 
 # Stage 2: inspect inventory and cross-check discovery
 
-Do not raw-dump `inventory.json` or `search-index.jsonl` into the conversation. Use `next-batch` for assertions and `search` for targeted evidence.
+Do not raw-dump `inventory.json` or `search-index.jsonl` into the conversation. Use `next-batch` for assertions, `context` for the complete bounded enclosing test or helper, and `search` for targeted evidence.
 
 Compare the native inventory with an independent repository test-discovery method when the repository provides one, such as a language test runner's list mode. Verify the runner is available and run it in the audited checkout in the same invocation, or explicitly select its manifest (for example, `cargo test --manifest-path "{{AUDITED_MANIFEST}}" -- --list`, where `AUDITED_MANIFEST` is the absolute manifest path for that checkout in the runner's environment). For a platform-specific scope, match the audited platform; for a Linux scope from Windows, use WSL when available. If the matching environment or runner is unavailable, record a discovery limitation rather than relying on a host-only result or installing tools. Do not execute arbitrary test suites merely to invent a list.
 
@@ -109,7 +118,24 @@ Read only the exported batch display, its local context, and targeted evidence s
 6. Use `Documented` when every checked fact is explicitly required; `Mixed` when a documented fact is combined with a distinct undocumented constraint; `Implicit` only for a named plausible public guarantee with a stated missing wording; otherwise use `Incidental` and name the fixture, private choice, setup, or permitted alternative. Do not use uncertainty alone as the reason for `Implicit`.
 7. Verify exact citations, caller attribution, and any explicit unlinked reason before submission. Reject an unlinked explanation when native or agent-confirmed effective callers already exist.
 
+Use `unresolvedCallerReason` for a possible additional indirect caller that still
+needs inspection. Do not overload `evidenceStatus`, which remains tied to the
+classification's evidence, or mark an assertion unlinked when effective callers
+already exist.
+
+Use `reviewReason` when authority or applicability remains unresolved after the
+bounded evidence process. It records why follow-up review may be useful without
+inventing a citation or changing the four-label classification contract.
+
 Search API docs, design docs, public declarations, trait implementations, and inherited contracts using [commands.md](commands.md#search-evidence). Group independent evidence lookups into one `search` command by repeating `--query`; the command returns one result page per query. Supply `--kind` to narrow queries only when the target is already clear. Terms within one query are combined as an AND query.
+
+Use `context` first when the compact card omits setup or observation timing.
+Its bounded owner source, native caller evidence, unresolved candidate evidence,
+and nested assertion list distinguish an API result from fixture acquisition and
+show whether a predicate observes behavior before, during, or after a callback or
+caught panic. For inherited external contracts that are absent from the index,
+record the missing evidence source; do not silently convert a convention into a
+citation.
 
 Write one compact submission matching [compact-submission.schema.json](schemas/compact-submission.schema.json). Copy the current batch result's `batchFingerprint` exactly; do not recompute it or copy a fingerprint from an earlier generation. `submit` uses that fingerprint to bind the rows to the exact current `batchPath`. Each `citationHandles` entry must be an exact `evidenceHandle` returned by search. Multiple citations are independent array entries.
 
@@ -153,6 +179,12 @@ successful directive and corresponding batch.
 
 Run `ss-ai test-audit report` using [commands.md](commands.md#emit-final-reports). The command requires exactly one accepted classification row for every assertion and one inventory row for every test.
 
+Review `consistencyDiagnostics` before delivery. Investigate broad citation reuse,
+one rationale used for different predicates, and analogous predicates with
+different classifications. Treat warnings as review prompts, never automatic
+relabels. Record any corrected judgment in a fresh audit transition; do not
+silently edit completed reports.
+
 Deliver these generated paths:
 
 - `summary.md`: per-module totals and percentages, tests with incidental-only checks, tests with no counted assertion, and scan diagnostics.
@@ -175,8 +207,19 @@ Emit the final conversational summary in this fixed order: audit identity, repos
 
 The report result also returns `noCountedAssertionCount` and `incidentalOnlyCount` for tests, `unlinkedAssertionCount` and `fallibleValueCheckCount` for assertion sites, and `conditionalAssertionCount` and `diagnosticCount` for diagnostics. Use those bounded counts without opening the complete trace unless detailed validation requires it. A nonzero fallible count means inventoried expect-style candidates required case-by-case judgment.
 
-The summary must state the audited repository and scopes, snapshot revision, test and assertion totals, classification totals, module rates, output paths, discovery cross-check, language coverage, and every material scan diagnostic or unresolved unsupported form.
+The summary must state the audited repository and scopes, snapshot revision,
+checkout-independent content and index digests, tool and rubric versions, test
+and assertion totals, classification totals, module rates, inventory corrections,
+consistency diagnostics, output paths, discovery cross-check, language coverage,
+and every material scan diagnostic or unresolved unsupported form.
 
 Execute native commands through their direct process boundary and inspect `$LASTEXITCODE`; a wrapper completing successfully is not evidence that the native command succeeded. In the rare case PowerShell is used for recovery, normalize projected arrays with `@(...)` and use literal string checks such as `.Contains()` rather than `-like` when Rust backticks are present.
+
+When comparing repeated audits, run `compare` on complete states and report the
+content, index, tool, and rubric identities with the transition matrix. Do not
+select a winner from net percentages; inspect changed caller edges, unmatched
+sites, evidence sufficiency, and test-gap membership. Follow
+[the evaluation procedure](docs/evaluation.md) when changing scanner behavior,
+schemas, or the rubric.
 
 Do not omit smoke tests, unlinked shared assertions, parse fallbacks, or unsupported forms to make coverage appear complete.

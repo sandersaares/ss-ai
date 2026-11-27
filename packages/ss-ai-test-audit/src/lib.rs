@@ -2,6 +2,7 @@
 #![cfg_attr(docsrs, feature(doc_cfg))]
 
 mod batch;
+mod compare;
 mod inventory;
 mod model;
 mod report;
@@ -10,6 +11,7 @@ mod state;
 mod submission;
 
 pub use batch::{advance, next_batch, record_batch, submit};
+pub use compare::compare;
 pub use inventory::{initialize, initialize_with_corrections};
 pub use report::report;
-pub use state::{search, search_many};
+pub use state::{inspect_assertion, search, search_many};

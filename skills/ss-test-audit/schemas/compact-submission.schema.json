@@ -90,6 +90,14 @@
         "unlinkedReason": {
           "type": "string",
           "minLength": 1
+        },
+        "unresolvedCallerReason": {
+          "type": "string",
+          "minLength": 1
+        },
+        "reviewReason": {
+          "type": "string",
+          "minLength": 1
         }
       },
       "allOf": [
@@ -217,6 +225,14 @@
           }
         },
         "unlinkedReason": {
+          "type": "string",
+          "minLength": 1
+        },
+        "unresolvedCallerReason": {
+          "type": "string",
+          "minLength": 1
+        },
+        "reviewReason": {
           "type": "string",
           "minLength": 1
         }

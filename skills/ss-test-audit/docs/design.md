@@ -17,7 +17,7 @@ The skill audits one repository and any selected set of existing file or directo
 
 The final trace contains exactly one classification row for each inventoried assertion. The test inventory contains every inventoried test and links direct and shared assertion IDs. Tests that execute smoke behavior without a counted predicate remain visible.
 
-Persisted audit state and inventory use schema version 2. Initialization can
+Persisted audit state and inventory use schema version 3. Initialization can
 apply exact, revision-bound source-site corrections when syntax cannot prove
 whether an `expect` extracts a fixture. The immutable corrected inventory retains
 the original assertion identifier, source location, expression, file digest, and
@@ -40,6 +40,14 @@ resolves exact citations, and records the judgments before exporting the next ba
 an explicit row shape requiring confirmed equivalence, replacement citations,
 and caller attribution. Batch display and final report counts make ordinary
 workflow completion independent of PowerShell JSON projection.
+
+The judgment workflow exposes complete bounded owner context and snapshot-bound
+evidence ranges. Native caller evidence distinguishes direct, imported, and
+qualified calls from unresolved candidates; only effective callers enter caller
+IDs. Search records retain their structural source role and owner without treating
+that metadata as semantic authority. Final reports surface correction and
+consistency diagnostics, while the `compare` command evaluates completed runs
+without choosing either as ground truth.
 
 Using the [classification boundaries](#classification-boundaries), the
 Markdown report shows per-module totals and percentages for:

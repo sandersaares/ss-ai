@@ -23,7 +23,7 @@ initial batch
 
 The inventory, source file digests, and search index bind each batch to one audit ID and snapshot digest. Initialization publishes the state record last so readers cannot treat a partially initialized directory as a ready audit. Every later read verifies the persisted state and index digests. Mutating commands additionally verify current source hashes. A changed source returns a stale-state failure before accepting a judgment against moved lines or emitting a final report.
 
-Audit state and inventory use schema version 2. A proven `Some(...)` fixture
+Audit state and inventory use schema version 3. A proven `Some(...)` fixture
 holder receives an assertion identifier while scanning, then leaves the
 effective inventory after all source IDs are assigned. This keeps identifiers
 for later sites stable without including fixture extraction in denominators.
@@ -64,7 +64,13 @@ equivalence confirmation. Native code replaces, rather than inherits, reuse
 citations and caller IDs.
 
 Search accepts repeated independent queries and evaluates them from one index
-load. Query count, per-query result count, and batch sizes remain bounded.
+load. Search records retain complete bounded documentation paragraphs or list
+items, source ranges, owners, and structural source roles. Marker-only ranges
+do not enter the index. The assertion `context` command returns the complete
+bounded owner source, nested assertion identifiers, native and unresolved caller
+spans, local binding candidates, and lexical evidence candidates. These
+candidate fields are evidence-navigation hints, not semantic authority. Query
+count, per-query result count, and batch sizes remain bounded.
 
 Batch export writes a machine record and a bounded text display under retained
 file transactions, outside the report publication area. Report results include no-assertion, incidental-only,
@@ -74,11 +80,15 @@ machine-readable assertion trace and test inventory, paired with aggregate
 `summary.json`.
 
 The Rust visitor reconciles declarations and direct calls resolvable within
-one parsed file after visiting it, so declaration order does not matter.
-The scanner does not treat matching names in source text as evidence that a
-test calls a helper. The agent can confirm indirect callers discovered through
-callbacks, traits, registration, or dynamic paths. A shared assertion without
-callers requires a reason. The visitor excludes test-owned `Drop` method
+one parsed file after visiting it, so declaration order does not matter. A
+conservative cross-file pass then resolves explicit crate imports, aliases,
+crate reexports, and module-qualified calls to unique helper definitions and
+records each source span. Ambiguous paths remain unresolved candidates rather
+than effective callers. The scanner does not treat matching names in source
+text as evidence that a test calls a helper. The agent can confirm indirect
+callers discovered through callbacks, traits, registration, or dynamic paths.
+A shared assertion without effective callers requires a reason. The visitor
+excludes test-owned `Drop` method
 panic sites that can drive an expected unwind, not ordinary functions named
 `drop`. Other callback assertions remain visible for agent attribution.
 Recognized `assert_panics` calls become one panic expectation; the visitor
@@ -99,6 +109,14 @@ API values inside the same callback. Contiguous cfg attributes on compile-time s
 The inventory counts source sites, not runtime loop iterations or repeated trait names in one macro. Rust `#[should_panic]` counts at the expectation attribute, not at the deliberately triggered panic. Ordinary `unwrap` calls remain setup rather than predicates. Selected test-context `expect` calls that extract API values count as heuristic `fallibleValueCheck` sites; common fixture and synchronization accessors remain excluded. A rustdoc fence is a test case; a compile-only fence remains in the inventory with no counted predicate unless it contains one of the recognized static or fallible checks.
 
 The report computes assertion-site rates over classified rows and preserves test inventory entries independently. This prevents smoke tests and no-predicate doctests from disappearing while keeping their lack of checks explicit.
+
+Final reports add nonmutating consistency diagnostics for rationale reuse across
+different predicates, identical predicates with different labels, broad or
+conflicting citation reuse, and audits with no `Mixed` sites. Summary and detail
+records carry tool and rubric versions, source and index digests, correction
+counts, and these diagnostics. The native `compare` command uses source
+provenance rather than audit-local IDs to report classification transitions,
+effective caller-set drift, and test-gap membership between complete runs.
 
 ## Failure and coverage semantics
 
