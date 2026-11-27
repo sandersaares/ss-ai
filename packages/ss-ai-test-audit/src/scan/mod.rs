@@ -26,7 +26,8 @@ use syn::{
 };
 
 use crate::model::{
-    AssertionSite, IndexEntry, IndexedFile, Inventory, RevisionKind, ScanDiagnostic, TestCase,
+    AUDIT_STATE_SCHEMA_VERSION, AssertionSite, IndexEntry, IndexedFile, Inventory,
+    InventoryCorrection, RevisionKind, ScanDiagnostic, TestCase,
 };
 
 /// Prevents one generated or unexpected file from making an audit unbounded.
@@ -154,12 +155,38 @@ pub(crate) fn inventory(
             ));
         }
     }
+    // Exclusion happens after source-site IDs have been assigned, so removing
+    // one proven fixture check cannot renumber later assertions.
+    let corrections = assertions
+        .iter()
+        .filter(|assertion| assertion.fixture_excluded)
+        .map(|assertion| InventoryCorrection {
+            assertion_id: assertion.id.clone(),
+            path: assertion.path.clone(),
+            line: assertion.line,
+            end_line: assertion.end_line,
+            column: assertion.column,
+            expression: assertion.expression.clone(),
+            file_sha256: assertion.file_sha256.clone(),
+            reason: "The source extracts a test-owned Some-backed option holder rather than a fallible audited API value".to_owned(),
+        })
+        .collect::<Vec<_>>();
+    diagnostics.extend(corrections.iter().map(|correction| ScanDiagnostic {
+        kind: "fixtureAccessExcluded".to_owned(),
+        path: correction.path.clone(),
+        line: Some(correction.line.get()),
+        detail: format!(
+            "Assertion '{}' was excluded from this audit: {}",
+            correction.assertion_id, correction.reason
+        ),
+    }));
+    assertions.retain(|assertion| !assertion.fixture_excluded);
     attach_assertions(&mut tests, &mut assertions);
     refresh_cross_checks(&mut diagnostics, &assertions);
     verify_indexed_files(repository_root, &indexed_files)?;
 
     let inventory = Inventory {
-        schema_version: 1,
+        schema_version: AUDIT_STATE_SCHEMA_VERSION,
         audit_id: String::new(),
         repository_root: repository_root
             .to_str()
@@ -172,6 +199,7 @@ pub(crate) fn inventory(
         tests,
         assertions,
         diagnostics,
+        corrections,
     };
     Ok((inventory, entries))
 }
@@ -616,11 +644,12 @@ struct BlockScope<'ast> {
 }
 
 /// Identifies receivers tied to standard synchronization or thread fixtures.
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Eq, PartialEq)]
 enum FixtureKind {
     Mutex,
     RwLock,
     JoinHandle,
+    OptionHolder,
 }
 
 impl<'ast> RustCollector<'_, 'ast> {
@@ -756,6 +785,7 @@ impl<'ast> RustCollector<'_, 'ast> {
             expression: source_slice(self.lines, start, end),
             file_sha256: self.file_sha256.to_owned(),
             test_code: self.functions.role.is_test(),
+            fixture_excluded: false,
             containing_test_id,
             helper_name: if self.functions.role.test_id().is_none() {
                 self.functions.name.clone()
@@ -891,22 +921,20 @@ impl<'ast> RustCollector<'_, 'ast> {
     fn local_fixture(&self, local: &Local) -> Option<(String, FixtureKind)> {
         let (pattern, kind) = match &local.pat {
             Pat::Type(typed) => {
-                let Type::Path(path) = typed.ty.as_ref() else {
-                    return None;
-                };
-                if path.qself.is_some() {
-                    return None;
+                let kind = match typed.ty.as_ref() {
+                    Type::Path(path) if path.qself.is_none() => {
+                        let names = path
+                            .path
+                            .segments
+                            .iter()
+                            .map(|segment| &segment.ident)
+                            .collect::<Vec<_>>();
+                        self.fixture_type(&names, path.path.leading_colon.is_some())
+                    }
+                    _ => None,
                 }
-                let names = path
-                    .path
-                    .segments
-                    .iter()
-                    .map(|segment| &segment.ident)
-                    .collect::<Vec<_>>();
-                (
-                    typed.pat.as_ref(),
-                    self.fixture_type(&names, path.path.leading_colon.is_some())?,
-                )
+                .or_else(|| self.fixture_constructor(&local.init.as_ref()?.expr))?;
+                (typed.pat.as_ref(), kind)
             }
             pattern => (
                 pattern,
@@ -921,28 +949,136 @@ impl<'ast> RustCollector<'_, 'ast> {
 
     /// Recognizes standard constructors without trusting a receiver's variable name.
     fn fixture_constructor(&self, expression: &Expr) -> Option<FixtureKind> {
+        if let Some(kind) = self.fixture_holder_constructor(expression) {
+            return Some(kind);
+        }
+        match unparenthesized(expression) {
+            Expr::Call(call) => {
+                let Expr::Path(function) = call.func.as_ref() else {
+                    return None;
+                };
+                if function.qself.is_some() {
+                    return None;
+                }
+                let names = function
+                    .path
+                    .segments
+                    .iter()
+                    .map(|segment| &segment.ident)
+                    .collect::<Vec<_>>();
+                let (&constructor, qualifiers) = names.split_last()?;
+                if constructor == "new" {
+                    return self.fixture_type(qualifiers, function.path.leading_colon.is_some());
+                }
+                (constructor == "spawn"
+                    && matches!(qualifiers, [root, namespace] if *root == "std" && *namespace == "thread"))
+                .then_some(FixtureKind::JoinHandle)
+            }
+            Expr::MethodCall(call) => (call.args.is_empty()
+                && matches!(call.method.to_string().as_str(), "borrow" | "borrow_mut")
+                && self.fixture_kind(&call.receiver) == Some(FixtureKind::OptionHolder))
+            .then_some(FixtureKind::OptionHolder),
+            _ => None,
+        }
+    }
+
+    /// Recognizes test-owned option holders and their ordinary Rc/Arc clones.
+    fn fixture_holder_constructor(&self, expression: &Expr) -> Option<FixtureKind> {
         let Expr::Call(call) = unparenthesized(expression) else {
             return None;
         };
         let Expr::Path(function) = call.func.as_ref() else {
             return None;
         };
-        if function.qself.is_some() {
-            return None;
-        }
         let names = function
             .path
             .segments
             .iter()
-            .map(|segment| &segment.ident)
+            .map(|segment| segment.ident.to_string())
             .collect::<Vec<_>>();
-        let (&constructor, qualifiers) = names.split_last()?;
-        if constructor == "new" {
-            return self.fixture_type(qualifiers, function.path.leading_colon.is_some());
+        if names.last().is_some_and(|name| name == "clone")
+            && call.args.len() == 1
+            && names.len() == 2
+            && names
+                .first()
+                .is_some_and(|owner| matches!(owner.as_str(), "Rc" | "Arc"))
+        {
+            return matches!(
+                call.args.first(),
+                Some(Expr::Reference(reference))
+                    if self.fixture_kind(&reference.expr) == Some(FixtureKind::OptionHolder)
+            )
+            .then_some(FixtureKind::OptionHolder);
         }
-        (constructor == "spawn"
-            && matches!(qualifiers, [root, namespace] if *root == "std" && *namespace == "thread"))
-        .then_some(FixtureKind::JoinHandle)
+        let argument = call.args.first()?;
+        if names.last().is_some_and(|name| name == "new")
+            && call.args.len() == 1
+            && names.len() == 2
+            && names
+                .first()
+                .is_some_and(|owner| matches!(owner.as_str(), "Rc" | "Arc" | "RefCell"))
+        {
+            let is_holder = |inner: &Expr| {
+                let Expr::Call(inner) = unparenthesized(inner) else {
+                    return false;
+                };
+                let Expr::Path(function) = inner.func.as_ref() else {
+                    return false;
+                };
+                function.path.is_ident("Some")
+            };
+            let inner = if names
+                .first()
+                .is_some_and(|name| matches!(name.as_str(), "Rc" | "Arc"))
+            {
+                let Expr::Call(inner) = unparenthesized(argument) else {
+                    return None;
+                };
+                let Expr::Path(function) = inner.func.as_ref() else {
+                    return None;
+                };
+                if !function
+                    .path
+                    .segments
+                    .last()
+                    .is_some_and(|segment| segment.ident == "new")
+                {
+                    return None;
+                }
+                let Expr::Path(container) = inner.func.as_ref() else {
+                    return None;
+                };
+                if !container
+                    .path
+                    .segments
+                    .iter()
+                    .any(|segment| segment.ident == "RefCell")
+                {
+                    return None;
+                }
+                inner.args.first()?
+            } else {
+                argument
+            };
+            return is_holder(inner).then_some(FixtureKind::OptionHolder);
+        }
+        None
+    }
+
+    /// Resolves only locally proven fixture bindings, never variable naming.
+    fn fixture_kind(&self, expression: &Expr) -> Option<FixtureKind> {
+        if let Expr::Path(path) = unparenthesized(expression)
+            && let Some(name) = path.path.get_ident()
+        {
+            return self
+                .blocks
+                .iter()
+                .skip(self.functions.first_binding_scope)
+                .rev()
+                .find_map(|block| block.bindings.get(&name.to_string()).copied())
+                .flatten();
+        }
+        self.fixture_constructor(expression)
     }
 
     /// Resolves an explicit standard-library path or directly imported type.
@@ -989,19 +1125,7 @@ impl<'ast> RustCollector<'_, 'ast> {
         if !call.args.is_empty() {
             return false;
         }
-        let fixture = if let Expr::Path(path) = unparenthesized(&call.receiver)
-            && let Some(name) = path.path.get_ident()
-        {
-            let name = name.to_string();
-            self.blocks
-                .iter()
-                .skip(self.functions.first_binding_scope)
-                .rev()
-                .find_map(|block| block.bindings.get(&name).copied())
-                .flatten()
-        } else {
-            self.fixture_constructor(&call.receiver)
-        };
+        let fixture = self.fixture_kind(&call.receiver);
         matches!(
             (fixture, call.method.to_string().as_str()),
             (Some(FixtureKind::Mutex), "lock" | "try_lock")
@@ -1010,6 +1134,10 @@ impl<'ast> RustCollector<'_, 'ast> {
                     "read" | "try_read" | "write" | "try_write"
                 )
                 | (Some(FixtureKind::JoinHandle), "join")
+                | (
+                    Some(FixtureKind::OptionHolder),
+                    "as_ref" | "as_mut" | "take"
+                )
         )
     }
 }
@@ -1239,15 +1367,19 @@ impl<'ast> Visit<'ast> for RustCollector<'_, 'ast> {
         for attribute in &i.attrs {
             self.visit_attribute(attribute);
         }
-        if i.method == "expect"
-            && self.functions.role.is_test()
-            && !self.is_fixture_access(&i.receiver)
-        {
+        if i.method == "expect" && self.functions.role.is_test() {
             self.push_range(
                 "fallibleValueCheck",
                 i.receiver.span().start(),
                 i.span().end(),
             );
+            if self.is_fixture_access(&i.receiver) {
+                // Keep this candidate's ID stable for subsequent source sites,
+                // while removing the false predicate after scanning the file.
+                if let Some(assertion) = self.assertions.last_mut() {
+                    assertion.fixture_excluded = true;
+                }
+            }
         }
         self.visit_expr(&i.receiver);
         if let Some(arguments) = &i.turbofish {
@@ -1874,6 +2006,7 @@ fn doctest_assertion(
         expression,
         file_sha256: file_sha256.to_owned(),
         test_code: true,
+        fixture_excluded: false,
         containing_test_id: Some(test.id.clone()),
         helper_name: None,
         calling_test_ids: Vec::new(),
@@ -1969,6 +2102,7 @@ fn scan_heuristically(
                 expression: source_line.trim().to_owned(),
                 file_sha256: file_sha256.to_owned(),
                 test_code: true,
+                fixture_excluded: false,
                 containing_test_id: test.clone(),
                 helper_name: None,
                 calling_test_ids: test.into_iter().collect(),

@@ -13,7 +13,8 @@ use ss_ai_runtime::{Clock, FileTransaction, caused_by, fail, read_bytes};
 
 use crate::batch::ValidatedJournal;
 use crate::model::{
-    AssertionSite, AuditState, ClassificationJournal, IndexEntry, IndexedFile, Inventory, TestCase,
+    AUDIT_STATE_SCHEMA_VERSION, AssertionSite, AuditState, ClassificationJournal, IndexEntry,
+    IndexedFile, Inventory, TestCase,
 };
 use crate::scan::digest;
 
@@ -165,7 +166,7 @@ pub(crate) struct LoadedState {
 /// Loads schema-version-one state without rehashing audited source files.
 pub(crate) fn load(state_directory: &Path, clock: &dyn Clock) -> Result<LoadedState, AppError> {
     let state: AuditState = read_json(&state_directory.join("audit-state.json"), clock)?;
-    require_version(state.schema_version, "audit state")?;
+    require_audit_version(state.schema_version, "audit state")?;
     let inventory_bytes = require_bytes(&state_directory.join("inventory.json"), clock)?;
     if digest(&inventory_bytes) != state.snapshot_sha256 {
         return Err(fail(
@@ -174,7 +175,7 @@ pub(crate) fn load(state_directory: &Path, clock: &dyn Clock) -> Result<LoadedSt
         ));
     }
     let inventory: Inventory = parse_json(&inventory_bytes, "inventory")?;
-    require_version(inventory.schema_version, "inventory")?;
+    require_audit_version(inventory.schema_version, "inventory")?;
     if inventory.audit_id != state.audit_id
         || inventory.repository_root != state.repository_root
         || inventory.repository_revision != state.repository_revision
@@ -259,6 +260,17 @@ pub(crate) fn parse_json<T: DeserializeOwned>(bytes: &[u8], role: &str) -> Resul
 /// Rejects records from a utility version this implementation cannot interpret.
 pub(crate) fn require_version(version: u32, role: &str) -> Result<(), AppError> {
     if version != 1 {
+        return Err(fail(
+            "invalidState",
+            format!("Unsupported {role} schema version {version}"),
+        ));
+    }
+    Ok(())
+}
+
+/// Rejects audit-state records from another inventory-correction contract.
+pub(crate) fn require_audit_version(version: u32, role: &str) -> Result<(), AppError> {
+    if version != AUDIT_STATE_SCHEMA_VERSION {
         return Err(fail(
             "invalidState",
             format!("Unsupported {role} schema version {version}"),
@@ -573,6 +585,42 @@ fn validate_inventory(inventory: &Inventory) -> Result<(), AppError> {
                     format!("Test '{}' references an unknown assertion", test.id),
                 ));
             }
+        }
+    }
+    let mut corrections = BTreeSet::new();
+    for correction in &inventory.corrections {
+        let Some(file) = files.get(correction.path.as_str()) else {
+            return Err(fail(
+                "invalidState",
+                format!(
+                    "Correction for assertion '{}' references an unknown file",
+                    correction.assertion_id
+                ),
+            ));
+        };
+        if !corrections.insert(correction.assertion_id.as_str()) {
+            return Err(fail(
+                "invalidState",
+                format!(
+                    "Inventory repeats correction for assertion '{}'",
+                    correction.assertion_id
+                ),
+            ));
+        }
+        if assertions.contains_key(correction.assertion_id.as_str())
+            || correction.end_line < correction.line.get()
+            || correction.end_line > file.line_count
+            || correction.expression.trim().is_empty()
+            || correction.reason.trim().is_empty()
+            || correction.file_sha256 != file.sha256
+        {
+            return Err(fail(
+                "invalidState",
+                format!(
+                    "Correction for assertion '{}' has invalid source provenance",
+                    correction.assertion_id
+                ),
+            ));
         }
     }
     Ok(())

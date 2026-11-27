@@ -23,6 +23,21 @@ initial batch
 
 The inventory, source file digests, and search index bind each batch to one audit ID and snapshot digest. Initialization publishes the state record last so readers cannot treat a partially initialized directory as a ready audit. Every later read verifies the persisted state and index digests. Mutating commands additionally verify current source hashes. A changed source returns a stale-state failure before accepting a judgment against moved lines or emitting a final report.
 
+Audit state and inventory use schema version 2. A proven `Some(...)` fixture
+holder receives an assertion identifier while scanning, then leaves the
+effective inventory after all source IDs are assigned. This keeps identifiers
+for later sites stable without including fixture extraction in denominators.
+Rc/Arc clones and borrow guards retain the holder marker; an independently
+initialized API `Option` remains a candidate.
+
+For syntax that cannot reliably classify fixture ownership, initialization can
+consume one strict correction request. Native code requires the exact repository
+revision, path, line range, and scanner expression to match exactly one source
+site before exclusion. The corrected inventory persists the original assertion
+ID, column, expression, file digest, and reason and adds an
+`inventoryCorrection` diagnostic. Corrections apply before the inventory digest
+and audit identity are computed. Existing snapshots cannot be edited in place.
+
 Read-only `search` and `next-batch` verify the persisted snapshot files without
 rehashing every audited source. Mutating `record-batch` and `advance` operations
 and final `report` generation rehash source files; mutation commands check
@@ -74,7 +89,9 @@ prepass identifies empty functions whose generic type parameters have trait
 bounds; direct calls from test-context code count at the enforcing invocation.
 The parser emits test-context `expect` method calls as `fallibleValueCheck`
 sites after excluding common lock, join, pointer, ownership, and fixture
-accessors. Contiguous cfg attributes on compile-time sites become
+accessors. Test-created `Some(...)` option holders are tracked through `Rc`/`Arc`
+clones and `RefCell` borrow guards without suppressing separately constructed
+API values inside the same callback. Contiguous cfg attributes on compile-time sites become
 `conditionalAssertion` diagnostics, preserving branch provenance.
 
 ## Count semantics
@@ -85,4 +102,4 @@ The report computes assertion-site rates over classified rows and preserves test
 
 ## Failure and coverage semantics
 
-Schema version mismatches, stale files, malformed citations, duplicate judgments, and incomplete reports fail without changing the accepted journal. A versioned state does not cross-read or migrate older formats. Unsupported or unverifiable forms appear as scan diagnostics and workflow caveats rather than successful empty coverage.
+Schema version mismatches, stale files, malformed citations, duplicate judgments, and incomplete reports fail without changing the accepted journal. A versioned state does not cross-read or migrate older formats. Recovery from an old or incorrectly scoped snapshot preserves the old directory and initializes a new state at the exact same revision with the corrected scan inputs. Agents replay semantic work only after rerunning evidence selection for the new snapshot. Unsupported or unverifiable forms appear as scan diagnostics and workflow caveats rather than successful empty coverage.

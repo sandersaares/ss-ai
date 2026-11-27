@@ -8,7 +8,8 @@ use clap::{Parser, Subcommand};
 use ohno::AppError;
 use ss_ai_runtime::{Process, caused_by};
 use ss_ai_test_audit::{
-    advance, initialize, next_batch, record_batch, report, search_many, submit,
+    advance, initialize, initialize_with_corrections, next_batch, record_batch, report,
+    search_many, submit,
 };
 
 use crate::Clock;
@@ -34,6 +35,8 @@ enum TestAuditCommand {
         repository_path: PathBuf,
         #[arg(long = "scope-path")]
         scope_paths: Vec<PathBuf>,
+        #[arg(long)]
+        correction_path: Option<PathBuf>,
         #[arg(long)]
         state_directory: PathBuf,
     },
@@ -123,13 +126,28 @@ where
         TestAuditCommand::Initialize {
             repository_path,
             scope_paths,
+            correction_path,
             state_directory,
-        } => initialize(
-            &repository_path,
-            &scope_paths,
-            &state_directory,
-            process,
-            clock,
+        } => correction_path.map_or_else(
+            || {
+                initialize(
+                    &repository_path,
+                    &scope_paths,
+                    &state_directory,
+                    process,
+                    clock,
+                )
+            },
+            |correction_path| {
+                initialize_with_corrections(
+                    &repository_path,
+                    &scope_paths,
+                    Some(&correction_path),
+                    &state_directory,
+                    process,
+                    clock,
+                )
+            },
         ),
         TestAuditCommand::Search {
             state_directory,

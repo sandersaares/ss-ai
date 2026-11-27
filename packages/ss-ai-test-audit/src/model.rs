@@ -7,6 +7,9 @@ use serde::de::Error as _;
 use serde::{Deserialize, Deserializer, Serialize};
 use serde_json::Value;
 
+/// Identifies persisted state with explicit inventory-correction provenance.
+pub(crate) const AUDIT_STATE_SCHEMA_VERSION: u32 = 2;
+
 /// Identifies the immutable inventory snapshot and its repository provenance.
 #[derive(Clone, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -46,6 +49,7 @@ pub(crate) struct Inventory {
     pub(crate) tests: Vec<TestCase>,
     pub(crate) assertions: Vec<AssertionSite>,
     pub(crate) diagnostics: Vec<ScanDiagnostic>,
+    pub(crate) corrections: Vec<InventoryCorrection>,
 }
 
 /// Binds one readable file to its snapshot identity and scan outcome.
@@ -91,6 +95,9 @@ pub(crate) struct AssertionSite {
     /// Transient ownership marker used before serializing the immutable inventory.
     #[serde(skip)]
     pub(crate) test_code: bool,
+    /// Retains stable source-site IDs while omitting a proven fixture check.
+    #[serde(skip)]
+    pub(crate) fixture_excluded: bool,
     pub(crate) containing_test_id: Option<String>,
     pub(crate) helper_name: Option<String>,
     pub(crate) calling_test_ids: Vec<String>,
@@ -104,6 +111,42 @@ pub(crate) struct ScanDiagnostic {
     pub(crate) path: String,
     pub(crate) line: Option<usize>,
     pub(crate) detail: String,
+}
+
+/// Supplies one exact source-site exclusion when AST detection is ambiguous.
+#[derive(Clone, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub(crate) struct InventoryCorrectionRequest {
+    pub(crate) schema_version: u32,
+    pub(crate) repository_revision: String,
+    pub(crate) corrections: Vec<InventoryCorrectionDraft>,
+}
+
+/// Names the immutable source predicate removed from one initialized audit.
+#[derive(Clone, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub(crate) struct InventoryCorrectionDraft {
+    pub(crate) path: String,
+    pub(crate) line: NonZeroUsize,
+    pub(crate) end_line: usize,
+    pub(crate) expression: String,
+    pub(crate) reason: String,
+}
+
+/// Retains exact provenance for one agent-supplied inventory correction.
+#[derive(Clone, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub(crate) struct InventoryCorrection {
+    /// Preserves the scanner's source-local ID even when the site is omitted.
+    pub(crate) assertion_id: String,
+    pub(crate) path: String,
+    pub(crate) line: NonZeroUsize,
+    pub(crate) end_line: usize,
+    pub(crate) column: NonZeroUsize,
+    pub(crate) expression: String,
+    /// Binds the correction to the exact audited source bytes.
+    pub(crate) file_sha256: String,
+    pub(crate) reason: String,
 }
 
 /// Carries one searchable line with immutable source provenance.

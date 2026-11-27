@@ -13,7 +13,7 @@ use jiff::Timestamp;
 use ohno::AppError;
 use serde_json::{Value, from_slice, json};
 use ss_ai_runtime::{Clock, Process, ProcessOutput};
-use ss_ai_test_audit::initialize;
+use ss_ai_test_audit::{initialize, initialize_with_corrections};
 use tempfile::tempdir_in;
 
 /// Keeps audit initialization independent of wall time and retries.
@@ -424,6 +424,175 @@ fn fixture_and_api_access() {
             "fallibleValueCheck"
         );
     }
+}
+
+#[test]
+fn excludes_some_backed_fixture_holders_but_retains_api_checks_inside_callbacks() {
+    let inventory = scan(|repository| {
+        write(
+            repository,
+            "src/lib.rs",
+            r#"
+#[test]
+fn first_callback() {
+    let receiver_holder: Rc<RefCell<Option<Pin<Box<_>>>>> =
+        Rc::new(RefCell::new(Some(Box::pin(receiver))));
+    let receiver_for_waker = Rc::clone(&receiver_holder);
+    let observed = Rc::new(RefCell::new(None));
+    run(move || {
+        let mut holder = receiver_for_waker.borrow_mut();
+        holder.as_mut().expect("receiver still held");
+        api_value().expect("real API result in callback");
+        *observed.borrow_mut() = Some(api_result());
+    });
+    let mut holder = receiver_holder.borrow_mut();
+    holder.as_mut().expect("receiver still held");
+}
+
+#[test]
+fn second_callback() {
+    let receiver_holder: Rc<RefCell<Option<Pin<Box<_>>>>> =
+        Rc::new(RefCell::new(Some(Box::pin(receiver))));
+    let receiver_for_waker = Rc::clone(&receiver_holder);
+    let observed = Rc::new(RefCell::new(None));
+    run(move || {
+        let mut holder = receiver_for_waker.borrow_mut();
+        holder.as_mut().expect("receiver still held");
+        let actual = observed.borrow_mut().take();
+        actual.expect("real observed API result");
+    });
+    let mut holder = receiver_holder.borrow_mut();
+    holder.as_mut().expect("receiver still held");
+}
+"#,
+        );
+    });
+    let sites = rows(&inventory, "assertions");
+    assert_eq!(sites.len(), 2);
+    let corrections = rows(&inventory, "corrections");
+    assert_eq!(corrections.len(), 4);
+    assert!(corrections.iter().all(|correction| {
+        correction["expression"]
+            .as_str()
+            .is_some_and(|expression| expression.contains("receiver still held"))
+    }));
+    assert_eq!(
+        rows(&inventory, "diagnostics")
+            .iter()
+            .filter(|diagnostic| diagnostic["kind"] == "fixtureAccessExcluded")
+            .count(),
+        4
+    );
+    assert!(
+        sites
+            .iter()
+            .all(|site| site["kind"] == "fallibleValueCheck")
+    );
+    assert!(sites.iter().any(|site| {
+        site["expression"]
+            .as_str()
+            .is_some_and(|expression| expression.contains("real API result in callback"))
+    }));
+    assert!(sites.iter().any(|site| {
+        site["expression"]
+            .as_str()
+            .is_some_and(|expression| expression.contains("real observed API result"))
+    }));
+    assert!(
+        sites.iter().any(|site| site["id"] != "A000001"),
+        "removing fixture checks must not renumber later source sites"
+    );
+}
+
+#[test]
+fn initialization_can_correct_an_exact_ambiguous_fixture_candidate() {
+    let fixture = tempdir_in(env!("CARGO_TARGET_TMPDIR")).unwrap();
+    let repository = fixture.path().join("repository");
+    let state = fixture.path().join("state");
+    let correction = fixture.path().join("correction.json");
+    write(&repository, ".git", "gitdir: ../fixture-git");
+    write(
+        &repository,
+        "tests/correction.rs",
+        "#[test]\nfn checks() {\n    let value = callback_result;\n    value.expect(\"fixture placeholder\");\n}\n",
+    );
+    fs::write(
+        &correction,
+        serde_json::to_vec_pretty(&json!({
+            "schemaVersion": 1,
+            "repositoryRevision": "0123456789abcdef0123456789abcdef01234567",
+            "corrections": [{
+                "path": "tests/correction.rs",
+                "line": 4,
+                "endLine": 4,
+                "expression": "value.expect(\"fixture placeholder\")",
+                "reason": "The value is inserted by a test callback and its presence does not check the audited API."
+            }]
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+
+    initialize_with_corrections(
+        &repository,
+        &[],
+        Some(&correction),
+        &state,
+        &FixtureGit,
+        &FixedClock,
+    )
+    .unwrap();
+    let inventory: Value = from_slice(&fs::read(state.join("inventory.json")).unwrap()).unwrap();
+    assert_eq!(inventory["schemaVersion"], 2);
+    assert!(rows(&inventory, "assertions").is_empty());
+    let [correction] = rows(&inventory, "corrections") else {
+        panic!("expected one exact inventory correction")
+    };
+    assert_eq!(correction["assertionId"], "A000001");
+    assert_eq!(correction["path"], "tests/correction.rs");
+    assert_eq!(
+        correction["reason"],
+        "The value is inserted by a test callback and its presence does not check the audited API."
+    );
+    assert!(rows(&inventory, "diagnostics").iter().any(|diagnostic| {
+        diagnostic["kind"] == "inventoryCorrection"
+            && diagnostic["detail"]
+                .as_str()
+                .is_some_and(|detail| detail.contains("A000001"))
+    }));
+
+    let invalid = fixture.path().join("invalid-correction.json");
+    let invalid_state = fixture.path().join("invalid-state");
+    fs::write(
+        &invalid,
+        serde_json::to_vec_pretty(&json!({
+            "schemaVersion": 1,
+            "repositoryRevision": "0123456789abcdef0123456789abcdef01234567",
+            "corrections": [{
+                "path": "tests/correction.rs",
+                "line": 4,
+                "endLine": 4,
+                "expression": "value.expect(\"different expression\")",
+                "reason": "This must not match another source predicate."
+            }]
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+    let error = initialize_with_corrections(
+        &repository,
+        &[],
+        Some(&invalid),
+        &invalid_state,
+        &FixtureGit,
+        &FixedClock,
+    )
+    .unwrap_err();
+    assert!(
+        error
+            .to_string()
+            .contains("does not match exactly one assertion")
+    );
 }
 
 #[test]

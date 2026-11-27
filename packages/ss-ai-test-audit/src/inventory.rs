@@ -1,5 +1,6 @@
 //! Immutable repository inventory and audit-state initialization.
 
+use std::collections::BTreeSet;
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -7,17 +8,44 @@ use ohno::AppError;
 use serde_json::{json, to_vec_pretty, to_writer};
 use ss_ai_runtime::{Clock, FileTransaction, Process, caused_by, fail};
 
-use crate::model::{AuditState, ClassificationJournal, IndexEntry, RevisionKind};
+use crate::model::{
+    AUDIT_STATE_SCHEMA_VERSION, AuditState, ClassificationJournal, IndexEntry, Inventory,
+    InventoryCorrection, InventoryCorrectionRequest, RevisionKind, ScanDiagnostic,
+};
 use crate::scan::{digest, inventory};
-use crate::state::{output_path, output_path_text, state_paths, write_bytes, write_json};
+use crate::state::{
+    output_path, output_path_text, parse_json, require_version, state_paths, write_bytes,
+    write_json,
+};
 
 /// Keeps session references concise while retaining ample digest entropy.
 const AUDIT_ID_HEX_CHARACTERS: usize = 24;
+/// Bounds agent-authored exclusion requests at the audit input ceiling.
+const MAX_CORRECTION_BYTES: u64 = 1024 * 1024;
 
 /// Creates a fresh durable snapshot for one exact repository and scope.
 pub fn initialize(
     repository_path: &Path,
     scopes: &[PathBuf],
+    state_directory: &Path,
+    process: &dyn Process,
+    clock: &dyn Clock,
+) -> Result<String, AppError> {
+    initialize_with_corrections(
+        repository_path,
+        scopes,
+        None,
+        state_directory,
+        process,
+        clock,
+    )
+}
+
+/// Creates a snapshot with explicitly reviewed source-site exclusions.
+pub fn initialize_with_corrections(
+    repository_path: &Path,
+    scopes: &[PathBuf],
+    correction_path: Option<&Path>,
     state_directory: &Path,
     process: &dyn Process,
     clock: &dyn Clock,
@@ -52,6 +80,9 @@ pub fn initialize(
         revision_kind,
         &scopes,
     )?;
+    if let Some(correction_path) = correction_path {
+        apply_corrections(&mut inventory, correction_path, &repository_revision)?;
+    }
     let inventory_material = to_vec_pretty(&inventory)?;
     let audit_id = digest(&inventory_material);
     inventory.audit_id.clear();
@@ -63,7 +94,7 @@ pub fn initialize(
     let index_bytes = index_lines(&index)?;
     let index_sha256 = digest(&index_bytes);
     let state = AuditState {
-        schema_version: 1,
+        schema_version: AUDIT_STATE_SCHEMA_VERSION,
         audit_id: inventory.audit_id.clone(),
         snapshot_sha256,
         index_sha256,
@@ -102,7 +133,7 @@ pub fn initialize(
     // The state record marks the audit ready only after its required inputs exist.
     state_transaction.write_bytes(&to_vec_pretty(&state)?)?;
     Ok(json!({
-        "schemaVersion": 1,
+        "schemaVersion": AUDIT_STATE_SCHEMA_VERSION,
         "stateDirectory": output_path_text(&state_directory)?,
         "paths": state_paths(&state_directory)?,
         "auditId": state.audit_id,
@@ -113,8 +144,127 @@ pub fn initialize(
         "assertionCount": state.assertion_count,
         "fileCount": inventory.files.len(),
         "diagnosticCount": inventory.diagnostics.len(),
+        "correctionCount": inventory.corrections.len(),
     })
     .to_string())
+}
+
+/// Binds exact source predicates to the corrected inventory before publication.
+fn apply_corrections(
+    inventory: &mut Inventory,
+    path: &Path,
+    repository_revision: &str,
+) -> Result<(), AppError> {
+    let metadata = fs::metadata(path).map_err(|error| {
+        caused_by(
+            "invalidInput",
+            format!("Cannot inspect inventory correction '{}'", path.display()),
+            error,
+        )
+    })?;
+    if !metadata.is_file() {
+        return Err(fail(
+            "invalidInput",
+            format!(
+                "Inventory correction '{}' must be a regular file",
+                path.display()
+            ),
+        ));
+    }
+    if metadata.len() > MAX_CORRECTION_BYTES {
+        return Err(fail(
+            "invalidInput",
+            format!(
+                "Inventory correction '{}' exceeds the bounded input size",
+                path.display()
+            ),
+        ));
+    }
+    let request: InventoryCorrectionRequest = parse_json(&fs::read(path)?, "inventory correction")?;
+    require_version(request.schema_version, "inventory correction")?;
+    if request.repository_revision != repository_revision {
+        return Err(fail(
+            "staleState",
+            format!(
+                "Inventory correction targets revision '{}', not audited revision '{}'",
+                request.repository_revision, repository_revision
+            ),
+        ));
+    }
+    let mut corrected = BTreeSet::new();
+    for draft in request.corrections {
+        let path = draft.path.replace('\\', "/");
+        if path.is_empty() || draft.reason.trim().is_empty() || draft.expression.trim().is_empty() {
+            return Err(fail(
+                "invalidInput",
+                "Inventory correction fields path, expression, and reason must be nonempty",
+            ));
+        }
+        let matching = inventory
+            .assertions
+            .iter()
+            .filter(|assertion| {
+                assertion.path == path
+                    && assertion.line == draft.line
+                    && assertion.end_line == draft.end_line
+                    && assertion.expression == draft.expression
+            })
+            .collect::<Vec<_>>();
+        let [assertion] = matching.as_slice() else {
+            return Err(fail(
+                "invalidInput",
+                format!(
+                    "Inventory correction does not match exactly one assertion at '{}:{}-{}'",
+                    path, draft.line, draft.end_line
+                ),
+            ));
+        };
+        if !corrected.insert(assertion.id.clone()) {
+            return Err(fail(
+                "invalidInput",
+                format!("Inventory correction repeats assertion '{}'", assertion.id),
+            ));
+        }
+        inventory.corrections.push(InventoryCorrection {
+            assertion_id: assertion.id.clone(),
+            path: assertion.path.clone(),
+            line: assertion.line,
+            end_line: assertion.end_line,
+            column: assertion.column,
+            expression: assertion.expression.clone(),
+            file_sha256: assertion.file_sha256.clone(),
+            reason: draft.reason,
+        });
+        inventory.diagnostics.push(ScanDiagnostic {
+            kind: "inventoryCorrection".to_owned(),
+            path: assertion.path.clone(),
+            line: Some(assertion.line.get()),
+            detail: format!(
+                "Assertion '{}' was excluded from this audit: {}",
+                assertion.id,
+                inventory
+                    .corrections
+                    .last()
+                    .map_or("", |correction| &correction.reason)
+            ),
+        });
+    }
+    if corrected.is_empty() {
+        return Err(fail(
+            "invalidInput",
+            "Inventory correction must name at least one source assertion",
+        ));
+    }
+    inventory
+        .assertions
+        .retain(|assertion| !corrected.contains(&assertion.id));
+    for test in &mut inventory.tests {
+        test.direct_assertion_ids
+            .retain(|assertion_id| !corrected.contains(assertion_id));
+        test.shared_assertion_ids
+            .retain(|assertion_id| !corrected.contains(assertion_id));
+    }
+    Ok(())
 }
 
 /// Requires a new state directory so initialization cannot mix source snapshots.

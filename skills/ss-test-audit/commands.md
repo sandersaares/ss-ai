@@ -15,6 +15,7 @@ $PSNativeCommandUseErrorActionPreference = $true
 ss-ai test-audit initialize `
   --repository-path "{{REPOSITORY_PATH}}" `
   --scope-path "{{SCOPE_PATH}}" `
+  --correction-path "{{INVENTORY_CORRECTION_PATH}}" `
   --state-directory "{{STATE_DIRECTORY}}"
 ```
 
@@ -22,9 +23,18 @@ ss-ai test-audit initialize `
 | --- | --- |
 | `REPOSITORY_PATH` | Absolute path to the repository root or a path inside a Git working tree. |
 | `SCOPE_PATH` | Existing repository-relative or absolute file or directory for test and assertion inventory. Repeat `--scope-path` for multiple scopes; omit it for the repository-wide inventory. The evidence index covers the ordinary repository walk and any explicitly selected source outside it. |
+| `INVENTORY_CORRECTION_PATH` | Optional strict [inventory-corrections.schema.json](schemas/inventory-corrections.schema.json) file for exact ambiguous fixture-site exclusions. Omit when no reviewed corrections are needed. |
 | `STATE_DIRECTORY` | New, empty directory outside the repository, even when `--scope-path` limits inventory. |
 
-On success, retain the returned state paths, `auditId`, `snapshotSha256`, source revision, test count, assertion count, file count, and diagnostic count. On any failure, report the native diagnostic and do not create an alternate state schema.
+On success, retain the returned state paths, `auditId`, `snapshotSha256`, source revision, test count, assertion count, file count, diagnostic count, and correction count. On any failure, report the native diagnostic and do not create an alternate state schema.
+
+Each correction must match exactly one scanner expression at the named revision,
+path, and line range and must include a nonblank reason. The tool retains the
+excluded source site, source digest, stable assertion identifier, and reason in
+the immutable inventory and emits an `inventoryCorrection` diagnostic. Corrections
+apply only during initialization. If a persisted snapshot is missing or contains
+an incorrect correction, preserve it and initialize a new schema-version-2 state
+instead of editing the old files.
 
 Source discovery indexes text files up to and including 4 MiB. Larger files
 produce an `oversizedFile` diagnostic and do not enter the inventory or index.
@@ -197,7 +207,7 @@ ss-ai test-audit submit `
 | `NEXT_BATCH_PATH` | Preferred output name for the next machine batch. |
 | `25` | Maximum next-batch size. |
 
-The command binds rows to the exported machine batch using `batchFingerprint`, resolves all evidence handles, and commits the validated classifications before exporting the next batch. Use separate `citationHandles` entries for multiple citations. Read the returned `nextBatch.displayPath` for judgment and retain `nextBatch.batchPath` for the next submission. Preserve the original inputs and [recover according to the point of failure](SKILL.md#recover-from-failure).
+The command binds rows to the exported machine batch using `batchFingerprint`, resolves all evidence handles, and commits the validated classifications before exporting the next batch. Use separate `citationHandles` entries for multiple citations. The receipt's `directive` spells out the required next operation. For `nextAction: "continue"`, immediately read the returned `nextBatch.displayPath` and start judgment in the same invocation; retain `nextBatch.batchPath` for the next submission. A successful progress receipt is not a final response. Preserve the original inputs and [recover according to the point of failure](SKILL.md#recover-from-failure).
 
 ## Emit final reports
 

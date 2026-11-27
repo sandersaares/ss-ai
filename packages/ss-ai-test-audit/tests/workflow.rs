@@ -361,6 +361,12 @@ fn continues_through_more_than_four_submit_transitions() {
     let mut receipt: Value = from_str(&receipt).unwrap();
     assert_eq!(receipt["nextAction"], "continue");
     assert_eq!(receipt["finalResponseAllowed"], false);
+    assert!(
+        receipt["directive"]
+            .as_str()
+            .unwrap()
+            .starts_with("INTERIM:")
+    );
 
     let expected_remaining = [101, 76, 51, 26, 1, 0];
     for batch_number in 1_usize..=6 {
@@ -410,9 +416,21 @@ fn continues_through_more_than_four_submit_transitions() {
         if remaining == 0 {
             assert_eq!(transition["nextAction"], "report");
             assert_eq!(transition["nextBatch"]["batchCount"], 0);
+            assert!(
+                transition["directive"]
+                    .as_str()
+                    .unwrap()
+                    .contains("final report now")
+            );
         } else {
             assert_eq!(transition["nextAction"], "continue");
             assert_eq!(transition["nextBatch"]["batchCount"], 25.min(remaining));
+            assert!(
+                transition["directive"]
+                    .as_str()
+                    .unwrap()
+                    .contains("nextBatch.displayPath")
+            );
         }
         batch_path = next_path;
         receipt = transition["nextBatch"].clone();
@@ -825,6 +843,23 @@ fn rejects_batch_output_that_aliases_an_audited_file() {
             .contains("cannot replace audit state file")
     );
     assert_eq!(fs::read(inventory).unwrap(), original_inventory);
+}
+
+#[test]
+fn rejects_state_created_before_inventory_correction_contract() {
+    let (_root, repository, state) = fixture(fixture_root());
+    initialize_fixture(&repository, &state);
+    let path = state.join("audit-state.json");
+    let mut record: Value = from_slice(&fs::read(&path).unwrap()).unwrap();
+    record["schemaVersion"] = json!(1);
+    fs::write(&path, to_vec_pretty(&record).unwrap()).unwrap();
+
+    let error = next_batch(&state, &state.join("batch.json"), 25, &FixedClock).unwrap_err();
+    assert!(
+        error
+            .to_string()
+            .contains("Unsupported audit state schema version 1")
+    );
 }
 
 #[test]

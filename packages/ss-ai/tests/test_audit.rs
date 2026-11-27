@@ -170,6 +170,62 @@ fn executable_accepts_multi_query_search_and_compact_submit() {
     assert_canonical_report_receipt(&report);
 }
 
+#[test]
+#[cfg_attr(miri, ignore = "requires a native subprocess")]
+fn executable_accepts_exact_initialization_corrections() {
+    let root = TempDir::new().unwrap();
+    let repository = root.path().join("repository");
+    let state = root.path().join("state");
+    fs::create_dir_all(repository.join("tests")).unwrap();
+    fs::write(
+        repository.join("tests/check.rs"),
+        "#[test]\nfn checks() {\n    let holder = callback_fixture;\n    holder.expect(\"fixture still present\");\n}\n",
+    )
+    .unwrap();
+    let correction_path = root.path().join("inventory-corrections.json");
+    fs::write(
+        &correction_path,
+        to_vec_pretty(&json!({
+            "schemaVersion": 1,
+            "repositoryRevision": "unversioned",
+            "corrections": [{
+                "path": "tests/check.rs",
+                "line": 4,
+                "endLine": 4,
+                "expression": "holder.expect(\"fixture still present\")",
+                "reason": "This option is populated only by callback-local test state."
+            }]
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+
+    let output = Command::new(env!("CARGO_BIN_EXE_ss-ai"))
+        .args(["test-audit", "initialize", "--repository-path"])
+        .arg(&repository)
+        .args(["--correction-path"])
+        .arg(&correction_path)
+        .args(["--state-directory"])
+        .arg(&state)
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let receipt: Value = from_slice(&output.stdout).unwrap();
+    assert_eq!(receipt["schemaVersion"], 2);
+    assert_eq!(receipt["assertionCount"], 0);
+    assert_eq!(receipt["correctionCount"], 1);
+    let inventory: Value = from_slice(&fs::read(state.join("inventory.json")).unwrap()).unwrap();
+    assert_eq!(inventory["corrections"][0]["assertionId"], "A000001");
+    assert_eq!(
+        inventory["corrections"][0]["fileSha256"],
+        inventory["files"][0]["sha256"]
+    );
+}
+
 /// Verifies that the CLI receipt exposes only canonical paired report artifacts.
 fn assert_canonical_report_receipt(report: &Value) {
     assert!(report.get("tracePath").is_none());

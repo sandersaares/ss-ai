@@ -17,6 +17,14 @@ The skill audits one repository and any selected set of existing file or directo
 
 The final trace contains exactly one classification row for each inventoried assertion. The test inventory contains every inventoried test and links direct and shared assertion IDs. Tests that execute smoke behavior without a counted predicate remain visible.
 
+Persisted audit state and inventory use schema version 2. Initialization can
+apply exact, revision-bound source-site corrections when syntax cannot prove
+whether an `expect` extracts a fixture. The immutable corrected inventory retains
+the original assertion identifier, source location, expression, file digest, and
+reason, and emits a diagnostic so excluded sites remain explainable. Corrections
+cannot mutate an already published snapshot. Native readers reject incompatible
+state rather than interpreting or migrating it.
+
 Final output has two matched presentation levels. The summary level is
 `summary.json` plus `summary.md`, with stable identity, coverage, classification,
 rate, gap, and diagnostic fields. The detail level is `details.json` plus
@@ -55,8 +63,11 @@ Rust static-assertion macros include size-equality checks. A call into an empty
 generic helper with trait bounds counts at that call as a compile-time check.
 Test-context `expect` calls on fallible API values are exported as
 `fallibleValueCheck` candidates for semantic judgment, while common fixture and
-synchronization access patterns remain excluded. Configuration attributes on
-compile-time assertions remain visible as scan diagnostics.
+synchronization access patterns remain excluded. `Some(...)`-backed local option
+holders remain fixture access through `Rc`/`Arc` clones and interior-mutable
+borrows; API values are still retained inside callbacks when their origin is not
+that fixture holder. Configuration attributes on compile-time assertions remain
+visible as scan diagnostics.
 
 C#, Java, JavaScript, TypeScript, Python, Go, Kotlin, and PowerShell use narrow language-specific text patterns and diagnostics. Other indexed source languages remain searchable but do not claim test or assertion coverage. Native diagnostics and an independent repository test-list command define the reachable coverage boundary.
 

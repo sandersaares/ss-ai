@@ -63,6 +63,12 @@ Workflow transitions distinguish continuation from completion explicitly.
 Recording work never authorizes a final response. Only a successful final
 report both completes the audit and permits its final summary.
 
+Persisted audit state and inventory use schema version 2. A test-audit
+initialization can apply exact revision-bound corrections to ambiguous fixture
+extraction sites while retaining their source provenance in the immutable
+inventory. Corrections apply before snapshot identity is committed; later readers
+reject incompatible state rather than editing or migrating it.
+
 Assertions count once at their source site. Tests with no counted predicate and
 shared helper assertions remain visible in the test inventory. Every accepted
 classification must match the audit ID (`auditId`) of the active audit and

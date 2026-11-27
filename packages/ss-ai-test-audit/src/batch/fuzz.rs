@@ -21,7 +21,7 @@ fn snapshot() -> LoadedState {
     let id = "audit";
     let digest = "snapshot";
     let state: AuditState = from_value(json!({
-        "schemaVersion": 1, "auditId": id, "snapshotSha256": digest, "indexSha256": "index",
+        "schemaVersion": 2, "auditId": id, "snapshotSha256": digest, "indexSha256": "index",
         "repositoryRoot": "repo", "repositoryRevision": "unversioned", "revisionKind": RevisionKind::Unversioned,
         "scopePaths": [], "scannedAt": "1970-01-01T00:00:00Z", "testCount": 1, "assertionCount": SITES
     })).unwrap();
@@ -37,13 +37,14 @@ fn snapshot() -> LoadedState {
             expression: format!("assert!(check_{site}())"),
             file_sha256: "source".to_owned(),
             test_code: true,
+            fixture_excluded: false,
             containing_test_id: Some("T000001".to_owned()),
             helper_name: None,
             calling_test_ids: Vec::new(),
         })
         .collect();
     let inventory = Inventory {
-        schema_version: 1,
+        schema_version: 2,
         audit_id: id.to_owned(),
         repository_root: state.repository_root.clone(),
         repository_revision: state.repository_revision.clone(),
@@ -56,6 +57,7 @@ fn snapshot() -> LoadedState {
         })).unwrap()],
         assertions,
         diagnostics: Vec::new(),
+        corrections: Vec::new(),
     };
     let journal = ValidatedJournal::from_persisted(
         ClassificationJournal {

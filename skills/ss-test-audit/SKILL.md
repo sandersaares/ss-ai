@@ -7,6 +7,17 @@ description: Audits test assertion sites against public contracts and emits a pr
 
 Audit the tests in a repository or explicit scope and distinguish what each assertion proves from what the public contract promises. The workflow keeps deterministic inventory and evidence operations in `ss-ai`; the agent owns evidence selection and semantic classification.
 
+# Continuation gate
+
+A successful transition is not a completed response unless it is the final
+`report` receipt with `nextAction: "complete"` and
+`finalResponseAllowed: true`. When any command returns `nextAction: "continue"`,
+the next action in this invocation must be a tool call that reads the returned
+`nextBatch.displayPath` and continues classification. Retry the same compact
+submission only for a diagnosed submission failure; after a retry succeeds,
+resume the loop immediately. Audit size, progress counts, and a user turn
+boundary do not authorize stopping.
+
 # Scope
 
 Resolve the repository path from the invocation. If the user names a crate, package, path, or module, translate it to one or more exact repository-relative scope paths. Those paths control test and assertion inventory. The evidence index covers the repository-wide text snapshot under the normal traversal exclusions, plus explicitly selected source outside that walk, so public declarations and documentation outside a narrow assertion scope remain citable. `scopePaths` reports assertion coverage; indexed file and language totals report evidence coverage. Without a scope, audit assertions and evidence across the complete current repository.
@@ -36,7 +47,31 @@ Use the absolute state directory path. If resuming, retain its exact path and sk
 
 Run `ss-ai test-audit initialize` using the first recipe in [commands.md](commands.md#initialize). Pass `--scope-path` once for each resolved scope. If initialization reports an unsupported-language or parse-fallback diagnostic, retain that diagnostic as a coverage limit; do not describe the later inventory as exhaustive.
 
-Record the returned `auditId`, `snapshotSha256`, counts, state paths, and diagnostics count in the session checkpoint.
+Record the returned `auditId`, `snapshotSha256`, counts, correction count, state paths, and diagnostics count in the session checkpoint.
+
+Persisted audit state and inventory use schema version 2. Use the same utility
+version throughout one audit. A reader rejects state from another schema version
+without changing it. Do not edit, migrate, or reinterpret an old inventory.
+
+Use the optional initialization correction record from
+[inventory-corrections.schema.json](schemas/inventory-corrections.schema.json)
+only when source syntax cannot establish whether an exported candidate extracts a
+test fixture. Bind every entry to the exact audited repository revision, source
+path, line range, and scanner expression, and explain why the site is not an
+audited predicate. The scanner applies these reviewed exclusions before it
+publishes the immutable inventory and records them as provenance diagnostics.
+Pass the file with `--correction-path`; there is no post-initialization edit.
+Never classify a known fixture extraction as `Incidental` merely to finish a
+batch, because that keeps it in assertion denominators.
+
+If an existing snapshot contains a detected miscount or has an incompatible
+schema, preserve that state directory as evidence. Reinitialize a new state
+directory at the same immutable repository revision with the corrected utility
+and any necessary initialization corrections. Reconcile prior accepted semantic
+judgments against the new snapshot by rerunning evidence searches and building
+fresh submissions; do not copy old audit IDs, snapshot digests, evidence handles,
+or source citations blindly. Export and classify from the new state. Discard
+old batch files as transition inputs; do not submit them to the corrected audit.
 
 # Stage 2: inspect inventory and cross-check discovery
 
@@ -66,11 +101,13 @@ Execute `next-batch` as specified in [commands.md](commands.md#export-the-next-a
 
 Read only the exported batch display, its local context, and targeted evidence searches. For each assertion:
 
-1. Record the actual outcome the source predicate checks.
-2. Determine the public promise, if any, with exact `search` citations.
-3. Explain private or incidental mechanics without treating observability as a promise.
-4. Assign the exact classification and evidence status.
-5. Validate that a shared site has complete caller evidence or an explicit unlinked reason.
+1. Confirm that the source site belongs in the denominator. Distinguish extracting an API result from acquiring a fixture, lock, guard, pointer, join result, or other test-owned storage. Use the initialization correction path for an uncertain inventory site; do not hide it by choosing `Incidental`.
+2. State the weakest outcome the predicate actually demonstrates. Name the tested subject, preconditions, observation point, and polarity. Test names and panic messages are context, not evidence of a promise.
+3. Split independently constrained facts in the reasoning, including exact counts, values, order, traits, and message matching. Keep one classification row for the source site. Do not count the same nested expectation as an additional outer predicate.
+4. Identify the actual public operation and candidate authority. Prefer operation-specific public API wording and applicable traits, then explicitly authoritative public design contracts or independent examples. A public API used only for setup and private fixture comments can explain context but cannot create a promise by themselves.
+5. Ask whether a contract-conforming implementation may make this predicate fail for the stated subject and conditions. Decide whether the outcome is required, only permitted, or unaddressed. A missing search result does not prove absence; refine the search and preserve ambiguity.
+6. Use `Documented` when every checked fact is explicitly required; `Mixed` when a documented fact is combined with a distinct undocumented constraint; `Implicit` only for a named plausible public guarantee with a stated missing wording; otherwise use `Incidental` and name the fixture, private choice, setup, or permitted alternative. Do not use uncertainty alone as the reason for `Implicit`.
+7. Verify exact citations, caller attribution, and any explicit unlinked reason before submission. Reject an unlinked explanation when native or agent-confirmed effective callers already exist.
 
 Search API docs, design docs, public declarations, trait implementations, and inherited contracts using [commands.md](commands.md#search-evidence). Group independent evidence lookups into one `search` command by repeating `--query`; the command returns one result page per query. Supply `--kind` to narrow queries only when the target is already clear. Terms within one query are combined as an AND query.
 
@@ -81,6 +118,10 @@ For a fresh row, supply assertion ID, classification, evidence status, actual ou
 To reuse an accepted row, supply `reuseFrom`, explicit `equivalenceConfirmed: true`, replacement `citationHandles`, and explicit `callingTestIds`. Do not reuse implicitly, infer equivalence, or omit caller attribution. An empty citation replacement is rejected rather than falling back to the prior assertion's evidence. If the reused assertion requires an unlinked reason, provide it explicitly.
 
 Submit the rows and export the next assertion batch through one `submit` command using [commands.md](commands.md#submit-a-compact-row-batch). `submit` is the normal transition after every classified batch. Use the lower-level `advance`, `record-batch`, and `next-batch` commands only while recovering or inspecting an intermediate state.
+
+After every successful `submit` with `continue`, read the returned
+`nextBatch.displayPath` immediately and start the next batch. A prior failed
+submission attempt changes neither this loop nor the completion gate.
 
 ## Follow the current directive
 

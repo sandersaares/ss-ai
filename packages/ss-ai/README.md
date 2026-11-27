@@ -137,7 +137,11 @@ ss-ai test-audit report --state-directory "{{STATE_DIRECTORY}}"
 ```
 
 `initialize` requires a new, empty state directory outside the repository and accepts repeated
-`--scope-path` inputs; omitting scopes selects the repository. These paths limit
+`--scope-path` inputs; omitting scopes selects the repository. Optional
+`--correction-path` accepts a strict inventory-correction record for an exact
+revision, source range, scanner expression, and explanatory reason when syntax
+cannot distinguish a fixture extraction. Corrections apply only during
+initialization and remain in immutable inventory provenance. These paths limit
 test and assertion inventory, while the evidence index covers repository-wide
 text under the normal traversal exclusions plus explicitly selected source. It atomically
 publishes the immutable inventory and line index, then returns source revision,
@@ -167,7 +171,9 @@ then commits the journal before exporting the next batch. Compact reuse requires
 equivalence confirmation plus citation and caller replacements.
 Mutation transitions return top-level `nextAction` (`continue` or `report`) and
 `finalResponseAllowed: false`. The final report returns `nextAction: "complete"`
-and `finalResponseAllowed: true`. These fields prevent progress updates or
+and `finalResponseAllowed: true`. Transition receipts also return a concrete
+`directive`; a `continue` directive requires reading the returned batch
+immediately and never treating progress as a turn boundary. These fields prevent progress updates or
 round batch boundaries from being mistaken for workflow completion.
 
 The primary path uses one initialization, one initial batch export, one
@@ -214,6 +220,12 @@ shared assertion IDs, including tests without counted predicates.
 All rates are descriptive; the command does not score test quality. Rust is
 parser-backed; named non-Rust profiles are heuristic, and diagnostics preserve
 the exact coverage boundary.
+
+Persisted audit state and inventory use schema version 2. New utility versions
+reject older state without editing or migrating it. To recover an audit whose
+snapshot contains a scanner miscount, retain the old directory, initialize a new
+directory at the same immutable revision, and replay accepted semantic judgments
+only after fresh evidence searches against the new snapshot.
 
 ## Git commands
 

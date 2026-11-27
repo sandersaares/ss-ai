@@ -78,6 +78,22 @@ Describe 'ss-test-audit skill contract' {
         Test-AuditRecord -Schema 'classification-batch' -Record $record | Should -BeFalse
     }
 
+    It 'validates exact revision-bound inventory corrections' {
+        $record = @{
+            schemaVersion = 1; repositoryRevision = 'a' * 40
+            corrections = @(
+                @{
+                    path = 'tests/check.rs'; line = 4; endLine = 4
+                    expression = 'holder.as_mut().expect("fixture still present")'
+                    reason = 'The option holds callback-local test state rather than an audited API result.'
+                }
+            )
+        }
+        Test-AuditRecord -Schema 'inventory-corrections' -Record $record | Should -BeTrue
+        $record.corrections[0].Remove('reason')
+        Test-AuditRecord -Schema 'inventory-corrections' -Record $record | Should -BeFalse
+    }
+
     It 'validates the completed summary and details as distinct records' {
         $identity = @{
             schemaVersion = 1; auditId = 'audit'; snapshotSha256 = 'a' * 64

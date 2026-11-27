@@ -98,6 +98,7 @@ fn batch_summary(batch: &Batch, output: &str, display: &str, fingerprint: &str) 
         "completed": batch.completed,
         "remaining": batch.remaining,
         "nextAction": next_action(batch.remaining),
+        "directive": batch_directive(batch.remaining),
         "finalResponseAllowed": false
     })
 }
@@ -366,6 +367,7 @@ fn advance_classification(
         "record": recorded,
         "nextBatch": next,
         "nextAction": next_action,
+        "directive": transition_directive(next_action),
         "finalResponseAllowed": false
     })
     .to_string())
@@ -475,6 +477,7 @@ fn record_classification(
         "completed": journal.rows().len(),
         "remaining": remaining,
         "nextAction": next_action(remaining),
+        "directive": record_directive(remaining),
         "finalResponseAllowed": false
     });
     Ok((journal, summary))
@@ -624,6 +627,33 @@ fn batch_count(count: usize) -> Result<NonZeroUsize, AppError> {
 /// Directs progress to classification or reporting, neither of which is final.
 fn next_action(remaining: usize) -> &'static str {
     if remaining == 0 { "report" } else { "continue" }
+}
+
+/// Names the next operation for an exported batch without implying completion.
+fn batch_directive(remaining: usize) -> &'static str {
+    if remaining == 0 {
+        "Run the final report now; do not claim completion from this export."
+    } else {
+        "INTERIM: read displayPath and classify the returned assertions now; do not end the turn."
+    }
+}
+
+/// Carries the same hard gate through a combined transition receipt.
+fn transition_directive(next_action: &str) -> &'static str {
+    if next_action == "report" {
+        "Run the final report now; do not claim completion from this transition."
+    } else {
+        "INTERIM: read nextBatch.displayPath and continue classification now; do not end the turn."
+    }
+}
+
+/// Directs a record-only recovery path without manufacturing a batch receipt.
+fn record_directive(remaining: usize) -> &'static str {
+    if remaining == 0 {
+        "Run the final report now; do not claim completion from this record."
+    } else {
+        "INTERIM: export and classify the next batch now; do not end the turn."
+    }
 }
 
 /// Names the exact compact input row and field in a recoverable diagnostic.
