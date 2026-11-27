@@ -380,10 +380,17 @@ directly and verifies every worker's artifact, focus-area attribution, and
 completed-group journal against the immutable grouped inventory. It does not trust an identifier list transcribed from model
 memory.
 
-The orchestrator maintains a rolling pool of at most 16 workers, refilling a
-vacancy without waiting for unrelated workers. This concurrency limit bounds
-simultaneous model work while allowing small focus areas to finish independently.
-Each worker receives a prepared private group queue from the same grouped inventory.
+The orchestrator verifies the execution context's actual dispatch tool
+contracts before phase 1. Whole-review delegation may select the orchestrating
+session, but focus-area work requires fresh background runtime subagents rather
+than app project sessions. An incompatible context stops before review work or
+returns the blocker to the capable caller.
+
+The orchestrator maintains a rolling pool of at most 16 focus-area workers,
+refilling a vacancy without waiting for unrelated workers. The limit counts
+focus-area workers, not their required synchronous finding-writeup tasks, and
+allows small focus areas to finish independently. Each worker receives a
+prepared private group queue from the same grouped inventory.
 Its queue file also stores one current claim, the completed-group identifiers,
 and per-file assessments under schema version 3. Assessment records contain a
 group, exact inventory path, reviewed/excluded disposition, controlling scope,

@@ -28,7 +28,20 @@ These mode rules apply whether the review runs directly or through delegated exe
 
 # Execution ownership and user decisions
 
-The agent executing this skill owns the review orchestration, whether the invocation runs in a user-facing session or as delegated work. It may dispatch the bounded phase work assigned below to subagents, but those workers do not advance the global workflow.
+The agent executing this skill owns review orchestration. A caller may delegate
+the whole review to a subagent or child session, but phase workers use runtime
+subagents, not app project sessions. Before starting phase 1, verify from the
+execution context's actual tool contracts that it can dispatch and track phase-2
+background task subagents and support their required nested finding-writeup
+tasks. Do not assume a delegate inherits its caller's capabilities; the delegate
+must check its own tools. Do not create a session or worker merely to probe
+support. If the tools cannot establish the required support, do not start
+review work: a delegated review returns the blocker to its caller, which should
+execute the review itself if capable or otherwise pause. A direct invocation
+with no caller reports the blocker and pauses. Missing dispatch support does not
+authorize project-session workers, synchronous focus-area review, worker reuse
+across focus areas, or reduced coverage. Bounded workers never advance the
+global workflow.
 
 The only scheduled entry is a confirmed `ss-review-proactor` handoff authorized by the user's explicit invocation or configured schedule. That handoff selects the PR scope, not the user's audit decisions or merge approval. All human decision gates below apply without alteration.
 
@@ -194,7 +207,7 @@ Include the compaction notes from `review.md` in every assignment. They guide au
 
 1. Initialize the work using `pwsh-calls/initialize-review-work.md` and the focus worker's exact retained `preparationIdentity`. The command validates `file-inventory-grouped.json` against `file-inventory.json`, binds both inventory snapshots and every generated focus area's contents, assigns reviewer identifiers, and prepares artifacts, journals, an immutable manifest, and a dispatch queue. It evaluates every section's complete path-scope alternatives; semantic, missing, or uncertain scopes retain review work. Provable exclusions become per-file journal records. Entirely excluded groups are complete; entirely excluded focus areas have complete empty artifacts and no dispatched worker. Groups still cover every file exactly once and respect the size bounds. Retain the manifest's full reviewer list, including excluded assignments, as expected coverage; a consumed queue is not a coverage record. If the identity is stale or the generation is no longer ready, restart focus-area discovery and preparation rather than adopting another identity. If grouped-inventory validation fails before the output directory exists, regenerate the groups using `prepare-file-groups.md` with the reported errors and retry initialization. For other initialization errors, apply `error-recovery.md` while preserving existing state. Do not initialize again after the manifest has been published or when resuming active work.
 
-2. Maintain a rolling pool of up to 16 concurrent workers. While a slot is available, call `pwsh-calls/get-next-focus-area.md`. For each returned item, immediately dispatch its worker with the prompt in `review.md` using the runtime's nonblocking/background mode. Fill all available slots, or exhaust the queue, before awaiting any worker result. Do not claim work before a slot is available or wait for a whole batch to finish before refilling slots. When a worker finishes, process its result and refill the slot while other workers keep running. Queue exhaustion stops new dispatches, not active workers. Preserve the manifest path and the mapping from reviewer identifiers to active agent handles across orchestrator compaction.
+2. Maintain a rolling pool of up to 16 concurrent focus-area workers. While a slot is available, call `pwsh-calls/get-next-focus-area.md`. For each returned item, immediately dispatch a fresh, dedicated subagent with the prompt in `review.md` using the runtime task tool's nonblocking/background mode, not an app project-session tool. Fill all available slots, or exhaust the queue, before awaiting any worker result. Do not claim work before a slot is available or wait for a whole batch to finish before refilling slots. When a worker finishes, process its result and refill the slot while other workers keep running. Queue exhaustion stops new dispatches, not active workers. Preserve the manifest path and the mapping from reviewer identifiers to active agent handles across orchestrator compaction.
 
    Build the assignment with `pwsh-calls/prepare-worker-assignment.md`, selecting `review`, the manifest path, and returned reviewer ID. The builder resolves the prompt placeholders and exact snapshot/queue paths, setting `{{RESUME_FLAG}}` to `--resume` even on first dispatch to preserve prepared state. Every worker receives the same complete grouped inventory and owns its private group queue and completion journal in one file. Forward only the user-authorized exceptions through the builder's switches.
 
