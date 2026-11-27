@@ -122,7 +122,9 @@ $ErrorActionPreference = 'Stop'
 $PSNativeCommandUseErrorActionPreference = $true
 
 ss-ai test-audit initialize --repository-path "{{REPOSITORY_PATH}}" `
-  --scope-path "{{SCOPE_PATH}}" --state-directory "{{STATE_DIRECTORY}}"
+  --scope-path "{{SCOPE_PATH}}" `
+  --contract-profile-path "{{CONTRACT_PROFILE_PATH}}" `
+  --state-directory "{{STATE_DIRECTORY}}"
 ss-ai test-audit search --state-directory "{{STATE_DIRECTORY}}" `
   --query '{{QUERY_ONE}}' --query '{{QUERY_TWO}}' `
   --kind "{{EVIDENCE_KIND}}" --limit 50
@@ -231,7 +233,8 @@ All rates are descriptive; the command does not score test quality. Rust is
 parser-backed; named non-Rust profiles are heuristic, and diagnostics preserve
 the exact coverage boundary.
 
-Persisted audit state and inventory use schema version 3. New utility versions
+Persisted audit state and inventory use schema version 4. The final summary and
+details reports use schema version 3. New utility versions
 reject older state without editing or migrating it. To recover an audit whose
 snapshot contains a scanner miscount, retain the old directory, initialize a new
 directory at the same immutable revision, and replay accepted semantic judgments
