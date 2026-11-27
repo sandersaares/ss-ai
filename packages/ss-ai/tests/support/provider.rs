@@ -166,7 +166,7 @@ fn github(args: &[String]) {
                         .strip_suffix('}')
                         .unwrap();
                     format!(
-                        r#"[[{{"id":55,"body":{body},"created_at":"{date}","user":{{"id":42,"login":"reviewer"}}}}]]"#
+                        r#"[[{{"id":55,"body":{body},"created_at":"{date}","updated_at":"{date}","user":{{"id":42,"login":"reviewer"}}}}]]"#
                     )
                 }
                 Err(error) if error.kind() == io::ErrorKind::NotFound => "[[]]".to_owned(),

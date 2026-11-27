@@ -110,6 +110,14 @@ commit made in the past 14 days, and has no unexpired proactor claim. In
 `assigned` mode, the assignment condition is reversed: the user must be assigned
 and must not already have submitted an active review.
 
+In either mode, a pull request remains ineligible for 48 hours after the current
+user's most recent completed proactor review when that review no longer matches
+the latest source or reviewer participation. This short suppression window
+spreads review attention across pull requests instead of immediately
+re-reviewing a pull request changed shortly after a completed review. A
+completed review whose source and participation still match remains ineligible
+after the window.
+
 On GitHub, assignment includes requested users and authors of active submitted
 reviews because submitting a review removes the pending request. Pending and
 dismissed reviews do not count as active submitted reviews. Team assignments do
@@ -140,7 +148,8 @@ A reserved claim is live for 60 minutes from the service's comment creation
 timestamp; editing it does not extend that interval. Confirmation changes it
 to an active claim that remains live across review work and user pauses.
 Completion changes the same comment to evidence used by later selection in
-either mode. Deleted comments do not hold claims. All sessions respect live
+either mode. Selection uses that completed comment's last content update for
+the 48-hour window. Deleted comments do not hold claims. All sessions respect live
 reserved and active claims, including claims from another identity. Expired
 reserved claims from earlier attempts are ignored, including those posted by
 the current user or from the same session.
