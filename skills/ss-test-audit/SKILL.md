@@ -207,8 +207,10 @@ different classifications. Handle `high` priority items before report delivery;
 use `medium` and `low` items as targeted calibration prompts, not automatic
 relabels. A repeated short rationale must still contain a discriminating
 operation, condition, missing premise, or permitted alternative. Record any
-corrected judgment in a fresh audit transition; do not
-silently edit completed reports.
+corrected judgment by initializing a new state directory at the same source
+snapshot, rerunning evidence selection, and replaying the revised judgments
+with fresh handles. Never submit a changed row to an existing completed
+classification journal; do not silently edit completed reports.
 
 Deliver these generated paths:
 

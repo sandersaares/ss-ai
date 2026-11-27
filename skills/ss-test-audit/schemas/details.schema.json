@@ -79,7 +79,6 @@
         "type": "object",
         "additionalProperties": false,
         "required": [
-          "priority",
           "kind",
           "path",
           "line",

@@ -143,7 +143,10 @@ Describe 'ss-test-audit skill contract' {
                 directAssertionIds = @('A000001'); sharedAssertionIds = @()
                 assertionCount = 1; incidentalOnly = $false
             })
-            diagnostics = @()
+            diagnostics = @(@{
+                kind = 'conditionalAssertion'; path = 'src/lib.rs'; line = 4
+                detail = 'Assertion A000001 is conditionally compiled.'
+            })
             corrections = @(); consistencyDiagnostics = @(@{
                 priority = 'medium'; kind = 'repeatedShortRationale'
                 assertionIds = @('A000001'); detail = 'The rationale repeats without a site-specific premise.'
