@@ -23,7 +23,8 @@ use syn::{
     Arm, Attribute, Block, Expr, ExprCall, ExprClosure, ExprConst, ExprMethodCall, ExprPath, Field,
     FnArg, ImplItem, ImplItemConst, ImplItemFn, Item, ItemConst, ItemFn, ItemImpl, ItemMod,
     ItemStatic, ItemUse, Local, Macro, Meta, Pat, PatIdent, Signature, Stmt, StmtMacro, TraitItem,
-    TraitItemConst, Type, UseTree, Variant, Visibility, WherePredicate, visit,
+    TraitItemConst, Type, UseTree, Variant, Visibility, WherePredicate, punctuated::Punctuated,
+    token::Comma, visit,
 };
 
 use crate::model::{
@@ -1580,7 +1581,7 @@ impl<'ast> RustCollector<'_, 'ast> {
         let end_line = end.line;
         let mut containing_test_id = self.functions.role.test_id().cloned();
         let id = next_assertion_id(self.assertions);
-        if kind == "compileTimeAssertion" && !self.cfg.is_empty() {
+        if !self.cfg.is_empty() {
             self.diagnostics.push(ScanDiagnostic {
                 kind: "conditionalAssertion".to_owned(),
                 path: self.path.to_owned(),
@@ -2096,9 +2097,8 @@ impl<'ast> Visit<'ast> for RustCollector<'_, 'ast> {
     fn visit_attribute(&mut self, i: &'ast Attribute) {
         // The audit already selects `cfg(test)` code; other configurations
         // restrict which builds exercise the check within that selection.
-        if (i.path().is_ident("cfg") || i.path().is_ident("cfg_attr"))
-            && !attribute_enables_test_code(i)
-        {
+        // cfg_attr only gates inclusion when one of its nested attributes is cfg.
+        if attribute_is_inclusion_gate(i) && !attribute_enables_test_code(i) {
             self.cfg
                 .push(source_slice(self.lines, i.span().start(), i.span().end()));
         }
@@ -2362,6 +2362,43 @@ fn attribute_enables_test_code(attribute: &Attribute) -> bool {
         return false;
     };
     list.tokens.to_string() == "test"
+}
+
+/// Identifies attributes that can change whether their owner is compiled.
+fn attribute_is_inclusion_gate(attribute: &Attribute) -> bool {
+    if attribute.path().is_ident("cfg") {
+        return true;
+    }
+    if !attribute.path().is_ident("cfg_attr") {
+        return false;
+    }
+    let Meta::List(list) = &attribute.meta else {
+        return false;
+    };
+    let Ok(arguments) = syn::parse2::<CfgAttrArguments>(list.tokens.clone()) else {
+        return false;
+    };
+    arguments
+        .attributes
+        .iter()
+        .any(|meta| meta.path().is_ident("cfg"))
+}
+
+/// Parses the condition and applied metadata of one `cfg_attr`.
+struct CfgAttrArguments {
+    attributes: Vec<Meta>,
+}
+
+impl syn::parse::Parse for CfgAttrArguments {
+    fn parse(input: syn::parse::ParseStream<'_>) -> syn::Result<Self> {
+        let condition: Meta = input.parse()?;
+        let _condition = condition;
+        _ = input.parse::<Comma>()?;
+        let attributes = Punctuated::<Meta, Comma>::parse_terminated(input)?
+            .into_iter()
+            .collect();
+        Ok(Self { attributes })
+    }
 }
 
 /// Determines whether a file can anchor an explicit `crate::` path.

@@ -105,7 +105,10 @@ sites after excluding common lock, join, pointer, ownership, and fixture
 accessors. Test-created `Some(...)` option holders are tracked through `Rc`/`Arc`
 clones and `RefCell` borrow guards without suppressing separately constructed
 API values inside the same callback. Contiguous cfg attributes on compile-time sites become
-`conditionalAssertion` diagnostics, preserving branch provenance.
+`conditionalAssertion` diagnostics, preserving branch provenance. Inclusion
+gates inherit from enclosing modules, tests, and owner attributes. `cfg_attr`
+is included only when it applies a nested `cfg`; instrumentation-only
+attributes do not become inclusion diagnostics.
 
 ## Count semantics
 

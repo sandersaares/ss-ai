@@ -372,6 +372,12 @@ mod nested {
 #[cfg(test)]
 mod tests {
     fn check<T: Copy>() {}
+    #[cfg(debug_assertions)]
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    #[test]
+    fn gated_runtime_assertion() {
+        assert!(runtime_value());
+    }
     #[test]
     fn compile() {
         #[cfg_attr(unix, cfg(debug_assertions))]
@@ -396,6 +402,7 @@ mod tests {
             r#"#[cfg(feature = "outer")] #[cfg(unix)]"#,
         ),
         ("check::<u8>()", "#[cfg_attr(unix, cfg(debug_assertions))]"),
+        ("assert!(runtime_value())", "#[cfg(debug_assertions)]"),
     ] {
         let site = assertion(&inventory, expression);
         let id = site["id"].as_str().unwrap();
@@ -407,7 +414,12 @@ mod tests {
             "{expected}"
         );
     }
-    assert_eq!(conditional.len(), 3);
+    assert_eq!(conditional.len(), 4);
+    assert!(!conditional.iter().any(|row| {
+        row["detail"]
+            .as_str()
+            .is_some_and(|detail| detail.contains("coverage(off)"))
+    }));
 }
 
 #[test]

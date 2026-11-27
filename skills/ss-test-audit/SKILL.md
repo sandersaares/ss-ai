@@ -102,6 +102,14 @@ Reconcile discrepancies before classification:
 - unsupported source language text remains searchable but receives no assertion or test inventory;
 - syntax rejected by the Rust parser uses a Rust text fallback and carries a diagnostic.
 
+`conditionalAssertion` diagnostics are coverage metadata. Continue semantic
+classification; record the effective `cfg`/`cfg_attr(..., cfg(...))` context in
+the judgment only when it affects the contract interpretation. Instrumentation
+attributes such as `cfg_attr(coverage_nightly, coverage(off))` do not gate the
+owner and do not produce this diagnostic. A diagnostic alone is not a command
+failure and does not authorize stopping the batch loop or reporting an audit as
+incomplete.
+
 Ordinary traversal skips generated and tool-state directories such as `target`, `node_modules`, and build-output directories. Select these directories explicitly when they belong to the requested source scope. Git administrative data (`.git`) is not source and cannot be selected. The native tool rejects a symbolic link used as the scope and does not follow nested symbolic links; nested omissions receive a diagnostic.
 
 Shared helpers, callbacks, and destructors count once at their definition. Production assertions and defensive branches do not become test assertions merely because tests call a same-named method. The Rust inventory links a shared assertion only from direct AST-visible free-function or qualified-path calls in a test; it does not infer callers from comments, function declarations, method calls, trait callbacks, or substring matches. Preserve every native caller link and add semantically confirmed `callingTestIds` in the classification record when static syntax cannot identify a call. Supply `unlinkedReason` rather than guessing when no calling test can be established.
