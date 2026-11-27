@@ -4,7 +4,10 @@
 
 The primary agent owns configuration, selection-mode resolution, local checkout
 preparation, the skill handoff, and human interaction. It may execute the
-handoff directly or delegate the `ss-review` invocation. The shared `ss-ai`
+handoff directly or delegate the whole `ss-review` invocation only after
+establishing the destination's required background worker and nested-task
+capability. The delegate checks its own tool contracts; focus-area work remains
+bounded runtime subagents rather than app project sessions. The shared `ss-ai`
 executable owns repository enumeration, eligibility, ordering, claim writes,
 the waiting period, and revalidation.
 It emits one JSON result and keeps a local journal in session state.

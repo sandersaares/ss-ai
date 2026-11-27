@@ -159,13 +159,17 @@ this cycle is missing or has expired, or the pull request is no longer
 eligible, the candidate is also discarded.
 
 If the claim holds, the primary agent hands off to the ordinary `ss-review`
-workflow, either directly or through delegated execution. Reviewer
-registration consumes the reservation in `available` mode through the
-resulting assignment. Submitting an active review does not release the active
-marker: the skill verifies the marker immediately before publication and marks
-it completed after the full review, including learning. Clean reviews and
-reviews that publish only ADO comments therefore also produce completion
-evidence without inventing an approval vote.
+workflow. It may delegate the whole review only when the destination can
+dispatch and track `ss-review`'s background runtime workers and their required
+nested tasks. Focus-area workers are never app project sessions. If that
+capability is unavailable, the primary agent keeps orchestration when capable;
+otherwise it reports the blocker and pauses. Reviewer registration consumes
+the reservation in `available` mode through the resulting assignment.
+Submitting an active review does not release the active marker: the skill
+verifies the marker immediately before publication and marks it completed after
+the full review, including learning. Clean reviews and reviews that publish
+only ADO comments therefore also produce completion evidence without inventing
+an approval vote.
 
 When a delegated review reaches a user gate, it returns the exact question,
 ordered choices, and complete presentation required before the question. The

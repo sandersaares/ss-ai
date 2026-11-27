@@ -7,8 +7,9 @@ description: Select and claim eligible GitHub or Azure DevOps pull requests acro
 
 Run this skill in the primary, user-facing session so a real user can answer
 questions. The review handoff may invoke `ss-review` in this session or delegate
-it to a subagent or child session while this session retains user interaction
-and loop control.
+it to a subagent or child session, subject to [ss-review's execution-capability
+requirements](../ss-review/SKILL.md#execution-ownership-and-user-decisions),
+while this session retains user interaction and loop control.
 
 The user may specify one or more repositories in the invocation or schedule
 prompt; otherwise use the Git repository where this skill is invoked. Process
@@ -300,17 +301,21 @@ identity for stage 4.
 
 # Stage 4: review handoff
 
-Invoke the `ss-review` skill with `target.webUrl` as the PR scope, either in
-this session or through delegated execution. State that this is a
-user-authorized `ss-review-proactor` handoff, provide the absolute temporary
-checkout and journal paths, the cycle's absolute review-state directory, any
-Azure tenant, the resolved repository URL, session identifier, claim message,
-selection mode, and current loop instruction. Use that review-state directory
-for all `ss-review` artifacts and worker outputs that would otherwise go
-directly in session state. Keep the run-control rules above active and return
-here at stage 5 after `ss-review` phase 9 completes. The review workflow
-verifies the active claim immediately before remote publication. When
-delegating, require
+Invoke `ss-review` with `target.webUrl` as the PR scope. Before delegating the
+whole review, establish that the destination supports `ss-review`'s required
+background worker dispatch and nested tasks. Require the delegate to check its
+own tools before phase 1. If support is absent or cannot be established, keep
+orchestration in this primary session when capable; otherwise report the
+blocker and pause the current cycle. Do not create app project sessions for
+focus-area workers. State that this is a user-authorized `ss-review-proactor`
+handoff, provide the absolute temporary checkout and journal paths, the
+cycle's absolute review-state directory, any Azure tenant, the resolved
+repository URL, session identifier, claim message, selection mode, and current
+loop instruction. Use that review-state directory for all `ss-review`
+artifacts and worker outputs that would otherwise go directly in session state.
+Keep the run-control rules above active and return here at stage 5 after
+`ss-review` phase 9 completes. The review workflow verifies the active claim
+immediately before remote publication. When delegating, require
 `ss-review` to return the exact question, ordered choices, and complete
 ordinary-session presentation, including complete audit text or document links
 and the PR reminder where applicable. Display that presentation verbatim and in

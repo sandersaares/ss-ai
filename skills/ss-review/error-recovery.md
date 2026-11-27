@@ -6,6 +6,14 @@ automatic recovery. Correct orchestration mistakes and retry safe transient
 failures without asking the user. Never use an error as evidence of completion,
 empty work, or approval.
 
+Missing required dispatch capability follows [ss-review's execution-capability
+gate](SKILL.md#execution-ownership-and-user-decisions); recovery cannot
+substitute app project sessions for bounded subagents. If incompatibility is
+discovered after work began, preserve the cycle identity, manifest, journals,
+artifacts, and known handles. Reconcile active or uncertain dispatches before
+transferring orchestration or replacing workers, then use [phase 2's existing
+assignment and resume procedure](SKILL.md#phase-2-review) for unfinished work.
+
 # Stage 1: diagnose the failed operation
 
 Check the exit status and diagnostic before using output. Retain the failed

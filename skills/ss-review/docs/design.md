@@ -69,13 +69,18 @@ authority may not.
 
 The agent executing the review owns orchestration and every question that
 reaches the user. That agent may run in a user-facing session, subagent, or
-child session. Subagents may inspect evidence and propose findings within
-bounded work. The auto-approval worker may approve claims only under the
-defined policy; workers cannot make user decisions or perform publication. When
-the workflow asks a question, only the user's direct answer can resume work
-that depends on it. A delegated review returns the exact question, ordered
-choices, and complete presentation required before the question. The caller
-shows that presentation before obtaining and relaying the user's exact answer.
+child session. Delegating the whole review is distinct from focus-area
+execution: the selected orchestrator must be able to dispatch and track the
+bounded runtime subagents before it starts review work, and phase workers are
+not app project sessions. A caller keeps responsibility for the handoff if a
+delegate lacks that capability. Subagents may inspect evidence and propose
+findings within bounded work. The auto-approval worker may approve claims only
+under the defined policy; workers cannot make user decisions or perform
+publication. When the workflow asks a question, only the user's direct answer
+can resume work that depends on it. A delegated review returns the exact
+question, ordered choices, and complete presentation required before the
+question. The caller shows that presentation before obtaining and relaying the
+user's exact answer.
 Audit handoffs preserve the destination-specific finding text or document links
 and the pull request reminder instead of reducing the decision to question
 text alone. A skipped, dismissed, cancelled, timed-out, or unrecognized prompt
