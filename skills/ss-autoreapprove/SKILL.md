@@ -190,10 +190,20 @@ Identify the worker in its assignment as `ss-autoreapprove-assessment-worker`
 and state that its native reservation succeeded. Give it the absolute installed
 skill root, absolute run path, PR ID, exact inspection snapshot digest, and
 [assessment assignment](assessment.md).
-The worker owns evidence reads, judgments, and completion
-for that PR only. Do not pass another PR's evidence, conversation history, or
-an orchestrator-generated semantic conclusion. Do not reuse a worker for another
-PR, load source or discussion in the orchestrator, or dispatch a full review.
+Before the first dispatch, resolve the active user-scoped instruction set from
+`COPILOT_CUSTOM_INSTRUCTIONS_DIRS`. Include every applicable `AGENTS.md` and
+`*.instructions.md` in a self-contained `User-scoped instruction snapshot` in
+the assignment, with its original source path and complete text. Preserve the
+exact snapshot for every replacement worker. If the variable is absent, state
+`User-scoped instruction snapshot: none` explicitly; do not infer that there are
+no instructions from an unreadable or invalid source. If discovery or delivery
+fails, retain the assessment as incomplete and do not dispatch another source
+change assessment.
+
+The worker owns evidence reads, judgments, and completion for that PR only. Do
+not pass another PR's evidence, conversation history, or an orchestrator-generated
+semantic conclusion. Do not reuse a worker for another PR, load source or
+discussion in the orchestrator, or dispatch a full review.
 
 Use one focused worker for the whole assessment when its actual context permits.
 The host may require the worker to invoke this skill; the assessment worker

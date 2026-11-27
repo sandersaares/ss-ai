@@ -45,6 +45,8 @@ const DIRECT_CONTRACT: &str = concat!(
     "usage, likely introduce material correctness or performance regressions, or make ",
     "a public API violate active user-scoped guidelines under the captured significance ",
     "policy. Minor API reorganization is not significant by itself. ",
+    "Apply only the complete user-scoped instruction snapshot explicitly delivered in ",
+    "the worker assignment; missing or unreadable required guidance remains incomplete. ",
     "Substantive uncertainty is never permission. A favorable cumulative ",
     "judgment cannot erase a significant or uncertain change or unresolved check. ",
     "An empty source diff still requires policy, discussion, and final synthesis. ",
