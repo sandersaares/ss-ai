@@ -190,10 +190,31 @@ Identify the worker in its assignment as `ss-autoreapprove-assessment-worker`
 and state that its native reservation succeeded. Give it the absolute installed
 skill root, absolute run path, PR ID, exact inspection snapshot digest, and
 [assessment assignment](assessment.md).
-The worker owns evidence reads, judgments, and completion
-for that PR only. Do not pass another PR's evidence, conversation history, or
-an orchestrator-generated semantic conclusion. Do not reuse a worker for another
-PR, load source or discussion in the orchestrator, or dispatch a full review.
+Before the first dispatch, resolve the active user-scoped instruction set from
+`COPILOT_CUSTOM_INSTRUCTIONS_DIRS`. Include every applicable `AGENTS.md` and
+`*.instructions.md` in a self-contained `User-scoped instruction snapshot` in
+the assignment, with its original source path and complete text. Recursively
+materialize guidance incorporated by local or external references before
+dispatch. Resolve local paths relative to the referring source's original path,
+never relative to this skill or a generated checkout. Follow redirects and
+readable alternatives when an external page needs them. For each expanded
+target, retain its resolved URL or original local path, complete applicable
+guidance, every referring chain, and inherited scope from that chain. Preserve
+distinct scope chains and any restrictions in the referenced guidance; never
+broaden or intersect unrelated scopes. Deduplicate a target's content without
+dropping its separate referring contexts.
+
+Preserve the exact completed snapshot for every replacement worker. If the
+variable is absent, state `User-scoped instruction snapshot: none` explicitly;
+do not infer that there are no instructions from an unreadable, invalid, or
+unexpanded source. A failed discovery, reference expansion, scope resolution, or
+delivery retains the assessment as incomplete. Do not dispatch another source
+change assessment or substitute a partial snapshot.
+
+The worker owns evidence reads, judgments, and completion for that PR only. Do
+not pass another PR's evidence, conversation history, or an orchestrator-generated
+semantic conclusion. Do not reuse a worker for another PR, load source or
+discussion in the orchestrator, or dispatch a full review.
 
 Use one focused worker for the whole assessment when its actual context permits.
 The host may require the worker to invoke this skill; the assessment worker

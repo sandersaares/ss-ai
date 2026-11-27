@@ -1291,8 +1291,9 @@ fn assess_as(
             "insignificant".into(),
             "--rationale".into(),
             concat!(
-                "The complete fixture change has no significant design change ",
-                "or likely performance/correctness regression."
+                "The complete fixture change has no substantial behavior or usage change, ",
+                "material correctness or performance regression, or new public-API ",
+                "guideline violation."
             )
             .into(),
         ];
@@ -1308,9 +1309,9 @@ fn assess_as(
         disposition.into(),
         "--rationale".into(),
         match disposition {
-            "significant" => "A significant design change requires a separate new review.",
+            "significant" => "A substantial behavior or usage change requires a separate review.",
             "uncertain" => "Missing contract context prevents assessing correctness.",
-            _ => "Combined fixture changes have no significant design change or likely performance/correctness regression; discussion has no new objection.",
+            _ => "Combined fixture changes have no substantial behavior or usage change, material correctness or performance regression, or new public-API guideline violation; discussion has no new objection.",
         }.into(),
         "--evidence".into(),
         "policy".into(),

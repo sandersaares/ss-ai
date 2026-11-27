@@ -160,7 +160,12 @@ and ignore deleted threads and comments.
 
 Adapters reduce these payloads to target coordinates, assignment and submitted
 review participation, eligibility, the newest non-future committer timestamp,
-and discussion comments. Identity comparison
+and discussion comments. Completed markers authored by the authenticated
+reviewer exclude a candidate for 48 hours after their last content update, even
+when source or participation evidence made the completed review historical.
+A marker that still matches both evidence values excludes the candidate after
+that window. Selection and confirmation apply the same exclusion before
+admitting the candidate. Identity comparison
 uses the shared utility's platform identity rules rather than display names.
 
 Azure DevOps eligibility excludes declined reviewers

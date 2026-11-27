@@ -223,8 +223,10 @@ In `available` mode, the helper considers open, non-draft PRs not authored by
 or already assigned to the signed-in user. In `assigned` mode, it instead
 requires an assignment to the signed-in user and excludes an existing active
 submitted review. It orders qualifying PRs by their newest commit timestamp
-within the past 14 days, ignores PRs with live claims, and claims the first
-eligible one. It returns immediately after posting the claim so checkout
+within the past 14 days, ignores PRs with live claims, and skips a PR completed
+by the signed-in user within the past 48 hours even when that review no longer
+matches the latest source or reviewer participation. It claims the first
+eligible PR. It returns immediately after posting the claim so checkout
 preparation can use the 60-second interval. Reserved claims expire 60 minutes
 after their service-recorded creation time. Ignore expired reserved claims from
 earlier attempts, even when they have the same author or session identifier.

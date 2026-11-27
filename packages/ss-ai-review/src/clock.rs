@@ -16,6 +16,8 @@ use crate::error::fail;
 ///
 /// Expressed as elapsed time so calendar offset changes cannot alter eligibility.
 pub(crate) const COMMIT_AGE: Duration = Duration::from_hours(14 * 24);
+/// Prevents rapid re-review after a completed review loses its source binding.
+pub(crate) const REVIEW_AGE: Duration = Duration::from_hours(2 * 24);
 /// A reserved claim's lifetime comes from service creation, never edit time.
 pub(crate) const CLAIM_AGE: Duration = Duration::from_hours(1);
 /// Preparation time counts toward this interval before the sole final check.
