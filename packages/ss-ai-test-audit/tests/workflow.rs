@@ -17,7 +17,8 @@ use ohno::AppError;
 use serde_json::{Value, from_slice, from_str, json, to_vec_pretty};
 use ss_ai_runtime::{Clock, Process, ProcessOutput};
 use ss_ai_test_audit::{
-    advance, compare, initialize, next_batch, record_batch, report, search, search_many, submit,
+    advance, compare, initialize, inspect_evidence, next_batch, record_batch, report, search,
+    search_many, submit,
 };
 use tempfile::TempDir;
 
@@ -981,6 +982,46 @@ fn search_preserves_qualified_ranges_and_rejects_marker_only_evidence() {
 }
 
 #[test]
+fn search_matches_full_text_and_exposes_truncated_previews() {
+    let root = unversioned_fixture_root();
+    let repository = root.path().join("repository");
+    let state = root.path().join("state");
+    fs::create_dir_all(repository.join("src")).unwrap();
+    let source = format!(
+        "/// {} unique-tail-promise\npub fn value() {{}}\n",
+        "padding ".repeat(400)
+    );
+    fs::write(repository.join("src/lib.rs"), &source).unwrap();
+    initialize(&repository, &[], &state, &NoProcess, &FixedClock).unwrap();
+    let result: Value =
+        from_str(&search(&state, "unique-tail-promise", None, 20, &FixedClock).unwrap()).unwrap();
+    let matched = &result["results"][0]["matches"][0];
+    assert_eq!(matched["previewTruncated"], true);
+    let evidence: Value = from_str(
+        &inspect_evidence(
+            &state,
+            matched["evidenceHandle"].as_str().unwrap(),
+            &FixedClock,
+        )
+        .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(evidence["previewTruncated"], true);
+    assert!(
+        evidence["text"]
+            .as_str()
+            .unwrap()
+            .contains("unique-tail-promise")
+    );
+    assert!(
+        !evidence["preview"]
+            .as_str()
+            .unwrap()
+            .contains("unique-tail-promise")
+    );
+}
+
+#[test]
 fn reports_broad_and_conflicting_citation_reuse_as_warnings() {
     let root = unversioned_fixture_root();
     let repository = root.path().join("repository");
@@ -1098,6 +1139,26 @@ fn rejects_state_created_before_inventory_correction_contract() {
             .to_string()
             .contains("Unsupported audit state schema version 1")
     );
+}
+
+#[test]
+fn rejects_state_from_another_tool_or_rubric_version() {
+    let (_root, repository, state) = fixture(fixture_root());
+    initialize_fixture(&repository, &state);
+    let path = state.join("audit-state.json");
+    let original = fs::read(&path).unwrap();
+    let mut record: Value = from_slice(&original).unwrap();
+    record["toolVersion"] = json!("different-tool");
+    fs::write(&path, to_vec_pretty(&record).unwrap()).unwrap();
+    let error = search(&state, "ready", None, 20, &FixedClock).unwrap_err();
+    assert!(error.to_string().contains("tool version"));
+
+    fs::write(&path, &original).unwrap();
+    let mut record: Value = from_slice(&original).unwrap();
+    record["rubricVersion"] = json!("different-rubric");
+    fs::write(&path, to_vec_pretty(&record).unwrap()).unwrap();
+    let error = search(&state, "ready", None, 20, &FixedClock).unwrap_err();
+    assert!(error.to_string().contains("rubric version"));
 }
 
 #[test]

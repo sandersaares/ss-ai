@@ -14,7 +14,7 @@ use ss_ai_runtime::{Clock, FileTransaction, caused_by, fail, read_bytes};
 use crate::batch::ValidatedJournal;
 use crate::model::{
     AUDIT_STATE_SCHEMA_VERSION, AssertionSite, AuditState, ClassificationJournal, IndexEntry,
-    IndexedFile, Inventory, TestCase,
+    IndexedFile, Inventory, RUBRIC_VERSION, TestCase,
 };
 use crate::scan::digest;
 
@@ -272,7 +272,7 @@ fn search_query(
         haystack.clear();
         haystack.push_str(&entry.path);
         haystack.push(' ');
-        haystack.push_str(&entry.excerpt);
+        haystack.push_str(&entry.text);
         haystack.make_ascii_lowercase();
         if terms.iter().all(|term| haystack.contains(term)) {
             if matches.len() == limit.get() {
@@ -289,6 +289,7 @@ fn search_query(
                 "owner": entry.owner,
                 "sourceRole": entry.source_role,
                 "excerpt": entry.excerpt,
+                "previewTruncated": entry.preview_truncated,
                 "repositoryRevision": entry.repository_revision,
                 "fileSha256": entry.file_sha256
             }));
@@ -300,6 +301,49 @@ fn search_query(
         "matches": matches,
         "truncated": truncated
     }))
+}
+
+/// Returns exact snapshot evidence without exposing an arbitrary repository read.
+pub fn inspect_evidence(
+    state_directory: &Path,
+    evidence_handle: &str,
+    clock: &dyn Clock,
+) -> Result<String, AppError> {
+    let loaded = load(state_directory, clock)?;
+    let offset = evidence_index(&loaded.state.snapshot_sha256, &loaded.index)
+        .get(evidence_handle)
+        .copied()
+        .ok_or_else(|| {
+            fail(
+                "invalidInput",
+                format!("Evidence handle '{evidence_handle}' is not bound to this audit snapshot"),
+            )
+        })?;
+    let entry = loaded.index.get(offset).ok_or_else(|| {
+        fail(
+            "invalidState",
+            format!("Evidence handle '{evidence_handle}' has no indexed range"),
+        )
+    })?;
+    Ok(json!({
+        "schemaVersion": 1,
+        "auditId": loaded.state.audit_id,
+        "snapshotSha256": loaded.state.snapshot_sha256,
+        "evidenceHandle": evidence_handle,
+        "path": entry.path,
+        "line": entry.line,
+        "endLine": entry.end_line,
+        "language": entry.language,
+        "kind": entry.kind,
+        "owner": entry.owner,
+        "sourceRole": entry.source_role,
+        "text": entry.text,
+        "preview": entry.excerpt,
+        "previewTruncated": entry.preview_truncated,
+        "repositoryRevision": entry.repository_revision,
+        "fileSha256": entry.file_sha256
+    })
+    .to_string())
 }
 
 /// Builds the same compact, snapshot-bound evidence reference for search and submit.
@@ -330,10 +374,29 @@ pub(crate) struct LoadedState {
     pub(crate) journal: ValidatedJournal,
 }
 
-/// Loads schema-version-one state without rehashing audited source files.
+/// Loads current-schema state without rehashing audited source files.
 pub(crate) fn load(state_directory: &Path, clock: &dyn Clock) -> Result<LoadedState, AppError> {
     let state: AuditState = read_json(&state_directory.join("audit-state.json"), clock)?;
     require_audit_version(state.schema_version, "audit state")?;
+    if state.tool_version != env!("CARGO_PKG_VERSION") {
+        return Err(fail(
+            "invalidState",
+            format!(
+                "Audit state tool version '{}' does not match the running utility '{}'",
+                state.tool_version,
+                env!("CARGO_PKG_VERSION")
+            ),
+        ));
+    }
+    if state.rubric_version != RUBRIC_VERSION {
+        return Err(fail(
+            "invalidState",
+            format!(
+                "Audit state rubric version '{}' does not match the running rubric '{}'",
+                state.rubric_version, RUBRIC_VERSION
+            ),
+        ));
+    }
     let inventory_bytes = require_bytes(&state_directory.join("inventory.json"), clock)?;
     if digest(&inventory_bytes) != state.snapshot_sha256 {
         return Err(fail(

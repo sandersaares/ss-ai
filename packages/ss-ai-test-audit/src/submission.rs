@@ -343,7 +343,7 @@ fn resolve_citation_handles(
             end_line: entry.end_line,
             owner: entry.owner.clone(),
             source_role: entry.source_role.clone(),
-            excerpt: entry.excerpt.clone(),
+            excerpt: entry.text.clone(),
         });
     }
     Ok(citations)

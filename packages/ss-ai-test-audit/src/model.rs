@@ -185,7 +185,9 @@ pub(crate) struct IndexEntry {
     pub(crate) kind: String,
     pub(crate) owner: String,
     pub(crate) source_role: String,
+    pub(crate) text: String,
     pub(crate) excerpt: String,
+    pub(crate) preview_truncated: bool,
     pub(crate) repository_revision: String,
     pub(crate) file_sha256: String,
 }
@@ -215,8 +217,25 @@ pub(crate) struct BatchAssertion {
     pub(crate) test_name: Option<String>,
     pub(crate) test_path: Option<String>,
     pub(crate) test_line: Option<NonZeroUsize>,
-    pub(crate) context: Vec<IndexEntry>,
+    pub(crate) context: Vec<BatchContextEntry>,
     pub(crate) diagnostics: Vec<ScanDiagnostic>,
+}
+
+/// Bounds exported context to presentation metadata while retaining its handle-capable identity.
+#[derive(Clone, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub(crate) struct BatchContextEntry {
+    pub(crate) path: String,
+    pub(crate) line: NonZeroUsize,
+    pub(crate) end_line: NonZeroUsize,
+    pub(crate) language: String,
+    pub(crate) kind: String,
+    pub(crate) owner: String,
+    pub(crate) source_role: String,
+    pub(crate) excerpt: String,
+    pub(crate) preview_truncated: bool,
+    pub(crate) repository_revision: String,
+    pub(crate) file_sha256: String,
 }
 
 /// Validates the caller's batch envelope before recording semantic judgments.

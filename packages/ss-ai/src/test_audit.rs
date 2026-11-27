@@ -8,8 +8,8 @@ use clap::{Parser, Subcommand};
 use ohno::AppError;
 use ss_ai_runtime::{Process, caused_by};
 use ss_ai_test_audit::{
-    advance, compare, initialize, initialize_with_corrections, inspect_assertion, next_batch,
-    record_batch, report, search_many, submit,
+    advance, compare, initialize, initialize_with_corrections, inspect_assertion, inspect_evidence,
+    next_batch, record_batch, report, search_many, submit,
 };
 
 use crate::Clock;
@@ -58,6 +58,13 @@ enum TestAuditCommand {
         state_directory: PathBuf,
         #[arg(long)]
         assertion_id: String,
+    },
+    /// Show the complete text bound to one evidence handle.
+    Evidence {
+        #[arg(long)]
+        state_directory: PathBuf,
+        #[arg(long)]
+        evidence_handle: String,
     },
     /// Export the next bounded assertion batch without consuming it.
     NextBatch {
@@ -173,6 +180,10 @@ where
             state_directory,
             assertion_id,
         } => inspect_assertion(&state_directory, &assertion_id, clock),
+        TestAuditCommand::Evidence {
+            state_directory,
+            evidence_handle,
+        } => inspect_evidence(&state_directory, &evidence_handle, clock),
         TestAuditCommand::NextBatch {
             state_directory,
             output_path,

@@ -39,6 +39,10 @@ it. A same-site doctest illustrates that scenario and is not independent proof
 of a broader promise. Private implementation, fixture, and test comments explain
 mechanics but do not become public promises.
 
+Search previews are bounded. When `previewTruncated` is true, run the
+`evidence` recipe for the exact handle and inspect the complete source range
+before using it. Never treat a truncated preview as complete contract evidence.
+
 # Classification contract
 
 Use exactly one classification for every assertion site:

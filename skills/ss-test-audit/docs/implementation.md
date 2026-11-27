@@ -66,7 +66,10 @@ citations and caller IDs.
 Search accepts repeated independent queries and evaluates them from one index
 load. Search records retain complete bounded documentation paragraphs or list
 items, source ranges, owners, and structural source roles. Marker-only ranges
-do not enter the index. The assertion `context` command returns the complete
+do not enter the index. Matching and citation resolution use complete range
+text. Agent-facing search output uses a bounded preview with an explicit
+`previewTruncated` flag; the `evidence` command returns the complete immutable
+range for one exact handle. The assertion `context` command returns the complete
 bounded owner source, nested assertion identifiers, native and unresolved caller
 spans, local binding candidates, and lexical evidence candidates. These
 candidate fields are evidence-navigation hints, not semantic authority. Query

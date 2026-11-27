@@ -35,7 +35,7 @@ Describe 'ss-test-audit skill contract' {
             }
         }
         @($nativeCommands) | Should -Be @(
-            'initialize', 'search', 'context', 'next-batch', 'record-batch', 'advance',
+            'initialize', 'search', 'context', 'evidence', 'next-batch', 'record-batch', 'advance',
             'submit', 'compare', 'report'
         )
         foreach ($name in @('SKILL.md', 'commands.md')) {
@@ -117,7 +117,33 @@ Describe 'ss-test-audit skill contract' {
             consistencyDiagnosticCount = 0
         }
         $details = $identity + @{
-            assertionTrace = @(); testInventory = @(); diagnostics = @()
+            assertionTrace = @(@{
+                assertion = @{
+                    id = 'A000001'; kind = 'assertion'; language = 'rust'; path = 'src/lib.rs'
+                    line = 4; endLine = 4; column = 5; expression = 'assert!(ready())'
+                    fileSha256 = 'd' * 64; ownerLine = 3; ownerEndLine = 5
+                    containingTestId = 'T000001'; helperName = $null; callingTestIds = @()
+                    callerEvidence = @(); unresolvedCallerCandidates = @()
+                }
+                classification = @{
+                    assertionId = 'A000001'; classification = 'Documented'
+                    evidenceStatus = 'Confirmed'; actualOutcome = 'The API reports ready.'
+                    rationale = 'Public documentation promises the result.'
+                    citations = @(@{
+                        path = 'src/lib.rs'; line = 1; endLine = 1; owner = 'pub fn ready()'
+                        sourceRole = 'rustItemDoc'; excerpt = '/// Reports readiness.'
+                    })
+                    incidentalReason = $null; callingTestIds = @(); unlinkedReason = $null
+                    unresolvedCallerReason = $null; reviewReason = $null
+                }
+            })
+            testInventory = @(@{
+                id = 'T000001'; name = 'checks_ready'; kind = 'unit'; language = 'rust'
+                path = 'src/lib.rs'; line = 3; endLine = 5; repositoryRevision = 'unversioned'
+                directAssertionIds = @('A000001'); sharedAssertionIds = @()
+                assertionCount = 1; incidentalOnly = $false
+            })
+            diagnostics = @()
             corrections = @(); consistencyDiagnostics = @()
         }
         Test-AuditRecord -Schema 'summary' -Record $summary | Should -BeTrue
@@ -126,6 +152,11 @@ Describe 'ss-test-audit skill contract' {
         Test-AuditRecord -Schema 'summary' -Record $summary | Should -BeFalse
         $details.Remove('testInventory')
         Test-AuditRecord -Schema 'details' -Record $details | Should -BeFalse
+        $invalidDetails = $identity + @{
+            assertionTrace = @(@{}); testInventory = @(@{}); diagnostics = @()
+            corrections = @(); consistencyDiagnostics = @()
+        }
+        Test-AuditRecord -Schema 'details' -Record $invalidDetails | Should -BeFalse
     }
 
     It 'validates a completed audit comparison without selecting a winner' {

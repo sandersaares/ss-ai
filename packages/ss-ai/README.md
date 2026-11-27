@@ -128,6 +128,8 @@ ss-ai test-audit search --state-directory "{{STATE_DIRECTORY}}" `
   --kind "{{EVIDENCE_KIND}}" --limit 50
 ss-ai test-audit context --state-directory "{{STATE_DIRECTORY}}" `
   --assertion-id "{{ASSERTION_ID}}"
+ss-ai test-audit evidence --state-directory "{{STATE_DIRECTORY}}" `
+  --evidence-handle "{{EVIDENCE_HANDLE}}"
 ss-ai test-audit next-batch --state-directory "{{STATE_DIRECTORY}}" `
   --output-path "{{BATCH_PATH}}" --count 25
 # Run submit for each batch after preparing its compact classification rows.

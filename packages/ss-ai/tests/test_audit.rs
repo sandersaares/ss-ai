@@ -29,6 +29,7 @@ fn help_lists_the_native_workflow_without_provider_authentication() {
         "initialize",
         "search",
         "context",
+        "evidence",
         "next-batch",
         "record-batch",
         "advance",
@@ -80,6 +81,10 @@ fn executable_accepts_multi_query_search_and_compact_submit() {
     );
     let search: Value = from_slice(&search.stdout).unwrap();
     assert_eq!(search["queryCount"], 2);
+    let evidence_handle = search["results"][0]["matches"][0]["evidenceHandle"]
+        .as_str()
+        .unwrap();
+    assert_evidence_card(&state, evidence_handle);
 
     let batch_path = state.join("batch-one.json");
     let next = Command::new(env!("CARGO_BIN_EXE_ss-ai"))
@@ -170,6 +175,10 @@ fn executable_accepts_multi_query_search_and_compact_submit() {
     let details_text = fs::read_to_string(report["detailsPath"].as_str().unwrap()).unwrap();
     assert!(details_text.contains("checks_value"));
     assert!(details_text.contains(predicate));
+    let containing_test = details["assertionTrace"][0]["assertion"]["containingTestId"]
+        .as_str()
+        .unwrap();
+    assert!(details_text.contains(&format!("- Calling tests: {containing_test}")));
     assert_canonical_report_receipt(&report);
 }
 
@@ -199,6 +208,25 @@ fn assert_context_card(state: &Path, batch: &Value) {
     assert!(
         context["bindingCandidates"].is_array() && context["relatedEvidenceCandidates"].is_array()
     );
+}
+
+/// Verifies complete handle-bound evidence through the executable boundary.
+fn assert_evidence_card(state: &Path, evidence_handle: &str) {
+    let evidence = Command::new(env!("CARGO_BIN_EXE_ss-ai"))
+        .args(["test-audit", "evidence", "--state-directory"])
+        .arg(state)
+        .args(["--evidence-handle"])
+        .arg(evidence_handle)
+        .output()
+        .unwrap();
+    assert!(
+        evidence.status.success(),
+        "{}",
+        String::from_utf8_lossy(&evidence.stderr)
+    );
+    let evidence: Value = from_slice(&evidence.stdout).unwrap();
+    assert_eq!(evidence["evidenceHandle"], evidence_handle);
+    assert!(evidence["text"].as_str().unwrap().contains("documented"));
 }
 
 #[test]

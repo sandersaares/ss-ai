@@ -12,7 +12,7 @@ use serde_json::{Value, json, to_value, to_vec_pretty};
 use ss_ai_runtime::{Clock, FileTransaction, caused_by, fail};
 
 use crate::model::{
-    AssertionSite, AuditState, Batch, BatchAssertion, Citation, Classification,
+    AssertionSite, AuditState, Batch, BatchAssertion, BatchContextEntry, Citation, Classification,
     ClassificationBatch, ClassificationJournal, ClassificationKind, CompactSubmission,
     EvidenceStatus, IndexEntry, Inventory, ScanDiagnostic, TestCase,
 };
@@ -305,7 +305,19 @@ fn batch_assertion(
                             .contains(&entry.line)
                 })
         })
-        .cloned()
+        .map(|entry| BatchContextEntry {
+            path: entry.path.clone(),
+            line: entry.line,
+            end_line: entry.end_line,
+            language: entry.language.clone(),
+            kind: entry.kind.clone(),
+            owner: entry.owner.clone(),
+            source_role: entry.source_role.clone(),
+            excerpt: entry.excerpt.clone(),
+            preview_truncated: entry.preview_truncated,
+            repository_revision: entry.repository_revision.clone(),
+            file_sha256: entry.file_sha256.clone(),
+        })
         .collect();
     let relevant_diagnostics = diagnostics
         .iter()
@@ -932,7 +944,7 @@ fn validate_citation(
     if citation.end_line != entry.end_line
         || citation.owner != entry.owner
         || citation.source_role != entry.source_role
-        || (citation.excerpt != entry.excerpt && !entry.excerpt.contains(citation.excerpt.trim()))
+        || (citation.excerpt != entry.text && !entry.text.contains(citation.excerpt.trim()))
     {
         return Err(row_error(
             assertion_id,

@@ -91,6 +91,30 @@ helper source, native caller spans, unresolved caller candidates, and nested
 assertion identifiers. It rechecks source freshness. Use targeted `search`
 recipes for definitions and public promises after this local owner context.
 
+## Inspect full evidence text
+
+```powershell
+#Requires -Version 7.6
+
+if ($PSVersionTable.PSVersion -lt [version]'7.6') { throw 'PowerShell 7.6 or later is required.' }
+Set-StrictMode -Version Latest
+$ErrorActionPreference = 'Stop'
+$PSNativeCommandUseErrorActionPreference = $true
+
+ss-ai test-audit evidence `
+  --state-directory "{{STATE_DIRECTORY}}" `
+  --evidence-handle "{{EVIDENCE_HANDLE}}"
+```
+
+| Placeholder | Description |
+| --- | --- |
+| `STATE_DIRECTORY` | Exact initialized audit state directory. |
+| `EVIDENCE_HANDLE` | One exact `evidenceHandle` from the active audit's search result. |
+
+The command returns the complete immutable text for one handle plus its bounded
+preview and `previewTruncated` flag. Inspect this full range before citing a
+truncated result; refining a search cannot recover text outside its preview.
+
 ## Export the next assertion batch
 
 ```powershell

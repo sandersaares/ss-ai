@@ -36,8 +36,7 @@ use crate::model::{
 /// This cap accommodates ordinary source and generated documentation files
 /// while preserving a predictable local-memory ceiling per file.
 const MAX_FILE_BYTES: usize = 4 * 1024 * 1024;
-/// Keeps local evidence around a predicate without letting one long line crowd
-/// out other results in the agent's context.
+/// Keeps search previews concise while the index retains exact range text.
 const MAX_INDEX_EXCERPT_CHARACTERS: usize = 2_000;
 
 /// Scans selected repository paths without modifying the working tree.
@@ -420,6 +419,8 @@ fn append_index(
         if !has_meaningful_excerpt(&excerpt) {
             continue;
         }
+        let text = excerpt.trim().to_owned();
+        let (preview, preview_truncated) = preview_text(&text, MAX_INDEX_EXCERPT_CHARACTERS);
         entries.push(IndexEntry {
             path: path.to_owned(),
             line: parser_line(range.start),
@@ -428,11 +429,28 @@ fn append_index(
             kind: index_kind(path, &excerpt),
             owner: range.owner,
             source_role: range.source_role,
-            excerpt: truncate(excerpt.trim(), MAX_INDEX_EXCERPT_CHARACTERS),
+            text,
+            excerpt: preview,
+            preview_truncated,
             repository_revision: repository_revision.to_owned(),
             file_sha256: file_sha256.to_owned(),
         });
     }
+}
+
+/// Bounds only presentation while retaining exact text for matching and citations.
+fn preview_text(text: &str, max: usize) -> (String, bool) {
+    let mut characters = text.chars();
+    let preview = characters.by_ref().take(max).collect::<String>();
+    let truncated = characters.next().is_some();
+    (
+        if truncated {
+            format!("{preview}...")
+        } else {
+            preview
+        },
+        truncated,
+    )
 }
 
 /// Bounds one complete paragraph, list item, doc block, or source line.
@@ -689,14 +707,6 @@ fn index_kind(path: &str, text: &str) -> String {
 }
 
 /// Truncates long lines on a Unicode character boundary for bounded agent reads.
-fn truncate(text: &str, max: usize) -> String {
-    let mut result = text.chars().take(max).collect::<String>();
-    if text.chars().count() > max {
-        result.push_str("...");
-    }
-    result
-}
-
 /// Bundles one parsed file so scanner state stays separate from source identity.
 #[derive(Clone, Copy)]
 struct ScanInput<'a> {

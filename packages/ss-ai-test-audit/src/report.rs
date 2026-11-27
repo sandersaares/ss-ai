@@ -268,10 +268,16 @@ fn unused_report_path(directory: &Path) -> Result<PathBuf, AppError> {
 /// Combines native and agent attribution for both human and machine views.
 fn callers<'a>(row: &TraceRow<'a>) -> impl Iterator<Item = &'a str> {
     row.assertion
-        .calling_test_ids
+        .containing_test_id
         .iter()
-        .chain(&row.classification.calling_test_ids)
         .map(String::as_str)
+        .chain(
+            row.assertion
+                .calling_test_ids
+                .iter()
+                .chain(&row.classification.calling_test_ids)
+                .map(String::as_str),
+        )
 }
 
 /// Counts each explicit semantic category without turning it into a quality score.
@@ -345,27 +351,52 @@ fn complete_test_inventory<'a>(
             "Test inventory contains duplicate IDs",
         ));
     }
-    let mut result = Vec::new();
+    let classifications = trace
+        .iter()
+        .map(|row| (row.assertion.id.as_str(), row.classification.kind))
+        .collect::<BTreeMap<_, _>>();
+    let mut direct_by_test = BTreeMap::<&str, BTreeSet<&str>>::new();
+    let mut shared_by_test = BTreeMap::<&str, BTreeSet<&str>>::new();
     for test in source_tests {
-        let mut direct: BTreeSet<String> = test.direct_assertion_ids.iter().cloned().collect();
-        let mut shared: BTreeSet<String> = test.shared_assertion_ids.iter().cloned().collect();
-        for row in trace {
-            if row.assertion.containing_test_id.as_deref() == Some(test.id.as_str()) {
-                direct.insert(row.assertion.id.clone());
-            }
-            if callers(row).any(|id| id == test.id)
-                && row.assertion.containing_test_id.as_deref() != Some(test.id.as_str())
-            {
-                shared.insert(row.assertion.id.clone());
+        let direct = direct_by_test.entry(test.id.as_str()).or_default();
+        direct.extend(test.direct_assertion_ids.iter().map(String::as_str));
+        let shared = shared_by_test.entry(test.id.as_str()).or_default();
+        shared.extend(test.shared_assertion_ids.iter().map(String::as_str));
+    }
+    for row in trace {
+        if let Some(test_id) = row.assertion.containing_test_id.as_deref() {
+            direct_by_test
+                .entry(test_id)
+                .or_default()
+                .insert(row.assertion.id.as_str());
+        }
+        for test_id in callers(row) {
+            if row.assertion.containing_test_id.as_deref() != Some(test_id) {
+                shared_by_test
+                    .entry(test_id)
+                    .or_default()
+                    .insert(row.assertion.id.as_str());
             }
         }
+    }
+    let mut result = Vec::new();
+    for test in source_tests {
+        let direct: BTreeSet<String> = direct_by_test
+            .remove(test.id.as_str())
+            .unwrap_or_default()
+            .into_iter()
+            .map(str::to_owned)
+            .collect();
+        let shared: BTreeSet<String> = shared_by_test
+            .remove(test.id.as_str())
+            .unwrap_or_default()
+            .into_iter()
+            .map(str::to_owned)
+            .collect();
         let assertion_ids = direct.iter().chain(shared.iter()).collect::<Vec<_>>();
         let incidental_only = !assertion_ids.is_empty()
             && assertion_ids.iter().all(|id| {
-                trace
-                    .iter()
-                    .find(|row| row.assertion.id == **id)
-                    .is_some_and(|row| row.classification.kind == ClassificationKind::Incidental)
+                classifications.get(id.as_str()) == Some(&ClassificationKind::Incidental)
             });
         result.push(TestReportRow {
             id: &test.id,
