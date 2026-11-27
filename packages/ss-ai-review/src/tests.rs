@@ -2217,6 +2217,146 @@ fn assigned_mode_requires_a_request_without_a_submitted_github_review() {
 }
 
 #[test]
+fn github_selection_distinguishes_reply_containers_from_submitted_reviews() {
+    let reply = json!({"id":2,"in_reply_to_id":1});
+    let standalone = json!({"id":3});
+    for (mode, requested, state, body, comment_pages, expected) in [
+        (
+            SelectionMode::Assigned,
+            true,
+            "COMMENTED",
+            "",
+            Some(json!([[reply.clone()]])),
+            None,
+        ),
+        (
+            SelectionMode::Available,
+            false,
+            "COMMENTED",
+            "",
+            Some(json!([[reply.clone()]])),
+            None,
+        ),
+        (
+            SelectionMode::Assigned,
+            true,
+            "COMMENTED",
+            "",
+            Some(json!([[reply], [standalone]])),
+            Some("alreadyReviewed"),
+        ),
+        (
+            SelectionMode::Assigned,
+            true,
+            "COMMENTED",
+            "",
+            Some(json!([[]])),
+            Some("alreadyReviewed"),
+        ),
+        (
+            SelectionMode::Assigned,
+            true,
+            "COMMENTED",
+            "Review summary",
+            None,
+            Some("alreadyReviewed"),
+        ),
+        (
+            SelectionMode::Assigned,
+            true,
+            "APPROVED",
+            "",
+            None,
+            Some("alreadyReviewed"),
+        ),
+    ] {
+        let mut steps = vec![
+            Step::read(
+                "repos/example/widgets/pulls/10",
+                json!({"state":"open","draft":false,"user":{"id":99}}),
+            ),
+            Step::read(
+                "repos/example/widgets/pulls/10/requested_reviewers?per_page=100",
+                json!([{"users":if requested {json!([{"id":42}])} else {json!([])},"teams":[]}]),
+            ),
+            Step::read(
+                "repos/example/widgets/pulls/10/reviews?per_page=100",
+                json!([[{"id":7,"state":state,"body":body,"user":{"id":42}}]]),
+            ),
+        ];
+        if let Some(pages) = comment_pages {
+            steps.push(Step::read(
+                "repos/example/widgets/pulls/10/reviews/7/comments?per_page=100",
+                pages,
+            ));
+        }
+        if expected.is_none() {
+            steps.push(Step::write(
+                "graphql",
+                "POST",
+                json!({"query":crate::api::COMMIT_QUERY,"variables":{"owner":"example","repo":"widgets","num":10,"cur":null,"size":100}}),
+                json!({"data":{"repository":{"pullRequest":{"commits":{"nodes":[{"commit":{"committedDate":"2026-09-27T00:00:00Z"}}],"pageInfo":{"hasNextPage":false}}}}}}),
+            ));
+        }
+        let script = Script::new(steps);
+        let clock = FakeClock::new();
+        let candidate = api(Platform::GitHub, &script, &clock)
+            .candidate(
+                &repository(Platform::GitHub).candidate(10.try_into().unwrap()),
+                &identity(Platform::GitHub),
+                clock.now(),
+                mode,
+            )
+            .unwrap();
+        assert_eq!(candidate.reason.as_deref(), expected, "{mode:?} {state}");
+        script.done();
+    }
+}
+
+#[test]
+fn github_reply_only_review_does_not_invalidate_completed_participation() {
+    let fingerprint = |reviews, comments| {
+        let mut steps = vec![
+            Step::read(
+                "repos/example/widgets/pulls/10/requested_reviewers?per_page=100",
+                json!([{"users":[{"id":42}],"teams":[]}]),
+            ),
+            Step::read(
+                "repos/example/widgets/pulls/10/reviews?per_page=100",
+                reviews,
+            ),
+        ];
+        if let Some(comments) = comments {
+            steps.push(Step::read(
+                "repos/example/widgets/pulls/10/reviews/7/comments?per_page=100",
+                comments,
+            ));
+        }
+        let script = Script::new(steps);
+        let clock = FakeClock::new();
+        let fingerprint = api(Platform::GitHub, &script, &clock)
+            .review_fingerprint(
+                &repository(Platform::GitHub).candidate(10.try_into().unwrap()),
+                &identity(Platform::GitHub),
+            )
+            .unwrap();
+        script.done();
+        fingerprint
+    };
+
+    let completed = fingerprint(json!([[]]), None);
+    let commented = json!([[{"id":7,"state":"COMMENTED","body":"","user":{"id":42}}]]);
+    assert_eq!(
+        completed,
+        fingerprint(
+            commented.clone(),
+            Some(json!([[{"id":2,"in_reply_to_id":1}]]))
+        )
+    );
+    assert_ne!(completed, fingerprint(commented, Some(json!([[{"id":2}]]))));
+}
+
+#[test]
 fn eligibility_exclusions_avoid_commit_reads_and_ignore_pending_reviews_or_teams() {
     for platform in [Platform::GitHub, Platform::AzureDevOps] {
         for exclusion in ["closed", "draft", "selfAuthored", "alreadyReviewer"] {

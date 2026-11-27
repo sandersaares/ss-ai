@@ -89,6 +89,10 @@ GitHub reviewer evidence combines requested users and submitted review
 authors without expanding teams or treating pending and dismissed reviews as
 participation. Selection retains assignment and submitted-review evidence
 separately so `available` and `assigned` modes can apply distinct rules.
+GitHub can attach inline replies to a `COMMENTED` review record even when
+the reviewer only replied to a thread. For a record with an empty body,
+selection reads all review-comment pages and excludes it from participation
+only when it contains comments and every comment has a parent.
 Registration preserves team requests and adds only the authenticated login.
 Azure DevOps registration leaves any matching existing reviewer untouched and
 creates a neutral reviewer only when none matches.
@@ -105,9 +109,10 @@ conflicting identities for the same canonical path fail before provider writes.
 
 Discussion records preserve service creation timestamps and comment/thread
 identifiers, plus the last content-update timestamp. Selection hashes the
-authenticated reviewer's assignment and complete review-state list into
-completion evidence. Completed markers use their last content update to apply
-the recent-review window; editing reserved or active markers does not extend
-their claim lifetime. Claim ownership uses strict account identity, these
-identifiers, the session and token, the source revision, and that participation
-fingerprint; surrounding announcement prose is not ownership evidence.
+authenticated reviewer's assignment and review-state list, excluding
+reply-only records, into completion evidence. Completed markers use their last
+content update to apply the recent-review window; editing reserved or active
+markers does not extend their claim lifetime. Claim ownership uses strict
+account identity, these identifiers, the session and token, the source
+revision, and that participation fingerprint; surrounding announcement prose
+is not ownership evidence.
