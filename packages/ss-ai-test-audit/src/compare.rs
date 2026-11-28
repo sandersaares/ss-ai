@@ -328,10 +328,7 @@ fn effective_callers(
     classification: &Classification,
     loaded: &LoadedState,
 ) -> BTreeSet<String> {
-    assertion
-        .calling_test_ids
-        .iter()
-        .chain(&classification.calling_test_ids)
+    effective_caller_ids(assertion, classification)
         .filter_map(|id| {
             loaded
                 .inventory
@@ -341,6 +338,19 @@ fn effective_callers(
                 .map(test_key)
         })
         .collect()
+}
+
+/// Combines direct ownership with native and agent-confirmed shared callers.
+fn effective_caller_ids<'a>(
+    assertion: &'a AssertionSite,
+    classification: &'a Classification,
+) -> impl Iterator<Item = &'a str> {
+    assertion
+        .containing_test_id
+        .iter()
+        .chain(assertion.calling_test_ids.iter())
+        .chain(classification.calling_test_ids.iter())
+        .map(String::as_str)
 }
 
 /// Finds test-level gap membership independently of audit-local IDs.
@@ -585,5 +595,64 @@ fn ratio(numerator: usize, denominator: usize) -> f64 {
     } else {
         f64::from(u32::try_from(numerator).unwrap_or(u32::MAX))
             / f64::from(u32::try_from(denominator).unwrap_or(u32::MAX))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::num::NonZeroUsize;
+
+    use super::effective_caller_ids;
+    use crate::model::{
+        AssertionSite, CandidateDisposition, CandidateRole, Classification, ClassificationKind,
+        EvidenceStatus,
+    };
+
+    #[test]
+    fn comparison_caller_ids_include_direct_ownership() {
+        let assertion = AssertionSite {
+            id: "A000001".to_owned(),
+            kind: "assertion".to_owned(),
+            language: "rust".to_owned(),
+            path: "src/lib.rs".to_owned(),
+            line: NonZeroUsize::MIN,
+            end_line: 1,
+            column: NonZeroUsize::MIN,
+            expression: "assert!(ready())".to_owned(),
+            file_sha256: "source".to_owned(),
+            owner_line: NonZeroUsize::MIN,
+            owner_end_line: 1,
+            test_code: true,
+            fixture_excluded: false,
+            fixture_exclusion_reason: None,
+            containing_test_id: Some("T000001".to_owned()),
+            helper_name: None,
+            calling_test_ids: Vec::new(),
+            caller_evidence: Vec::new(),
+            unresolved_caller_candidates: Vec::new(),
+        };
+        let classification = Classification {
+            assertion_id: assertion.id.clone(),
+            kind: ClassificationKind::Incidental,
+            evidence_status: EvidenceStatus::Confirmed,
+            actual_outcome: "ready".to_owned(),
+            rationale: "The test owns this predicate".to_owned(),
+            citations: Vec::new(),
+            incidental_reason: Some("test-local".to_owned()),
+            calling_test_ids: Vec::new(),
+            unlinked_reason: None,
+            unresolved_caller_reason: None,
+            review_reason: None,
+            decisive_clause: None,
+            observation_strength: None,
+            passing_counterexample: None,
+            candidate_role: Some(CandidateRole::Observation),
+            candidate_disposition: Some(CandidateDisposition::Included),
+        };
+
+        assert_eq!(
+            effective_caller_ids(&assertion, &classification).collect::<Vec<_>>(),
+            ["T000001"]
+        );
     }
 }
