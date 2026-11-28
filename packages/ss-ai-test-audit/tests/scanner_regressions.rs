@@ -4,6 +4,7 @@
     reason = "The regression tests select named fields from their own JSON fixtures."
 )]
 
+use std::collections::BTreeSet;
 use std::fs::{self, File};
 use std::io;
 use std::path::{Path, PathBuf};
@@ -361,6 +362,7 @@ fn cfg_diagnostics_follow_ast_owners_and_keep_same_line_sites_distinct() {
             repository,
             "src/lib.rs",
             r#"
+#[cfg(test)]
 #[cfg(feature = "outer")]
 mod nested {
     #[cfg(unix)]
@@ -429,6 +431,8 @@ fn detects_static_assertion_families_and_evaluated_const_blocks() {
             repository,
             "src/lib.rs",
             "
+#[cfg(test)]
+mod compile_checks {
 static_assertions::const_assert!(true);
 static_assertions::const_assert_eq!(1, 1);
 static_assertions::const_assert_ne!(1, 2);
@@ -437,6 +441,7 @@ static_assertions::assert_eq_size!(u8, i8);
 const _: () = { assert!(true); };
 struct Value;
 impl Value { const CHECK: () = assert!(1 < 2); }
+}
 
 #[test]
 fn inline_const() {
@@ -465,6 +470,86 @@ fn inline_const() {
         assertion(&inventory, "assert!(runtime())")["kind"],
         "assertion"
     );
+}
+
+#[test]
+fn production_compile_time_guards_do_not_enter_test_inventory() {
+    let inventory = scan(|repository| {
+        write(
+            repository,
+            "src/lib.rs",
+            "
+const _: () = assert!(
+    std::mem::align_of::<u64>() <= std::mem::align_of::<usize>()
+);
+static_assertions::assert_eq_size!(u64, usize);
+
+#[cfg(test)]
+mod tests {
+    const _: () = assert!(std::mem::align_of::<u64>() > 0);
+    static_assertions::assert_type_eq_all!(usize, usize);
+}
+",
+        );
+        write(
+            repository,
+            "tests/abi.rs",
+            "const _: () = assert!(std::mem::size_of::<usize>() > 0);\n",
+        );
+    });
+    let sites = rows(&inventory, "assertions");
+    assert_eq!(sites.len(), 3, "{inventory:#}");
+    assert!(
+        sites
+            .iter()
+            .all(|site| site["kind"] == "compileTimeAssertion")
+    );
+    assert!(
+        sites
+            .iter()
+            .all(|site| { site["path"] == "tests/abi.rs" || site["line"].as_u64().unwrap() > 3 })
+    );
+    let tests = rows(&inventory, "tests");
+    assert_eq!(tests.len(), 3);
+}
+
+#[test]
+fn mock_argument_and_cardinality_constraints_are_assertion_sites() {
+    let inventory = scan(|repository| {
+        write(
+            repository,
+            "src/lib.rs",
+            "
+#[test]
+fn mocks() {
+    bindings.expect_constrained()
+        .withf(|groups| groups.len() == 1 && groups[0] == 2)
+        .return_const(());
+    bindings.expect_counted()
+        .times(2)
+        .return_const(());
+    bindings.expect_unconstrained()
+        .return_const(());
+}
+",
+        );
+    });
+    let sites = rows(&inventory, "assertions");
+    assert_eq!(sites.len(), 2, "{inventory:#}");
+    let kinds = sites
+        .iter()
+        .map(|site| site["kind"].as_str().unwrap())
+        .collect::<BTreeSet<_>>();
+    assert_eq!(
+        kinds,
+        BTreeSet::from(["mockArgumentCheck", "mockCallCount"])
+    );
+    assert!(sites.iter().all(|site| {
+        site["expression"]
+            .as_str()
+            .is_some_and(|expression| !expression.contains("return_const"))
+    }));
+    assert_eq!(rows(&inventory, "tests").len(), 1);
 }
 
 #[test]
@@ -760,7 +845,7 @@ fn initialization_can_correct_an_exact_ambiguous_fixture_candidate() {
     )
     .unwrap();
     let inventory: Value = from_slice(&fs::read(state.join("inventory.json")).unwrap()).unwrap();
-    assert_eq!(inventory["schemaVersion"], 5);
+    assert_eq!(inventory["schemaVersion"], 6);
     assert!(rows(&inventory, "assertions").is_empty());
     let [correction] = rows(&inventory, "corrections") else {
         panic!("expected one exact inventory correction")

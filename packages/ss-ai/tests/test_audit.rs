@@ -284,7 +284,7 @@ fn executable_accepts_exact_initialization_corrections() {
         String::from_utf8_lossy(&output.stderr)
     );
     let receipt: Value = from_slice(&output.stdout).unwrap();
-    assert_eq!(receipt["schemaVersion"], 5);
+    assert_eq!(receipt["schemaVersion"], 6);
     assert!(
         receipt["sourceRoles"]
             .as_array()

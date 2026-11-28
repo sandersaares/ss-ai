@@ -40,7 +40,7 @@ nonblank reason. The tool retains the
 excluded source site, source digest, stable assertion identifier, and reason in
 the immutable inventory and emits an `inventoryCorrection` diagnostic. Corrections
 apply only during initialization. If a persisted snapshot is missing or contains
-an incorrect correction, preserve it and initialize a new schema-version-5 state
+an incorrect correction, preserve it and initialize a new schema-version-6 state
 instead of editing the old files.
 
 Corrections remove exact assertion candidates. They cannot add missing test

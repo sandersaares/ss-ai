@@ -1694,14 +1694,14 @@ fn rejects_state_created_before_ignored_doctest_inventory_contract() {
     initialize_fixture(&repository, &state);
     let path = state.join("audit-state.json");
     let mut record: Value = from_slice(&fs::read(&path).unwrap()).unwrap();
-    record["schemaVersion"] = json!(4);
+    record["schemaVersion"] = json!(5);
     fs::write(&path, to_vec_pretty(&record).unwrap()).unwrap();
 
     let error = next_batch(&state, &state.join("batch.json"), 25, &FixedClock).unwrap_err();
     assert!(
         error
             .to_string()
-            .contains("Unsupported audit state schema version 4")
+            .contains("Unsupported audit state schema version 5")
     );
 }
 

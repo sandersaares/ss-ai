@@ -23,7 +23,7 @@ initial batch
 
 The inventory, source file digests, and search index bind each batch to one audit ID and snapshot digest. Initialization publishes the state record last so readers cannot treat a partially initialized directory as a ready audit. Every later read verifies the persisted state and index digests. Mutating commands additionally verify current source hashes. A changed source returns a stale-state failure before accepting a judgment against moved lines or emitting a final report.
 
-Audit state and inventory use schema version 5 and judgment rubric version 2. A
+Audit state and inventory use schema version 6 and judgment rubric version 2. A
 contract profile is part of snapshot identity but not the source evidence
 content digest. Native citation resolution chooses the most specific matching
 authority rule from that profile and binds its identifier into each citation.
@@ -127,6 +127,13 @@ API values inside the same callback. Contiguous cfg attributes on compile-time s
 gates inherit from enclosing modules, tests, and owner attributes. `cfg_attr`
 is included only when it applies a nested `cfg`; instrumentation-only
 attributes do not become inclusion diagnostics.
+
+Compile-time assertions without a test-owned owner remain production constraints
+and do not create assertion or synthetic compile-test records. Integration
+targets and `cfg(test)` modules establish test ownership. Mock expectation
+chains contribute `mockArgumentCheck` rows for `.withf(...)` predicates and
+`mockCallCount` rows for explicit `.times(...)` constraints; `.return_const(...)`
+and similar setup methods remain non-predicate setup.
 
 ## Count semantics
 

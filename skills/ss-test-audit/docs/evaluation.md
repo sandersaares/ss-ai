@@ -35,6 +35,10 @@ The native regression suite covers:
 - complete contiguous documentation ranges, qualifiers and negation on continuation lines, public examples, and marker-only rejection;
 - ignored Rustdoc fences with inline reasons retained as unexecuted
   `ignoredDoctest` inventory rows with no predicates;
+- production compile-time guards excluded while the same syntax in `cfg(test)`
+  modules and integration targets remains inventoried;
+- mock argument matcher and explicit call-count constraints separated from
+  unconditional return setup;
 - `Some(...)`-backed fixture holders through `Rc`/`Arc` clones and `RefCell` borrow guards, with independent API values inside callbacks retained;
 - exact initialization corrections and refusal to reinterpret incompatible state;
 - explicit profile authority for public design versus private implementation,

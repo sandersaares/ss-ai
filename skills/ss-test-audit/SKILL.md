@@ -79,7 +79,7 @@ Record the returned `auditId`, `snapshotSha256`, `contentSha256`,
 `contractProfileSha256`, counts, correction count, state paths, and diagnostics
 count in the session checkpoint.
 
-Persisted audit state and inventory use schema version 5 with judgment rubric
+Persisted audit state and inventory use schema version 6 with judgment rubric
 version 2. Use the same utility
 version throughout one audit. A reader rejects state from another schema version
 without changing it. Do not edit, migrate, or reinterpret an old inventory.
@@ -90,6 +90,14 @@ Contract profile `sourceRoles` use the native evidence-index vocabulary:
 array matches every role under that rule's path. Initialization rejects an
 unknown role and any authority rule that matches no indexed source; use the
 returned `sourceRoles` array as the authoritative vocabulary.
+
+Before initialization, reconcile the profile's `entryPoints` and
+`internalSurfaces` against resolved public re-exports, their feature conditions,
+and the purpose of each cited document. A feature-gated re-export can be public
+for that supported feature even when the backing module is internal. A
+design/implementation companion can explain mechanics without becoming public
+authority. Record unresolved contradictions in the profile instead of silently
+resolving them per assertion.
 
 Use the optional initialization correction record from
 [inventory-corrections.schema.json](schemas/inventory-corrections.schema.json)
@@ -123,7 +131,12 @@ discrepancy is ambiguous. Record unsupported or ambiguous forms as a
 diagnostic/review limitation and continue classifying. For a confirmed missing
 test row, preserve the state, stop the audit before semantic classification or
 reporting, and wait for a corrected scanner. Reinitialize a fresh immutable
-state at the same source revision; do not copy the old state or batch.
+state at the same source revision; do not copy the old state or batch. Record a
+source-keyed revalidation list using `path:start-end:expression`, the old test
+or assertion ID, and the disposition (`missing test`, `phantom test`,
+`phantom assertion`, `fixture correction`, or `mock predicate`). Re-run evidence
+selection and semantic judgment for every listed source key even if its
+classification survived on another audit.
 For a proven fixture
 false positive, preserve the current state, create a revision-bound correction
 record, reinitialize a new audit, and replay only source-identical semantic work
@@ -148,12 +161,16 @@ scanner omission, not an intentional exclusion and not a correction case.
 
 Reconcile discrepancies before classification:
 
-- parser-backed Rust records `#[test]`, recognized test attributes, rustdoc code blocks, assertions, panic expectations, `static_assertions` checks (including `assert_eq_size!`), and direct failure branches;
+- parser-backed Rust records `#[test]`, recognized test attributes, rustdoc code blocks, assertions, panic expectations, test-owned `static_assertions` checks (including `assert_eq_size!`), and direct failure branches. Ungated production compile-time guards remain implementation constraints and do not create test records;
 - compile-only checks count at a call site that instantiates an empty generic helper with trait bounds, rather than at the helper declaration;
 - fallible value access in test code may appear as `fallibleValueCheck` sites. Judge these individually: a standalone `.expect(...)` on an extracted API value can verify presence, while lock, pointer, join, ownership, and other fixture extraction remains excluded. Do not blanket-count every `unwrap` or `expect`;
 - a candidate export can distinguish an observation from fixture setup, fault injection, or cleanup. Resolve `fallibleValueCheck` and `unexpectedBranch` candidates before semantic classification. An included candidate must explicitly use `candidateRole: "observation"` and `candidateDisposition: "included"`; any other role requires a correction in a new initialization. Do not count a consumed injected fault as a second assertion;
 - an ordinary `.unwrap()` remains setup. In rustdoc examples, a post-send `unwrap()` used only to print or display a result is not an assertion site unless the resulting value participates in another recognized predicate;
 - recognized panic expectation helpers such as `assert_panics` count once, while a panic deliberately triggered inside that expectation does not count again;
+- test-owned mock `.withf(...)` argument matchers contribute `mockArgumentCheck`
+  sites, and explicit `.times(...)` constraints contribute separate
+  `mockCallCount` sites. Unconditional return setup contributes no predicate and
+  argument constraints do not imply call cardinality;
 - C#, Java, JavaScript, TypeScript, Python, Go, Kotlin, and PowerShell use deliberately narrow text patterns;
 - multiline synchronization access is identified from the receiver's proven
   `Mutex`, `RwLock`, or `JoinHandle` type, including fields typed in the current
@@ -190,6 +207,11 @@ Before the numbered checks, read the contract profile exported in the batch and 
 5. Identify the decisive clause, not merely a nearby paragraph on the right API. State how it requires the observed predicate for this subject and precondition set. Distinguish a producer's state guarantee from an observer's query, permission (`may`) from obligation (`must`), and the first observation from later registration or cleanup states.
    Submit the clause verbatim in `decisiveClause`; the native validator requires it to occur in an admissible cited range.
 6. Ask whether a contract-conforming implementation may make this predicate fail for the stated subject and conditions. Decide whether the outcome is required, only permitted, or unaddressed. A missing search result does not prove absence; refine the search and preserve ambiguity.
+   For a private-layer observation, name the public operation or result it
+   represents and give a concrete contract-conforming alternative under which
+   that public result remains correct while this private predicate fails. Do
+   not treat “the code feeds the API” or “the code is inside a platform layer”
+   as a substitute for this equivalence argument.
    For a `substring`, `presence`, or `other` observation used by `Documented` or `Mixed`, record a concrete alternative result that still passes the predicate in `passingCounterexample`. This separates necessary conformance from evidence that would prove the claimed relationship.
 7. Use `Documented` when every checked fact is explicitly required; `Mixed` when a documented fact is combined with a distinct undocumented constraint; `Implicit` only for a named plausible public guarantee with a stated missing wording; otherwise use `Incidental` and name the fixture, private choice, setup, or permitted alternative. Do not use uncertainty alone as the reason for `Implicit`. Set `observationStrength` for every profile-backed row.
 8. Verify exact citations, caller attribution, and any explicit unlinked reason before submission. Reject an unlinked explanation when native or agent-confirmed effective callers already exist.
@@ -275,6 +297,11 @@ profile mismatch, denominator and correction membership, authority-policy
 transitions, decisive-clause and observation-strength differences, candidate
 roles, caller-set drift, and test-gap drift. Agreement is not a winner signal.
 Inspect sampled agreeing sites as well as disagreements.
+Group private-layer differences by the public operation they claim to observe,
+not by a repeated boilerplate rationale. Compare the effective authority rule
+and the cited export/document passage; a different profile hash alone is not a
+policy diagnosis. Resolve the receiver type and fixture preconditions before
+deciding whether a promise applies.
 
 Deliver these generated paths:
 

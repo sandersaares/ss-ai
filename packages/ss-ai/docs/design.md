@@ -63,7 +63,7 @@ Workflow transitions distinguish continuation from completion explicitly.
 Recording work never authorizes a final response. Only a successful final
 report both completes the audit and permits its final summary.
 
-Persisted audit state and inventory use schema version 5 with rubric version 2.
+Persisted audit state and inventory use schema version 6 with rubric version 2.
 Initialization binds an explicit contract-authority profile independently from
 source and evidence identity. Exact revision-bound corrections can exclude
 ambiguous fixture, fault-injection, and cleanup candidates while retaining

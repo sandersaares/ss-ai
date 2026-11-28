@@ -2398,6 +2398,10 @@ impl<'ast> Visit<'ast> for RustCollector<'_, 'ast> {
         if kind == "assertion" && self.in_const {
             kind = "compileTimeAssertion";
         }
+        let test_owned = self.test_context || self.functions.role.is_test();
+        if kind == "compileTimeAssertion" && !test_owned {
+            return;
+        }
         if kind == "compileTimeAssertion" || self.functions.name.is_some() {
             self.push_span(kind, i.span());
         }
@@ -2451,6 +2455,32 @@ impl<'ast> Visit<'ast> for RustCollector<'_, 'ast> {
     fn visit_expr_method_call(&mut self, i: &'ast ExprMethodCall) {
         for attribute in &i.attrs {
             self.visit_attribute(attribute);
+        }
+        if self.functions.role.is_test()
+            && i.method == "withf"
+            && i.args.len() == 1
+            && let Some(argument) = i.args.first()
+            && matches!(
+                unparenthesized(&i.receiver),
+                Expr::MethodCall(expectation) if expectation.method.to_string().starts_with("expect_")
+            )
+        {
+            self.push_range(
+                "mockArgumentCheck",
+                argument.span().start(),
+                argument.span().end(),
+            );
+        }
+        if self.functions.role.is_test()
+            && i.method == "times"
+            && !i.args.is_empty()
+            && matches!(
+                unparenthesized(&i.receiver),
+                Expr::MethodCall(expectation) if expectation.method.to_string().starts_with("expect_")
+                    || expectation.method == "withf"
+            )
+        {
+            self.push_range("mockCallCount", i.method.span().start(), i.span().end());
         }
         if i.method == "expect" && self.functions.role.is_test() {
             self.push_range(
