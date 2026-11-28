@@ -26,6 +26,7 @@ ss-ai-review = { workspace = true }
 ss-ai-review-context = { workspace = true }
 ss-ai-review-workflow = { workspace = true }
 ss-ai-runtime = { workspace = true }
+ss-ai-test-audit = { workspace = true }
 
 [dev-dependencies]
 sha2 = { workspace = true }

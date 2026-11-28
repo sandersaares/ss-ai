@@ -1,0 +1,315 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schemaVersion",
+    "auditId",
+    "snapshotSha256",
+    "contentSha256",
+    "indexSha256",
+    "toolVersion",
+    "rubricVersion",
+    "contractProfileSha256",
+    "contractProfile",
+    "repositoryRevision",
+    "repositoryRoot",
+    "scopePaths",
+    "assertionTrace",
+    "testInventory",
+    "diagnostics",
+    "corrections",
+    "consistencyDiagnostics"
+  ],
+  "properties": {
+    "schemaVersion": {
+      "const": 3
+    },
+    "auditId": {
+      "type": "string",
+      "minLength": 1
+    },
+    "snapshotSha256": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "contentSha256": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "indexSha256": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "toolVersion": {
+      "type": "string",
+      "minLength": 1
+    },
+    "rubricVersion": {
+      "type": "string",
+      "minLength": 1
+    },
+    "contractProfileSha256": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "contractProfile": {
+      "type": ["object", "null"]
+    },
+    "repositoryRevision": {
+      "type": "string",
+      "minLength": 1
+    },
+    "repositoryRoot": {
+      "type": "string",
+      "minLength": 1
+    },
+    "scopePaths": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "assertionTrace": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/traceRow"
+      }
+    },
+    "testInventory": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/testRow"
+      }
+    },
+    "diagnostics": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "kind",
+          "path",
+          "line",
+          "detail"
+        ],
+        "properties": {
+          "kind": { "type": "string", "minLength": 1 },
+          "path": { "type": "string", "minLength": 1 },
+          "line": { "type": ["integer", "null"], "minimum": 1 },
+          "detail": { "type": "string", "minLength": 1 }
+        }
+      }
+    },
+    "corrections": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "assertionId",
+          "path",
+          "line",
+          "endLine",
+          "column",
+          "expression",
+          "fileSha256",
+          "candidateRole",
+          "candidateDisposition",
+          "reason"
+        ],
+        "properties": {
+          "assertionId": { "type": "string", "pattern": "^A[0-9]{6}$" },
+          "path": { "type": "string", "minLength": 1 },
+          "line": { "type": "integer", "minimum": 1 },
+          "endLine": { "type": "integer", "minimum": 1 },
+          "column": { "type": "integer", "minimum": 1 },
+          "expression": { "type": "string", "minLength": 1 },
+          "fileSha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+          "candidateRole": { "enum": ["fixtureSetup", "faultInjection", "cleanup"] },
+          "candidateDisposition": { "const": "excluded" },
+          "reason": { "type": "string", "minLength": 1 }
+        }
+      }
+    },
+    "consistencyDiagnostics": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "kind",
+          "assertionIds",
+          "detail"
+        ],
+        "properties": {
+          "priority": { "enum": ["high", "medium", "low"] },
+          "kind": {
+            "type": "string",
+            "minLength": 1
+          },
+          "assertionIds": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "pattern": "^A[0-9]{6}$"
+            }
+          },
+          "detail": {
+            "type": "string",
+            "minLength": 1
+          }
+        }
+      }
+    }
+  },
+  "$defs": {
+        "callerEvidence": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["kind", "testId", "path", "line", "endLine", "column", "expression"],
+          "properties": {
+            "kind": { "type": "string", "minLength": 1 },
+            "testId": { "type": "string", "pattern": "^T[0-9]{6}$" },
+            "path": { "type": "string", "minLength": 1 },
+            "line": { "type": "integer", "minimum": 1 },
+            "endLine": { "type": "integer", "minimum": 1 },
+            "column": { "type": "integer", "minimum": 1 },
+            "expression": { "type": "string", "minLength": 1 }
+          }
+        },
+        "assertionSite": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "id", "kind", "language", "path", "line", "endLine", "column",
+            "expression", "fileSha256", "ownerLine", "ownerEndLine",
+            "containingTestId", "helperName", "callingTestIds", "callerEvidence",
+            "unresolvedCallerCandidates"
+          ],
+          "properties": {
+            "id": { "type": "string", "pattern": "^A[0-9]{6}$" },
+            "kind": { "type": "string", "minLength": 1 },
+            "language": { "type": "string", "minLength": 1 },
+            "path": { "type": "string", "minLength": 1 },
+            "line": { "type": "integer", "minimum": 1 },
+            "endLine": { "type": "integer", "minimum": 1 },
+            "column": { "type": "integer", "minimum": 1 },
+            "expression": { "type": "string", "minLength": 1 },
+            "fileSha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+            "ownerLine": { "type": "integer", "minimum": 1 },
+            "ownerEndLine": { "type": "integer", "minimum": 1 },
+            "containingTestId": {
+              "type": ["string", "null"],
+              "pattern": "^T[0-9]{6}$"
+            },
+            "helperName": { "type": ["string", "null"] },
+            "callingTestIds": {
+              "type": "array",
+              "items": { "type": "string", "pattern": "^T[0-9]{6}$" }
+            },
+            "callerEvidence": {
+              "type": "array",
+              "items": { "$ref": "#/$defs/callerEvidence" }
+            },
+            "unresolvedCallerCandidates": {
+              "type": "array",
+              "items": { "$ref": "#/$defs/callerEvidence" }
+            }
+          }
+        },
+        "citation": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["path", "line", "endLine", "owner", "sourceRole", "excerpt"],
+          "properties": {
+            "path": { "type": "string", "minLength": 1 },
+            "line": { "type": "integer", "minimum": 1 },
+            "endLine": { "type": "integer", "minimum": 1 },
+            "owner": { "type": "string" },
+            "sourceRole": { "type": "string", "minLength": 1 },
+            "authorityRuleId": { "type": ["string", "null"], "minLength": 1 },
+            "excerpt": { "type": "string", "minLength": 1 }
+          }
+        },
+        "classification": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "assertionId", "classification", "evidenceStatus", "actualOutcome",
+            "rationale", "citations", "incidentalReason", "callingTestIds",
+            "unlinkedReason", "unresolvedCallerReason", "reviewReason",
+            "decisiveClause", "observationStrength", "passingCounterexample",
+            "candidateRole", "candidateDisposition"
+          ],
+          "properties": {
+            "assertionId": { "type": "string", "pattern": "^A[0-9]{6}$" },
+            "classification": { "enum": ["Documented", "Implicit", "Mixed", "Incidental"] },
+            "evidenceStatus": { "enum": ["Confirmed", "Ambiguous"] },
+            "actualOutcome": { "type": "string", "minLength": 1 },
+            "rationale": { "type": "string", "minLength": 1 },
+            "citations": { "type": "array", "items": { "$ref": "#/$defs/citation" } },
+            "incidentalReason": { "type": ["string", "null"], "minLength": 1 },
+            "callingTestIds": {
+              "type": "array",
+              "items": { "type": "string", "pattern": "^T[0-9]{6}$" }
+            },
+            "unlinkedReason": { "type": ["string", "null"], "minLength": 1 },
+            "unresolvedCallerReason": { "type": ["string", "null"], "minLength": 1 },
+            "reviewReason": { "type": ["string", "null"], "minLength": 1 },
+            "decisiveClause": { "type": ["string", "null"], "minLength": 1 },
+            "observationStrength": {
+              "type": ["string", "null"],
+              "enum": ["exact", "substring", "presence", "ordering", "controlFlow", "other", null]
+            },
+            "passingCounterexample": { "type": ["string", "null"], "minLength": 1 },
+            "candidateRole": {
+              "type": ["string", "null"],
+              "enum": ["observation", "fixtureSetup", "faultInjection", "cleanup", "unresolved", null]
+            },
+            "candidateDisposition": {
+              "type": ["string", "null"],
+              "enum": ["included", "excluded", null]
+            }
+          }
+        },
+        "traceRow": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["assertion", "classification"],
+          "properties": {
+            "assertion": { "$ref": "#/$defs/assertionSite" },
+            "classification": { "$ref": "#/$defs/classification" }
+          }
+        },
+        "testRow": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "id", "name", "kind", "language", "path", "line", "endLine",
+            "repositoryRevision", "directAssertionIds", "sharedAssertionIds",
+            "assertionCount", "incidentalOnly"
+          ],
+          "properties": {
+            "id": { "type": "string", "pattern": "^T[0-9]{6}$" },
+            "name": { "type": "string", "minLength": 1 },
+            "kind": { "type": "string", "minLength": 1 },
+            "language": { "type": "string", "minLength": 1 },
+            "path": { "type": "string", "minLength": 1 },
+            "line": { "type": "integer", "minimum": 1 },
+            "endLine": { "type": "integer", "minimum": 1 },
+            "repositoryRevision": { "type": "string", "minLength": 1 },
+            "directAssertionIds": {
+              "type": "array",
+              "items": { "type": "string", "pattern": "^A[0-9]{6}$" }
+            },
+            "sharedAssertionIds": {
+              "type": "array",
+              "items": { "type": "string", "pattern": "^A[0-9]{6}$" }
+            },
+            "assertionCount": { "type": "integer", "minimum": 0 },
+            "incidentalOnly": { "type": "boolean" }
+          }
+        }
+      }
+  }

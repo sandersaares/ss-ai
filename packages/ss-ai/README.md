@@ -111,6 +111,135 @@ publishes the inventory and emits a summary with absolute `outputPath`,
 manifest. Readers can retain an opened complete version during replacement.
 The inventory is local and does not initialize provider authentication.
 
+## Test audit commands
+
+```powershell
+#Requires -Version 7.6
+
+if ($PSVersionTable.PSVersion -lt [version]'7.6') { throw 'PowerShell 7.6 or later is required.' }
+Set-StrictMode -Version Latest
+$ErrorActionPreference = 'Stop'
+$PSNativeCommandUseErrorActionPreference = $true
+
+ss-ai test-audit initialize --repository-path "{{REPOSITORY_PATH}}" `
+  --scope-path "{{SCOPE_PATH}}" `
+  --contract-profile-path "{{CONTRACT_PROFILE_PATH}}" `
+  --state-directory "{{STATE_DIRECTORY}}"
+ss-ai test-audit search --state-directory "{{STATE_DIRECTORY}}" `
+  --query '{{QUERY_ONE}}' --query '{{QUERY_TWO}}' `
+  --kind "{{EVIDENCE_KIND}}" --limit 50
+ss-ai test-audit context --state-directory "{{STATE_DIRECTORY}}" `
+  --assertion-id "{{ASSERTION_ID}}"
+ss-ai test-audit evidence --state-directory "{{STATE_DIRECTORY}}" `
+  --evidence-handle "{{EVIDENCE_HANDLE}}"
+ss-ai test-audit next-batch --state-directory "{{STATE_DIRECTORY}}" `
+  --output-path "{{BATCH_PATH}}" --count 25
+# Run submit for each batch after preparing its compact classification rows.
+ss-ai test-audit submit --state-directory "{{STATE_DIRECTORY}}" `
+  --batch-path "{{BATCH_PATH}}" --submission-path "{{SUBMISSION_PATH}}" `
+  --output-path "{{NEXT_BATCH_PATH}}" --count 25
+# Run report when the current transition says report.
+ss-ai test-audit report --state-directory "{{STATE_DIRECTORY}}"
+# Compare two completed runs without choosing a ground truth.
+ss-ai test-audit compare --left-state-directory "{{LEFT_STATE_DIRECTORY}}" `
+  --right-state-directory "{{RIGHT_STATE_DIRECTORY}}"
+```
+
+`initialize` requires a new, empty state directory outside the repository and accepts repeated
+`--scope-path` inputs; omitting scopes selects the repository. Optional
+`--correction-path` accepts a strict inventory-correction record for an exact
+revision, source range, scanner expression, and explanatory reason when syntax
+cannot distinguish a fixture extraction. Corrections apply only during
+initialization and remain in immutable inventory provenance. These paths limit
+test and assertion inventory, while the evidence index covers repository-wide
+text under the normal traversal exclusions plus explicitly selected source. It atomically
+publishes the immutable inventory and line index, then returns source revision,
+audit identity, snapshot digest, and counts. Git repositories retain a full
+commit ID. Other local repositories use `unversioned` revision metadata and
+still bind every indexed file to a SHA-256 digest.
+
+`search` splits each query on whitespace and folds ASCII case. Every term may
+occur anywhere in a result's path or excerpt. Double embedded apostrophes in
+the single-quoted placeholders. Repeating `--query` evaluates independent queries from one state load,
+up to ten queries per invocation. Evidence kinds are `documentation`, `publicDeclaration`,
+`traitImplementation`, `test`, and `source`. `next-batch` exports no more than
+25 unclassified source sites and may export fewer to fit the byte limit.
+For each `continue` receipt, classify the returned batch and submit it using
+the [compact payload recipe](../../skills/ss-test-audit/commands.md#submit-a-compact-row-batch).
+For `report`, run the report and check for `nextAction: "complete"` and
+`finalResponseAllowed: true`.
+
+For recovery or low-level inputs, `record-batch` validates the exact audit and
+snapshot, unique assertion IDs, category-specific evidence, indexed citations,
+and known or explained shared callers. Identical records are idempotent.
+`advance` combines `record-batch` and `next-batch` in one process and returns
+both the durable record summary and the next batch path.
+`submit` is the preferred agent path: it accepts compact schema-backed rows plus
+snapshot-bound evidence handles, builds the canonical classification batch, and
+then commits the journal before exporting the next batch. Compact reuse requires explicit
+equivalence confirmation plus citation and caller replacements.
+Mutation transitions return top-level `nextAction` (`continue` or `report`) and
+`finalResponseAllowed: false`. The final report returns `nextAction: "complete"`
+and `finalResponseAllowed: true`. Transition receipts also return a concrete
+`directive`; a `continue` directive requires reading the returned batch
+immediately and never treating progress as a turn boundary. These fields prevent progress updates or
+round batch boundaries from being mistaken for workflow completion.
+
+The primary path uses one initialization, one initial batch export, one
+`submit` per nonempty exported batch, and one final report. Independent evidence
+queries do not add process startup per query when repeated in one `search`
+invocation.
+
+Read-only `search` and `next-batch` validate the immutable state files but do
+not rehash every audited source. `record-batch`, `advance`, `submit`, and
+`report` verify current source hashes before accepting a mutation or emitting
+final reports.
+
+Open the returned `displayPath` for assertions and nearby source. Retain the
+JSON record at `batchPath` unchanged for `submit --batch-path`. For transition
+receipts, find the equivalent paths under `nextBatch`.
+
+`noCountedAssertionCount` and `incidentalOnlyCount` count tests;
+`unlinkedAssertionCount` and `fallibleValueCheckCount` count assertion sites;
+`conditionalAssertionCount` and `diagnosticCount` count diagnostic records.
+
+Final reports standardize paired human and machine artifacts:
+`summary.json`/`summary.md` carry the versioned audit summary, while
+`details.json`/`details.md` carry matching assertion-trace, test-inventory, and
+diagnostic sections. Details use `assertionTrace`, `testInventory`, `diagnostics`,
+`corrections`, and `consistencyDiagnostics` as their section names. Summary identity includes repository,
+revision, scope paths, indexed files, and language totals. The report also
+records checkout-independent content/index digests plus tool and rubric versions.
+`details.json` is the canonical machine-readable assertion trace and test
+inventory. `compare` requires two complete states and reports source-based
+transitions, caller-set drift, and test-gap membership without selecting a
+ground truth.
+
+Rust caller attribution comes from direct syntax in test functions. Production
+invariants and method names are not promoted to shared assertions, while
+free helpers called by tests and test-owned callbacks remain inventoried.
+Recognized panic-expectation helper calls count once without counting the
+deliberately triggered panic inside their argument.
+`assert_eq_size!`, constrained empty generic helper invocations, and selected
+test-context `expect(...)` value-presence checks are inventoried. Common lock,
+pointer, join, ownership, and fixture extraction calls remain excluded.
+
+`report` rejects incomplete classification and publishes the artifacts together
+in one generation beneath `reports`. Open the successful receipt's
+`summaryJsonPath`, `summaryPath`, `detailsJsonPath`, and `detailsPath`. The
+detail trace has one row per assertion. The test inventory retains direct and
+shared assertion IDs, including tests without counted predicates.
+All rates are descriptive; the command does not score test quality. Rust is
+parser-backed; named non-Rust profiles are heuristic, and diagnostics preserve
+the exact coverage boundary.
+
+Persisted audit state and inventory use schema version 7. The final summary and
+details reports use schema version 3. New utility versions
+reject older state without editing or migrating it. To recover an audit whose
+snapshot contains a scanner miscount, retain the old directory, initialize a new
+directory at the same immutable revision, and replay accepted semantic judgments
+only after fresh evidence searches against the new snapshot.
+
 ## Git commands
 
 ```powershell

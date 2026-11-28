@@ -1,0 +1,346 @@
+# Native command recipes
+
+Run these installed commands directly. Every state write uses the same `--state-directory`. For continuation and completion, [follow the current directive](SKILL.md#follow-the-current-directive).
+
+## Initialize
+
+```powershell
+#Requires -Version 7.6
+
+if ($PSVersionTable.PSVersion -lt [version]'7.6') { throw 'PowerShell 7.6 or later is required.' }
+Set-StrictMode -Version Latest
+$ErrorActionPreference = 'Stop'
+$PSNativeCommandUseErrorActionPreference = $true
+
+ss-ai test-audit initialize `
+  --repository-path "{{REPOSITORY_PATH}}" `
+  --scope-path "{{SCOPE_PATH}}" `
+  --correction-path "{{INVENTORY_CORRECTION_PATH}}" `
+  --contract-profile-path "{{CONTRACT_PROFILE_PATH}}" `
+  --state-directory "{{STATE_DIRECTORY}}"
+```
+
+| Placeholder | Description |
+| --- | --- |
+| `REPOSITORY_PATH` | Absolute path to the repository root or a path inside a Git working tree. |
+| `SCOPE_PATH` | Existing repository-relative or absolute file or directory for test and assertion inventory. Repeat `--scope-path` for multiple scopes; omit it for the repository-wide inventory. The evidence index covers the ordinary repository walk and any explicitly selected source outside it. |
+| `INVENTORY_CORRECTION_PATH` | Optional strict [inventory-corrections.schema.json](schemas/inventory-corrections.schema.json) file for exact ambiguous fixture-site exclusions. Omit when no reviewed corrections are needed. |
+| `CONTRACT_PROFILE_PATH` | Required strict [contract-profile.schema.json](schemas/contract-profile.schema.json) file defining the audited audience, supported entry points, internal surfaces, source authority, and unresolved policy. |
+| `STATE_DIRECTORY` | New, empty directory outside the repository, even when `--scope-path` limits inventory. |
+
+On success, retain the returned state paths, `auditId`, `snapshotSha256`,
+`contentSha256`, `contractProfileSha256`, `sourceRoles`, source revision, test
+count, assertion count, file count, diagnostic count, and correction count. On
+any failure,
+report the native diagnostic and do not create an alternate state schema.
+
+Each correction must match exactly one scanner expression at the named revision,
+path, and line range and must include a candidate role, excluded disposition, and
+nonblank reason. The tool retains the
+excluded source site, source digest, stable assertion identifier, and reason in
+the immutable inventory and emits an `inventoryCorrection` diagnostic. Corrections
+apply only during initialization. If a persisted snapshot is missing or contains
+an incorrect correction, preserve it and initialize a new schema-version-7 state
+instead of editing the old files.
+
+Corrections remove exact assertion candidates. They cannot add missing test
+records. If independent discovery proves a runner-only test row, preserve the
+current state and initialize a fresh audit with a corrected utility after the
+scanner omission is fixed.
+
+Source discovery indexes text files up to and including 4 MiB. Larger files
+produce an `oversizedFile` diagnostic and do not enter the inventory or index.
+
+## Search evidence
+
+```powershell
+#Requires -Version 7.6
+
+if ($PSVersionTable.PSVersion -lt [version]'7.6') { throw 'PowerShell 7.6 or later is required.' }
+Set-StrictMode -Version Latest
+$ErrorActionPreference = 'Stop'
+$PSNativeCommandUseErrorActionPreference = $true
+
+ss-ai test-audit search `
+  --state-directory "{{STATE_DIRECTORY}}" `
+  --query '{{QUERY_ONE}}' `
+  --query '{{QUERY_TWO}}' `
+  --kind "{{EVIDENCE_KIND}}" `
+  --limit {{LIMIT}}
+```
+
+| Placeholder | Description |
+| --- | --- |
+| `STATE_DIRECTORY` | Exact initialized audit state directory. |
+| `QUERY_ONE`, `QUERY_TWO` | Independent queries split on whitespace. Each term may occur anywhere in the result's path or excerpt; matching folds ASCII case only. Double any apostrophe in the substituted text. Repeat `--query` up to 10 times; a single query is valid. |
+| `EVIDENCE_KIND` | Optional `documentation`, `publicDeclaration`, `traitImplementation`, `test`, or `source`; omit `--kind` to search all indexed lines. |
+| `LIMIT` | Result bound from 1 through 200. Use 50 unless a narrower or broader page is justified. |
+
+Use each `results` entry's `matches` as citation candidates. Submit the returned `evidenceHandle` rather than reconstructing a citation from `path`, `line`, `endLine`, `owner`, `sourceRole`, and `excerpt`. The native command preserves a bounded contiguous paragraph, list item, or source line rather than only the matching line. Refine truncated results. Find a matching citation for `Documented` and for the documented component of `Mixed`. A diagnostic search can end without a match after reasonable targeted queries and after ruling out truncation; this can support an `Implicit` or `Incidental` explanation. One empty query does not prove that no public promise exists.
+
+## Inspect assertion context
+
+```powershell
+#Requires -Version 7.6
+
+if ($PSVersionTable.PSVersion -lt [version]'7.6') { throw 'PowerShell 7.6 or later is required.' }
+Set-StrictMode -Version Latest
+$ErrorActionPreference = 'Stop'
+$PSNativeCommandUseErrorActionPreference = $true
+
+ss-ai test-audit context `
+  --state-directory "{{STATE_DIRECTORY}}" `
+  --assertion-id "{{ASSERTION_ID}}"
+```
+
+| Placeholder | Description |
+| --- | --- |
+| `STATE_DIRECTORY` | Exact initialized audit state directory. |
+| `ASSERTION_ID` | One assertion identifier from the current batch. |
+
+The command returns the assertion card, complete bounded enclosing test or
+helper source, native caller spans, unresolved caller candidates, and nested
+assertion identifiers. It rechecks source freshness. Use targeted `search`
+recipes for definitions and public promises after this local owner context.
+
+## Inspect full evidence text
+
+```powershell
+#Requires -Version 7.6
+
+if ($PSVersionTable.PSVersion -lt [version]'7.6') { throw 'PowerShell 7.6 or later is required.' }
+Set-StrictMode -Version Latest
+$ErrorActionPreference = 'Stop'
+$PSNativeCommandUseErrorActionPreference = $true
+
+ss-ai test-audit evidence `
+  --state-directory "{{STATE_DIRECTORY}}" `
+  --evidence-handle "{{EVIDENCE_HANDLE}}"
+```
+
+| Placeholder | Description |
+| --- | --- |
+| `STATE_DIRECTORY` | Exact initialized audit state directory. |
+| `EVIDENCE_HANDLE` | One exact `evidenceHandle` from the active audit's search result. |
+
+The command returns the complete immutable text for one handle plus its bounded
+preview and `previewTruncated` flag. Inspect this full range before citing a
+truncated result; refining a search cannot recover text outside its preview.
+
+## Export the next assertion batch
+
+```powershell
+#Requires -Version 7.6
+
+if ($PSVersionTable.PSVersion -lt [version]'7.6') { throw 'PowerShell 7.6 or later is required.' }
+Set-StrictMode -Version Latest
+$ErrorActionPreference = 'Stop'
+$PSNativeCommandUseErrorActionPreference = $true
+
+ss-ai test-audit next-batch `
+  --state-directory "{{STATE_DIRECTORY}}" `
+  --output-path "{{BATCH_PATH}}" `
+  --count 25
+```
+
+| Placeholder | Description |
+| --- | --- |
+| `STATE_DIRECTORY` | Exact initialized audit state directory. |
+| `BATCH_PATH` | Preferred output name for the machine batch. |
+| `25` | Bounded batch size. Use 25 so cumulative conversation progress remains predictable. |
+
+Batch exports preserve existing files; `--output-path` supplies a preferred name outside the report publication area. Open the returned `displayPath` to read the assertions and nearby source. Retain the JSON record at the returned `batchPath` unchanged for `submit --batch-path`.
+
+## Record classification results
+
+```powershell
+#Requires -Version 7.6
+
+if ($PSVersionTable.PSVersion -lt [version]'7.6') { throw 'PowerShell 7.6 or later is required.' }
+Set-StrictMode -Version Latest
+$ErrorActionPreference = 'Stop'
+$PSNativeCommandUseErrorActionPreference = $true
+
+ss-ai test-audit record-batch `
+  --state-directory "{{STATE_DIRECTORY}}" `
+  --batch-path "{{CLASSIFICATION_BATCH_PATH}}"
+```
+
+| Placeholder | Description |
+| --- | --- |
+| `STATE_DIRECTORY` | Exact initialized audit state directory. |
+| `CLASSIFICATION_BATCH_PATH` | Strict agent-authored record following `schemas/classification-batch.schema.json`. |
+
+The canonical classification input must fit in 1 MiB, including JSON whitespace.
+The command checks that the audit ID (`auditId`) identifies the active audit and that the snapshot digest (`snapshotSha256`) identifies its source snapshot. It also checks source freshness, unique assertion IDs, outcome explanation, category-specific evidence, exact citation lines, known calling tests, and shared-site linkage. Identical replays report `unchanged`; different repeats fail. This record-only command returns no batch; if its directive is `continue`, use `next-batch` to export one.
+
+Use this command when recovering an already-recorded result or inspecting one explicit transition. For ordinary progress, prefer the compact `submit` command below; use `advance` only when a canonical low-level classification record already exists.
+
+## Record and export the next batch
+
+```powershell
+#Requires -Version 7.6
+
+if ($PSVersionTable.PSVersion -lt [version]'7.6') { throw 'PowerShell 7.6 or later is required.' }
+Set-StrictMode -Version Latest
+$ErrorActionPreference = 'Stop'
+$PSNativeCommandUseErrorActionPreference = $true
+
+ss-ai test-audit advance `
+  --state-directory "{{STATE_DIRECTORY}}" `
+  --batch-path "{{CLASSIFICATION_BATCH_PATH}}" `
+  --output-path "{{NEXT_BATCH_PATH}}" `
+  --count 25
+```
+
+| Placeholder | Description |
+| --- | --- |
+| `STATE_DIRECTORY` | Exact initialized audit state directory. |
+| `CLASSIFICATION_BATCH_PATH` | Strict agent-authored record following `schemas/classification-batch.schema.json`. |
+| `NEXT_BATCH_PATH` | Preferred output name for the next machine batch. |
+| `25` | Maximum next-batch size. |
+
+The command commits the classification journal before exporting the next batch from the same validated state load. `record` contains the durable counts. Use the returned `nextBatch.displayPath` for judgment and retain `nextBatch.batchPath` for the next submission. After a known post-record export failure, replay the identical classification input.
+
+## Submit a compact row batch
+
+Write one file following [compact-submission.schema.json](schemas/compact-submission.schema.json). Do not create per-session PowerShell serializers for this record; write its small JSON rows directly and let native code resolve all evidence handles and build the canonical journal record.
+
+Fresh rows:
+
+```json
+{
+  "schemaVersion": 1,
+  "batchFingerprint": "COPY THE CURRENT BATCH FINGERPRINT",
+  "rows": [
+    {
+      "assertionId": "A000001",
+      "classification": "Documented",
+      "evidenceStatus": "Confirmed",
+      "actualOutcome": "The checked call returns the documented value.",
+      "rationale": "The cited API documentation promises this outcome.",
+      "citationHandles": ["E0123456789ab-000042"],
+      "decisiveClause": "The API returns the documented value.",
+      "observationStrength": "exact"
+    }
+  ]
+}
+```
+
+Reuse rows must explicitly confirm equivalence and replace both evidence and caller attribution:
+
+```json
+{
+  "schemaVersion": 1,
+  "batchFingerprint": "COPY THE CURRENT BATCH FINGERPRINT",
+  "rows": [
+    {
+      "assertionId": "A000002",
+      "reuseFrom": "A000001",
+      "equivalenceConfirmed": true,
+      "citationHandles": ["E0123456789ab-000084"]
+    }
+  ]
+}
+```
+
+```powershell
+#Requires -Version 7.6
+
+if ($PSVersionTable.PSVersion -lt [version]'7.6') { throw 'PowerShell 7.6 or later is required.' }
+Set-StrictMode -Version Latest
+$ErrorActionPreference = 'Stop'
+$PSNativeCommandUseErrorActionPreference = $true
+
+ss-ai test-audit submit `
+  --state-directory "{{STATE_DIRECTORY}}" `
+  --batch-path "{{BATCH_PATH}}" `
+  --submission-path "{{SUBMISSION_PATH}}" `
+  --output-path "{{NEXT_BATCH_PATH}}" `
+  --count 25
+```
+
+| Placeholder | Description |
+| --- | --- |
+| `STATE_DIRECTORY` | Exact initialized audit state directory. |
+| `BATCH_PATH` | Current exported batch from `next-batch` or the prior `nextBatch.batchPath`. |
+| `SUBMISSION_PATH` | Compact agent-authored row file following `schemas/compact-submission.schema.json`. |
+| `NEXT_BATCH_PATH` | Preferred output name for the next machine batch. |
+| `25` | Maximum next-batch size. |
+
+The command binds rows to the exported machine batch using `batchFingerprint`, resolves all evidence handles, and commits the validated classifications before exporting the next batch. Use separate `citationHandles` entries for multiple citations. The receipt's `directive` spells out the required next operation. For `nextAction: "continue"`, immediately read the returned `nextBatch.displayPath` and start judgment in the same invocation; retain `nextBatch.batchPath` for the next submission. A successful progress receipt is not a final response. Preserve the original inputs and [recover according to the point of failure](SKILL.md#recover-from-failure).
+
+For directly owned assertions, omit `callingTestIds`; native source ownership
+supplies that caller. A valid but unrelated ID is rejected. Shared assertions
+still require explicit source-backed caller attribution.
+
+For a `substring`, `presence`, or `other` observation used by `Documented` or
+`Mixed`, include `passingCounterexample`. For an uncertain fallible or
+control-flow candidate that remains active, include
+`candidateRole: "observation"` and `candidateDisposition: "included"`.
+Reinitialize with a correction for fixture setup, fault injection, or cleanup;
+submission cannot relabel those source sites into the active denominator.
+
+## Compare completed audits
+
+```powershell
+#Requires -Version 7.6
+
+if ($PSVersionTable.PSVersion -lt [version]'7.6') { throw 'PowerShell 7.6 or later is required.' }
+Set-StrictMode -Version Latest
+$ErrorActionPreference = 'Stop'
+$PSNativeCommandUseErrorActionPreference = $true
+
+ss-ai test-audit compare `
+  --left-state-directory "{{LEFT_STATE_DIRECTORY}}" `
+  --right-state-directory "{{RIGHT_STATE_DIRECTORY}}"
+```
+
+| Placeholder | Description |
+| --- | --- |
+| `LEFT_STATE_DIRECTORY` | First completed audit state used as one comparison side. |
+| `RIGHT_STATE_DIRECTORY` | Second completed audit state used as the other comparison side. |
+
+The command requires complete classification on both sides. It reports
+checkout-independent content comparability, contract-profile identity,
+per-policy transition groups, denominator and correction drift, decisive-clause
+and observation-strength differences, effective caller-set differences,
+test-gap membership, and a prioritized review queue. It never designates either
+run as the ground truth.
+The result follows [comparison.schema.json](schemas/comparison.schema.json).
+
+## Emit final reports
+
+```powershell
+#Requires -Version 7.6
+
+if ($PSVersionTable.PSVersion -lt [version]'7.6') { throw 'PowerShell 7.6 or later is required.' }
+Set-StrictMode -Version Latest
+$ErrorActionPreference = 'Stop'
+$PSNativeCommandUseErrorActionPreference = $true
+
+ss-ai test-audit report `
+  --state-directory "{{STATE_DIRECTORY}}"
+```
+
+| Placeholder | Description |
+| --- | --- |
+| `STATE_DIRECTORY` | Exact initialized audit state directory. |
+
+The successful report receipt provides `summaryJsonPath`, `summaryPath`,
+`detailsJsonPath`, and `detailsPath`; do not assume a state-root report location.
+`details.json` is the canonical machine-readable row detail, while `summary.json`
+is the aggregate report.
+
+The paired JSON artifacts conform to [summary.schema.json](schemas/summary.schema.json)
+and [details.schema.json](schemas/details.schema.json). Their schema version is
+part of each file and changes only with the native utility's record contract.
+The report retains correction provenance, caller evidence, range citations,
+reproducibility identities, and nonmutating consistency diagnostics.
+
+The command checks exact coverage and does not publish a success report for an
+incomplete classification journal. On a nonzero result, preserve the exact
+command and diagnostic and follow
+[Recover from failure](SKILL.md#recover-from-failure). A concrete failure that
+requires user correction leaves the audit incomplete; do not infer completion
+from a prior `report` directive.

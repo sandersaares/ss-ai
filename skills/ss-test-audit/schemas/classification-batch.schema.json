@@ -1,0 +1,251 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schemaVersion",
+    "auditId",
+    "snapshotSha256",
+    "assertions"
+  ],
+  "properties": {
+    "schemaVersion": {
+      "const": 1
+    },
+    "auditId": {
+      "type": "string",
+      "minLength": 1
+    },
+    "snapshotSha256": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "assertions": {
+      "type": "array",
+      "minItems": 1,
+      "maxItems": 25,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "assertionId",
+          "classification",
+          "evidenceStatus",
+          "actualOutcome",
+          "rationale",
+          "citations",
+          "callingTestIds"
+        ],
+        "properties": {
+          "assertionId": {
+            "type": "string",
+            "pattern": "^A[0-9]{6}$"
+          },
+          "classification": {
+            "enum": [
+              "Documented",
+              "Implicit",
+              "Mixed",
+              "Incidental"
+            ]
+          },
+          "evidenceStatus": {
+            "enum": [
+              "Confirmed",
+              "Ambiguous"
+            ]
+          },
+          "actualOutcome": {
+            "type": "string",
+            "minLength": 1
+          },
+          "rationale": {
+            "type": "string",
+            "minLength": 1
+          },
+          "citations": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "path",
+                "line",
+                "endLine",
+                "owner",
+                "sourceRole",
+                "excerpt"
+              ],
+              "properties": {
+                "path": {
+                  "type": "string",
+                  "minLength": 1
+                },
+                "line": {
+                  "type": "integer",
+                  "minimum": 1
+                },
+                "endLine": {
+                  "type": "integer",
+                  "minimum": 1
+                },
+                "owner": {
+                  "type": "string"
+                },
+                "sourceRole": {
+                  "type": "string",
+                  "minLength": 1
+                },
+                "authorityRuleId": {
+                  "type": ["string", "null"],
+                  "minLength": 1
+                },
+                "excerpt": {
+                  "type": "string",
+                  "minLength": 1
+                }
+              }
+            }
+          },
+          "incidentalReason": {
+            "type": "string",
+            "minLength": 1
+          },
+          "callingTestIds": {
+            "type": "array",
+            "uniqueItems": true,
+            "items": {
+              "type": "string",
+              "pattern": "^T[0-9]{6}$"
+            }
+          },
+          "unlinkedReason": {
+            "type": "string",
+            "minLength": 1
+          },
+          "unresolvedCallerReason": {
+            "type": "string",
+            "minLength": 1
+          },
+          "reviewReason": {
+            "type": "string",
+            "minLength": 1
+          },
+          "decisiveClause": {
+            "type": "string",
+            "minLength": 1
+          },
+          "observationStrength": {
+            "enum": ["exact", "substring", "presence", "ordering", "controlFlow", "other"]
+          },
+          "passingCounterexample": {
+            "type": "string",
+            "minLength": 1
+          },
+          "candidateRole": {
+            "enum": ["observation", "fixtureSetup", "faultInjection", "cleanup"]
+          },
+          "candidateDisposition": {
+            "enum": ["included"]
+          }
+        },
+        "allOf": [
+          {
+            "if": {
+              "properties": {
+                "classification": { "enum": ["Documented", "Mixed"] },
+                "observationStrength": { "enum": ["substring", "presence", "other"] }
+              },
+              "required": ["classification", "observationStrength"]
+            },
+            "then": {
+              "required": ["passingCounterexample"]
+            }
+          },
+          {
+            "if": {
+              "properties": {
+                "classification": {
+                  "const": "Documented"
+                }
+              },
+              "required": [
+                "classification"
+              ]
+            },
+            "then": {
+              "required": ["decisiveClause", "observationStrength"],
+              "properties": {
+                "evidenceStatus": {
+                  "const": "Confirmed"
+                },
+                "citations": {
+                  "minItems": 1
+                }
+              }
+            }
+          },
+          {
+            "if": {
+              "properties": {
+                "classification": {
+                  "const": "Implicit"
+                }
+              },
+              "required": [
+                "classification"
+              ]
+            },
+            "then": {
+              "properties": {
+                "evidenceStatus": {
+                  "const": "Ambiguous"
+                }
+              }
+            }
+          },
+          {
+            "if": {
+              "properties": {
+                "classification": {
+                  "const": "Mixed"
+                }
+              },
+              "required": [
+                "classification"
+              ]
+            },
+            "then": {
+              "required": ["incidentalReason", "decisiveClause", "observationStrength"],
+              "properties": {
+                "evidenceStatus": {
+                  "const": "Confirmed"
+                },
+                "citations": {
+                  "minItems": 1
+                }
+              }
+            }
+          },
+          {
+            "if": {
+              "properties": {
+                "classification": {
+                  "const": "Incidental"
+                }
+              },
+              "required": [
+                "classification"
+              ]
+            },
+            "then": {
+              "required": [
+                "incidentalReason"
+              ]
+            }
+          }
+        ]
+      }
+    }
+  }
+}

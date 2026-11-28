@@ -14,6 +14,79 @@ retaining user interaction and loop control. Registration does not approve a
 pull request. The `ss-review` workflow owns review capture,
 judgments, report rendering, and publication.
 
+`ss-test-audit` consumes local repository content and produces a resumable
+evidence trace. The native utility owns deterministic test and assertion
+inventory, source provenance, bounded batch transport, and report validation.
+The executing agent owns public-contract evidence selection and semantic
+classification. The utility does not interpret source wording with a keyword
+classifier or turn descriptive audit rates into a quality score.
+
+## Test audit scope and coverage
+
+A test audit derives its audit ID from an immutable snapshot of the selected
+working-tree bytes, scopes, file hashes, and line-level evidence. Git `HEAD`
+is separate repository provenance when available; unversioned inputs use the
+same snapshot contract without a Git revision. Rust inventory uses parser-backed
+analysis with explicit fallback diagnostics. Common non-Rust test languages use
+narrow documented patterns and do not claim exhaustive syntax coverage. Other
+indexed languages remain available for contract evidence without an assertion
+inventory.
+
+Selected scope paths limit tests and assertions. The evidence index independently
+covers repository-wide text, so a narrow audit can still cite public contracts
+outside its selected test tree without adding those files' tests to totals.
+
+Rust caller attribution uses direct test syntax, not same-name source text.
+Production invariants are not assertion sites unless native syntax resolves a
+test's direct free-function or qualified-path call within the same file.
+Recognized panic-expectation helpers count once and suppress
+their deliberately triggered panic expression.
+
+The normal agent transition records a classified batch and exports the next
+batch in one local command. Related evidence searches can be grouped in one
+invocation. Read-only operations use the immutable state snapshot; commands
+that accept judgments or emit final reports also verify current source files.
+
+Rust discovery covers size assertions, compile-time trait-bound helper
+invocations, and narrowly selected fallible-value `expect` sites. Ambiguous
+expect-style candidates remain explicit in results and require semantic
+judgment. Fixture and synchronization accessors are excluded rather than
+promoted to checks merely because they panic on unexpected state.
+
+The compact submission boundary accepts agent-owned semantic rows and
+snapshot-bound evidence handles, with explicit equivalence, citation, and
+caller choices for reuse. Batch and report results include compact presentation
+surfaces and bounded completion counts, reducing the need for ad hoc JSON
+projection and full-trace reads.
+
+Workflow transitions distinguish continuation from completion explicitly.
+Recording work never authorizes a final response. Only a successful final
+report both completes the audit and permits its final summary.
+
+Persisted audit state and inventory use schema version 7 with rubric version 2.
+Initialization binds an explicit contract-authority profile independently from
+source and evidence identity. Exact revision-bound corrections can exclude
+ambiguous fixture, fault-injection, and cleanup candidates while retaining
+their source provenance and role in the immutable inventory. Corrections apply
+before snapshot identity is committed; later readers reject incompatible state
+rather than editing or migrating it.
+
+Test-audit evidence remains snapshot bound while exposing complete bounded
+documentation ranges, owner context, native caller spans, unresolved caller
+candidates, reproducibility identities, and nonmutating consistency diagnostics.
+Completed audits can be compared by source provenance, contract policy, denominator,
+claim strength, callers, and test gaps without selecting a winner.
+
+Assertions count once at their source site. Tests with no counted predicate and
+shared helper assertions remain visible in the test inventory. Every accepted
+classification must match the audit ID (`auditId`) of the active audit and
+the snapshot digest (`snapshotSha256`) of its stored source snapshot. A report
+requires exactly one classification for every assertion and one row for every
+test. The [classification boundaries](../../../skills/ss-test-audit/docs/design.md#classification-boundaries)
+define the labels used in the rates: no explicitly documented promise means
+`Implicit` plus `Incidental` sites; no public-contract check means `Incidental`
+sites only. `Mixed` sites enter neither numerator.
+
 ## Version compatibility
 
 Sessions and persisted workflow state belong to the utility version that creates

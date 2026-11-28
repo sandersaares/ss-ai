@@ -18,6 +18,9 @@ The nonpublished workspace packages implement the utility-wide [design](design.m
   records, approved projections, shared Markdown rendering, worker assignments,
   bounded shared-document reads, instruction snapshots, focus-area preparation
   and reuse, report tooling, HTML rendering, and their workflow plans.
+- `ss-ai-test-audit` owns immutable local test inventory, searchable evidence
+  indexing, bounded classification batches, snapshot freshness, and final
+  trace/test/report aggregation for `ss-test-audit`.
 
 Dependencies flow from command composition toward focused operations and shared
 runtime boundaries, never back to the executable. Review selection, provider
@@ -61,6 +64,13 @@ network dependency. The focused packages support targeted test builds and
 incremental reuse; a cold build of the complete executable still builds its
 dependency closure. None of these internal Rust APIs is a supported SDK.
 
+The test-audit package uses the shared runtime to run local commands, read the
+clock, publish files, and report errors. `ss-ai` obtains Git identity locally
+without initializing provider transport. The package parses Rust and applies
+text patterns for other supported languages to discover tests and assertions.
+The agent decides what each assertion checks; the utility verifies that
+judgments match the audited snapshot and cover every assertion.
+
 The package boundaries follow the subject-owned, one-way dependency practices
 used by [cargo-release-plan](https://github.com/folo-rs/folo/blob/db33786ec25196696b46f38e2b60a03bd33ec913/packages/cargo-release-plan/docs/implementation.md)
 and [cargo-bench-history](https://github.com/folo-rs/folo/blob/db33786ec25196696b46f38e2b60a03bd33ec913/packages/cargo-bench-history/docs/implementation.md).
@@ -75,6 +85,8 @@ identity rules without requiring a selection journal.
 
 Read the topics relevant to the responsibility being changed:
 
+- [Test audit](../../../skills/ss-test-audit/docs/implementation.md) explains
+  scanning, classification, replay, and report publication.
 - [Automatic reapproval](reapproval.md) defines approval recognition, exact source
   evidence, assessment, publication, and supported provider boundaries.
 - [Provider evidence and identities](implementation/providers.md) explains
