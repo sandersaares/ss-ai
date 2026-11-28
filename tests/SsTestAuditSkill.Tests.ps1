@@ -65,7 +65,7 @@ Describe 'ss-test-audit skill contract' {
         }
         Test-AuditRecord -Schema 'compact-submission' -Record $record | Should -BeTrue
         $record.rows[1].Remove('callingTestIds')
-        Test-AuditRecord -Schema 'compact-submission' -Record $record | Should -BeFalse
+        Test-AuditRecord -Schema 'compact-submission' -Record $record | Should -BeTrue
     }
 
     It 'validates canonical judgments and rejects extra caller data' {

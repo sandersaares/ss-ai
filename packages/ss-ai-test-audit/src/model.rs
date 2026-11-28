@@ -8,7 +8,7 @@ use serde::{Deserialize, Deserializer, Serialize};
 use serde_json::Value;
 
 /// Identifies persisted state with explicit contract-authority policy.
-pub(crate) const AUDIT_STATE_SCHEMA_VERSION: u32 = 6;
+pub(crate) const AUDIT_STATE_SCHEMA_VERSION: u32 = 7;
 /// Identifies the semantic judgment rubric used by this utility build.
 pub(crate) const RUBRIC_VERSION: &str = "2";
 

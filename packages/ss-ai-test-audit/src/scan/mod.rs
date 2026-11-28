@@ -3,6 +3,7 @@
 use std::collections::btree_map::Entry;
 use std::collections::{BTreeMap, BTreeSet};
 use std::ffi::OsStr;
+use std::fmt::Write as _;
 use std::fs::{self, File};
 use std::io::{self, Read as _};
 use std::iter::{once, repeat_n};
@@ -2460,10 +2461,7 @@ impl<'ast> Visit<'ast> for RustCollector<'_, 'ast> {
             && i.method == "withf"
             && i.args.len() == 1
             && let Some(argument) = i.args.first()
-            && matches!(
-                unparenthesized(&i.receiver),
-                Expr::MethodCall(expectation) if expectation.method.to_string().starts_with("expect_")
-            )
+            && is_mock_expectation_chain(&i.receiver)
         {
             self.push_range(
                 "mockArgumentCheck",
@@ -2474,11 +2472,7 @@ impl<'ast> Visit<'ast> for RustCollector<'_, 'ast> {
         if self.functions.role.is_test()
             && i.method == "times"
             && !i.args.is_empty()
-            && matches!(
-                unparenthesized(&i.receiver),
-                Expr::MethodCall(expectation) if expectation.method.to_string().starts_with("expect_")
-                    || expectation.method == "withf"
-            )
+            && is_mock_expectation_chain(&i.receiver)
         {
             self.push_range("mockCallCount", i.method.span().start(), i.span().end());
         }
@@ -2533,6 +2527,19 @@ impl<'ast> Visit<'ast> for RustCollector<'_, 'ast> {
                 });
         }
         visit::visit_expr_path(self, i);
+    }
+}
+
+/// Follows a fluent mock expectation chain to its `expect_*` root.
+fn is_mock_expectation_chain(mut expression: &Expr) -> bool {
+    loop {
+        let Expr::MethodCall(call) = unparenthesized(expression) else {
+            return false;
+        };
+        if call.method.to_string().starts_with("expect_") {
+            return true;
+        }
+        expression = &call.receiver;
     }
 }
 
@@ -3721,6 +3728,18 @@ fn cross_check(
             "Independent marker lines: {markers}; inventoried assertion sites: {assertion_count}"
         ),
     });
+    let source_matchers = text.matches(".withf(").count();
+    let source_call_counts = text.matches(".times(").count();
+    if source_matchers > 0 || source_call_counts > 0 {
+        diagnostics.push(ScanDiagnostic {
+            kind: "mockPredicateCrossCheck".to_owned(),
+            path: path.to_owned(),
+            line: None,
+            detail: format!(
+                "Independent mock markers: {source_matchers} argument matchers, {source_call_counts} call counts; structured inventory supplies exact mock predicate spans before classification"
+            ),
+        });
+    }
 }
 
 /// Attaches surviving predicates to their owning and calling tests.
@@ -3762,6 +3781,27 @@ fn refresh_cross_checks(diagnostics: &mut [ScanDiagnostic], assertions: &[Assert
             .filter(|assertion| assertion.path == diagnostic.path)
             .count();
         diagnostic.detail = format!("{marker_summary}; inventoried assertion sites: {count}");
+    }
+    for diagnostic in diagnostics
+        .iter_mut()
+        .filter(|diagnostic| diagnostic.kind == "mockPredicateCrossCheck")
+    {
+        let matcher_count = assertions
+            .iter()
+            .filter(|assertion| {
+                assertion.path == diagnostic.path && assertion.kind == "mockArgumentCheck"
+            })
+            .count();
+        let call_count = assertions
+            .iter()
+            .filter(|assertion| {
+                assertion.path == diagnostic.path && assertion.kind == "mockCallCount"
+            })
+            .count();
+        _ = write!(
+            diagnostic.detail,
+            "; inventoried mock predicates: {matcher_count} argument matchers, {call_count} call counts"
+        );
     }
 }
 

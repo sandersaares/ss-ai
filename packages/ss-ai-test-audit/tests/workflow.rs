@@ -827,6 +827,109 @@ fn submit_resolves_multiple_handles_and_explicit_reuse() {
 }
 
 #[test]
+fn compact_submission_uses_native_owner_and_rejects_unrelated_direct_callers() {
+    let root = unversioned_fixture_root();
+    let repository = root.path().join("repository");
+    let state = root.path().join("state");
+    fs::create_dir_all(repository.join("src")).unwrap();
+    fs::write(
+        repository.join("src/lib.rs"),
+        "#[test]\nfn owner() { assert!(true); }\n#[test]\nfn foreign() { assert!(false); }\n",
+    )
+    .unwrap();
+    initialize(&repository, &[], &state, &NoProcess, &FixedClock).unwrap();
+    let batch_path = state.join("direct-owner-batch.json");
+    let receipt: Value =
+        from_str(&next_batch(&state, &batch_path, 1, &FixedClock).unwrap()).unwrap();
+    let batch: Value = from_slice(&fs::read(&batch_path).unwrap()).unwrap();
+    let inventory: Value = from_slice(&fs::read(state.join("inventory.json")).unwrap()).unwrap();
+    let assertion = batch["assertions"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|site| site["containingTestId"].is_string())
+        .unwrap();
+    let owner = assertion["containingTestId"].as_str().unwrap();
+    let foreign = inventory["tests"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|test| test["id"].as_str().unwrap() != owner)
+        .unwrap()["id"]
+        .clone();
+    let base = json!({
+        "assertionId": assertion["id"],
+        "classification": "Incidental",
+        "evidenceStatus": "Confirmed",
+        "actualOutcome": "The direct predicate observes test-owned behavior.",
+        "rationale": "The public contract does not promise this test-owned detail.",
+        "citationHandles": [],
+        "incidentalReason": "The predicate is scoped to the enclosing test implementation."
+    });
+    let submission_path = state.join("direct-owner-submission.json");
+    let mut invalid = base.clone();
+    invalid["callingTestIds"] = json!([foreign]);
+    fs::write(
+        &submission_path,
+        to_vec_pretty(&json!({
+            "schemaVersion": 1,
+            "batchFingerprint": receipt["batchFingerprint"],
+            "rows": [invalid]
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+    let error = submit(
+        &state,
+        &batch_path,
+        &submission_path,
+        &state.join("rejected-next.json"),
+        1,
+        &FixedClock,
+    )
+    .unwrap_err();
+    assert!(
+        error
+            .to_string()
+            .contains("Directly owned assertion rejects"),
+        "{error}"
+    );
+    assert!(error.to_string().contains("omit callingTestIds"), "{error}");
+
+    fs::write(
+        &submission_path,
+        to_vec_pretty(&json!({
+            "schemaVersion": 1,
+            "batchFingerprint": receipt["batchFingerprint"],
+            "rows": [base]
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+    submit(
+        &state,
+        &batch_path,
+        &submission_path,
+        &state.join("accepted-next.json"),
+        1,
+        &FixedClock,
+    )
+    .unwrap();
+    let journal: Value =
+        from_slice(&fs::read(state.join("classifications.json")).unwrap()).unwrap();
+    assert_eq!(
+        journal["classifications"][0]["assertionId"],
+        assertion["id"]
+    );
+    assert!(
+        journal["classifications"][0]["callingTestIds"]
+            .as_array()
+            .unwrap()
+            .is_empty()
+    );
+}
+
+#[test]
 fn compact_submission_reports_empty_citation_replacement() {
     let (_root, repository, state) = fixture(fixture_root());
     initialize_fixture(&repository, &state);
@@ -1694,14 +1797,14 @@ fn rejects_state_created_before_ignored_doctest_inventory_contract() {
     initialize_fixture(&repository, &state);
     let path = state.join("audit-state.json");
     let mut record: Value = from_slice(&fs::read(&path).unwrap()).unwrap();
-    record["schemaVersion"] = json!(5);
+    record["schemaVersion"] = json!(6);
     fs::write(&path, to_vec_pretty(&record).unwrap()).unwrap();
 
     let error = next_batch(&state, &state.join("batch.json"), 25, &FixedClock).unwrap_err();
     assert!(
         error
             .to_string()
-            .contains("Unsupported audit state schema version 5")
+            .contains("Unsupported audit state schema version 6")
     );
 }
 

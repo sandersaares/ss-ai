@@ -79,7 +79,7 @@ Record the returned `auditId`, `snapshotSha256`, `contentSha256`,
 `contractProfileSha256`, counts, correction count, state paths, and diagnostics
 count in the session checkpoint.
 
-Persisted audit state and inventory use schema version 6 with judgment rubric
+Persisted audit state and inventory use schema version 7 with judgment rubric
 version 2. Use the same utility
 version throughout one audit. A reader rejects state from another schema version
 without changing it. Do not edit, migrate, or reinterpret an old inventory.
@@ -170,7 +170,10 @@ Reconcile discrepancies before classification:
 - test-owned mock `.withf(...)` argument matchers contribute `mockArgumentCheck`
   sites, and explicit `.times(...)` constraints contribute separate
   `mockCallCount` sites. Unconditional return setup contributes no predicate and
-  argument constraints do not imply call cardinality;
+  argument constraints do not imply call cardinality. Before classification,
+  compare the `mockPredicateCrossCheck` source-marker and inventoried-predicate
+  counts for each file; a mismatch blocks publication as an inventory omission,
+  even when the runner's test list matches;
 - C#, Java, JavaScript, TypeScript, Python, Go, Kotlin, and PowerShell use deliberately narrow text patterns;
 - multiline synchronization access is identified from the receiver's proven
   `Mutex`, `RwLock`, or `JoinHandle` type, including fields typed in the current
@@ -238,12 +241,24 @@ citation.
 Write one compact submission matching [compact-submission.schema.json](schemas/compact-submission.schema.json). Copy the current batch result's `batchFingerprint` exactly; do not recompute it or copy a fingerprint from an earlier generation. `submit` uses that fingerprint to bind the rows to the exact current `batchPath`. Each `citationHandles` entry must be an exact `evidenceHandle` returned by search. Multiple citations are independent array entries.
 
 For a fresh row, supply assertion ID, classification, evidence status, actual
-outcome, rationale, citation handles, caller IDs, observation strength, and
+outcome, rationale, citation handles, observation strength, and
 applicable reasons directly. `Documented` and `Mixed` also carry a decisive
 clause. Weak observations carry a passing counterexample. Uncertain source
 candidates carry candidate role and disposition.
 
-To reuse an accepted row, supply `reuseFrom`, explicit `equivalenceConfirmed: true`, replacement `citationHandles`, and explicit `callingTestIds`. Do not reuse implicitly, infer equivalence, or omit caller attribution. An empty citation replacement is rejected rather than falling back to the prior assertion's evidence. If the reused assertion requires an unlinked reason, provide it explicitly.
+Do not transcribe a caller ID for a directly owned assertion: omit
+`callingTestIds`, and native ownership supplies its enclosing test. If supplied,
+an unrelated valid test ID is rejected before journal insertion. Keep explicit
+caller attribution only for a genuinely shared assertion with source-backed or
+confirmed indirect caller evidence.
+
+To reuse an accepted row, supply `reuseFrom`, explicit
+`equivalenceConfirmed: true`, and replacement `citationHandles`. Include
+`callingTestIds` only for a genuinely shared assertion; omit it for a directly
+owned assertion. Do not reuse implicitly or infer equivalence. An empty citation
+replacement is rejected rather than falling back to the prior assertion's
+evidence. If the reused assertion requires an unlinked reason, provide it
+explicitly.
 
 Submit the rows and export the next assertion batch through one `submit` command using [commands.md](commands.md#submit-a-compact-row-batch). `submit` is the normal transition after every classified batch. Use the lower-level `advance`, `record-batch`, and `next-batch` commands only while recovering or inspecting an intermediate state.
 

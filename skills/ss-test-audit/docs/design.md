@@ -17,7 +17,7 @@ The skill audits one repository and any selected set of existing file or directo
 
 The final trace contains exactly one classification row for each inventoried assertion. The test inventory contains every inventoried test and links direct and shared assertion IDs. Tests that execute smoke behavior without a counted predicate remain visible.
 
-Persisted audit state and inventory use schema version 6 with judgment rubric
+Persisted audit state and inventory use schema version 7 with judgment rubric
 version 2. Initialization requires an explicit contract-authority profile that
 names the public interface, audience, supported entry points, internal surfaces,
 accepted and rejected source authority, and unresolved policy. The profile has

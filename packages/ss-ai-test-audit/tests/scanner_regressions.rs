@@ -530,12 +530,17 @@ fn mocks() {
         .return_const(());
     bindings.expect_unconstrained()
         .return_const(());
+    bindings.expect_sequence()
+        .times(1)
+        .in_sequence(&mut sequence)
+        .withf(|group| *group == 0)
+        .return_const(());
 }
 ",
         );
     });
     let sites = rows(&inventory, "assertions");
-    assert_eq!(sites.len(), 2, "{inventory:#}");
+    assert_eq!(sites.len(), 4, "{inventory:#}");
     let kinds = sites
         .iter()
         .map(|site| site["kind"].as_str().unwrap())
@@ -549,6 +554,22 @@ fn mocks() {
             .as_str()
             .is_some_and(|expression| !expression.contains("return_const"))
     }));
+    let mock_cross_check = rows(&inventory, "diagnostics")
+        .iter()
+        .find(|diagnostic| diagnostic["kind"] == "mockPredicateCrossCheck")
+        .unwrap();
+    assert!(
+        mock_cross_check["detail"]
+            .as_str()
+            .unwrap()
+            .contains("2 argument matchers, 2 call counts")
+    );
+    assert!(
+        mock_cross_check["detail"]
+            .as_str()
+            .unwrap()
+            .ends_with("inventoried mock predicates: 2 argument matchers, 2 call counts")
+    );
     assert_eq!(rows(&inventory, "tests").len(), 1);
 }
 
@@ -845,7 +866,7 @@ fn initialization_can_correct_an_exact_ambiguous_fixture_candidate() {
     )
     .unwrap();
     let inventory: Value = from_slice(&fs::read(state.join("inventory.json")).unwrap()).unwrap();
-    assert_eq!(inventory["schemaVersion"], 6);
+    assert_eq!(inventory["schemaVersion"], 7);
     assert!(rows(&inventory, "assertions").is_empty());
     let [correction] = rows(&inventory, "corrections") else {
         panic!("expected one exact inventory correction")

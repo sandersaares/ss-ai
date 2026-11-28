@@ -40,7 +40,7 @@ nonblank reason. The tool retains the
 excluded source site, source digest, stable assertion identifier, and reason in
 the immutable inventory and emits an `inventoryCorrection` diagnostic. Corrections
 apply only during initialization. If a persisted snapshot is missing or contains
-an incorrect correction, preserve it and initialize a new schema-version-6 state
+an incorrect correction, preserve it and initialize a new schema-version-7 state
 instead of editing the old files.
 
 Corrections remove exact assertion candidates. They cannot add missing test
@@ -220,7 +220,6 @@ Fresh rows:
       "actualOutcome": "The checked call returns the documented value.",
       "rationale": "The cited API documentation promises this outcome.",
       "citationHandles": ["E0123456789ab-000042"],
-      "callingTestIds": ["T000001"],
       "decisiveClause": "The API returns the documented value.",
       "observationStrength": "exact"
     }
@@ -239,8 +238,7 @@ Reuse rows must explicitly confirm equivalence and replace both evidence and cal
       "assertionId": "A000002",
       "reuseFrom": "A000001",
       "equivalenceConfirmed": true,
-      "citationHandles": ["E0123456789ab-000084"],
-      "callingTestIds": ["T000002"]
+      "citationHandles": ["E0123456789ab-000084"]
     }
   ]
 }
@@ -271,6 +269,10 @@ ss-ai test-audit submit `
 | `25` | Maximum next-batch size. |
 
 The command binds rows to the exported machine batch using `batchFingerprint`, resolves all evidence handles, and commits the validated classifications before exporting the next batch. Use separate `citationHandles` entries for multiple citations. The receipt's `directive` spells out the required next operation. For `nextAction: "continue"`, immediately read the returned `nextBatch.displayPath` and start judgment in the same invocation; retain `nextBatch.batchPath` for the next submission. A successful progress receipt is not a final response. Preserve the original inputs and [recover according to the point of failure](SKILL.md#recover-from-failure).
+
+For directly owned assertions, omit `callingTestIds`; native source ownership
+supplies that caller. A valid but unrelated ID is rejected. Shared assertions
+still require explicit source-backed caller attribution.
 
 For a `substring`, `presence`, or `other` observation used by `Documented` or
 `Mixed`, include `passingCounterexample`. For an uncertain fallible or

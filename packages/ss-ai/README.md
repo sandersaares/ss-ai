@@ -233,7 +233,7 @@ All rates are descriptive; the command does not score test quality. Rust is
 parser-backed; named non-Rust profiles are heuristic, and diagnostics preserve
 the exact coverage boundary.
 
-Persisted audit state and inventory use schema version 6. The final summary and
+Persisted audit state and inventory use schema version 7. The final summary and
 details reports use schema version 3. New utility versions
 reject older state without editing or migrating it. To recover an audit whose
 snapshot contains a scanner miscount, retain the old directory, initialize a new

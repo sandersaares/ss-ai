@@ -1064,6 +1064,15 @@ pub(crate) fn validate_classification(
                 format!("Unknown calling test '{test}'"),
             ));
         }
+        if assertion.containing_test_id.is_some() && !assertion.calling_test_ids.contains(test) {
+            return Err(row_error(
+                &assertion.id,
+                &format!("callingTestIds[{position}]"),
+                format!(
+                    "Directly owned assertion rejects unrelated test '{test}'; omit callingTestIds so native ownership supplies the caller"
+                ),
+            ));
+        }
     }
     let unlinked = assertion.containing_test_id.is_none()
         && assertion.calling_test_ids.is_empty()

@@ -153,7 +153,15 @@ fn resolve_submission_row(
 ) -> Result<Classification, AppError> {
     match row.reuse_from.take() {
         None => resolve_explicit_row(row, assertion, handles, index, profile),
-        Some(reuse_from) => resolve_reuse_row(row, &reuse_from, accepted, handles, index, profile),
+        Some(reuse_from) => resolve_reuse_row(
+            row,
+            assertion,
+            &reuse_from,
+            accepted,
+            handles,
+            index,
+            profile,
+        ),
     }
 }
 
@@ -178,11 +186,10 @@ fn resolve_explicit_row(
         "citationHandles",
         "The field is required, including an explicit empty array for incidental checks",
     )?;
-    let calling_test_ids = required_string_array(
+    let calling_test_ids = resolve_calling_test_ids(
         row.calling_test_ids,
-        &row.assertion_id,
-        "callingTestIds",
-        "The field is required; do not omit caller attribution",
+        assertion,
+        "Fresh rows for shared assertions require explicit caller attribution",
     )?;
     Ok(Classification {
         assertion_id: row.assertion_id,
@@ -214,6 +221,7 @@ fn resolve_explicit_row(
 /// Copies only the accepted semantic judgment, with new evidence and callers.
 fn resolve_reuse_row(
     row: CompactSubmissionRow,
+    assertion: &AssertionSite,
     reuse_from: &str,
     accepted: &BTreeMap<&str, &Classification>,
     handles: &BTreeMap<String, usize>,
@@ -258,10 +266,9 @@ fn resolve_reuse_row(
             ),
         ));
     }
-    let calling_test_ids = required_string_array(
+    let calling_test_ids = resolve_calling_test_ids(
         row.calling_test_ids,
-        &row.assertion_id,
-        "callingTestIds",
+        assertion,
         format!("Reuse from '{reuse_from}' requires explicit caller attribution"),
     )?;
     let source = accepted.get(reuse_from).copied().ok_or_else(|| {
@@ -309,6 +316,18 @@ fn resolve_reuse_row(
 /// Requires one explicit semantic field and names its compact-row location.
 fn required_row_value<T>(value: Option<T>, assertion_id: &str, field: &str) -> Result<T, AppError> {
     value.ok_or_else(|| submission_error(assertion_id, field, "The field is required"))
+}
+
+/// Defaults direct-owner rows to native ownership while preserving shared-site attribution.
+fn resolve_calling_test_ids(
+    value: Option<Value>,
+    assertion: &AssertionSite,
+    missing_detail: impl Into<String>,
+) -> Result<Vec<String>, AppError> {
+    if value.is_none() && assertion.containing_test_id.is_some() {
+        return Ok(Vec::new());
+    }
+    required_string_array(value, &assertion.id, "callingTestIds", missing_detail)
 }
 
 /// Parses an agent-owned string array after preserving field-level error context.
