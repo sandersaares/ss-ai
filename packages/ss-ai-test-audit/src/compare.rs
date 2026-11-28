@@ -26,6 +26,8 @@ pub fn compare(
 
     let left_assertions = assertion_map(&left);
     let right_assertions = assertion_map(&right);
+    let left_test_keys = test_key_map(&left);
+    let right_test_keys = test_key_map(&right);
     let mut transition_counts: BTreeMap<(String, String), usize> = BTreeMap::new();
     let mut policy_groups: BTreeMap<(String, String, String, String), BTreeSet<String>> =
         BTreeMap::new();
@@ -104,8 +106,8 @@ pub fn compare(
         if left_classification.candidate_role != right_classification.candidate_role {
             candidate_role_differences.insert(key.clone());
         }
-        if effective_callers(left_assertion, left_classification, &left)
-            != effective_callers(right_assertion, right_classification, &right)
+        if effective_callers(left_assertion, left_classification, &left_test_keys)
+            != effective_callers(right_assertion, right_classification, &right_test_keys)
         {
             caller_set_differences.insert(key.clone());
         }
@@ -326,17 +328,20 @@ fn correction_key(correction: &InventoryCorrection) -> String {
 fn effective_callers(
     assertion: &AssertionSite,
     classification: &Classification,
-    loaded: &LoadedState,
+    test_keys: &BTreeMap<&str, String>,
 ) -> BTreeSet<String> {
     effective_caller_ids(assertion, classification)
-        .filter_map(|id| {
-            loaded
-                .inventory
-                .tests
-                .iter()
-                .find(|test| test.id == *id)
-                .map(test_key)
-        })
+        .filter_map(|id| test_keys.get(id).cloned())
+        .collect()
+}
+
+/// Indexes audit-local test IDs once for linear-edge caller normalization.
+fn test_key_map(loaded: &LoadedState) -> BTreeMap<&str, String> {
+    loaded
+        .inventory
+        .tests
+        .iter()
+        .map(|test| (test.id.as_str(), test_key(test)))
         .collect()
 }
 
@@ -602,11 +607,12 @@ fn ratio(numerator: usize, denominator: usize) -> f64 {
 mod tests {
     use std::num::NonZeroUsize;
 
-    use super::effective_caller_ids;
+    use super::{effective_caller_ids, effective_callers};
     use crate::model::{
         AssertionSite, CandidateDisposition, CandidateRole, Classification, ClassificationKind,
         EvidenceStatus,
     };
+    use std::collections::{BTreeMap, BTreeSet};
 
     #[test]
     fn comparison_caller_ids_include_direct_ownership() {
@@ -653,6 +659,11 @@ mod tests {
         assert_eq!(
             effective_caller_ids(&assertion, &classification).collect::<Vec<_>>(),
             ["T000001"]
+        );
+        let keys = BTreeMap::from([("T000001", "src/lib.rs:1:owner".to_owned())]);
+        assert_eq!(
+            effective_callers(&assertion, &classification, &keys),
+            BTreeSet::from(["src/lib.rs:1:owner".to_owned()])
         );
     }
 }
